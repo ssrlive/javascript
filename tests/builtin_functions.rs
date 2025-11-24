@@ -483,4 +483,30 @@ mod builtin_functions_tests {
             _ => panic!("Expected concat to return 'hello world!', got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_string_pad_start() {
+        let script = "'5'.padStart(3, '0')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "005");
+            }
+            _ => panic!("Expected padStart to return '005', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_pad_end() {
+        let script = "'5'.padEnd(3, '0')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "500");
+            }
+            _ => panic!("Expected padEnd to return '500', got {:?}", result),
+        }
+    }
 }

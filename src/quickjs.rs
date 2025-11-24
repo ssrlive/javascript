@@ -2560,6 +2560,84 @@ fn evaluate_expr(
                                 }
                                 Ok(Value::String(result))
                             }
+                            "padStart" => {
+                                if args.len() >= 1 {
+                                    let target_len_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::Number(target_len) = target_len_val {
+                                        let target_len = target_len as usize;
+                                        let current_len = utf16_len(&s);
+                                        if current_len >= target_len {
+                                            Ok(Value::String(s.clone()))
+                                        } else {
+                                            let pad_char = if args.len() >= 2 {
+                                                let pad_val = evaluate_expr(env, &args[1])?;
+                                                if let Value::String(pad_str) = pad_val {
+                                                    if !pad_str.is_empty() {
+                                                        pad_str[0]
+                                                    } else {
+                                                        ' ' as u16
+                                                    }
+                                                } else {
+                                                    ' ' as u16
+                                                }
+                                            } else {
+                                                ' ' as u16
+                                            };
+                                            let pad_count = target_len - current_len;
+                                            let mut padded = vec![pad_char; pad_count];
+                                            padded.extend_from_slice(&s);
+                                            Ok(Value::String(padded))
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "padEnd" => {
+                                if args.len() >= 1 {
+                                    let target_len_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::Number(target_len) = target_len_val {
+                                        let target_len = target_len as usize;
+                                        let current_len = utf16_len(&s);
+                                        if current_len >= target_len {
+                                            Ok(Value::String(s.clone()))
+                                        } else {
+                                            let pad_char = if args.len() >= 2 {
+                                                let pad_val = evaluate_expr(env, &args[1])?;
+                                                if let Value::String(pad_str) = pad_val {
+                                                    if !pad_str.is_empty() {
+                                                        pad_str[0]
+                                                    } else {
+                                                        ' ' as u16
+                                                    }
+                                                } else {
+                                                    ' ' as u16
+                                                }
+                                            } else {
+                                                ' ' as u16
+                                            };
+                                            let pad_count = target_len - current_len;
+                                            let mut padded = s.clone();
+                                            padded.extend(vec![pad_char; pad_count]);
+                                            Ok(Value::String(padded))
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
                             _ => Err(JSError::EvaluationError {
                                 message: "error".to_string(),
                             }), // method not found

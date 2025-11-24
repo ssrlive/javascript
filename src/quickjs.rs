@@ -1175,6 +1175,53 @@ fn evaluate_expr(
                 Ok(Value::Object(console_obj))
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
+            } else if name == "Math" {
+                let mut math_obj = std::collections::HashMap::new();
+                math_obj.insert("PI".to_string(), Value::Number(std::f64::consts::PI));
+                math_obj.insert("E".to_string(), Value::Number(std::f64::consts::E));
+                math_obj.insert(
+                    "floor".to_string(),
+                    Value::Function("Math.floor".to_string()),
+                );
+                math_obj.insert("ceil".to_string(), Value::Function("Math.ceil".to_string()));
+                math_obj.insert(
+                    "round".to_string(),
+                    Value::Function("Math.round".to_string()),
+                );
+                math_obj.insert("abs".to_string(), Value::Function("Math.abs".to_string()));
+                math_obj.insert("sqrt".to_string(), Value::Function("Math.sqrt".to_string()));
+                math_obj.insert("pow".to_string(), Value::Function("Math.pow".to_string()));
+                math_obj.insert("sin".to_string(), Value::Function("Math.sin".to_string()));
+                math_obj.insert("cos".to_string(), Value::Function("Math.cos".to_string()));
+                math_obj.insert("tan".to_string(), Value::Function("Math.tan".to_string()));
+                math_obj.insert(
+                    "random".to_string(),
+                    Value::Function("Math.random".to_string()),
+                );
+                Ok(Value::Object(math_obj))
+            } else if name == "JSON" {
+                let mut json_obj = std::collections::HashMap::new();
+                json_obj.insert(
+                    "parse".to_string(),
+                    Value::Function("JSON.parse".to_string()),
+                );
+                json_obj.insert(
+                    "stringify".to_string(),
+                    Value::Function("JSON.stringify".to_string()),
+                );
+                Ok(Value::Object(json_obj))
+            } else if name == "parseInt" {
+                Ok(Value::Function("parseInt".to_string()))
+            } else if name == "parseFloat" {
+                Ok(Value::Function("parseFloat".to_string()))
+            } else if name == "isNaN" {
+                Ok(Value::Function("isNaN".to_string()))
+            } else if name == "isFinite" {
+                Ok(Value::Function("isFinite".to_string()))
+            } else if name == "Array" {
+                Ok(Value::Function("Array".to_string()))
+            } else if name == "NaN" {
+                Ok(Value::Number(f64::NAN))
             } else {
                 Ok(Value::Undefined)
             }
@@ -1396,6 +1443,308 @@ fn evaluate_expr(
                             })
                         }
                     }
+                    (Value::Object(obj_map), method) => {
+                        // Check if this is the Math object
+                        if obj_map.contains_key("PI") && obj_map.contains_key("E") {
+                            // Math methods
+                            match method {
+                                "floor" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.floor()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.floor expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.floor expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "ceil" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.ceil()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.ceil expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.ceil expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "round" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.round()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.round expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.round expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "abs" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.abs()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.abs expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.abs expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "sqrt" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.sqrt()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.sqrt expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.sqrt expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "pow" => {
+                                    if args.len() == 2 {
+                                        let base_val = evaluate_expr(env, &args[0])?;
+                                        let exp_val = evaluate_expr(env, &args[1])?;
+                                        if let (Value::Number(base), Value::Number(exp)) =
+                                            (base_val, exp_val)
+                                        {
+                                            Ok(Value::Number(base.powf(exp)))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.pow expects two numbers".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.pow expects exactly two arguments"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "sin" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.sin()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.sin expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.sin expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "cos" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.cos()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.cos expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.cos expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "tan" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Number(n) = arg_val {
+                                            Ok(Value::Number(n.tan()))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Math.tan expects a number".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.tan expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "random" => {
+                                    if args.len() == 0 {
+                                        use std::time::{SystemTime, UNIX_EPOCH};
+                                        let duration =
+                                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                                        let seed = duration.as_nanos() as u64;
+                                        // Simple linear congruential generator for random number
+                                        let a = 1664525u64;
+                                        let c = 1013904223u64;
+                                        let m = 2u64.pow(32);
+                                        let random_u32 =
+                                            ((seed.wrapping_mul(a).wrapping_add(c)) % m) as u32;
+                                        let random_f64 = random_u32 as f64 / m as f64;
+                                        Ok(Value::Number(random_f64))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Math.random expects no arguments".to_string(),
+                                        })
+                                    }
+                                }
+                                _ => Err(JSError::EvaluationError {
+                                    message: format!("Math.{} is not implemented", method),
+                                }),
+                            }
+                        } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify")
+                        {
+                            // JSON methods
+                            match method {
+                                "parse" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        match arg_val {
+                                            Value::String(s) => {
+                                                // Simple JSON parsing - for now just return the string as-is
+                                                // In a real implementation, this would parse JSON
+                                                Ok(Value::String(s))
+                                            }
+                                            _ => Err(JSError::EvaluationError {
+                                                message: "JSON.parse expects a string".to_string(),
+                                            }),
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "JSON.parse expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "stringify" => {
+                                    if args.len() == 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        match arg_val {
+                                            Value::Number(n) => {
+                                                Ok(Value::String(utf8_to_utf16(&n.to_string())))
+                                            }
+                                            Value::String(s) => {
+                                                // Simple JSON stringification - just return the string
+                                                Ok(Value::String(s))
+                                            }
+                                            Value::Boolean(b) => {
+                                                Ok(Value::String(utf8_to_utf16(&b.to_string())))
+                                            }
+                                            Value::Undefined => {
+                                                Ok(Value::String(utf8_to_utf16("null")))
+                                            }
+                                            Value::Object(_) => {
+                                                Ok(Value::String(utf8_to_utf16("{}")))
+                                            } // Simple object representation
+                                            _ => Ok(Value::String(utf8_to_utf16("null"))),
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "JSON.stringify expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                _ => Err(JSError::EvaluationError {
+                                    message: format!("JSON.{} is not implemented", method),
+                                }),
+                            }
+                        } else {
+                            // Array methods (simplified - treating objects as arrays)
+                            match method {
+                                "push" => {
+                                    if args.len() >= 1 {
+                                        let arg_val = evaluate_expr(env, &args[0])?;
+                                        let mut new_map = obj_map.clone();
+                                        let length =
+                                            new_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        let current_len = match length {
+                                            Value::Number(n) => *n as usize,
+                                            _ => 0,
+                                        };
+                                        new_map.insert(current_len.to_string(), arg_val);
+                                        new_map.insert(
+                                            "length".to_string(),
+                                            Value::Number((current_len + 1) as f64),
+                                        );
+                                        Ok(Value::Object(new_map))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.push expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "pop" => {
+                                    let mut new_map = obj_map.clone();
+                                    let length =
+                                        new_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+                                    if current_len > 0 {
+                                        let last_idx = (current_len - 1).to_string();
+                                        if let Some(val) = new_map.remove(&last_idx) {
+                                            new_map.insert(
+                                                "length".to_string(),
+                                                Value::Number((current_len - 1) as f64),
+                                            );
+                                            Ok(val)
+                                        } else {
+                                            Ok(Value::Undefined)
+                                        }
+                                    } else {
+                                        Ok(Value::Undefined)
+                                    }
+                                }
+                                "length" => {
+                                    let length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    Ok(length.clone())
+                                }
+                                _ => Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                }), // array method not found
+                            }
+                        }
+                    }
                     (Value::String(s), method) => {
                         // String method call
                         match method {
@@ -1607,6 +1956,92 @@ fn evaluate_expr(
                             } else {
                                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
                             }
+                        }
+                        "parseInt" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        // Parse integer from the beginning of the string
+                                        let trimmed = str_val.trim();
+                                        let mut end_pos = 0;
+                                        let mut chars = trimmed.chars();
+                                        if let Some(first_char) = chars.next() {
+                                            if first_char == '-'
+                                                || first_char == '+'
+                                                || first_char.is_digit(10)
+                                            {
+                                                end_pos = 1;
+                                                for ch in chars {
+                                                    if ch.is_digit(10) {
+                                                        end_pos += 1;
+                                                    } else {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        let num_str = &trimmed[0..end_pos];
+                                        match num_str.parse::<i32>() {
+                                            Ok(n) => Ok(Value::Number(n as f64)),
+                                            Err(_) => Ok(Value::Number(f64::NAN)),
+                                        }
+                                    }
+                                    Value::Number(n) => Ok(Value::Number(n.trunc())),
+                                    _ => Ok(Value::Number(f64::NAN)),
+                                }
+                            } else {
+                                Ok(Value::Number(f64::NAN))
+                            }
+                        }
+                        "parseFloat" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        match str_val.trim().parse::<f64>() {
+                                            Ok(n) => Ok(Value::Number(n)),
+                                            Err(_) => Ok(Value::Number(f64::NAN)),
+                                        }
+                                    }
+                                    Value::Number(n) => Ok(Value::Number(n)),
+                                    _ => Ok(Value::Number(f64::NAN)),
+                                }
+                            } else {
+                                Ok(Value::Number(f64::NAN))
+                            }
+                        }
+                        "isNaN" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
+                                    _ => Ok(Value::Boolean(false)),
+                                }
+                            } else {
+                                Ok(Value::Boolean(false))
+                            }
+                        }
+                        "isFinite" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
+                                    _ => Ok(Value::Boolean(false)),
+                                }
+                            } else {
+                                Ok(Value::Boolean(false))
+                            }
+                        }
+                        "Array" => {
+                            // Array constructor - create an array-like object
+                            let mut array_obj = std::collections::HashMap::new();
+                            // For now, just create an empty array representation
+                            // In a real implementation, we'd need proper array support
+                            array_obj.insert("length".to_string(), Value::Number(0.0));
+                            Ok(Value::Object(array_obj))
                         }
                         _ => Err(JSError::EvaluationError {
                             message: "error".to_string(),

@@ -7,5 +7,5 @@ edition = "2021"
 libc = "0.2.177"
 
 [[bin]]
-name = "main"
-path = "src/main.rs"
+name = "qjs"
+path = "bin/qjs.rs"

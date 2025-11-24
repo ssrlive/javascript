@@ -791,6 +791,50 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
     JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
 }
 
+pub unsafe fn JS_Eval(
+    _ctx: *mut JSContext,
+    input: *const i8,
+    input_len: usize,
+    _filename: *const i8,
+    _eval_flags: i32,
+) -> JSValue {
+    // Simple implementation: only support numeric literals for now
+    if input_len == 0 {
+        return JS_UNDEFINED;
+    }
+    let s = std::slice::from_raw_parts(input as *const u8, input_len);
+    let str = std::str::from_utf8(s).unwrap_or("");
+    if let Ok(num) = str.trim().parse::<f64>() {
+        JSValue::new_float64(num)
+    } else {
+        // For now, return undefined for non-numeric
+        JS_UNDEFINED
+    }
+}
+
+pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom) -> JSValue {
+    if this_obj.tag != JS_TAG_OBJECT as i64 {
+        return JS_UNDEFINED;
+    }
+    let p = this_obj.u.ptr as *mut JSObject;
+    let sh = (*p).shape;
+    if let Some((idx, _)) = (*sh).find_own_property(prop) {
+        let prop_val = (*(*p).prop.offset(idx as isize)).u.value;
+        prop_val
+    } else {
+        JS_UNDEFINED
+    }
+}
+
+pub unsafe fn JS_SetProperty(
+    ctx: *mut JSContext,
+    this_obj: JSValue,
+    prop: JSAtom,
+    val: JSValue,
+) -> i32 {
+    JS_DefinePropertyValue(ctx, this_obj, prop, val, 0)
+}
+
 impl JSRuntime {
     pub unsafe fn js_new_atom_len(&mut self, name: *const u8, len: usize) -> JSAtom {
         if len == 0 {
@@ -898,6 +942,30 @@ mod tests {
             let prop_val = (*(*obj_ptr).prop.offset(idx as isize)).u.value;
             assert_eq!(prop_val.get_tag(), JS_TAG_INT);
             assert_eq!(prop_val.u.int32, 42);
+
+            JS_FreeContext(ctx);
+            JS_FreeRuntime(rt);
+        }
+    }
+
+    #[test]
+    fn test_eval_numeric() {
+        unsafe {
+            let rt = JS_NewRuntime();
+            assert!(!rt.is_null());
+            let ctx = JS_NewContext(rt);
+            assert!(!ctx.is_null());
+
+            let script = b"42.5";
+            let result = JS_Eval(
+                ctx,
+                script.as_ptr() as *const i8,
+                script.len(),
+                std::ptr::null(),
+                0,
+            );
+            assert_eq!(result.get_tag(), JS_TAG_FLOAT64);
+            assert_eq!(result.u.float64, 42.5);
 
             JS_FreeContext(ctx);
             JS_FreeRuntime(rt);

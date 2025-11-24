@@ -903,6 +903,8 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 Ok(val.clone())
             } else if name == "console" {
                 Ok(Value::Object("console".to_string()))
+            } else if name == "String" {
+                Ok(Value::Function("String".to_string()))
             } else {
                 Err(())
             }
@@ -1063,9 +1065,36 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         println!();
                         Ok(Value::Undefined)
                     }
+                    (obj_val, "toString") => {
+                        // toString method for all values
+                        if args.is_empty() {
+                            match obj_val {
+                                Value::Number(n) => {
+                                    Ok(Value::String(utf8_to_utf16(&n.to_string())))
+                                }
+                                Value::String(s) => Ok(Value::String(s.clone())),
+                                Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                                Value::Object(name) => {
+                                    Ok(Value::String(utf8_to_utf16(&format!("[object {}]", name))))
+                                }
+                                Value::Function(name) => Ok(Value::String(utf8_to_utf16(
+                                    &format!("[Function: {}]", name),
+                                ))),
+                            }
+                        } else {
+                            Err(())
+                        }
+                    }
                     (Value::String(s), method) => {
                         // String method call
                         match method {
+                            "toString" => {
+                                if args.is_empty() {
+                                    Ok(Value::String(s.clone()))
+                                } else {
+                                    Err(())
+                                }
+                            }
                             "substring" => {
                                 if args.len() == 2 {
                                     let start_val = evaluate_expr(env, &args[0])?;
@@ -1207,6 +1236,29 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 let func_val = evaluate_expr(env, func_expr)?;
                 match func_val {
                     Value::Function(func_name) => match func_name.as_str() {
+                        "String" => {
+                            // String() constructor
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => {
+                                        Ok(Value::String(utf8_to_utf16(&n.to_string())))
+                                    }
+                                    Value::String(s) => Ok(Value::String(s.clone())),
+                                    Value::Undefined => {
+                                        Ok(Value::String(utf8_to_utf16("undefined")))
+                                    }
+                                    Value::Object(name) => Ok(Value::String(utf8_to_utf16(
+                                        &format!("[object {}]", name),
+                                    ))),
+                                    Value::Function(name) => Ok(Value::String(utf8_to_utf16(
+                                        &format!("[Function: {}]", name),
+                                    ))),
+                                }
+                            } else {
+                                Ok(Value::String(Vec::new())) // String() with no args returns empty string
+                            }
+                        }
                         _ => Err(()),
                     },
                     _ => Err(()),

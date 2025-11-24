@@ -798,17 +798,143 @@ pub unsafe fn JS_Eval(
     _filename: *const i8,
     _eval_flags: i32,
 ) -> JSValue {
-    // Simple implementation: only support numeric literals for now
     if input_len == 0 {
         return JS_UNDEFINED;
     }
     let s = std::slice::from_raw_parts(input as *const u8, input_len);
-    let str = std::str::from_utf8(s).unwrap_or("");
-    if let Ok(num) = str.trim().parse::<f64>() {
-        JSValue::new_float64(num)
-    } else {
-        // For now, return undefined for non-numeric
-        JS_UNDEFINED
+    let script = std::str::from_utf8(s).unwrap_or("");
+
+    // Simple expression evaluator
+    match evaluate_expression(script.trim()) {
+        Ok(num) => JSValue::new_float64(num),
+        Err(_) => JS_UNDEFINED,
+    }
+}
+
+fn evaluate_expression(expr: &str) -> Result<f64, ()> {
+    let mut tokens = tokenize(expr)?;
+    parse_expression(&mut tokens)
+}
+
+fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            ' ' | '\t' | '\n' => i += 1,
+            '+' => {
+                tokens.push(Token::Plus);
+                i += 1;
+            }
+            '-' => {
+                tokens.push(Token::Minus);
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token::Multiply);
+                i += 1;
+            }
+            '/' => {
+                tokens.push(Token::Divide);
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token::RParen);
+                i += 1;
+            }
+            '0'..='9' | '.' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_digit(10) || chars[i] == '.') {
+                    i += 1;
+                }
+                let num_str = &expr[start..i];
+                let num = num_str.parse::<f64>().map_err(|_| ())?;
+                tokens.push(Token::Number(num));
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(tokens)
+}
+
+#[derive(Debug)]
+enum Token {
+    Number(f64),
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    LParen,
+    RParen,
+}
+
+fn parse_expression(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+    parse_additive(tokens)
+}
+
+fn parse_additive(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+    let mut left = parse_multiplicative(tokens)?;
+    while !tokens.is_empty() {
+        match tokens[0] {
+            Token::Plus => {
+                tokens.remove(0);
+                let right = parse_multiplicative(tokens)?;
+                left += right;
+            }
+            Token::Minus => {
+                tokens.remove(0);
+                let right = parse_multiplicative(tokens)?;
+                left -= right;
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+    let mut left = parse_primary(tokens)?;
+    while !tokens.is_empty() {
+        match tokens[0] {
+            Token::Multiply => {
+                tokens.remove(0);
+                let right = parse_primary(tokens)?;
+                left *= right;
+            }
+            Token::Divide => {
+                tokens.remove(0);
+                let right = parse_primary(tokens)?;
+                if right == 0.0 {
+                    return Err(());
+                }
+                left /= right;
+            }
+            _ => break,
+        }
+    }
+    Ok(left)
+}
+
+fn parse_primary(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+    if tokens.is_empty() {
+        return Err(());
+    }
+    match tokens.remove(0) {
+        Token::Number(n) => Ok(n),
+        Token::LParen => {
+            let expr = parse_expression(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                return Err(());
+            }
+            tokens.remove(0);
+            Ok(expr)
+        }
+        _ => Err(()),
     }
 }
 

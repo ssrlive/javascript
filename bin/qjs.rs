@@ -3,6 +3,20 @@ use std::env;
 use std::fs;
 use std::process;
 
+unsafe fn get_js_string(val: &JSValue) -> String {
+    if val.get_tag() != JS_TAG_STRING {
+        return String::new();
+    }
+    let p = val.get_ptr() as *mut JSString;
+    if p.is_null() {
+        return String::new();
+    }
+    let len = (*p).len as usize;
+    let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+    let bytes = std::slice::from_raw_parts(str_data, len);
+    String::from_utf8_lossy(bytes).to_string()
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -68,8 +82,10 @@ fn main() {
             JS_TAG_BOOL => println!("{}", if result.u.int32 != 0 { "true" } else { "false" }),
             JS_TAG_NULL => println!("null"),
             JS_TAG_UNDEFINED => println!("undefined"),
-            JS_TAG_OBJECT => println!("[object Object]"),
-            JS_TAG_STRING => println!("[string]"), // Simplified
+            JS_TAG_STRING => {
+                let s = get_js_string(&result);
+                println!("{}", s);
+            }
             _ => println!("[unknown]"),
         }
 

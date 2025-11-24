@@ -791,6 +791,29 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
     JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
 }
 
+pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &str) -> JSValue {
+    let len = s.len();
+    if len == 0 {
+        // Empty string
+        return JSValue::new_ptr(JS_TAG_STRING, std::ptr::null_mut());
+    }
+    let str_size = std::mem::size_of::<JSString>() + len;
+    let p = (*(*ctx).rt).js_malloc_rt(str_size) as *mut JSString;
+    if p.is_null() {
+        return JS_EXCEPTION;
+    }
+    (*p).header.ref_count = 1;
+    (*p).len = len as u32;
+    (*p).hash = 0; // TODO: compute hash
+    (*p).hash_next = 0;
+    // Copy string data
+    let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+    for (i, &byte) in s.as_bytes().iter().enumerate() {
+        *str_data.offset(i as isize) = byte;
+    }
+    JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
+}
+
 pub unsafe fn JS_Eval(
     _ctx: *mut JSContext,
     input: *const i8,
@@ -807,10 +830,7 @@ pub unsafe fn JS_Eval(
     // Evaluate statements
     match evaluate_script(script.trim()) {
         Ok(Value::Number(num)) => JSValue::new_float64(num),
-        Ok(Value::String(s)) => {
-            // For simplicity, return the length as int for now
-            JSValue::new_int32(s.len() as i32)
-        }
+        Ok(Value::String(s)) => JS_NewString(_ctx, &s),
         Err(_) => JS_UNDEFINED,
     }
 }

@@ -373,6 +373,12 @@ impl JSRuntime {
     }
 
     pub unsafe fn js_new_atom_len(&mut self, str: *const u8, len: usize) -> JSAtom {
+        if self.atom_hash_size == 0 {
+            if self.init_atoms() < 0 {
+                return 0;
+            }
+        }
+
         let str_slice = std::slice::from_raw_parts(str, len);
         let h = Self::hash_string(str_slice);
         let h_masked = h & ((self.atom_hash_size as u32) - 1);
@@ -393,23 +399,71 @@ impl JSRuntime {
             i = (*p).hash_next;
         }
 
-        // Not found, create new
-        // TODO: Resize atom_array if needed
+        if self.atom_free_index == 0 {
+            if self.atom_count >= self.atom_size {
+                let new_size = if self.atom_size == 0 {
+                    128
+                } else {
+                    self.atom_size * 2
+                };
+                let new_array = self.js_realloc_rt(
+                    self.atom_array as *mut c_void,
+                    new_size as usize * std::mem::size_of::<*mut JSAtomStruct>(),
+                ) as *mut *mut JSAtomStruct;
+                if new_array.is_null() {
+                    return 0;
+                }
+                self.atom_array = new_array;
+                self.atom_size = new_size;
+            }
+            i = self.atom_count as u32;
+            self.atom_count += 1;
+        } else {
+            i = self.atom_free_index as u32;
+            self.atom_free_index = *self.atom_array.offset(i as isize) as i32;
+        }
 
         let p = self.js_alloc_string(len, false);
         if p.is_null() {
-            return 0; // JS_ATOM_NULL
+            return 0;
         }
 
         let p_str = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
         std::ptr::copy_nonoverlapping(str, p_str, len);
         *p_str.offset(len as isize) = 0; // Null terminate
 
-        // Add to hash
-        // TODO: Allocate atom index
-        let atom_index = 1; // Dummy index for now
+        (*p).hash = h;
+        (*p).hash_next = *self.atom_hash.offset(h_masked as isize);
+        *self.atom_hash.offset(h_masked as isize) = i;
 
-        atom_index
+        *self.atom_array.offset(i as isize) = p;
+
+        i
+    }
+
+    pub unsafe fn init_atoms(&mut self) -> i32 {
+        self.atom_hash_size = 256;
+        self.atom_count = 1;
+        self.atom_size = 256;
+
+        self.atom_hash = self
+            .js_malloc_rt(self.atom_hash_size as usize * std::mem::size_of::<u32>())
+            as *mut u32;
+        if self.atom_hash.is_null() {
+            return -1;
+        }
+        std::ptr::write_bytes(self.atom_hash, 0, self.atom_hash_size as usize);
+
+        self.atom_array = self
+            .js_malloc_rt(self.atom_size as usize * std::mem::size_of::<*mut JSAtomStruct>())
+            as *mut *mut JSAtomStruct;
+        if self.atom_array.is_null() {
+            self.js_free_rt(self.atom_hash as *mut c_void);
+            self.atom_hash = std::ptr::null_mut();
+            return -1;
+        }
+
+        0
     }
 }
 
@@ -489,6 +543,45 @@ impl JSRuntime {
             _ => {}
         }
     }
+}
+
+pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
+    let rt_ptr = libc::malloc(std::mem::size_of::<JSRuntime>()) as *mut JSRuntime;
+    if rt_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let rt = &mut *rt_ptr;
+    std::ptr::write_bytes(rt_ptr, 0, 1);
+
+    rt.mf.js_malloc = Some(js_def_malloc);
+    rt.mf.js_free = Some(js_def_free);
+    rt.mf.js_realloc = Some(js_def_realloc);
+    rt.mf.js_malloc_usable_size = Some(js_def_malloc_usable_size);
+    rt.malloc_state.malloc_limit = usize::MAX;
+
+    rt.context_list.init();
+    rt.gc_obj_list.init();
+    rt.gc_zero_ref_count_list.init();
+    rt.tmp_obj_list.init();
+    rt.weakref_list.init();
+
+    if rt.init_atoms() < 0 {
+        JS_FreeRuntime(rt_ptr);
+        return std::ptr::null_mut();
+    }
+
+    rt_ptr
+}
+
+pub unsafe fn JS_FreeRuntime(rt: *mut JSRuntime) {
+    let rt_ref = &mut *rt;
+    if !rt_ref.atom_hash.is_null() {
+        rt_ref.js_free_rt(rt_ref.atom_hash as *mut c_void);
+    }
+    if !rt_ref.atom_array.is_null() {
+        rt_ref.js_free_rt(rt_ref.atom_array as *mut c_void);
+    }
+    libc::free(rt as *mut c_void);
 }
 
 pub unsafe extern "C" fn js_def_malloc(s: *mut JSMallocState, size: usize) -> *mut c_void {

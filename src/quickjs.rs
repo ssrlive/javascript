@@ -251,6 +251,7 @@ pub struct JSShape {
     pub prop_count: i32,
     pub deleted_prop_count: i32,
     pub prop: *mut JSShapeProperty,
+    pub prop_hash: *mut u32,
     pub proto: *mut JSObject,
 }
 
@@ -395,44 +396,15 @@ pub struct JSClassDef {
 impl JSShape {
     pub unsafe fn find_own_property(&self, atom: JSAtom) -> Option<(i32, *mut JSShapeProperty)> {
         if self.is_hashed != 0 {
-            let _h = atom & self.prop_hash_mask;
-            let mut _prop_idx = self.hash as i32; // This seems wrong, hash should be array of indices?
-                                                  // Wait, QuickJS implementation of shape hash is:
-                                                  // shape->prop[h].hash_next chain? No.
-                                                  // It uses a separate hash table if prop_count is large, or linear search?
-                                                  // Actually, QuickJS uses `prop_hash_end` and `prop` array acts as hash table buckets?
-                                                  // Let's look at QuickJS C code structure again.
-                                                  // JSShape:
-                                                  //   uint32_t *prop_hash; /* hash table of size (1 << prop_hash_bits) */
-                                                  //   ...
-                                                  // But here we defined JSShape without prop_hash pointer?
-                                                  // Ah, I missed `prop_hash` in my JSShape definition?
-                                                  // Let's check my JSShape definition.
-
-            // In my definition:
-            // pub hash: u32,
-            // pub prop_hash_mask: u32,
-
-            // QuickJS C:
-            // uint32_t prop_hash_mask;
-            // int prop_size;
-            // int prop_count;
-            // int deleted_prop_count;
-            // JSShapeProperty *prop;
-            // ...
-
-            // Wait, where is the hash table?
-            // In QuickJS, if is_hashed is true, the hash table is stored at the end of the prop array?
-            // Or maybe I missed a field.
-
-            // Let's assume linear search for now to keep it simple and working,
-            // then upgrade to hash table later.
-
-            for i in 0..self.prop_count {
-                let pr = self.prop.offset(i as isize);
+            let h = (atom as u32) & self.prop_hash_mask;
+            let mut prop_idx = *self.prop_hash.offset(h as isize);
+            while prop_idx != 0 {
+                let idx = (prop_idx - 1) as i32;
+                let pr = self.prop.offset(idx as isize);
                 if (*pr).atom == atom {
-                    return Some((i, pr));
+                    return Some((idx, pr));
                 }
+                prop_idx = (*pr).hash_next;
             }
             None
         } else {
@@ -466,11 +438,6 @@ impl JSRuntime {
         // Check if property already exists
         if let Some(_) = (*sh).find_own_property(atom) {
             // Already exists
-            // For now, return error or index?
-            // QuickJS returns index if found.
-            // But we need to handle flags update etc.
-            // Let's assume we return index.
-            // But wait, we need to know the index.
             let (idx, _) = (*sh).find_own_property(atom).unwrap();
             return idx;
         }
@@ -486,11 +453,38 @@ impl JSRuntime {
             }
         }
 
+        // Enable hash if needed
+        if (*sh).prop_count >= 4 && (*sh).is_hashed == 0 {
+            (*sh).is_hashed = 1;
+            (*sh).prop_hash_mask = 15; // 16 - 1
+            let hash_size = 16;
+            (*sh).prop_hash = self.js_malloc_rt(hash_size * std::mem::size_of::<u32>()) as *mut u32;
+            if (*sh).prop_hash.is_null() {
+                return -1;
+            }
+            for i in 0..hash_size {
+                *(*sh).prop_hash.offset(i as isize) = 0;
+            }
+            // Fill hash table with existing properties
+            for i in 0..(*sh).prop_count {
+                let pr = (*sh).prop.offset(i as isize);
+                let h = ((*pr).atom as u32) & (*sh).prop_hash_mask;
+                (*pr).hash_next = *(*sh).prop_hash.offset(h as isize);
+                *(*sh).prop_hash.offset(h as isize) = (i + 1) as u32;
+            }
+        }
+
         let idx = (*sh).prop_count;
         let pr = (*sh).prop.offset(idx as isize);
         (*pr).atom = atom;
         (*pr).flags = flags;
-        (*pr).hash_next = 0; // TODO: Update hash
+        if (*sh).is_hashed != 0 {
+            let h = (atom as u32) & (*sh).prop_hash_mask;
+            (*pr).hash_next = *(*sh).prop_hash.offset(h as isize);
+            *(*sh).prop_hash.offset(h as isize) = (idx + 1) as u32;
+        } else {
+            (*pr).hash_next = 0;
+        }
         (*sh).prop_count += 1;
 
         idx
@@ -518,6 +512,34 @@ impl JSRuntime {
         }
     }
 
+    pub unsafe fn init_atoms(&mut self) {
+        self.atom_hash_size = 16;
+        self.atom_count = 0;
+        self.atom_size = 16;
+        self.atom_count_resize = 8;
+        self.atom_hash = self
+            .js_malloc_rt((self.atom_hash_size as usize) * std::mem::size_of::<u32>())
+            as *mut u32;
+        if self.atom_hash.is_null() {
+            return;
+        }
+        for i in 0..self.atom_hash_size {
+            *self.atom_hash.offset(i as isize) = 0;
+        }
+        self.atom_array = self
+            .js_malloc_rt((self.atom_size as usize) * std::mem::size_of::<*mut JSAtomStruct>())
+            as *mut *mut JSAtomStruct;
+        if self.atom_array.is_null() {
+            self.js_free_rt(self.atom_hash as *mut c_void);
+            self.atom_hash = std::ptr::null_mut();
+            return;
+        }
+        for i in 0..self.atom_size {
+            *self.atom_array.offset(i as isize) = std::ptr::null_mut();
+        }
+        self.atom_free_index = 0;
+    }
+
     pub unsafe fn js_new_shape(&mut self, proto: *mut JSObject) -> *mut JSShape {
         let sh = self.js_malloc_rt(std::mem::size_of::<JSShape>()) as *mut JSShape;
         if sh.is_null() {
@@ -537,6 +559,7 @@ impl JSRuntime {
         (*sh).prop_size = 0;
         (*sh).prop_count = 0;
         (*sh).prop = std::ptr::null_mut();
+        (*sh).prop_hash = std::ptr::null_mut();
         (*sh).proto = proto;
         sh
     }
@@ -545,6 +568,9 @@ impl JSRuntime {
         if !sh.is_null() {
             if !(*sh).prop.is_null() {
                 self.js_free_rt((*sh).prop as *mut c_void);
+            }
+            if !(*sh).prop_hash.is_null() {
+                self.js_free_rt((*sh).prop_hash as *mut c_void);
             }
             self.js_free_rt(sh as *mut c_void);
         }
@@ -676,6 +702,8 @@ pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
 
     (*rt).user_opaque = std::ptr::null_mut();
 
+    (*rt).init_atoms();
+
     rt
 }
 
@@ -764,9 +792,74 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
 }
 
 impl JSRuntime {
-    pub unsafe fn js_new_atom_len(&mut self, _name: *const u8, _len: usize) -> JSAtom {
-        // Simple implementation: return a dummy atom
-        1
+    pub unsafe fn js_new_atom_len(&mut self, name: *const u8, len: usize) -> JSAtom {
+        if len == 0 {
+            return 0; // invalid
+        }
+        // Compute hash
+        let mut h = 0u32;
+        for i in 0..len {
+            h = h
+                .wrapping_mul(31)
+                .wrapping_add(*name.offset(i as isize) as u32);
+        }
+        // Find in hash table
+        let hash_index = (h % self.atom_hash_size as u32) as i32;
+        let mut atom = *self.atom_hash.offset(hash_index as isize);
+        while atom != 0 {
+            let p = *self.atom_array.offset((atom - 1) as isize);
+            if (*p).len == len as u32 && (*p).hash == h {
+                // Check string
+                let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+                let mut equal = true;
+                for i in 0..len {
+                    if *str_data.offset(i as isize) != *name.offset(i as isize) {
+                        equal = false;
+                        break;
+                    }
+                }
+                if equal {
+                    return atom;
+                }
+            }
+            atom = (*p).hash_next;
+        }
+        // Not found, create new
+        if self.atom_count >= self.atom_size {
+            let new_size = self.atom_size * 2;
+            let new_array = self.js_realloc_rt(
+                self.atom_array as *mut c_void,
+                (new_size as usize) * std::mem::size_of::<*mut JSAtomStruct>(),
+            ) as *mut *mut JSAtomStruct;
+            if new_array.is_null() {
+                return 0;
+            }
+            self.atom_array = new_array;
+            self.atom_size = new_size;
+            for i in self.atom_count..new_size {
+                *self.atom_array.offset(i as isize) = std::ptr::null_mut();
+            }
+        }
+        // Allocate JSString
+        let str_size = std::mem::size_of::<JSString>() + len;
+        let p = self.js_malloc_rt(str_size) as *mut JSString;
+        if p.is_null() {
+            return 0;
+        }
+        (*p).header.ref_count = 1;
+        (*p).len = len as u32;
+        (*p).hash = h;
+        (*p).hash_next = *self.atom_hash.offset(hash_index as isize);
+        // Copy string
+        let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+        for i in 0..len {
+            *str_data.offset(i as isize) = *name.offset(i as isize);
+        }
+        let new_atom = (self.atom_count + 1) as u32;
+        *self.atom_array.offset(self.atom_count as isize) = p;
+        *self.atom_hash.offset(hash_index as isize) = new_atom;
+        self.atom_count += 1;
+        new_atom
     }
 }
 

@@ -9,3 +9,7 @@ libc = "0.2.177"
 [[bin]]
 name = "qjs"
 path = "bin/qjs.rs"
+
+[[bin]]
+name = "rust_qjs"
+path = "bin/rust_qjs.rs"

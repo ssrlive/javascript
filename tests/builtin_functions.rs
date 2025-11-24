@@ -186,4 +186,62 @@ mod builtin_functions_tests {
             _ => panic!("Expected arr.pop() to return 2.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_array_join() {
+        let script = "let arr = Array(); let arr2 = arr.push('a'); let arr3 = arr2.push('b'); arr3.join('-')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "a-b");
+            }
+            _ => panic!("Expected arr.join('-') to be 'a-b', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_keys() {
+        let script = "let obj = {a: 1, b: 2}; Object.keys(obj).length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!(
+                "Expected Object.keys(obj).length to be 2.0, got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_encode_uri_component() {
+        let script = "encodeURIComponent('hello world')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello%20world");
+            }
+            _ => panic!(
+                "Expected encodeURIComponent('hello world') to be 'hello%20world', got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_decode_uri_component() {
+        let script = "decodeURIComponent('hello%20world')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world");
+            }
+            _ => panic!(
+                "Expected decodeURIComponent('hello%20world') to be 'hello world', got {:?}",
+                result
+            ),
+        }
+    }
 }

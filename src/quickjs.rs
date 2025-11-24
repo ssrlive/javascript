@@ -1210,6 +1210,17 @@ fn evaluate_expr(
                     Value::Function("JSON.stringify".to_string()),
                 );
                 Ok(Value::Object(json_obj))
+            } else if name == "Object" {
+                let mut object_obj = std::collections::HashMap::new();
+                object_obj.insert(
+                    "keys".to_string(),
+                    Value::Function("Object.keys".to_string()),
+                );
+                object_obj.insert(
+                    "values".to_string(),
+                    Value::Function("Object.values".to_string()),
+                );
+                Ok(Value::Object(object_obj))
             } else if name == "parseInt" {
                 Ok(Value::Function("parseInt".to_string()))
             } else if name == "parseFloat" {
@@ -1218,6 +1229,10 @@ fn evaluate_expr(
                 Ok(Value::Function("isNaN".to_string()))
             } else if name == "isFinite" {
                 Ok(Value::Function("isFinite".to_string()))
+            } else if name == "encodeURIComponent" {
+                Ok(Value::Function("encodeURIComponent".to_string()))
+            } else if name == "decodeURIComponent" {
+                Ok(Value::Function("decodeURIComponent".to_string()))
             } else if name == "Array" {
                 Ok(Value::Function("Array".to_string()))
             } else if name == "NaN" {
@@ -1685,6 +1700,81 @@ fn evaluate_expr(
                                     message: format!("JSON.{} is not implemented", method),
                                 }),
                             }
+                        } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
+                            // Object methods
+                            match method {
+                                "keys" => {
+                                    if args.len() == 1 {
+                                        let obj_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Object(obj) = obj_val {
+                                            let mut keys = Vec::new();
+                                            for key in obj.keys() {
+                                                if key != "length" {
+                                                    // Skip array length property
+                                                    keys.push(Value::String(utf8_to_utf16(key)));
+                                                }
+                                            }
+                                            // Create a simple array-like object for keys
+                                            let mut result_obj = std::collections::HashMap::new();
+                                            for (i, key) in keys.into_iter().enumerate() {
+                                                result_obj.insert(i.to_string(), key);
+                                            }
+                                            result_obj.insert(
+                                                "length".to_string(),
+                                                Value::Number(result_obj.len() as f64),
+                                            );
+                                            Ok(Value::Object(result_obj))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Object.keys expects an object"
+                                                    .to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Object.keys expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "values" => {
+                                    if args.len() == 1 {
+                                        let obj_val = evaluate_expr(env, &args[0])?;
+                                        if let Value::Object(obj) = obj_val {
+                                            let mut values = Vec::new();
+                                            for (key, value) in obj.iter() {
+                                                if key != "length" {
+                                                    // Skip array length property
+                                                    values.push(value.clone());
+                                                }
+                                            }
+                                            // Create a simple array-like object for values
+                                            let mut result_obj = std::collections::HashMap::new();
+                                            for (i, value) in values.into_iter().enumerate() {
+                                                result_obj.insert(i.to_string(), value);
+                                            }
+                                            result_obj.insert(
+                                                "length".to_string(),
+                                                Value::Number(result_obj.len() as f64),
+                                            );
+                                            Ok(Value::Object(result_obj))
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "Object.values expects an object"
+                                                    .to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Object.values expects exactly one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                _ => Err(JSError::EvaluationError {
+                                    message: format!("Object.{} is not implemented", method),
+                                }),
+                            }
                         } else {
                             // Array methods (simplified - treating objects as arrays)
                             match method {
@@ -1738,6 +1828,101 @@ fn evaluate_expr(
                                     let length =
                                         obj_map.get("length").unwrap_or(&Value::Number(0.0));
                                     Ok(length.clone())
+                                }
+                                "join" => {
+                                    let separator = if args.len() >= 1 {
+                                        match evaluate_expr(env, &args[0])? {
+                                            Value::String(s) => String::from_utf16_lossy(&s),
+                                            Value::Number(n) => n.to_string(),
+                                            _ => ",".to_string(),
+                                        }
+                                    } else {
+                                        ",".to_string()
+                                    };
+
+                                    let length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let mut result = String::new();
+                                    for i in 0..current_len {
+                                        if i > 0 {
+                                            result.push_str(&separator);
+                                        }
+                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                            match val {
+                                                Value::String(s) => {
+                                                    result.push_str(&String::from_utf16_lossy(s))
+                                                }
+                                                Value::Number(n) => result.push_str(&n.to_string()),
+                                                Value::Boolean(b) => {
+                                                    result.push_str(&b.to_string())
+                                                }
+                                                _ => result.push_str("[object Object]"),
+                                            }
+                                        }
+                                    }
+                                    Ok(Value::String(utf8_to_utf16(&result)))
+                                }
+                                "slice" => {
+                                    let start = if args.len() >= 1 {
+                                        match evaluate_expr(env, &args[0])? {
+                                            Value::Number(n) => n as isize,
+                                            _ => 0isize,
+                                        }
+                                    } else {
+                                        0isize
+                                    };
+                                    let end = if args.len() >= 2 {
+                                        match evaluate_expr(env, &args[1])? {
+                                            Value::Number(n) => n as isize,
+                                            _ => {
+                                                let length = obj_map
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                match length {
+                                                    Value::Number(n) => *n as isize,
+                                                    _ => 0isize,
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        let length =
+                                            obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        match length {
+                                            Value::Number(n) => *n as isize,
+                                            _ => 0isize,
+                                        }
+                                    };
+
+                                    let length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let len = current_len as isize;
+                                    let start = if start < 0 { len + start } else { start };
+                                    let end = if end < 0 { len + end } else { end };
+
+                                    let start = start.max(0).min(len) as usize;
+                                    let end = end.max(0).min(len) as usize;
+
+                                    let mut new_array = std::collections::HashMap::new();
+                                    let mut idx = 0;
+                                    for i in start..end {
+                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                            new_array.insert(idx.to_string(), val.clone());
+                                            idx += 1;
+                                        }
+                                    }
+                                    new_array
+                                        .insert("length".to_string(), Value::Number(idx as f64));
+                                    Ok(Value::Object(new_array))
                                 }
                                 _ => Err(JSError::EvaluationError {
                                     message: "error".to_string(),
@@ -2033,6 +2218,68 @@ fn evaluate_expr(
                                 }
                             } else {
                                 Ok(Value::Boolean(false))
+                            }
+                        }
+                        "encodeURIComponent" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        // Simple URI encoding - replace spaces with %20 and some special chars
+                                        let encoded = str_val
+                                            .replace("%", "%25")
+                                            .replace(" ", "%20")
+                                            .replace("\"", "%22")
+                                            .replace("'", "%27")
+                                            .replace("<", "%3C")
+                                            .replace(">", "%3E")
+                                            .replace("&", "%26");
+                                        Ok(Value::String(utf8_to_utf16(&encoded)))
+                                    }
+                                    _ => {
+                                        // For non-string values, convert to string first
+                                        let str_val = match arg_val {
+                                            Value::Number(n) => n.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            _ => "[object Object]".to_string(),
+                                        };
+                                        Ok(Value::String(utf8_to_utf16(&str_val)))
+                                    }
+                                }
+                            } else {
+                                Ok(Value::String(Vec::new()))
+                            }
+                        }
+                        "decodeURIComponent" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        // Simple URI decoding - replace %20 with spaces and some special chars
+                                        let decoded = str_val
+                                            .replace("%20", " ")
+                                            .replace("%22", "\"")
+                                            .replace("%27", "'")
+                                            .replace("%3C", "<")
+                                            .replace("%3E", ">")
+                                            .replace("%26", "&")
+                                            .replace("%25", "%");
+                                        Ok(Value::String(utf8_to_utf16(&decoded)))
+                                    }
+                                    _ => {
+                                        // For non-string values, convert to string first
+                                        let str_val = match arg_val {
+                                            Value::Number(n) => n.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            _ => "[object Object]".to_string(),
+                                        };
+                                        Ok(Value::String(utf8_to_utf16(&str_val)))
+                                    }
+                                }
+                            } else {
+                                Ok(Value::String(Vec::new()))
                             }
                         }
                         "Array" => {

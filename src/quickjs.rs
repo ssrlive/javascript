@@ -1026,6 +1026,51 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 tokens.push(Token::StringLit(str_lit.to_string()));
                 i += 1; // skip closing quote
             }
+            '`' => {
+                i += 1; // skip opening backtick
+                let mut parts = Vec::new();
+                let mut current_start = i;
+                while i < chars.len() && chars[i] != '`' {
+                    if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+                        // Found ${, add string part before it
+                        if current_start < i {
+                            let str_part = &expr[current_start..i];
+                            parts.push(TemplatePart::String(str_part.to_string()));
+                        }
+                        i += 2; // skip ${
+                        let expr_start = i;
+                        let mut brace_count = 1;
+                        while i < chars.len() && brace_count > 0 {
+                            if chars[i] == '{' {
+                                brace_count += 1;
+                            } else if chars[i] == '}' {
+                                brace_count -= 1;
+                            }
+                            i += 1;
+                        }
+                        if brace_count != 0 {
+                            return Err(());
+                        }
+                        let expr_str = &expr[expr_start..i - 1];
+                        // Tokenize the expression inside ${}
+                        let expr_tokens = tokenize(expr_str)?;
+                        parts.push(TemplatePart::Expr(expr_tokens));
+                        current_start = i;
+                    } else {
+                        i += 1;
+                    }
+                }
+                if i >= chars.len() {
+                    return Err(());
+                }
+                // Add remaining string part
+                if current_start < i {
+                    let str_part = &expr[current_start..i];
+                    parts.push(TemplatePart::String(str_part.to_string()));
+                }
+                tokens.push(Token::TemplateString(parts));
+                i += 1; // skip closing backtick
+            }
             'a'..='z' | 'A'..='Z' | '_' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -1052,9 +1097,16 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
 }
 
 #[derive(Debug, Clone)]
+enum TemplatePart {
+    String(String),
+    Expr(Vec<Token>),
+}
+
+#[derive(Debug, Clone)]
 enum Token {
     Number(f64),
     StringLit(String),
+    TemplateString(Vec<TemplatePart>),
     Identifier(String),
     Plus,
     Minus,
@@ -1118,6 +1170,39 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     match tokens.remove(0) {
         Token::Number(n) => Ok(Expr::Number(n)),
         Token::StringLit(s) => Ok(Expr::StringLit(s)),
+        Token::TemplateString(parts) => {
+            if parts.is_empty() {
+                Ok(Expr::StringLit(String::new()))
+            } else if parts.len() == 1 {
+                match &parts[0] {
+                    TemplatePart::String(s) => Ok(Expr::StringLit(s.clone())),
+                    TemplatePart::Expr(expr_tokens) => {
+                        let mut expr_tokens = expr_tokens.clone();
+                        parse_expression(&mut expr_tokens)
+                    }
+                }
+            } else {
+                // Build binary addition chain
+                let mut expr = match &parts[0] {
+                    TemplatePart::String(s) => Expr::StringLit(s.clone()),
+                    TemplatePart::Expr(expr_tokens) => {
+                        let mut expr_tokens = expr_tokens.clone();
+                        parse_expression(&mut expr_tokens)?
+                    }
+                };
+                for part in &parts[1..] {
+                    let right = match part {
+                        TemplatePart::String(s) => Expr::StringLit(s.clone()),
+                        TemplatePart::Expr(expr_tokens) => {
+                            let mut expr_tokens = expr_tokens.clone();
+                            parse_expression(&mut expr_tokens)?
+                        }
+                    };
+                    expr = Expr::Binary(Box::new(expr), BinaryOp::Add, Box::new(right));
+                }
+                Ok(expr)
+            }
+        }
         Token::Identifier(name) => Ok(Expr::Var(name)),
         Token::LParen => {
             let expr = parse_expression(tokens)?;

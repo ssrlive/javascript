@@ -934,6 +934,60 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     }
                     _ => Err(()),
                 },
+                BinaryOp::Equal => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Ok(Value::Number(0.0)), // Different types are not equal
+                },
+                BinaryOp::StrictEqual => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Ok(Value::Number(0.0)), // Different types are not equal
+                },
+                BinaryOp::LessThan => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Err(()),
+                },
+                BinaryOp::GreaterThan => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Err(()),
+                },
+                BinaryOp::LessEqual => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Err(()),
+                },
+                BinaryOp::GreaterEqual => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 }))
+                    }
+                    (Value::String(ls), Value::String(rs)) => {
+                        Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 }))
+                    }
+                    _ => Err(()),
+                },
             }
         }
         Expr::Index(obj, idx) => {
@@ -1138,6 +1192,12 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Equal,
+    StrictEqual,
+    LessThan,
+    GreaterThan,
+    LessEqual,
+    GreaterEqual,
 }
 
 fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<String, ()> {
@@ -1211,6 +1271,38 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
             '.' => {
                 tokens.push(Token::Dot);
                 i += 1;
+            }
+            '=' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    if i + 2 < chars.len() && chars[i + 2] == '=' {
+                        tokens.push(Token::StrictEqual);
+                        i += 3;
+                    } else {
+                        tokens.push(Token::Equal);
+                        i += 2;
+                    }
+                } else {
+                    tokens.push(Token::Assign);
+                    i += 1;
+                }
+            }
+            '<' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::LessEqual);
+                    i += 2;
+                } else {
+                    tokens.push(Token::LessThan);
+                    i += 1;
+                }
+            }
+            '>' => {
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::GreaterEqual);
+                    i += 2;
+                } else {
+                    tokens.push(Token::GreaterThan);
+                    i += 1;
+                }
             }
             '0'..='9' => {
                 let start = i;
@@ -1295,10 +1387,6 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                     _ => tokens.push(Token::Identifier(ident.to_string())),
                 }
             }
-            '=' => {
-                tokens.push(Token::Assign);
-                i += 1;
-            }
             ',' => {
                 tokens.push(Token::Comma);
                 i += 1;
@@ -1339,10 +1427,80 @@ pub enum Token {
     Var,
     Assign,
     Semicolon,
+    Equal,
+    StrictEqual,
+    LessThan,
+    GreaterThan,
+    LessEqual,
+    GreaterEqual,
 }
 
 fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
-    parse_additive(tokens)
+    parse_comparison(tokens)
+}
+
+fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+    let left = parse_additive(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    match &tokens[0] {
+        Token::Equal => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::Equal,
+                Box::new(right),
+            ))
+        }
+        Token::StrictEqual => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::StrictEqual,
+                Box::new(right),
+            ))
+        }
+        Token::LessThan => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::LessThan,
+                Box::new(right),
+            ))
+        }
+        Token::GreaterThan => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::GreaterThan,
+                Box::new(right),
+            ))
+        }
+        Token::LessEqual => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::LessEqual,
+                Box::new(right),
+            ))
+        }
+        Token::GreaterEqual => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(
+                Box::new(left),
+                BinaryOp::GreaterEqual,
+                Box::new(right),
+            ))
+        }
+        _ => Ok(left),
+    }
 }
 
 fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, ()> {

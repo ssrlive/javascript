@@ -904,6 +904,106 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
             }
         }
     }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::If) {
+        tokens.remove(0); // consume if
+        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+            return Err(());
+        }
+        tokens.remove(0); // consume (
+        let condition = parse_expression(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+            return Err(());
+        }
+        tokens.remove(0); // consume )
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(());
+        }
+        tokens.remove(0); // consume {
+        let then_body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(());
+        }
+        tokens.remove(0); // consume }
+
+        let else_body = if !tokens.is_empty() && matches!(tokens[0], Token::Else) {
+            tokens.remove(0); // consume else
+            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                return Err(());
+            }
+            tokens.remove(0); // consume {
+            let body = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(());
+            }
+            tokens.remove(0); // consume }
+            Some(body)
+        } else {
+            None
+        };
+
+        return Ok(Statement::If(condition, then_body, else_body));
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::For) {
+        tokens.remove(0); // consume for
+        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+            return Err(());
+        }
+        tokens.remove(0); // consume (
+
+        // Parse initialization
+        let init = if tokens.len() >= 1
+            && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var))
+        {
+            Some(Box::new(parse_statement(tokens)?))
+        } else if !matches!(tokens[0], Token::Semicolon) {
+            Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
+        } else {
+            None
+        };
+
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(());
+        }
+        tokens.remove(0); // consume first ;
+
+        // Parse condition
+        let condition = if !matches!(tokens[0], Token::Semicolon) {
+            Some(parse_expression(tokens)?)
+        } else {
+            None
+        };
+
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(());
+        }
+        tokens.remove(0); // consume second ;
+
+        // Parse increment
+        let increment = if !matches!(tokens[0], Token::RParen) {
+            Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
+        } else {
+            None
+        };
+
+        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+            return Err(());
+        }
+        tokens.remove(0); // consume )
+
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(());
+        }
+        tokens.remove(0); // consume {
+
+        let body = parse_statements(tokens)?;
+
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(());
+        }
+        tokens.remove(0); // consume }
+
+        return Ok(Statement::For(init, condition, increment, body));
+    }
     if tokens.len() >= 1 && matches!(tokens[0], Token::Return) {
         tokens.remove(0); // consume return
         if tokens.is_empty() || matches!(tokens[0], Token::Semicolon) {
@@ -924,6 +1024,12 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
         }
     }
     let expr = parse_expression(tokens)?;
+    // Check if this is an assignment expression
+    if let Expr::Assign(target, value) = &expr {
+        if let Expr::Var(name) = target.as_ref() {
+            return Ok(Statement::Assign(name.clone(), *value.clone()));
+        }
+    }
     Ok(Statement::Expr(expr))
 }
 
@@ -939,6 +1045,11 @@ pub fn evaluate_statements(
                 env.insert(name.clone(), val.clone());
                 last_value = val;
             }
+            Statement::Assign(name, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                env.insert(name.clone(), val.clone());
+                last_value = val;
+            }
             Statement::Expr(expr) => {
                 last_value = evaluate_expr(env, expr)?;
             }
@@ -947,6 +1058,79 @@ pub fn evaluate_statements(
                     Some(expr) => evaluate_expr(env, expr),
                     None => Ok(Value::Undefined),
                 };
+            }
+            Statement::If(condition, then_body, else_body) => {
+                let cond_val = evaluate_expr(env, condition)?;
+                if is_truthy(&cond_val) {
+                    last_value = evaluate_statements(env, then_body)?;
+                } else if let Some(else_stmts) = else_body {
+                    last_value = evaluate_statements(env, else_stmts)?;
+                }
+            }
+            Statement::For(init, condition, increment, body) => {
+                // Execute initialization
+                if let Some(init_stmt) = init {
+                    match init_stmt.as_ref() {
+                        Statement::Let(name, expr) => {
+                            let val = evaluate_expr(env, expr)?;
+                            env.insert(name.clone(), val);
+                        }
+                        Statement::Expr(expr) => {
+                            evaluate_expr(env, expr)?;
+                        }
+                        _ => return Err(()), // For now, only support let and expr in init
+                    }
+                }
+
+                // For now, limit to 1000 iterations to prevent infinite loops
+                let mut iterations = 0;
+                loop {
+                    if iterations >= 1000 {
+                        return Err(()); // Prevent infinite loops
+                    }
+
+                    // Check condition
+                    let should_continue = if let Some(cond_expr) = condition {
+                        let cond_val = evaluate_expr(env, cond_expr)?;
+                        is_truthy(&cond_val)
+                    } else {
+                        iterations == 0 // No condition means execute once
+                    };
+
+                    if !should_continue {
+                        break;
+                    }
+
+                    // Execute body
+                    let result = evaluate_statements(env, body);
+                    match result {
+                        Ok(val) => last_value = val,
+                        Err(()) => return Err(()),
+                    }
+
+                    // Execute increment
+                    if let Some(incr_stmt) = increment {
+                        match incr_stmt.as_ref() {
+                            Statement::Expr(expr) => match expr {
+                                Expr::Assign(target, value) => {
+                                    if let Expr::Var(name) = target.as_ref() {
+                                        let val = evaluate_expr(env, value)?;
+                                        env.insert(name.clone(), val);
+                                    }
+                                }
+                                _ => {
+                                    evaluate_expr(env, expr)?;
+                                }
+                            },
+                            _ => return Err(()), // For now, only support expr in increment
+                        }
+                    }
+
+                    iterations += 1;
+                    if condition.is_none() {
+                        break; // Execute only once if no condition
+                    }
+                }
             }
         }
     }
@@ -965,8 +1149,12 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
             } else {
-                Err(())
+                Ok(Value::Undefined)
             }
+        }
+        Expr::Assign(_target, value) => {
+            // Assignment is handled at statement level, just evaluate the value
+            evaluate_expr(env, value)
         }
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(env, expr)?;
@@ -1440,8 +1628,16 @@ fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
 #[derive(Debug, Clone)]
 pub enum Statement {
     Let(String, Expr),
+    Assign(String, Expr), // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
+    If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
+    For(
+        Option<Box<Statement>>,
+        Option<Expr>,
+        Option<Box<Statement>>,
+        Vec<Statement>,
+    ), // init, condition, increment, body
 }
 
 #[derive(Debug, Clone)]
@@ -1451,6 +1647,7 @@ pub enum Expr {
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
+    Assign(Box<Expr>, Box<Expr>), // target, value
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
@@ -1680,6 +1877,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                     "var" => tokens.push(Token::Var),
                     "function" => tokens.push(Token::Function),
                     "return" => tokens.push(Token::Return),
+                    "if" => tokens.push(Token::If),
+                    "else" => tokens.push(Token::Else),
+                    "for" => tokens.push(Token::For),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -1725,6 +1925,9 @@ pub enum Token {
     Var,
     Function,
     Return,
+    If,
+    Else,
+    For,
     Assign,
     Semicolon,
     Equal,
@@ -1735,8 +1938,33 @@ pub enum Token {
     GreaterEqual,
 }
 
+fn is_truthy(val: &Value) -> bool {
+    match val {
+        Value::Number(n) => *n != 0.0 && !n.is_nan(),
+        Value::String(s) => !s.is_empty(),
+        Value::Undefined => false,
+        Value::Object(_) => true,
+        Value::Function(_) => true,
+        Value::Closure(_, _, _) => true,
+    }
+}
+
 fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
-    parse_comparison(tokens)
+    parse_assignment(tokens)
+}
+
+fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+    let left = parse_comparison(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::Assign) {
+        tokens.remove(0);
+        let right = parse_assignment(tokens)?;
+        Ok(Expr::Assign(Box::new(left), Box::new(right)))
+    } else {
+        Ok(left)
+    }
 }
 
 fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, ()> {

@@ -37,7 +37,7 @@ fn main() {
     let result = match evaluate_statements(&mut env, &statements) {
         Ok(value) => value,
         Err(_) => {
-            eprintln!("Evaluation failed");
+            eprintln!("Evaluation failed (possibly due to infinite loop protection)");
             process::exit(1);
         }
     };

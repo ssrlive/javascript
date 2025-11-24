@@ -49,5 +49,6 @@ fn main() {
         Value::Undefined => println!("undefined"),
         Value::Object(name) => println!("[object {}]", name),
         Value::Function(name) => println!("[Function: {}]", name),
+        Value::Closure(_, _, _) => println!("[Function]"),
     }
 }

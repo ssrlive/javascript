@@ -833,8 +833,9 @@ pub unsafe fn JS_Eval(
         Ok(Value::Number(num)) => JSValue::new_float64(num),
         Ok(Value::String(s)) => JS_NewString(_ctx, &s),
         Ok(Value::Undefined) => JS_UNDEFINED,
-        Ok(Value::Object(_)) => JS_UNDEFINED,   // For now
-        Ok(Value::Function(_)) => JS_UNDEFINED, // For now
+        Ok(Value::Object(_)) => JS_UNDEFINED,        // For now
+        Ok(Value::Function(_)) => JS_UNDEFINED,      // For now
+        Ok(Value::Closure(_, _, _)) => JS_UNDEFINED, // For now
         Err(_) => JS_UNDEFINED,
     }
 }
@@ -848,7 +849,7 @@ fn evaluate_script(script: &str) -> Result<Value, ()> {
 
 pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
     let mut statements = Vec::new();
-    while !tokens.is_empty() {
+    while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
         let stmt = parse_statement(tokens)?;
         statements.push(stmt);
         if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
@@ -859,6 +860,58 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
 }
 
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Function) {
+        tokens.remove(0); // consume function
+        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+            tokens.remove(0);
+            if tokens.len() >= 1 && matches!(tokens[0], Token::LParen) {
+                tokens.remove(0); // consume (
+                let mut params = Vec::new();
+                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                    loop {
+                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                            tokens.remove(0);
+                            params.push(param);
+                            if tokens.is_empty() {
+                                return Err(());
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[0], Token::Comma) {
+                                return Err(());
+                            }
+                            tokens.remove(0); // consume ,
+                        } else {
+                            return Err(());
+                        }
+                    }
+                }
+                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume )
+                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statements(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume }
+                return Ok(Statement::Let(name, Expr::Function(params, body)));
+            }
+        }
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Return) {
+        tokens.remove(0); // consume return
+        if tokens.is_empty() || matches!(tokens[0], Token::Semicolon) {
+            return Ok(Statement::Return(None));
+        }
+        let expr = parse_expression(tokens)?;
+        return Ok(Statement::Return(Some(expr)));
+    }
     if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
         tokens.remove(0); // consume let/var
         if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
@@ -888,6 +941,12 @@ pub fn evaluate_statements(
             }
             Statement::Expr(expr) => {
                 last_value = evaluate_expr(env, expr)?;
+            }
+            Statement::Return(expr_opt) => {
+                return match expr_opt {
+                    Some(expr) => evaluate_expr(env, expr),
+                    None => Ok(Value::Undefined),
+                };
             }
         }
     }
@@ -1060,6 +1119,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 Value::Undefined => print!("undefined"),
                                 Value::Object(name) => print!("[object {}]", name),
                                 Value::Function(name) => print!("[Function: {}]", name),
+                                Value::Closure(_, _, _) => print!("[Function]"),
                             }
                         }
                         println!();
@@ -1080,6 +1140,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 Value::Function(name) => Ok(Value::String(utf8_to_utf16(
                                     &format!("[Function: {}]", name),
                                 ))),
+                                Value::Closure(_, _, _) => {
+                                    Ok(Value::String(utf8_to_utf16("[Function]")))
+                                }
                             }
                         } else {
                             Err(())
@@ -1254,6 +1317,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                     Value::Function(name) => Ok(Value::String(utf8_to_utf16(
                                         &format!("[Function: {}]", name),
                                     ))),
+                                    Value::Closure(_, _, _) => {
+                                        Ok(Value::String(utf8_to_utf16("[Function]")))
+                                    }
                                 }
                             } else {
                                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
@@ -1261,9 +1327,27 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         }
                         _ => Err(()),
                     },
+                    Value::Closure(params, body, captured_env) => {
+                        // Function call
+                        if params.len() != args.len() {
+                            return Err(());
+                        }
+                        // Create new environment starting with captured environment
+                        let mut func_env = captured_env.clone();
+                        // Add parameters
+                        for (param, arg) in params.iter().zip(args.iter()) {
+                            let arg_val = evaluate_expr(env, arg)?;
+                            func_env.insert(param.clone(), arg_val);
+                        }
+                        // Execute function body
+                        evaluate_statements(&mut func_env, &body)
+                    }
                     _ => Err(()),
                 }
             }
+        }
+        Expr::Function(params, body) => {
+            Ok(Value::Closure(params.clone(), body.clone(), env.clone()))
         }
     }
 }
@@ -1275,6 +1359,11 @@ pub enum Value {
     Undefined,
     Object(String),   // For now, just a name
     Function(String), // Function name
+    Closure(
+        Vec<String>,
+        Vec<Statement>,
+        std::collections::HashMap<String, Value>,
+    ), // parameters, body, captured environment
 }
 
 // Helper functions for UTF-16 string operations
@@ -1348,13 +1437,14 @@ fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Statement {
     Let(String, Expr),
     Expr(Expr),
+    Return(Option<Expr>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Expr {
     Number(f64),
     StringLit(Vec<u16>),
@@ -1364,9 +1454,10 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
+    Function(Vec<String>, Vec<Statement>), // parameters, body
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -1461,6 +1552,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
             }
             ']' => {
                 tokens.push(Token::RBracket);
+                i += 1;
+            }
+            '{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token::RBrace);
                 i += 1;
             }
             '.' => {
@@ -1579,6 +1678,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 match ident.as_str() {
                     "let" => tokens.push(Token::Let),
                     "var" => tokens.push(Token::Var),
+                    "function" => tokens.push(Token::Function),
+                    "return" => tokens.push(Token::Return),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -1616,10 +1717,14 @@ pub enum Token {
     RParen,
     LBracket,
     RBracket,
+    LBrace,
+    RBrace,
     Dot,
     Comma,
     Let,
     Var,
+    Function,
+    Return,
     Assign,
     Semicolon,
     Equal,
@@ -1783,6 +1888,49 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
             }
         }
         Token::Identifier(name) => Expr::Var(name),
+        Token::Function => {
+            // Parse function expression
+            if tokens.len() >= 1 && matches!(tokens[0], Token::LParen) {
+                tokens.remove(0); // consume (
+                let mut params = Vec::new();
+                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                    loop {
+                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                            tokens.remove(0);
+                            params.push(param);
+                            if tokens.is_empty() {
+                                return Err(());
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[0], Token::Comma) {
+                                return Err(());
+                            }
+                            tokens.remove(0); // consume ,
+                        } else {
+                            return Err(());
+                        }
+                    }
+                }
+                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume )
+                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statements(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume }
+                Expr::Function(params, body)
+            } else {
+                return Err(());
+            }
+        }
         Token::LParen => {
             let expr = parse_expression(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {

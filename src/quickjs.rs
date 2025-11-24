@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
+use libc;
 use std::ffi::c_void;
 
 #[repr(C)]
@@ -71,6 +72,18 @@ impl JSValue {
             tag: tag as i64,
         }
     }
+
+    pub fn has_ref_count(&self) -> bool {
+        (self.tag as i32) >= JS_TAG_FIRST
+    }
+
+    pub fn get_ptr(&self) -> *mut c_void {
+        unsafe { self.u.ptr }
+    }
+
+    pub fn get_tag(&self) -> i32 {
+        self.tag as i32
+    }
 }
 
 pub const JS_NULL: JSValue = JSValue {
@@ -110,6 +123,13 @@ pub struct list_head {
     pub next: *mut list_head,
 }
 
+impl list_head {
+    pub unsafe fn init(&mut self) {
+        self.prev = self;
+        self.next = self;
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct JSMallocState {
@@ -132,10 +152,21 @@ pub struct JSMallocFunctions {
 pub type JSAtom = u32;
 
 #[repr(C)]
-pub struct JSAtomStruct {
-    // Opaque for now
-    _unused: [u8; 0],
+#[derive(Copy, Clone)]
+pub struct JSRefCountHeader {
+    pub ref_count: i32,
 }
+
+#[repr(C)]
+pub struct JSString {
+    pub header: JSRefCountHeader,
+    pub len: u32,  // len: 31, is_wide_char: 1 (packed manually)
+    pub hash: u32, // hash: 30, atom_type: 2 (packed manually)
+    pub hash_next: u32,
+    // Variable length data follows
+}
+
+pub type JSAtomStruct = JSString;
 
 #[repr(C)]
 pub struct JSClass {
@@ -171,12 +202,368 @@ pub struct JSRuntime {
     pub gc_phase: u8,
     pub malloc_gc_threshold: usize,
     pub weakref_list: list_head,
-    // Incomplete...
+
+    pub shape_hash_bits: i32,
+    pub shape_hash_size: i32,
+    pub shape_hash_count: i32,
+    pub shape_hash: *mut *mut JSShape,
+    pub user_opaque: *mut c_void,
 }
 
 #[repr(C)]
+#[derive(Copy, Clone)]
+pub struct JSGCObjectHeader {
+    pub ref_count: i32,
+    pub gc_obj_type: u8, // 4 bits
+    pub mark: u8,        // 1 bit
+    pub dummy0: u8,      // 3 bits
+    pub dummy1: u8,
+    pub dummy2: u16,
+    pub link: list_head,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct JSShape {
+    // Opaque for now
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
 pub struct JSContext {
+    pub header: JSGCObjectHeader,
     pub rt: *mut JSRuntime,
     pub link: list_head,
-    // Incomplete...
+
+    pub binary_object_count: u16,
+    pub binary_object_size: i32,
+    pub std_array_prototype: u8,
+
+    pub array_shape: *mut JSShape,
+    pub arguments_shape: *mut JSShape,
+    pub mapped_arguments_shape: *mut JSShape,
+    pub regexp_shape: *mut JSShape,
+    pub regexp_result_shape: *mut JSShape,
+
+    pub class_proto: *mut JSValue,
+    pub function_proto: JSValue,
+    pub function_ctor: JSValue,
+    pub array_ctor: JSValue,
+    pub regexp_ctor: JSValue,
+    pub promise_ctor: JSValue,
+    pub native_error_proto: [JSValue; 8], // JS_NATIVE_ERROR_COUNT = 8 (usually)
+    pub iterator_ctor: JSValue,
+    pub async_iterator_proto: JSValue,
+    pub array_proto_values: JSValue,
+    pub throw_type_error: JSValue,
+    pub eval_obj: JSValue,
+
+    pub global_obj: JSValue,
+    pub global_var_obj: JSValue,
+
+    pub random_state: u64,
+    pub interrupt_counter: i32,
+
+    pub loaded_modules: list_head,
+
+    pub compile_regexp: Option<unsafe extern "C" fn(*mut JSContext, JSValue, JSValue) -> JSValue>,
+    pub eval_internal: Option<
+        unsafe extern "C" fn(
+            *mut JSContext,
+            JSValue,
+            *const i8,
+            usize,
+            *const i8,
+            i32,
+            i32,
+        ) -> JSValue,
+    >,
+    pub user_opaque: *mut c_void,
+}
+
+#[repr(C)]
+pub struct JSFunctionBytecode {
+    pub header: JSGCObjectHeader,
+    pub js_mode: u8,
+    pub flags: u16, // Packed bitfields
+    pub byte_code_buf: *mut u8,
+    pub byte_code_len: i32,
+    pub func_name: JSAtom,
+    pub vardefs: *mut c_void,     // JSBytecodeVarDef
+    pub closure_var: *mut c_void, // JSClosureVar
+    pub arg_count: u16,
+    pub var_count: u16,
+    pub defined_arg_count: u16,
+    pub stack_size: u16,
+    pub var_ref_count: u16,
+    pub realm: *mut JSContext,
+    pub cpool: *mut JSValue,
+    pub cpool_count: i32,
+    pub closure_var_count: i32,
+    // debug info
+    pub filename: JSAtom,
+    pub source_len: i32,
+    pub pc2line_len: i32,
+    pub pc2line_buf: *mut u8,
+    pub source: *mut i8,
+}
+
+#[repr(C)]
+pub struct JSStackFrame {
+    pub prev_frame: *mut JSStackFrame,
+    pub cur_func: JSValue,
+    pub arg_buf: *mut JSValue,
+    pub var_buf: *mut JSValue,
+    pub var_refs: *mut *mut c_void, // JSVarRef
+    pub cur_pc: *const u8,
+    pub arg_count: i32,
+    pub js_mode: i32,
+    pub cur_sp: *mut JSValue,
+}
+
+impl JSRuntime {
+    pub unsafe fn js_malloc_rt(&mut self, size: usize) -> *mut c_void {
+        if let Some(malloc_func) = self.mf.js_malloc {
+            malloc_func(&mut self.malloc_state, size)
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    pub unsafe fn js_free_rt(&mut self, ptr: *mut c_void) {
+        if let Some(free_func) = self.mf.js_free {
+            free_func(&mut self.malloc_state, ptr)
+        }
+    }
+
+    pub unsafe fn js_realloc_rt(&mut self, ptr: *mut c_void, size: usize) -> *mut c_void {
+        if let Some(realloc_func) = self.mf.js_realloc {
+            realloc_func(&mut self.malloc_state, ptr, size)
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+
+    pub unsafe fn js_alloc_string(&mut self, max_len: usize, is_wide_char: bool) -> *mut JSString {
+        let size =
+            std::mem::size_of::<JSString>() + (max_len << (if is_wide_char { 1 } else { 0 })) + 1
+                - (if is_wide_char { 1 } else { 0 });
+        let ptr = self.js_malloc_rt(size) as *mut JSString;
+        if !ptr.is_null() {
+            (*ptr).header.ref_count = 1;
+            (*ptr).len = (max_len as u32) | (if is_wide_char { 1 << 31 } else { 0 });
+            (*ptr).hash = 0; // atom_type = 0
+            (*ptr).hash_next = 0;
+        }
+        ptr
+    }
+
+    pub unsafe fn js_free_atom_struct(&mut self, p: *mut JSAtomStruct) {
+        // TODO: handle different atom types
+        self.js_free_rt(p as *mut c_void);
+    }
+
+    fn hash_string(str: &[u8]) -> u32 {
+        let mut h: u32 = 0;
+        for &c in str {
+            h = h.wrapping_mul(263).wrapping_add(c as u32);
+        }
+        h
+    }
+
+    pub unsafe fn js_new_atom_len(&mut self, str: *const u8, len: usize) -> JSAtom {
+        let str_slice = std::slice::from_raw_parts(str, len);
+        let h = Self::hash_string(str_slice);
+        let h_masked = h & ((self.atom_hash_size as u32) - 1);
+
+        let mut i = *self.atom_hash.offset(h_masked as isize);
+        while i != 0 {
+            let p = *self.atom_array.offset(i as isize);
+            // Check if match
+            // Assuming 8-bit string for now
+            let p_len = ((*p).len & 0x7FFFFFFF) as usize;
+            if p_len == len {
+                let p_str = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+                let p_slice = std::slice::from_raw_parts(p_str, len);
+                if p_slice == str_slice {
+                    return i;
+                }
+            }
+            i = (*p).hash_next;
+        }
+
+        // Not found, create new
+        // TODO: Resize atom_array if needed
+
+        let p = self.js_alloc_string(len, false);
+        if p.is_null() {
+            return 0; // JS_ATOM_NULL
+        }
+
+        let p_str = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+        std::ptr::copy_nonoverlapping(str, p_str, len);
+        *p_str.offset(len as isize) = 0; // Null terminate
+
+        // Add to hash
+        // TODO: Allocate atom index
+        let atom_index = 1; // Dummy index for now
+
+        atom_index
+    }
+}
+
+impl JSContext {
+    pub unsafe fn js_malloc(&mut self, size: usize) -> *mut c_void {
+        (*self.rt).js_malloc_rt(size)
+    }
+
+    pub unsafe fn js_free(&mut self, ptr: *mut c_void) {
+        (*self.rt).js_free_rt(ptr)
+    }
+
+    pub unsafe fn js_realloc(&mut self, ptr: *mut c_void, size: usize) -> *mut c_void {
+        (*self.rt).js_realloc_rt(ptr, size)
+    }
+
+    pub unsafe fn js_free_value(&mut self, v: JSValue) {
+        if v.has_ref_count() {
+            let p = v.get_ptr() as *mut JSRefCountHeader;
+            (*p).ref_count -= 1;
+            if (*p).ref_count <= 0 {
+                self.js_free_value_rt(v);
+            }
+        }
+    }
+
+    pub unsafe fn js_free_value_rt(&mut self, v: JSValue) {
+        (*self.rt).js_free_value_rt(v);
+    }
+
+    pub unsafe fn js_call(
+        &mut self,
+        func_obj: JSValue,
+        this_obj: JSValue,
+        args: &[JSValue],
+    ) -> JSValue {
+        self.js_call_internal(func_obj, this_obj, this_obj, args, 0)
+    }
+
+    pub unsafe fn js_call_internal(
+        &mut self,
+        _func_obj: JSValue,
+        _this_obj: JSValue,
+        _new_target: JSValue,
+        _args: &[JSValue],
+        _flags: i32,
+    ) -> JSValue {
+        // TODO: Implement bytecode interpreter loop
+        JS_UNDEFINED
+    }
+}
+
+impl JSRuntime {
+    pub unsafe fn js_free_value_rt(&mut self, v: JSValue) {
+        let tag = v.get_tag();
+        match tag {
+            JS_TAG_STRING => {
+                let p = v.get_ptr() as *mut JSString;
+                // Check atom_type (hash field)
+                // hash: 30, atom_type: 2
+                let atom_type = ((*p).hash >> 30) & 3;
+                if atom_type != 0 {
+                    self.js_free_atom_struct(p);
+                } else {
+                    self.js_free_rt(p as *mut c_void);
+                }
+            }
+            JS_TAG_OBJECT | JS_TAG_FUNCTION_BYTECODE => {
+                let p = v.get_ptr() as *mut JSGCObjectHeader;
+                // GC logic
+                // For now just free it directly to avoid complex GC logic in this step
+                // But real implementation puts it in gc_zero_ref_count_list
+
+                // Simplified:
+                self.js_free_rt(p as *mut c_void);
+            }
+            _ => {}
+        }
+    }
+}
+
+pub unsafe extern "C" fn js_def_malloc(s: *mut JSMallocState, size: usize) -> *mut c_void {
+    let s = &mut *s;
+    if s.malloc_size + size > s.malloc_limit {
+        return std::ptr::null_mut();
+    }
+    let ptr = libc::malloc(size);
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    s.malloc_count += 1;
+    s.malloc_size += js_def_malloc_usable_size(ptr);
+    ptr
+}
+
+pub unsafe extern "C" fn js_def_free(s: *mut JSMallocState, ptr: *mut c_void) {
+    if ptr.is_null() {
+        return;
+    }
+    let s = &mut *s;
+    s.malloc_count -= 1;
+    s.malloc_size -= js_def_malloc_usable_size(ptr);
+    libc::free(ptr);
+}
+
+pub unsafe extern "C" fn js_def_realloc(
+    s: *mut JSMallocState,
+    ptr: *mut c_void,
+    size: usize,
+) -> *mut c_void {
+    let s = &mut *s;
+    if ptr.is_null() {
+        return js_def_malloc(s, size);
+    }
+    if size == 0 {
+        js_def_free(s, ptr);
+        return std::ptr::null_mut();
+    }
+
+    let old_size = js_def_malloc_usable_size(ptr);
+    if s.malloc_size + size - old_size > s.malloc_limit {
+        return std::ptr::null_mut();
+    }
+
+    let new_ptr = libc::realloc(ptr, size);
+    if new_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    s.malloc_size -= old_size;
+    s.malloc_size += js_def_malloc_usable_size(new_ptr);
+    new_ptr
+}
+
+pub unsafe extern "C" fn js_def_malloc_usable_size(ptr: *const c_void) -> usize {
+    // Windows/MSVC doesn't have malloc_usable_size easily accessible via libc crate usually,
+    // or it might be _msize.
+    // For now, let's assume we can't track exact size perfectly without platform specific calls.
+    // But wait, quickjs.c uses malloc_usable_size on Linux and _msize on Windows.
+
+    #[cfg(target_os = "linux")]
+    return libc::malloc_usable_size(ptr as *mut c_void);
+
+    #[cfg(target_os = "windows")]
+    {
+        // libc crate might expose _msize for windows-msvc
+        // Let's check if we can use it.
+        // If not, we might need to declare it.
+        extern "C" {
+            fn _msize(memblock: *mut c_void) -> usize;
+        }
+        return _msize(ptr as *mut c_void);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    return 0; // TODO: support other platforms
 }

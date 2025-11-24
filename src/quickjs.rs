@@ -1233,8 +1233,20 @@ fn evaluate_expr(
                 Ok(Value::Function("encodeURIComponent".to_string()))
             } else if name == "decodeURIComponent" {
                 Ok(Value::Function("decodeURIComponent".to_string()))
+            } else if name == "eval" {
+                Ok(Value::Function("eval".to_string()))
+            } else if name == "encodeURI" {
+                Ok(Value::Function("encodeURI".to_string()))
+            } else if name == "decodeURI" {
+                Ok(Value::Function("decodeURI".to_string()))
             } else if name == "Array" {
                 Ok(Value::Function("Array".to_string()))
+            } else if name == "Number" {
+                Ok(Value::Function("Number".to_string()))
+            } else if name == "Boolean" {
+                Ok(Value::Function("Boolean".to_string()))
+            } else if name == "Date" {
+                Ok(Value::Function("Date".to_string()))
             } else if name == "NaN" {
                 Ok(Value::Number(f64::NAN))
             } else {
@@ -2289,6 +2301,117 @@ fn evaluate_expr(
                             // In a real implementation, we'd need proper array support
                             array_obj.insert("length".to_string(), Value::Number(0.0));
                             Ok(Value::Object(array_obj))
+                        }
+                        "Number" => {
+                            // Number constructor
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => Ok(Value::Number(n)),
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        match str_val.trim().parse::<f64>() {
+                                            Ok(n) => Ok(Value::Number(n)),
+                                            Err(_) => Ok(Value::Number(f64::NAN)),
+                                        }
+                                    }
+                                    Value::Boolean(b) => {
+                                        Ok(Value::Number(if b { 1.0 } else { 0.0 }))
+                                    }
+                                    _ => Ok(Value::Number(f64::NAN)),
+                                }
+                            } else {
+                                Ok(Value::Number(0.0)) // Number() with no args returns 0
+                            }
+                        }
+                        "Boolean" => {
+                            // Boolean constructor
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                let bool_val = match arg_val {
+                                    Value::Boolean(b) => b,
+                                    Value::Number(n) => n != 0.0 && !n.is_nan(),
+                                    Value::String(s) => !s.is_empty(),
+                                    Value::Object(_) => true,
+                                    Value::Undefined => false,
+                                    _ => false,
+                                };
+                                Ok(Value::Boolean(bool_val))
+                            } else {
+                                Ok(Value::Boolean(false)) // Boolean() with no args returns false
+                            }
+                        }
+                        "Date" => {
+                            // Date constructor - for now just return current timestamp
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                            let timestamp = duration.as_millis() as f64;
+                            Ok(Value::String(utf8_to_utf16(&format!(
+                                "Date: {}",
+                                timestamp
+                            ))))
+                        }
+                        "eval" => {
+                            // eval function - basic implementation
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        // For now, just return the string as-is
+                                        // In a real implementation, this would parse and execute the code
+                                        Ok(Value::String(s))
+                                    }
+                                    _ => Ok(arg_val),
+                                }
+                            } else {
+                                Ok(Value::Undefined)
+                            }
+                        }
+                        "encodeURI" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        // Simple URI encoding - replace spaces with %20
+                                        let encoded = str_val.replace(" ", "%20");
+                                        Ok(Value::String(utf8_to_utf16(&encoded)))
+                                    }
+                                    _ => {
+                                        let str_val = match arg_val {
+                                            Value::Number(n) => n.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            _ => "[object Object]".to_string(),
+                                        };
+                                        Ok(Value::String(utf8_to_utf16(&str_val)))
+                                    }
+                                }
+                            } else {
+                                Ok(Value::String(Vec::new()))
+                            }
+                        }
+                        "decodeURI" => {
+                            if args.len() >= 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        let str_val = String::from_utf16_lossy(&s);
+                                        // Simple URI decoding - replace %20 with spaces
+                                        let decoded = str_val.replace("%20", " ");
+                                        Ok(Value::String(utf8_to_utf16(&decoded)))
+                                    }
+                                    _ => {
+                                        let str_val = match arg_val {
+                                            Value::Number(n) => n.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            _ => "[object Object]".to_string(),
+                                        };
+                                        Ok(Value::String(utf8_to_utf16(&str_val)))
+                                    }
+                                }
+                            } else {
+                                Ok(Value::String(Vec::new()))
+                            }
                         }
                         _ => Err(JSError::EvaluationError {
                             message: "error".to_string(),

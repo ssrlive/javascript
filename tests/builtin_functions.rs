@@ -244,4 +244,69 @@ mod builtin_functions_tests {
             ),
         }
     }
+
+    #[test]
+    fn test_number_constructor() {
+        let script = "Number('42.5')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.5),
+            _ => panic!("Expected Number('42.5') to be 42.5, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_boolean_constructor() {
+        let script = "Boolean(1)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected Boolean(1) to be true, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_eval_function() {
+        let script = "eval('hello')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello");
+            }
+            _ => panic!("Expected eval('hello') to return 'hello', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_encode_uri() {
+        let script = "encodeURI('hello world')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello%20world");
+            }
+            _ => panic!(
+                "Expected encodeURI('hello world') to be 'hello%20world', got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_decode_uri() {
+        let script = "decodeURI('hello%20world')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world");
+            }
+            _ => panic!(
+                "Expected decodeURI('hello%20world') to be 'hello world', got {:?}",
+                result
+            ),
+        }
+    }
 }

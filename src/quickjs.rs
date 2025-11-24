@@ -1936,6 +1936,293 @@ fn evaluate_expr(
                                         .insert("length".to_string(), Value::Number(idx as f64));
                                     Ok(Value::Object(new_array))
                                 }
+                                "forEach" => {
+                                    if args.len() >= 1 {
+                                        // Evaluate the callback expression
+                                        let callback_val = evaluate_expr(env, &args[0])?;
+                                        let length =
+                                            obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        let current_len = match length {
+                                            Value::Number(n) => *n as usize,
+                                            _ => 0,
+                                        };
+
+                                        for i in 0..current_len {
+                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                                match &callback_val {
+                                                    Value::Closure(params, body, captured_env) => {
+                                                        // Prepare function environment
+                                                        let mut func_env = captured_env.clone();
+                                                        // Map params: (element, index, array)
+                                                        if params.len() >= 1 {
+                                                            func_env.insert(
+                                                                params[0].clone(),
+                                                                val.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() >= 2 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                Value::Number(i as f64),
+                                                            );
+                                                        }
+                                                        if params.len() >= 3 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+                                                        let _ = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message:
+                                                                "Array.forEach expects a function"
+                                                                    .to_string(),
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Ok(Value::Undefined)
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.forEach expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "map" => {
+                                    if args.len() >= 1 {
+                                        let callback_val = evaluate_expr(env, &args[0])?;
+                                        let length =
+                                            obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        let current_len = match length {
+                                            Value::Number(n) => *n as usize,
+                                            _ => 0,
+                                        };
+
+                                        let mut new_array = std::collections::HashMap::new();
+                                        let mut idx = 0;
+                                        for i in 0..current_len {
+                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                                match &callback_val {
+                                                    Value::Closure(params, body, captured_env) => {
+                                                        // Prepare function environment
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() >= 1 {
+                                                            func_env.insert(
+                                                                params[0].clone(),
+                                                                val.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() >= 2 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                Value::Number(i as f64),
+                                                            );
+                                                        }
+                                                        if params.len() >= 3 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        new_array.insert(idx.to_string(), res);
+                                                        idx += 1;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message: "Array.map expects a function"
+                                                                .to_string(),
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        new_array.insert(
+                                            "length".to_string(),
+                                            Value::Number(idx as f64),
+                                        );
+                                        Ok(Value::Object(new_array))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.map expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "filter" => {
+                                    if args.len() >= 1 {
+                                        let callback_val = evaluate_expr(env, &args[0])?;
+                                        let length =
+                                            obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        let current_len = match length {
+                                            Value::Number(n) => *n as usize,
+                                            _ => 0,
+                                        };
+
+                                        let mut new_array = std::collections::HashMap::new();
+                                        let mut idx = 0;
+                                        for i in 0..current_len {
+                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                                match &callback_val {
+                                                    Value::Closure(params, body, captured_env) => {
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() >= 1 {
+                                                            func_env.insert(
+                                                                params[0].clone(),
+                                                                val.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() >= 2 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                Value::Number(i as f64),
+                                                            );
+                                                        }
+                                                        if params.len() >= 3 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        // truthy check
+                                                        let include = match res {
+                                                            Value::Boolean(b) => b,
+                                                            Value::Number(n) => n != 0.0,
+                                                            Value::String(ref s) => !s.is_empty(),
+                                                            Value::Object(_) => true,
+                                                            Value::Undefined => false,
+                                                            _ => false,
+                                                        };
+                                                        if include {
+                                                            new_array.insert(
+                                                                idx.to_string(),
+                                                                val.clone(),
+                                                            );
+                                                            idx += 1;
+                                                        }
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message:
+                                                                "Array.filter expects a function"
+                                                                    .to_string(),
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        new_array.insert(
+                                            "length".to_string(),
+                                            Value::Number(idx as f64),
+                                        );
+                                        Ok(Value::Object(new_array))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.filter expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "reduce" => {
+                                    if args.len() >= 1 {
+                                        let callback_val = evaluate_expr(env, &args[0])?;
+                                        let initial_value = if args.len() >= 2 {
+                                            Some(evaluate_expr(env, &args[1])?)
+                                        } else {
+                                            None
+                                        };
+
+                                        let length =
+                                            obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                        let current_len = match length {
+                                            Value::Number(n) => *n as usize,
+                                            _ => 0,
+                                        };
+
+                                        if current_len == 0 && initial_value.is_none() {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Array.reduce called on empty array with no initial value"
+                                                    .to_string(),
+                                            });
+                                        }
+
+                                        let mut accumulator = if let Some(ref val) = initial_value {
+                                            val.clone()
+                                        } else if let Some(val) = obj_map.get(&0.to_string()) {
+                                            val.clone()
+                                        } else {
+                                            Value::Undefined
+                                        };
+
+                                        let start_idx = if initial_value.is_some() { 0 } else { 1 };
+                                        for i in start_idx..current_len {
+                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                                match &callback_val {
+                                                    Value::Closure(params, body, captured_env) => {
+                                                        let mut func_env = captured_env.clone();
+                                                        // build args for callback: first acc, then current element
+                                                        if params.len() >= 1 {
+                                                            func_env.insert(
+                                                                params[0].clone(),
+                                                                accumulator.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() >= 2 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                val.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() >= 3 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Number(i as f64),
+                                                            );
+                                                        }
+                                                        if params.len() >= 4 {
+                                                            func_env.insert(
+                                                                params[3].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        accumulator = res;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message:
+                                                                "Array.reduce expects a function"
+                                                                    .to_string(),
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Ok(accumulator)
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.reduce expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
                                 _ => Err(JSError::EvaluationError {
                                     message: "error".to_string(),
                                 }), // array method not found

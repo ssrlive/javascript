@@ -309,4 +309,47 @@ mod builtin_functions_tests {
             ),
         }
     }
+
+    #[test]
+    fn test_array_for_each() {
+        let script =
+            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.forEach(function(x) { return x; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => {
+                // forEach returns undefined
+            }
+            _ => panic!("Expected arr.forEach to return undefined, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_map() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let mapped = arr3.map(function(x) { return x * 2; }); mapped.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!("Expected mapped array length to be 2.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_filter() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let filtered = arr3.filter(function(x) { return x > 1; }); filtered.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected filtered array length to be 1.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_reduce() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.reduce(function(acc, x) { return acc + x; }, 0)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
+            _ => panic!("Expected arr.reduce to return 6.0, got {:?}", result),
+        }
+    }
 }

@@ -2380,12 +2380,70 @@ fn evaluate_expr(
                                 if args.len() == 1 {
                                     let sep_val = evaluate_expr(env, &args[0])?;
                                     if let Value::String(sep) = sep_val {
-                                        // For simplicity, return the first part only as a string
-                                        // In real JS, split returns an array
-                                        if let Some(pos) = utf16_find(&s, &sep) {
-                                            Ok(Value::String(utf16_slice(&s, 0, pos)))
+                                        // Implement split returning an array-like object
+                                        let mut parts: Vec<Vec<u16>> = Vec::new();
+                                        if sep.is_empty() {
+                                            // split by empty separator => each UTF-16 code unit as string
+                                            for i in 0..utf16_len(&s) {
+                                                if let Some(ch) = utf16_char_at(&s, i) {
+                                                    parts.push(vec![ch]);
+                                                }
+                                            }
                                         } else {
-                                            Ok(Value::String(s.clone()))
+                                            let mut start = 0usize;
+                                            while start <= utf16_len(&s) {
+                                                if let Some(pos) =
+                                                    utf16_find(&s[start..].to_vec(), &sep)
+                                                {
+                                                    let end = start + pos;
+                                                    parts.push(utf16_slice(&s, start, end));
+                                                    start = end + utf16_len(&sep);
+                                                } else {
+                                                    // remainder
+                                                    parts.push(utf16_slice(
+                                                        &s,
+                                                        start,
+                                                        utf16_len(&s),
+                                                    ));
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        let mut arr = std::collections::HashMap::new();
+                                        for (i, part) in parts.into_iter().enumerate() {
+                                            arr.insert(i.to_string(), Value::String(part));
+                                        }
+                                        arr.insert(
+                                            "length".to_string(),
+                                            Value::Number(arr.len() as f64),
+                                        );
+                                        Ok(Value::Object(arr))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "charAt" => {
+                                if args.len() == 1 {
+                                    let idx_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::Number(n) = idx_val {
+                                        let idx = n as isize;
+                                        // let len = utf16_len(&s) as isize;
+                                        let idx = if idx < 0 { 0 } else { idx } as usize;
+                                        if idx < utf16_len(&s) {
+                                            if let Some(ch) = utf16_char_at(&s, idx) {
+                                                Ok(Value::String(vec![ch]))
+                                            } else {
+                                                Ok(Value::String(Vec::new()))
+                                            }
+                                        } else {
+                                            Ok(Value::String(Vec::new()))
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {

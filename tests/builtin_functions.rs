@@ -352,4 +352,66 @@ mod builtin_functions_tests {
             _ => panic!("Expected arr.reduce to return 6.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_string_split_simple() {
+        let script = "let parts = 'a,b,c'.split(','); parts.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected split length to be 3.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_split_empty_sep() {
+        let script = "let parts = 'abc'.split(''); parts.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!(
+                "Expected split empty-sep length to be 3.0, got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_string_char_at() {
+        let script = "'hello'.charAt(1)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "e");
+            }
+            _ => panic!("Expected charAt to return 'e', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_replace_functional() {
+        let script = "'hello world'.replace('world', 'there')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello there");
+            }
+            _ => panic!("Expected replace to return 'hello there', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_map_values() {
+        let script = "let arr = Array(); let a2 = arr.push(1); let a3 = a2.push(2); let mapped = a3.map(function(x) { return x * 2; }); mapped.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "2,4");
+            }
+            _ => panic!("Expected mapped.join(',') to be '2,4', got {:?}", result),
+        }
+    }
 }

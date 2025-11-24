@@ -242,8 +242,16 @@ pub struct JSGCObjectHeader {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct JSShape {
-    // Opaque for now
-    _unused: [u8; 0],
+    pub header: JSGCObjectHeader,
+    pub is_hashed: u8,
+    pub has_small_array_index: u8,
+    pub hash: u32,
+    pub prop_hash_mask: u32,
+    pub prop_size: i32,
+    pub prop_count: i32,
+    pub deleted_prop_count: i32,
+    pub prop: *mut JSShapeProperty,
+    pub proto: *mut JSObject,
 }
 
 #[repr(C)]
@@ -526,6 +534,67 @@ impl JSRuntime {
         }
 
         0
+    }
+
+    pub unsafe fn js_new_shape(&mut self, proto: *mut JSObject) -> *mut JSShape {
+        let sh_ptr = self.js_malloc_rt(std::mem::size_of::<JSShape>()) as *mut JSShape;
+        if sh_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        let sh = &mut *sh_ptr;
+        sh.header.ref_count = 1;
+        sh.header.gc_obj_type = JS_GC_OBJ_TYPE_SHAPE;
+        sh.header.mark = 0;
+        sh.header.link.init();
+        self.gc_obj_list.add_tail(&mut sh.header.link);
+
+        sh.is_hashed = 0;
+        sh.has_small_array_index = 0;
+        sh.hash = 0;
+        sh.prop_hash_mask = 0;
+        sh.prop_size = 0;
+        sh.prop_count = 0;
+        sh.deleted_prop_count = 0;
+        sh.prop = std::ptr::null_mut();
+        sh.proto = proto;
+
+        if !proto.is_null() {
+            // TODO: Increment ref count of proto
+            // JS_DupValue(ctx, JS_MKPTR(JS_TAG_OBJECT, proto));
+            // But we don't have JS_DupValue easily accessible here without context or raw manipulation
+            // For now, manually increment ref count if we can access header
+            (*proto).header.ref_count += 1;
+        }
+
+        sh_ptr
+    }
+
+    pub unsafe fn js_free_shape(&mut self, sh: *mut JSShape) {
+        // Free properties
+        if !(*sh).prop.is_null() {
+            self.js_free_rt((*sh).prop as *mut c_void);
+        }
+        // Free proto
+        if !(*sh).proto.is_null() {
+            // TODO: JS_FreeValue(ctx, ...)
+            // Manually decrement ref count
+            let p = (*sh).proto;
+            (*p).header.ref_count -= 1;
+            if (*p).header.ref_count <= 0 {
+                // This is tricky, we need to free the object, but we are in runtime method
+                // We need to call js_free_value_rt equivalent for object
+                // But object freeing might need context for finalizers etc.
+                // For now, let's assume we can just free the memory if it's simple
+                // self.js_free_rt(p as *mut c_void);
+                // BETTER: Add to gc_zero_ref_count_list
+                self.gc_zero_ref_count_list.add_tail(&mut (*p).header.link);
+            }
+        }
+
+        // Remove from GC list
+        (*sh).header.link.del();
+
+        self.js_free_rt(sh as *mut c_void);
     }
 }
 
@@ -834,7 +903,19 @@ pub unsafe fn JS_NewObjectProtoClass(
 
     (*ctx.rt).gc_obj_list.add_tail(&mut (*obj).header.link);
 
-    (*obj).shape = std::ptr::null_mut(); // TODO: Create shape from proto
+    let proto_obj = if _proto.tag == JS_TAG_OBJECT as i64 {
+        _proto.u.ptr as *mut JSObject
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let sh = (*ctx.rt).js_new_shape(proto_obj);
+    if sh.is_null() {
+        (*ctx.rt).js_free_rt(obj as *mut c_void);
+        return JS_EXCEPTION;
+    }
+
+    (*obj).shape = sh;
     (*obj).prop = std::ptr::null_mut();
     (*obj).first_weak_ref = std::ptr::null_mut();
 

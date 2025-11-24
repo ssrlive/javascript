@@ -1154,7 +1154,12 @@ fn evaluate_expr(
             if let Some(val) = env.get(name) {
                 Ok(val.clone())
             } else if name == "console" {
-                Ok(Value::Object("console".to_string()))
+                let mut console_obj = std::collections::HashMap::new();
+                console_obj.insert(
+                    "log".to_string(),
+                    Value::Function("console.log".to_string()),
+                );
+                Ok(Value::Object(console_obj))
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
             } else {
@@ -1309,11 +1314,14 @@ fn evaluate_expr(
         Expr::Property(obj, prop) => {
             let obj_val = evaluate_expr(env, obj)?;
             println!("Property: obj_val={:?}, prop={}", obj_val, prop);
-            match (obj_val, prop.as_str()) {
-                (Value::String(s), "length") => Ok(Value::Number(utf16_len(&s) as f64)),
-                (Value::Object(obj_name), method) if obj_name == "console" && method == "log" => {
-                    println!("Returning console.log function");
-                    Ok(Value::Function("console.log".to_string()))
+            match obj_val {
+                Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
+                Value::Object(obj_map) => {
+                    if let Some(val) = obj_map.get(prop.as_str()) {
+                        Ok(val.clone())
+                    } else {
+                        Ok(Value::Undefined)
+                    }
                 }
                 _ => {
                     println!("Property not found");
@@ -1328,7 +1336,7 @@ fn evaluate_expr(
             if let Expr::Property(obj_expr, method_name) = &**func_expr {
                 let obj_val = evaluate_expr(env, obj_expr)?;
                 match (obj_val, method_name.as_str()) {
-                    (Value::Object(obj_name), "log") if obj_name == "console" => {
+                    (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
                         // console.log call
                         for arg in args {
                             let arg_val = evaluate_expr(env, arg)?;
@@ -1338,7 +1346,7 @@ fn evaluate_expr(
                                     print!("{}", String::from_utf16_lossy(&s))
                                 }
                                 Value::Undefined => print!("undefined"),
-                                Value::Object(name) => print!("[object {}]", name),
+                                Value::Object(_) => print!("[object Object]"),
                                 Value::Function(name) => print!("[Function: {}]", name),
                                 Value::Closure(_, _, _) => print!("[Function]"),
                             }
@@ -1355,8 +1363,8 @@ fn evaluate_expr(
                                 }
                                 Value::String(s) => Ok(Value::String(s.clone())),
                                 Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
-                                Value::Object(name) => {
-                                    Ok(Value::String(utf8_to_utf16(&format!("[object {}]", name))))
+                                Value::Object(_) => {
+                                    Ok(Value::String(utf8_to_utf16("[object Object]")))
                                 }
                                 Value::Function(name) => Ok(Value::String(utf8_to_utf16(
                                     &format!("[Function: {}]", name),
@@ -1566,9 +1574,9 @@ fn evaluate_expr(
                                     Value::Undefined => {
                                         Ok(Value::String(utf8_to_utf16("undefined")))
                                     }
-                                    Value::Object(name) => Ok(Value::String(utf8_to_utf16(
-                                        &format!("[object {}]", name),
-                                    ))),
+                                    Value::Object(_) => {
+                                        Ok(Value::String(utf8_to_utf16("[object Object]")))
+                                    }
                                     Value::Function(name) => Ok(Value::String(utf8_to_utf16(
                                         &format!("[Function: {}]", name),
                                     ))),
@@ -1608,6 +1616,14 @@ fn evaluate_expr(
         Expr::Function(params, body) => {
             Ok(Value::Closure(params.clone(), body.clone(), env.clone()))
         }
+        Expr::Object(properties) => {
+            let mut obj = std::collections::HashMap::new();
+            for (key, value_expr) in properties {
+                let value = evaluate_expr(env, value_expr)?;
+                obj.insert(key.clone(), value);
+            }
+            Ok(Value::Object(obj))
+        }
     }
 }
 
@@ -1616,8 +1632,8 @@ pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
     Undefined,
-    Object(String),   // For now, just a name
-    Function(String), // Function name
+    Object(std::collections::HashMap<String, Value>), // Object with properties
+    Function(String),                                 // Function name
     Closure(
         Vec<String>,
         Vec<Statement>,
@@ -1723,6 +1739,7 @@ pub enum Expr {
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
     Function(Vec<String>, Vec<Statement>), // parameters, body
+    Object(Vec<(String, Expr)>),           // object literal: key-value pairs
 }
 
 #[derive(Debug, Clone)]
@@ -1832,6 +1849,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '}' => {
                 tokens.push(Token::RBrace);
+                i += 1;
+            }
+            ':' => {
+                tokens.push(Token::Colon);
                 i += 1;
             }
             '.' => {
@@ -1996,6 +2017,7 @@ pub enum Token {
     RBracket,
     LBrace,
     RBrace,
+    Colon,
     Dot,
     Comma,
     Let,
@@ -2193,6 +2215,51 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
         }
         Token::Identifier(name) => Expr::Var(name),
+        Token::LBrace => {
+            // Parse object literal
+            let mut properties = Vec::new();
+            if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
+                // Empty object {}
+                tokens.remove(0); // consume }
+                return Ok(Expr::Object(properties));
+            }
+            loop {
+                // Parse key
+                let key = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                    tokens.remove(0);
+                    name
+                } else if let Some(Token::StringLit(s)) = tokens.get(0).cloned() {
+                    tokens.remove(0);
+                    String::from_utf16_lossy(&s)
+                } else {
+                    return Err(JSError::ParseError);
+                };
+
+                // Expect colon
+                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume :
+
+                // Parse value
+                let value = parse_expression(tokens)?;
+                properties.push((key, value));
+
+                // Check for comma or end
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
+                if matches!(tokens[0], Token::RBrace) {
+                    tokens.remove(0); // consume }
+                    break;
+                } else if matches!(tokens[0], Token::Comma) {
+                    tokens.remove(0); // consume ,
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            }
+            Expr::Object(properties)
+        }
         Token::Function => {
             // Parse function expression
             if tokens.len() >= 1 && matches!(tokens[0], Token::LParen) {

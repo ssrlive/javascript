@@ -47,7 +47,7 @@ fn main() {
         Value::Number(n) => println!("{}", n),
         Value::String(s) => println!("{}", String::from_utf16_lossy(&s)),
         Value::Undefined => println!("undefined"),
-        Value::Object(name) => println!("[object {}]", name),
+        Value::Object(_) => println!("[object Object]"),
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),
     }

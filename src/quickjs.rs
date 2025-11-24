@@ -791,8 +791,9 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
     JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
 }
 
-pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &str) -> JSValue {
-    let len = s.len();
+pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &[u16]) -> JSValue {
+    let utf8_str = utf16_to_utf8(s);
+    let len = utf8_str.len();
     if len == 0 {
         // Empty string
         return JSValue::new_ptr(JS_TAG_STRING, std::ptr::null_mut());
@@ -808,7 +809,7 @@ pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &str) -> JSValue {
     (*p).hash_next = 0;
     // Copy string data
     let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
-    for (i, &byte) in s.as_bytes().iter().enumerate() {
+    for (i, &byte) in utf8_str.as_bytes().iter().enumerate() {
         *str_data.offset(i as isize) = byte;
     }
     JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
@@ -908,12 +909,20 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
             match op {
                 BinaryOp::Add => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::String(ls + &rs)),
+                    (Value::String(ls), Value::String(rs)) => {
+                        let mut result = ls.clone();
+                        result.extend_from_slice(&rs);
+                        Ok(Value::String(result))
+                    }
                     (Value::Number(ln), Value::String(rs)) => {
-                        Ok(Value::String(ln.to_string() + &rs))
+                        let mut result = utf8_to_utf16(&ln.to_string());
+                        result.extend_from_slice(&rs);
+                        Ok(Value::String(result))
                     }
                     (Value::String(ls), Value::Number(rn)) => {
-                        Ok(Value::String(ls + &rn.to_string()))
+                        let mut result = ls.clone();
+                        result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
+                        Ok(Value::String(result))
                     }
                 },
                 BinaryOp::Sub => match (l, r) {
@@ -996,11 +1005,10 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
             match (obj_val, idx_val) {
                 (Value::String(s), Value::Number(n)) => {
                     let idx = n as usize;
-                    if idx < s.len() {
-                        let ch = s.chars().nth(idx).unwrap();
-                        Ok(Value::String(ch.to_string()))
+                    if let Some(ch) = utf16_char_at(&s, idx) {
+                        Ok(Value::String(vec![ch]))
                     } else {
-                        Ok(Value::String(String::new())) // or return undefined, but use empty string here
+                        Ok(Value::String(Vec::new())) // or return undefined, but use empty string here
                     }
                 }
                 _ => Err(()), // other types of indexing not supported yet
@@ -1009,12 +1017,12 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
         Expr::Property(obj, prop) => {
             let obj_val = evaluate_expr(env, obj)?;
             match (obj_val, prop.as_str()) {
-                (Value::String(s), "length") => Ok(Value::Number(s.len() as f64)),
+                (Value::String(s), "length") => Ok(Value::Number(utf16_len(&s) as f64)),
                 _ => Err(()), // property not found or not supported
             }
         }
         Expr::Call(func_expr, args) => {
-            // For now, we only support method calls on strings
+            // Check if it's a method call on an object
             if let Expr::Property(obj_expr, method_name) = &**func_expr {
                 let obj_val = evaluate_expr(env, obj_expr)?;
                 if let Value::String(s) = obj_val {
@@ -1028,8 +1036,8 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 {
                                     let start_idx = start as usize;
                                     let end_idx = end as usize;
-                                    if start_idx <= end_idx && end_idx <= s.len() {
-                                        Ok(Value::String(s[start_idx..end_idx].to_string()))
+                                    if start_idx <= end_idx && end_idx <= utf16_len(&s) {
+                                        Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
                                     } else {
                                         Err(())
                                     }
@@ -1058,7 +1066,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 s.len() as isize
                             };
 
-                            let len = s.len() as isize;
+                            let len = utf16_len(&s) as isize;
                             let start = if start < 0 { len + start } else { start };
                             let end = if end < 0 { len + end } else { end };
 
@@ -1066,21 +1074,21 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                             let end = end.max(0).min(len) as usize;
 
                             if start <= end {
-                                Ok(Value::String(s[start..end].to_string()))
+                                Ok(Value::String(utf16_slice(&s, start, end)))
                             } else {
-                                Ok(Value::String("".to_string()))
+                                Ok(Value::String(Vec::new()))
                             }
                         }
                         "toUpperCase" => {
                             if args.is_empty() {
-                                Ok(Value::String(s.to_uppercase()))
+                                Ok(Value::String(utf16_to_uppercase(&s)))
                             } else {
                                 Err(())
                             }
                         }
                         "toLowerCase" => {
                             if args.is_empty() {
-                                Ok(Value::String(s.to_lowercase()))
+                                Ok(Value::String(utf16_to_lowercase(&s)))
                             } else {
                                 Err(())
                             }
@@ -1089,7 +1097,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                             if args.len() == 1 {
                                 let search_val = evaluate_expr(env, &args[0])?;
                                 if let Value::String(search) = search_val {
-                                    if let Some(pos) = s.find(&search) {
+                                    if let Some(pos) = utf16_find(&s, &search) {
                                         Ok(Value::Number(pos as f64))
                                     } else {
                                         Ok(Value::Number(-1.0))
@@ -1105,7 +1113,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                             if args.len() == 1 {
                                 let search_val = evaluate_expr(env, &args[0])?;
                                 if let Value::String(search) = search_val {
-                                    if let Some(pos) = s.rfind(&search) {
+                                    if let Some(pos) = utf16_rfind(&s, &search) {
                                         Ok(Value::Number(pos as f64))
                                     } else {
                                         Ok(Value::Number(-1.0))
@@ -1124,7 +1132,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 if let (Value::String(search), Value::String(replace)) =
                                     (search_val, replace_val)
                                 {
-                                    Ok(Value::String(s.replacen(&search, &replace, 1)))
+                                    Ok(Value::String(utf16_replace(&s, &search, &replace)))
                                 } else {
                                     Err(())
                                 }
@@ -1138,8 +1146,8 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 if let Value::String(sep) = sep_val {
                                     // For simplicity, return the first part only as a string
                                     // In real JS, split returns an array
-                                    if let Some(pos) = s.find(&sep) {
-                                        Ok(Value::String(s[..pos].to_string()))
+                                    if let Some(pos) = utf16_find(&s, &sep) {
+                                        Ok(Value::String(utf16_slice(&s, 0, pos)))
                                     } else {
                                         Ok(Value::String(s.clone()))
                                     }
@@ -1156,7 +1164,28 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     Err(())
                 }
             } else {
-                Err(())
+                // Check if it's a global function call
+                if let Expr::Var(func_name) = &**func_expr {
+                    match func_name.as_str() {
+                        "console.log" => {
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => println!("{}", n),
+                                    Value::String(s) => {
+                                        println!("{}", String::from_utf16_lossy(&s))
+                                    }
+                                }
+                                Ok(Value::Number(0.0)) // console.log returns undefined, but we return 0
+                            } else {
+                                Err(())
+                            }
+                        }
+                        _ => Err(()), // function not found
+                    }
+                } else {
+                    Err(())
+                }
             }
         }
     }
@@ -1165,7 +1194,78 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
-    String(String),
+    String(Vec<u16>), // UTF-16 code units
+}
+
+// Helper functions for UTF-16 string operations
+fn utf8_to_utf16(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
+}
+
+fn utf16_to_utf8(v: &[u16]) -> String {
+    String::from_utf16_lossy(v)
+}
+
+fn utf16_len(v: &[u16]) -> usize {
+    v.len()
+}
+
+fn utf16_slice(v: &[u16], start: usize, end: usize) -> Vec<u16> {
+    if start >= v.len() {
+        Vec::new()
+    } else {
+        let end = end.min(v.len());
+        v[start..end].to_vec()
+    }
+}
+
+fn utf16_char_at(v: &[u16], index: usize) -> Option<u16> {
+    v.get(index).copied()
+}
+
+fn utf16_to_uppercase(v: &[u16]) -> Vec<u16> {
+    let s = utf16_to_utf8(v);
+    utf8_to_utf16(&s.to_uppercase())
+}
+
+fn utf16_to_lowercase(v: &[u16]) -> Vec<u16> {
+    let s = utf16_to_utf8(v);
+    utf8_to_utf16(&s.to_lowercase())
+}
+
+fn utf16_find(v: &[u16], pattern: &[u16]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    for i in 0..=v.len().saturating_sub(pattern.len()) {
+        if v[i..i + pattern.len()] == *pattern {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn utf16_rfind(v: &[u16], pattern: &[u16]) -> Option<usize> {
+    if pattern.is_empty() {
+        return Some(v.len());
+    }
+    for i in (0..=v.len().saturating_sub(pattern.len())).rev() {
+        if v[i..i + pattern.len()] == *pattern {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
+    if let Some(pos) = utf16_find(v, search) {
+        let mut result = v[..pos].to_vec();
+        result.extend_from_slice(replace);
+        result.extend_from_slice(&v[pos + search.len()..]);
+        result
+    } else {
+        v.to_vec()
+    }
 }
 
 #[derive(Debug)]
@@ -1177,7 +1277,7 @@ pub enum Statement {
 #[derive(Debug)]
 pub enum Expr {
     Number(f64),
-    StringLit(String),
+    StringLit(Vec<u16>),
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
@@ -1200,8 +1300,8 @@ pub enum BinaryOp {
     GreaterEqual,
 }
 
-fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<String, ()> {
-    let mut result = String::new();
+fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, ()> {
+    let mut result = Vec::new();
     while *start < chars.len() && chars[*start] != end_char {
         if chars[*start] == '\\' {
             *start += 1;
@@ -1209,17 +1309,32 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                 return Err(());
             }
             match chars[*start] {
-                'n' => result.push('\n'),
-                't' => result.push('\t'),
-                'r' => result.push('\r'),
-                '\\' => result.push('\\'),
-                '"' => result.push('"'),
-                '\'' => result.push('\''),
-                '`' => result.push('`'),
+                'n' => result.push('\n' as u16),
+                't' => result.push('\t' as u16),
+                'r' => result.push('\r' as u16),
+                '\\' => result.push('\\' as u16),
+                '"' => result.push('"' as u16),
+                '\'' => result.push('\'' as u16),
+                '`' => result.push('`' as u16),
+                'u' => {
+                    // Unicode escape sequence \uXXXX
+                    *start += 1;
+                    if *start + 4 > chars.len() {
+                        return Err(());
+                    }
+                    let hex_str: String = chars[*start..*start + 4].iter().collect();
+                    *start += 3; // will be incremented by 1 at the end
+                    match u16::from_str_radix(&hex_str, 16) {
+                        Ok(code) => {
+                            result.push(code);
+                        }
+                        Err(_) => return Err(()), // Invalid hex
+                    }
+                }
                 _ => return Err(()), // Invalid escape sequence
             }
         } else {
-            result.push(chars[*start]);
+            result.push(chars[*start] as u16);
         }
         *start += 1;
     }
@@ -1309,7 +1424,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 while i < chars.len() && (chars[i].is_digit(10) || chars[i] == '.') {
                     i += 1;
                 }
-                let num_str = &expr[start..i];
+                let num_str: String = chars[start..i].iter().collect();
                 let num = num_str.parse::<f64>().map_err(|_| ())?;
                 tokens.push(Token::Number(num));
             }
@@ -1354,9 +1469,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                         if brace_count != 0 {
                             return Err(());
                         }
-                        let expr_str = &expr[expr_start..i - 1];
+                        let expr_str: String = chars[expr_start..i - 1].iter().collect();
                         // Tokenize the expression inside ${}
-                        let expr_tokens = tokenize(expr_str)?;
+                        let expr_tokens = tokenize(&expr_str)?;
                         parts.push(TemplatePart::Expr(expr_tokens));
                         current_start = i;
                     } else {
@@ -1380,11 +1495,11 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
-                let ident = &expr[start..i];
-                match ident {
+                let ident: String = chars[start..i].iter().collect();
+                match ident.as_str() {
                     "let" => tokens.push(Token::Let),
                     "var" => tokens.push(Token::Var),
-                    _ => tokens.push(Token::Identifier(ident.to_string())),
+                    _ => tokens.push(Token::Identifier(ident)),
                 }
             }
             ',' => {
@@ -1403,14 +1518,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
 
 #[derive(Debug, Clone)]
 pub enum TemplatePart {
-    String(String),
+    String(Vec<u16>),
     Expr(Vec<Token>),
 }
 
 #[derive(Debug, Clone)]
 pub enum Token {
     Number(f64),
-    StringLit(String),
+    StringLit(Vec<u16>),
     TemplateString(Vec<TemplatePart>),
     Identifier(String),
     Plus,
@@ -1556,7 +1671,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
         }
         Token::TemplateString(parts) => {
             if parts.is_empty() {
-                Expr::StringLit(String::new())
+                Expr::StringLit(Vec::new())
             } else if parts.len() == 1 {
                 match &parts[0] {
                     TemplatePart::String(s) => Expr::StringLit(s.clone()),

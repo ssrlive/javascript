@@ -6,6 +6,9 @@ use crate::error::JSError;
 use libc;
 use std::ffi::c_void;
 
+/// Maximum number of loop iterations before triggering infinite loop detection
+pub const MAX_LOOP_ITERATIONS: usize = 1000;
+
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union JSValueUnion {
@@ -833,6 +836,13 @@ pub unsafe fn JS_Eval(
     match evaluate_script(script.trim()) {
         Ok(Value::Number(num)) => JSValue::new_float64(num),
         Ok(Value::String(s)) => JS_NewString(_ctx, &s),
+        Ok(Value::Boolean(b)) => {
+            if b {
+                JS_TRUE
+            } else {
+                JS_FALSE
+            }
+        }
         Ok(Value::Undefined) => JS_UNDEFINED,
         Ok(Value::Object(_)) => JS_UNDEFINED,        // For now
         Ok(Value::Function(_)) => JS_UNDEFINED,      // For now
@@ -841,7 +851,7 @@ pub unsafe fn JS_Eval(
     }
 }
 
-fn evaluate_script(script: &str) -> Result<Value, JSError> {
+pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     let mut tokens = tokenize(script)?;
     let statements = parse_statements(&mut tokens)?;
     let mut env = std::collections::HashMap::new();
@@ -1087,11 +1097,13 @@ pub fn evaluate_statements(
                     }
                 }
 
-                // For now, limit to 1000 iterations to prevent infinite loops
+                // For now, limit to MAX_LOOP_ITERATIONS iterations to prevent infinite loops
                 let mut iterations = 0;
                 loop {
-                    if iterations >= 1000 {
-                        return Err(JSError::InfiniteLoopError { iterations: 1000 });
+                    if iterations >= MAX_LOOP_ITERATIONS {
+                        return Err(JSError::InfiniteLoopError {
+                            iterations: MAX_LOOP_ITERATIONS,
+                        });
                     }
 
                     // Check condition
@@ -1150,6 +1162,7 @@ fn evaluate_expr(
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
+        Expr::Boolean(b) => Ok(Value::Boolean(*b)),
         Expr::Var(name) => {
             if let Some(val) = env.get(name) {
                 Ok(val.clone())
@@ -1345,6 +1358,7 @@ fn evaluate_expr(
                                 Value::String(s) => {
                                     print!("{}", String::from_utf16_lossy(&s))
                                 }
+                                Value::Boolean(b) => print!("{}", b),
                                 Value::Undefined => print!("undefined"),
                                 Value::Object(_) => print!("[object Object]"),
                                 Value::Function(name) => print!("[Function: {}]", name),
@@ -1362,6 +1376,9 @@ fn evaluate_expr(
                                     Ok(Value::String(utf8_to_utf16(&n.to_string())))
                                 }
                                 Value::String(s) => Ok(Value::String(s.clone())),
+                                Value::Boolean(b) => {
+                                    Ok(Value::String(utf8_to_utf16(&b.to_string())))
+                                }
                                 Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
                                 Value::Object(_) => {
                                     Ok(Value::String(utf8_to_utf16("[object Object]")))
@@ -1571,6 +1588,9 @@ fn evaluate_expr(
                                         Ok(Value::String(utf8_to_utf16(&n.to_string())))
                                     }
                                     Value::String(s) => Ok(Value::String(s.clone())),
+                                    Value::Boolean(b) => {
+                                        Ok(Value::String(utf8_to_utf16(&b.to_string())))
+                                    }
                                     Value::Undefined => {
                                         Ok(Value::String(utf8_to_utf16("undefined")))
                                     }
@@ -1631,6 +1651,7 @@ fn evaluate_expr(
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
+    Boolean(bool),
     Undefined,
     Object(std::collections::HashMap<String, Value>), // Object with properties
     Function(String),                                 // Function name
@@ -1731,6 +1752,7 @@ pub enum Statement {
 pub enum Expr {
     Number(f64),
     StringLit(Vec<u16>),
+    Boolean(bool),
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
@@ -1978,6 +2000,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "if" => tokens.push(Token::If),
                     "else" => tokens.push(Token::Else),
                     "for" => tokens.push(Token::For),
+                    "true" => tokens.push(Token::True),
+                    "false" => tokens.push(Token::False),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -2035,12 +2059,15 @@ pub enum Token {
     GreaterThan,
     LessEqual,
     GreaterEqual,
+    True,
+    False,
 }
 
 fn is_truthy(val: &Value) -> bool {
     match val {
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(s) => !s.is_empty(),
+        Value::Boolean(b) => *b,
         Value::Undefined => false,
         Value::Object(_) => true,
         Value::Function(_) => true,
@@ -2177,6 +2204,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let mut expr = match tokens.remove(0) {
         Token::Number(n) => Expr::Number(n),
         Token::StringLit(s) => Expr::StringLit(s),
+        Token::True => Expr::Boolean(true),
+        Token::False => Expr::Boolean(false),
         Token::Minus => {
             let inner = parse_primary(tokens)?;
             Expr::UnaryNeg(Box::new(inner))

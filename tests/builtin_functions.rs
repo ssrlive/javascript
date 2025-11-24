@@ -509,4 +509,199 @@ mod builtin_functions_tests {
             _ => panic!("Expected padEnd to return '500', got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_array_find() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.find(function(x) { return x > 2; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected arr.find to return 3.0, got {:?}", result),
+        }
+
+        // Test find with no match
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.find(function(x) { return x > 5; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => {
+                // find returns undefined when no element matches
+            }
+            _ => panic!("Expected arr.find to return undefined, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_find_index() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.findIndex(function(x) { return x > 2; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!("Expected arr.findIndex to return 2.0, got {:?}", result),
+        }
+
+        // Test findIndex with no match
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.findIndex(function(x) { return x > 5; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected arr.findIndex to return -1.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_some() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.some(function(x) { return x > 2; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected arr.some to return true, got {:?}", result),
+        }
+
+        // Test some with no match
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.some(function(x) { return x > 5; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            _ => panic!("Expected arr.some to return false, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_every() {
+        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(4); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected arr.every to return true, got {:?}", result),
+        }
+
+        // Test every with some elements not matching
+        let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(1); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            _ => panic!("Expected arr.every to return false, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_concat() {
+        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let arr3 = arr2.push(2); let arr4 = Array(); let arr5 = arr4.push(3); let arr6 = arr5.push(4); let result = arr3.concat(arr6); result.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 4.0),
+            _ => panic!("Expected concat result length to be 4.0, got {:?}", result),
+        }
+
+        // Test concat with non-array values
+        let script = "let arr1 = Array(); let arr2 = arr1.push(1); let result = arr2.concat(2, 3); result.length";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected concat result length to be 3.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_index_of() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.indexOf(2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected arr.indexOf(2) to return 1.0, got {:?}", result),
+        }
+
+        // Test indexOf with element not found
+        let script =
+            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.indexOf(5)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected arr.indexOf(5) to return -1.0, got {:?}", result),
+        }
+
+        // Test indexOf with fromIndex
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.indexOf(2, 2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!("Expected arr.indexOf(2, 2) to return 2.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_includes() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.includes(2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected arr.includes(2) to return true, got {:?}", result),
+        }
+
+        // Test includes with element not found
+        let script =
+            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            _ => panic!("Expected arr.includes(5) to return false, got {:?}", result),
+        }
+
+        // Test includes with fromIndex
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.includes(2, 2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!(
+                "Expected arr.includes(2, 2) to return true, got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_sort() {
+        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(); sorted.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "1,2,3");
+            }
+            _ => panic!(
+                "Expected sorted array join to return '1,2,3', got {:?}",
+                result
+            ),
+        }
+
+        // Test sort with custom compare function
+        let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(function(a, b) { return b - a; }); sorted.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "3,2,1");
+            }
+            _ => panic!(
+                "Expected sorted array join to return '3,2,1', got {:?}",
+                result
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_reverse() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let reversed = arr4.reverse(); reversed.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "3,2,1");
+            }
+            _ => panic!(
+                "Expected reversed array join to return '3,2,1', got {:?}",
+                result
+            ),
+        }
+    }
 }

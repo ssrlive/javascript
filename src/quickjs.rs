@@ -2223,6 +2223,548 @@ fn evaluate_expr(
                                         })
                                     }
                                 }
+                                "find" => {
+                                    if !args.is_empty() {
+                                        let callback = evaluate_expr(env, &args[0])?;
+                                        match callback {
+                                            Value::Closure(params, body, captured_env) => {
+                                                let length = obj_map
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                let current_len = match length {
+                                                    Value::Number(n) => *n as usize,
+                                                    _ => 0,
+                                                };
+
+                                                for i in 0..current_len {
+                                                    if let Some(value) = obj_map.get(&i.to_string())
+                                                    {
+                                                        let element = value.clone();
+                                                        let index_val = Value::Number(i as f64);
+
+                                                        // Create new environment for callback
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() > 0 {
+                                                            func_env.insert(
+                                                                params[0].clone(),
+                                                                element.clone(),
+                                                            );
+                                                        }
+                                                        if params.len() > 1 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                index_val,
+                                                            );
+                                                        }
+                                                        if params.len() > 2 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        // truthy check
+                                                        let is_truthy = match res {
+                                                            Value::Boolean(b) => b,
+                                                            Value::Number(n) => n != 0.0,
+                                                            Value::String(ref s) => !s.is_empty(),
+                                                            Value::Object(_) => true,
+                                                            Value::Undefined => false,
+                                                            _ => false,
+                                                        };
+                                                        if is_truthy {
+                                                            return Ok(element);
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Value::Undefined)
+                                            }
+                                            _ => {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "Array.find expects a function"
+                                                        .to_string(),
+                                                })
+                                            }
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.find expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "findIndex" => {
+                                    if !args.is_empty() {
+                                        let callback = evaluate_expr(env, &args[0])?;
+                                        match callback {
+                                            Value::Closure(params, body, captured_env) => {
+                                                let length = obj_map
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                let current_len = match length {
+                                                    Value::Number(n) => *n as usize,
+                                                    _ => 0,
+                                                };
+
+                                                for i in 0..current_len {
+                                                    if let Some(value) = obj_map.get(&i.to_string())
+                                                    {
+                                                        let element = value.clone();
+                                                        let index_val = Value::Number(i as f64);
+
+                                                        // Create new environment for callback
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() > 0 {
+                                                            func_env
+                                                                .insert(params[0].clone(), element);
+                                                        }
+                                                        if params.len() > 1 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                index_val,
+                                                            );
+                                                        }
+                                                        if params.len() > 2 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        // truthy check
+                                                        let is_truthy = match res {
+                                                            Value::Boolean(b) => b,
+                                                            Value::Number(n) => n != 0.0,
+                                                            Value::String(ref s) => !s.is_empty(),
+                                                            Value::Object(_) => true,
+                                                            Value::Undefined => false,
+                                                            _ => false,
+                                                        };
+                                                        if is_truthy {
+                                                            return Ok(Value::Number(i as f64));
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Value::Number(-1.0))
+                                            }
+                                            _ => {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "Array.findIndex expects a function"
+                                                        .to_string(),
+                                                })
+                                            }
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message:
+                                                "Array.findIndex expects at least one argument"
+                                                    .to_string(),
+                                        })
+                                    }
+                                }
+                                "some" => {
+                                    if !args.is_empty() {
+                                        let callback = evaluate_expr(env, &args[0])?;
+                                        match callback {
+                                            Value::Closure(params, body, captured_env) => {
+                                                let length = obj_map
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                let current_len = match length {
+                                                    Value::Number(n) => *n as usize,
+                                                    _ => 0,
+                                                };
+
+                                                for i in 0..current_len {
+                                                    if let Some(value) = obj_map.get(&i.to_string())
+                                                    {
+                                                        let element = value.clone();
+                                                        let index_val = Value::Number(i as f64);
+
+                                                        // Create new environment for callback
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() > 0 {
+                                                            func_env
+                                                                .insert(params[0].clone(), element);
+                                                        }
+                                                        if params.len() > 1 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                index_val,
+                                                            );
+                                                        }
+                                                        if params.len() > 2 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        // truthy check
+                                                        let is_truthy = match res {
+                                                            Value::Boolean(b) => b,
+                                                            Value::Number(n) => n != 0.0,
+                                                            Value::String(ref s) => !s.is_empty(),
+                                                            Value::Object(_) => true,
+                                                            Value::Undefined => false,
+                                                            _ => false,
+                                                        };
+                                                        if is_truthy {
+                                                            return Ok(Value::Boolean(true));
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Value::Boolean(false))
+                                            }
+                                            _ => {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "Array.some expects a function"
+                                                        .to_string(),
+                                                })
+                                            }
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.some expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "every" => {
+                                    if !args.is_empty() {
+                                        let callback = evaluate_expr(env, &args[0])?;
+                                        match callback {
+                                            Value::Closure(params, body, captured_env) => {
+                                                let length = obj_map
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                let current_len = match length {
+                                                    Value::Number(n) => *n as usize,
+                                                    _ => 0,
+                                                };
+
+                                                for i in 0..current_len {
+                                                    if let Some(value) = obj_map.get(&i.to_string())
+                                                    {
+                                                        let element = value.clone();
+                                                        let index_val = Value::Number(i as f64);
+
+                                                        // Create new environment for callback
+                                                        let mut func_env = captured_env.clone();
+                                                        if params.len() > 0 {
+                                                            func_env
+                                                                .insert(params[0].clone(), element);
+                                                        }
+                                                        if params.len() > 1 {
+                                                            func_env.insert(
+                                                                params[1].clone(),
+                                                                index_val,
+                                                            );
+                                                        }
+                                                        if params.len() > 2 {
+                                                            func_env.insert(
+                                                                params[2].clone(),
+                                                                Value::Object(obj_map.clone()),
+                                                            );
+                                                        }
+
+                                                        let res = evaluate_statements(
+                                                            &mut func_env,
+                                                            &body,
+                                                        )?;
+                                                        // truthy check
+                                                        let is_truthy = match res {
+                                                            Value::Boolean(b) => b,
+                                                            Value::Number(n) => n != 0.0,
+                                                            Value::String(ref s) => !s.is_empty(),
+                                                            Value::Object(_) => true,
+                                                            Value::Undefined => false,
+                                                            _ => false,
+                                                        };
+                                                        if !is_truthy {
+                                                            return Ok(Value::Boolean(false));
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Value::Boolean(true))
+                                            }
+                                            _ => {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "Array.every expects a function"
+                                                        .to_string(),
+                                                })
+                                            }
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "Array.every expects at least one argument"
+                                                .to_string(),
+                                        })
+                                    }
+                                }
+                                "concat" => {
+                                    let mut result = std::collections::HashMap::new();
+
+                                    // First, copy all elements from current array
+                                    let current_length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match current_length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let mut new_index = 0;
+                                    for i in 0..current_len {
+                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                            result.insert(new_index.to_string(), val.clone());
+                                            new_index += 1;
+                                        }
+                                    }
+
+                                    // Then, append all arguments
+                                    for arg in args {
+                                        let arg_val = evaluate_expr(env, arg)?;
+                                        match arg_val {
+                                            Value::Object(arg_obj) => {
+                                                // If argument is an array-like object, copy its elements
+                                                let arg_length = arg_obj
+                                                    .get("length")
+                                                    .unwrap_or(&Value::Number(0.0));
+                                                let arg_len = match arg_length {
+                                                    Value::Number(n) => *n as usize,
+                                                    _ => 0,
+                                                };
+                                                for i in 0..arg_len {
+                                                    if let Some(val) = arg_obj.get(&i.to_string()) {
+                                                        result.insert(
+                                                            new_index.to_string(),
+                                                            val.clone(),
+                                                        );
+                                                        new_index += 1;
+                                                    }
+                                                }
+                                            }
+                                            _ => {
+                                                // If argument is not an array, append it directly
+                                                result.insert(new_index.to_string(), arg_val);
+                                                new_index += 1;
+                                            }
+                                        }
+                                    }
+
+                                    result.insert(
+                                        "length".to_string(),
+                                        Value::Number(new_index as f64),
+                                    );
+                                    Ok(Value::Object(result))
+                                }
+                                "indexOf" => {
+                                    if args.is_empty() {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Array.indexOf expects at least one argument"
+                                                .to_string(),
+                                        });
+                                    }
+
+                                    let search_element = evaluate_expr(env, &args[0])?;
+                                    let from_index = if args.len() > 1 {
+                                        match evaluate_expr(env, &args[1])? {
+                                            Value::Number(n) => n as isize,
+                                            _ => 0isize,
+                                        }
+                                    } else {
+                                        0isize
+                                    };
+
+                                    let current_length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match current_length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let start = if from_index < 0 {
+                                        (current_len as isize + from_index).max(0) as usize
+                                    } else {
+                                        from_index as usize
+                                    };
+
+                                    for i in start..current_len {
+                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if values_equal(val, &search_element) {
+                                                return Ok(Value::Number(i as f64));
+                                            }
+                                        }
+                                    }
+
+                                    Ok(Value::Number(-1.0))
+                                }
+                                "includes" => {
+                                    if args.is_empty() {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Array.includes expects at least one argument"
+                                                .to_string(),
+                                        });
+                                    }
+
+                                    let search_element = evaluate_expr(env, &args[0])?;
+                                    let from_index = if args.len() > 1 {
+                                        match evaluate_expr(env, &args[1])? {
+                                            Value::Number(n) => n as isize,
+                                            _ => 0isize,
+                                        }
+                                    } else {
+                                        0isize
+                                    };
+
+                                    let current_length =
+                                        obj_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match current_length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let start = if from_index < 0 {
+                                        (current_len as isize + from_index).max(0) as usize
+                                    } else {
+                                        from_index as usize
+                                    };
+
+                                    for i in start..current_len {
+                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if values_equal(val, &search_element) {
+                                                return Ok(Value::Boolean(true));
+                                            }
+                                        }
+                                    }
+
+                                    Ok(Value::Boolean(false))
+                                }
+                                "sort" => {
+                                    let new_map = obj_map.clone();
+                                    let current_length =
+                                        new_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match current_length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    // Extract array elements for sorting
+                                    let mut elements: Vec<(String, Value)> = Vec::new();
+                                    for i in 0..current_len {
+                                        if let Some(val) = new_map.get(&i.to_string()) {
+                                            elements.push((i.to_string(), val.clone()));
+                                        }
+                                    }
+
+                                    // Sort elements
+                                    if args.is_empty() {
+                                        // Default sort (string comparison)
+                                        elements.sort_by(|a, b| {
+                                            let a_str = value_to_sort_string(&a.1);
+                                            let b_str = value_to_sort_string(&b.1);
+                                            a_str.cmp(&b_str)
+                                        });
+                                    } else {
+                                        // Custom sort with compare function
+                                        let compare_fn = evaluate_expr(env, &args[0])?;
+                                        if let Value::Closure(params, body, captured_env) =
+                                            compare_fn
+                                        {
+                                            elements.sort_by(|a, b| {
+                                                // Create function environment for comparison
+                                                let mut func_env = captured_env.clone();
+                                                if params.len() > 0 {
+                                                    func_env.insert(params[0].clone(), a.1.clone());
+                                                }
+                                                if params.len() > 1 {
+                                                    func_env.insert(params[1].clone(), b.1.clone());
+                                                }
+
+                                                match evaluate_statements(&mut func_env, &body) {
+                                                    Ok(Value::Number(n)) => {
+                                                        if n < 0.0 {
+                                                            std::cmp::Ordering::Less
+                                                        } else if n > 0.0 {
+                                                            std::cmp::Ordering::Greater
+                                                        } else {
+                                                            std::cmp::Ordering::Equal
+                                                        }
+                                                    }
+                                                    _ => std::cmp::Ordering::Equal,
+                                                }
+                                            });
+                                        } else {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Array.sort expects a function as compare function".to_string(),
+                                            });
+                                        }
+                                    }
+
+                                    // Update the array with sorted elements
+                                    let mut sorted_map = std::collections::HashMap::new();
+                                    for (new_index, (_old_key, value)) in
+                                        elements.into_iter().enumerate()
+                                    {
+                                        sorted_map.insert(new_index.to_string(), value);
+                                    }
+                                    sorted_map.insert(
+                                        "length".to_string(),
+                                        Value::Number(current_len as f64),
+                                    );
+
+                                    Ok(Value::Object(sorted_map))
+                                }
+                                "reverse" => {
+                                    let mut new_map = obj_map.clone();
+                                    let current_length =
+                                        new_map.get("length").unwrap_or(&Value::Number(0.0));
+                                    let current_len = match current_length {
+                                        Value::Number(n) => *n as usize,
+                                        _ => 0,
+                                    };
+
+                                    // Reverse elements in place
+                                    let mut left = 0;
+                                    let mut right = current_len.saturating_sub(1);
+
+                                    while left < right {
+                                        let left_key = left.to_string();
+                                        let right_key = right.to_string();
+
+                                        let left_val = new_map.get(&left_key).cloned();
+                                        let right_val = new_map.get(&right_key).cloned();
+
+                                        if let Some(val) = right_val {
+                                            new_map.insert(left_key, val);
+                                        } else {
+                                            new_map.remove(&left_key);
+                                        }
+
+                                        if let Some(val) = left_val {
+                                            new_map.insert(right_key, val);
+                                        } else {
+                                            new_map.remove(&right_key);
+                                        }
+
+                                        left += 1;
+                                        right -= 1;
+                                    }
+
+                                    Ok(Value::Object(new_map))
+                                }
                                 _ => Err(JSError::EvaluationError {
                                     message: "error".to_string(),
                                 }), // array method not found
@@ -3062,6 +3604,41 @@ fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
         result
     } else {
         v.to_vec()
+    }
+}
+
+// Helper function to compare two values for equality
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Number(na), Value::Number(nb)) => na == nb,
+        (Value::String(sa), Value::String(sb)) => sa == sb,
+        (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Object(_), Value::Object(_)) => false, // Objects are not equal unless same reference
+        _ => false,                                    // Different types are not equal
+    }
+}
+
+// Helper function to convert value to string for sorting
+fn value_to_sort_string(val: &Value) -> String {
+    match val {
+        Value::Number(n) => {
+            if n.is_nan() {
+                "NaN".to_string()
+            } else if *n == f64::INFINITY {
+                "Infinity".to_string()
+            } else if *n == f64::NEG_INFINITY {
+                "-Infinity".to_string()
+            } else {
+                n.to_string()
+            }
+        }
+        Value::String(s) => String::from_utf16_lossy(s),
+        Value::Boolean(b) => b.to_string(),
+        Value::Undefined => "undefined".to_string(),
+        Value::Object(_) => "[object Object]".to_string(),
+        Value::Function(name) => format!("[function {}]", name),
+        Value::Closure(_, _, _) => "[function]".to_string(),
     }
 }
 

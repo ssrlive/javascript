@@ -339,6 +339,51 @@ pub struct JSStackFrame {
     pub cur_sp: *mut JSValue,
 }
 
+pub const JS_GC_OBJ_TYPE_JS_OBJECT: u8 = 1;
+pub const JS_GC_OBJ_TYPE_FUNCTION_BYTECODE: u8 = 2;
+pub const JS_GC_OBJ_TYPE_SHAPE: u8 = 3;
+pub const JS_GC_OBJ_TYPE_VAR_REF: u8 = 4;
+pub const JS_GC_OBJ_TYPE_ASYNC_FUNCTION: u8 = 5;
+pub const JS_GC_OBJ_TYPE_JS_CONTEXT: u8 = 6;
+
+#[repr(C)]
+pub struct JSShapeProperty {
+    pub hash_next: u32,
+    pub flags: u8,
+    pub atom: JSAtom,
+}
+
+#[repr(C)]
+pub struct JSProperty {
+    pub u: JSPropertyUnion,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub union JSPropertyUnion {
+    pub value: JSValue,
+    pub next: *mut JSProperty, // simplified for now
+}
+
+#[repr(C)]
+pub struct JSObject {
+    pub header: JSGCObjectHeader,
+    pub shape: *mut JSShape,
+    pub prop: *mut JSProperty,
+    pub first_weak_ref: *mut JSObject,
+}
+
+#[repr(C)]
+pub struct JSClassDef {
+    pub class_name: *const i8,
+    pub finalizer: Option<unsafe extern "C" fn(*mut JSRuntime, JSValue)>,
+    pub gc_mark: Option<unsafe extern "C" fn(*mut JSRuntime, JSValue, *mut c_void)>,
+    pub call: Option<
+        unsafe extern "C" fn(*mut JSContext, JSValue, JSValue, i32, *mut JSValue, i32) -> JSValue,
+    >,
+    pub exotic: *mut c_void,
+}
+
 impl JSRuntime {
     pub unsafe fn js_malloc_rt(&mut self, size: usize) -> *mut c_void {
         if let Some(malloc_func) = self.mf.js_malloc {
@@ -705,4 +750,98 @@ pub unsafe fn JS_FreeContext(ctx: *mut JSContext) {
     // TODO: Free built-in objects
 
     (*rt).js_free_rt(ctx as *mut c_void);
+}
+
+pub unsafe fn JS_NewClassID(rt_ptr: *mut JSRuntime, class_id_ptr: *mut u32) -> u32 {
+    let rt = &mut *rt_ptr;
+    let mut class_id = *class_id_ptr;
+    if class_id != 0 {
+        return class_id;
+    }
+
+    // Resize class_array if needed
+    // We assume class_id starts at 1. 0 is reserved/none.
+    // If class_count is 0, we might want to allocate initial array.
+
+    let new_size = rt.class_count + 1;
+    let new_array = rt.js_realloc_rt(
+        rt.class_array as *mut c_void,
+        new_size as usize * std::mem::size_of::<JSClass>(),
+    ) as *mut JSClass;
+
+    if new_array.is_null() {
+        return 0;
+    }
+    rt.class_array = new_array;
+    class_id = rt.class_count as u32;
+    rt.class_count += 1;
+
+    // Initialize the new class slot
+    let cls = rt.class_array.offset(class_id as isize);
+    std::ptr::write_bytes(cls, 0, 1);
+    (*cls).class_id = class_id;
+
+    *class_id_ptr = class_id;
+    class_id
+}
+
+pub unsafe fn JS_NewClass(rt: *mut JSRuntime, class_id: u32, class_def: *const JSClassDef) -> i32 {
+    let rt = &mut *rt;
+    if class_id >= rt.class_count as u32 {
+        return -1;
+    }
+    let cls = rt.class_array.offset(class_id as isize);
+    let def = &*class_def;
+
+    (*cls).class_name =
+        rt.js_new_atom_len(def.class_name as *const u8, libc::strlen(def.class_name));
+    (*cls).finalizer = def
+        .finalizer
+        .map(|f| f as *mut c_void)
+        .unwrap_or(std::ptr::null_mut());
+    (*cls).gc_mark = def
+        .gc_mark
+        .map(|f| f as *mut c_void)
+        .unwrap_or(std::ptr::null_mut());
+    (*cls).call = def
+        .call
+        .map(|f| f as *mut c_void)
+        .unwrap_or(std::ptr::null_mut());
+    (*cls).exotic = def.exotic;
+
+    0
+}
+
+pub unsafe fn JS_NewObjectProtoClass(
+    ctx: *mut JSContext,
+    _proto: JSValue,
+    class_id: u32,
+) -> JSValue {
+    let ctx = &mut *ctx;
+    if class_id >= (*ctx.rt).class_count as u32 {
+        return JS_EXCEPTION;
+    }
+
+    let obj = (*ctx.rt).js_malloc_rt(std::mem::size_of::<JSObject>()) as *mut JSObject;
+    if obj.is_null() {
+        return JS_EXCEPTION;
+    }
+
+    (*obj).header.ref_count = 1;
+    (*obj).header.gc_obj_type = JS_GC_OBJ_TYPE_JS_OBJECT;
+    (*obj).header.mark = 0;
+    (*obj).header.link.init();
+
+    (*ctx.rt).gc_obj_list.add_tail(&mut (*obj).header.link);
+
+    (*obj).shape = std::ptr::null_mut(); // TODO: Create shape from proto
+    (*obj).prop = std::ptr::null_mut();
+    (*obj).first_weak_ref = std::ptr::null_mut();
+
+    JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
+}
+
+pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
+    // TODO: Use Object.prototype
+    JS_NewObjectProtoClass(ctx, JS_NULL, 1) // Assuming class_id 1 is Object
 }

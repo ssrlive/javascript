@@ -414,4 +414,73 @@ mod builtin_functions_tests {
             _ => panic!("Expected mapped.join(',') to be '2,4', got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_string_trim() {
+        let script = "'  hello world  '.trim()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world");
+            }
+            _ => panic!("Expected trim to return 'hello world', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_starts_with() {
+        let script = "'hello world'.startsWith('hello')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected startsWith to return true, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_ends_with() {
+        let script = "'hello world'.endsWith('world')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected endsWith to return true, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_includes() {
+        let script = "'hello world'.includes('lo wo')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected includes to return true, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_repeat() {
+        let script = "'ha'.repeat(3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hahaha");
+            }
+            _ => panic!("Expected repeat to return 'hahaha', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_concat() {
+        let script = "'hello'.concat(' ', 'world', '!')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world!");
+            }
+            _ => panic!("Expected concat to return 'hello world!', got {:?}", result),
+        }
+    }
 }

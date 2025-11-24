@@ -2456,6 +2456,110 @@ fn evaluate_expr(
                                     })
                                 }
                             }
+                            "trim" => {
+                                if args.is_empty() {
+                                    let str_val = String::from_utf16_lossy(&s);
+                                    let trimmed = str_val.trim();
+                                    Ok(Value::String(utf8_to_utf16(trimmed)))
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "startsWith" => {
+                                if args.len() == 1 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(search) = search_val {
+                                        let starts = s.len() >= search.len()
+                                            && s[..search.len()] == search[..];
+                                        Ok(Value::Boolean(starts))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "endsWith" => {
+                                if args.len() == 1 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(search) = search_val {
+                                        let ends = s.len() >= search.len()
+                                            && s[s.len() - search.len()..] == search[..];
+                                        Ok(Value::Boolean(ends))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "includes" => {
+                                if args.len() == 1 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(search) = search_val {
+                                        let includes = utf16_find(&s, &search).is_some();
+                                        Ok(Value::Boolean(includes))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "repeat" => {
+                                if args.len() == 1 {
+                                    let count_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::Number(n) = count_val {
+                                        let count = n as usize;
+                                        let mut repeated = Vec::new();
+                                        for _ in 0..count {
+                                            repeated.extend_from_slice(&s);
+                                        }
+                                        Ok(Value::String(repeated))
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            }
+                            "concat" => {
+                                let mut result = s.clone();
+                                for arg in args {
+                                    let arg_val = evaluate_expr(env, arg)?;
+                                    if let Value::String(arg_str) = arg_val {
+                                        result.extend(arg_str);
+                                    } else {
+                                        // Convert to string
+                                        let str_val = match arg_val {
+                                            Value::Number(n) => utf8_to_utf16(&n.to_string()),
+                                            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+                                            Value::Undefined => utf8_to_utf16("undefined"),
+                                            _ => utf8_to_utf16("[object Object]"),
+                                        };
+                                        result.extend(str_val);
+                                    }
+                                }
+                                Ok(Value::String(result))
+                            }
                             _ => Err(JSError::EvaluationError {
                                 message: "error".to_string(),
                             }), // method not found

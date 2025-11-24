@@ -842,7 +842,7 @@ fn evaluate_script(script: &str) -> Result<Value, ()> {
     evaluate_statements(&mut env, &statements)
 }
 
-fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
+pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
     let mut statements = Vec::new();
     while !tokens.is_empty() {
         let stmt = parse_statement(tokens)?;
@@ -870,7 +870,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
     Ok(Statement::Expr(expr))
 }
 
-fn evaluate_statements(
+pub fn evaluate_statements(
     env: &mut std::collections::HashMap<String, Value>,
     statements: &[Statement],
 ) -> Result<Value, ()> {
@@ -895,6 +895,13 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Var(name) => env.get(name).cloned().ok_or(()),
+        Expr::UnaryNeg(expr) => {
+            let val = evaluate_expr(env, expr)?;
+            match val {
+                Value::Number(n) => Ok(Value::Number(-n)),
+                _ => Err(()),
+            }
+        }
         Expr::Binary(left, op, right) => {
             let l = evaluate_expr(env, left)?;
             let r = evaluate_expr(env, right)?;
@@ -952,33 +959,181 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 _ => Err(()), // property not found or not supported
             }
         }
+        Expr::Call(func_expr, args) => {
+            // For now, we only support method calls on strings
+            if let Expr::Property(obj_expr, method_name) = &**func_expr {
+                let obj_val = evaluate_expr(env, obj_expr)?;
+                if let Value::String(s) = obj_val {
+                    match method_name.as_str() {
+                        "substring" => {
+                            if args.len() == 2 {
+                                let start_val = evaluate_expr(env, &args[0])?;
+                                let end_val = evaluate_expr(env, &args[1])?;
+                                if let (Value::Number(start), Value::Number(end)) =
+                                    (start_val, end_val)
+                                {
+                                    let start_idx = start as usize;
+                                    let end_idx = end as usize;
+                                    if start_idx <= end_idx && end_idx <= s.len() {
+                                        Ok(Value::String(s[start_idx..end_idx].to_string()))
+                                    } else {
+                                        Err(())
+                                    }
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "slice" => {
+                            let start = if args.len() >= 1 {
+                                match evaluate_expr(env, &args[0])? {
+                                    Value::Number(n) => n as isize,
+                                    _ => 0isize,
+                                }
+                            } else {
+                                0isize
+                            };
+                            let end = if args.len() >= 2 {
+                                match evaluate_expr(env, &args[1])? {
+                                    Value::Number(n) => n as isize,
+                                    _ => s.len() as isize,
+                                }
+                            } else {
+                                s.len() as isize
+                            };
+
+                            let len = s.len() as isize;
+                            let start = if start < 0 { len + start } else { start };
+                            let end = if end < 0 { len + end } else { end };
+
+                            let start = start.max(0).min(len) as usize;
+                            let end = end.max(0).min(len) as usize;
+
+                            if start <= end {
+                                Ok(Value::String(s[start..end].to_string()))
+                            } else {
+                                Ok(Value::String("".to_string()))
+                            }
+                        }
+                        "toUpperCase" => {
+                            if args.is_empty() {
+                                Ok(Value::String(s.to_uppercase()))
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "toLowerCase" => {
+                            if args.is_empty() {
+                                Ok(Value::String(s.to_lowercase()))
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "indexOf" => {
+                            if args.len() == 1 {
+                                let search_val = evaluate_expr(env, &args[0])?;
+                                if let Value::String(search) = search_val {
+                                    if let Some(pos) = s.find(&search) {
+                                        Ok(Value::Number(pos as f64))
+                                    } else {
+                                        Ok(Value::Number(-1.0))
+                                    }
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "lastIndexOf" => {
+                            if args.len() == 1 {
+                                let search_val = evaluate_expr(env, &args[0])?;
+                                if let Value::String(search) = search_val {
+                                    if let Some(pos) = s.rfind(&search) {
+                                        Ok(Value::Number(pos as f64))
+                                    } else {
+                                        Ok(Value::Number(-1.0))
+                                    }
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "replace" => {
+                            if args.len() == 2 {
+                                let search_val = evaluate_expr(env, &args[0])?;
+                                let replace_val = evaluate_expr(env, &args[1])?;
+                                if let (Value::String(search), Value::String(replace)) =
+                                    (search_val, replace_val)
+                                {
+                                    Ok(Value::String(s.replacen(&search, &replace, 1)))
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        "split" => {
+                            if args.len() == 1 {
+                                let sep_val = evaluate_expr(env, &args[0])?;
+                                if let Value::String(sep) = sep_val {
+                                    // For simplicity, return the first part only as a string
+                                    // In real JS, split returns an array
+                                    if let Some(pos) = s.find(&sep) {
+                                        Ok(Value::String(s[..pos].to_string()))
+                                    } else {
+                                        Ok(Value::String(s.clone()))
+                                    }
+                                } else {
+                                    Err(())
+                                }
+                            } else {
+                                Err(())
+                            }
+                        }
+                        _ => Err(()), // method not found
+                    }
+                } else {
+                    Err(())
+                }
+            } else {
+                Err(())
+            }
+        }
     }
 }
 
 #[derive(Debug, Clone)]
-enum Value {
+pub enum Value {
     Number(f64),
     String(String),
 }
 
 #[derive(Debug)]
-enum Statement {
+pub enum Statement {
     Let(String, Expr),
     Expr(Expr),
 }
 
 #[derive(Debug)]
-enum Expr {
+pub enum Expr {
     Number(f64),
     StringLit(String),
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
+    UnaryNeg(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
+    Call(Box<Expr>, Vec<Expr>),
 }
 
 #[derive(Debug)]
-enum BinaryOp {
+pub enum BinaryOp {
     Add,
     Sub,
     Mul,
@@ -1014,7 +1169,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
     Ok(result)
 }
 
-fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
+pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
@@ -1144,6 +1299,10 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 tokens.push(Token::Assign);
                 i += 1;
             }
+            ',' => {
+                tokens.push(Token::Comma);
+                i += 1;
+            }
             ';' => {
                 tokens.push(Token::Semicolon);
                 i += 1;
@@ -1155,13 +1314,13 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
 }
 
 #[derive(Debug, Clone)]
-enum TemplatePart {
+pub enum TemplatePart {
     String(String),
     Expr(Vec<Token>),
 }
 
 #[derive(Debug, Clone)]
-enum Token {
+pub enum Token {
     Number(f64),
     StringLit(String),
     TemplateString(Vec<TemplatePart>),
@@ -1175,6 +1334,7 @@ enum Token {
     LBracket,
     RBracket,
     Dot,
+    Comma,
     Let,
     Var,
     Assign,
@@ -1232,6 +1392,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     let mut expr = match tokens.remove(0) {
         Token::Number(n) => Expr::Number(n),
         Token::StringLit(s) => Expr::StringLit(s),
+        Token::Minus => {
+            let inner = parse_primary(tokens)?;
+            Expr::UnaryNeg(Box::new(inner))
+        }
         Token::TemplateString(parts) => {
             if parts.is_empty() {
                 Expr::StringLit(String::new())
@@ -1299,6 +1463,31 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                 } else {
                     return Err(());
                 }
+            }
+            Token::LParen => {
+                tokens.remove(0); // consume '('
+                let mut args = Vec::new();
+                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                    loop {
+                        let arg = parse_expression(tokens)?;
+                        args.push(arg);
+                        if tokens.is_empty() {
+                            return Err(());
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            break;
+                        }
+                        if !matches!(tokens[0], Token::Comma) {
+                            return Err(());
+                        }
+                        tokens.remove(0); // consume ','
+                    }
+                }
+                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume ')'
+                expr = Expr::Call(Box::new(expr), args);
             }
             _ => break,
         }

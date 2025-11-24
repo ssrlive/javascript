@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
+use crate::error::JSError;
 use libc;
 use std::ffi::c_void;
 
@@ -840,14 +841,14 @@ pub unsafe fn JS_Eval(
     }
 }
 
-fn evaluate_script(script: &str) -> Result<Value, ()> {
+fn evaluate_script(script: &str) -> Result<Value, JSError> {
     let mut tokens = tokenize(script)?;
     let statements = parse_statements(&mut tokens)?;
     let mut env = std::collections::HashMap::new();
     evaluate_statements(&mut env, &statements)
 }
 
-pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
+pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
     while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
         let stmt = parse_statement(tokens)?;
@@ -859,7 +860,7 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
     Ok(statements)
 }
 
-fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
+fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if tokens.len() >= 1 && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
         if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
@@ -873,31 +874,31 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
                             tokens.remove(0);
                             params.push(param);
                             if tokens.is_empty() {
-                                return Err(());
+                                return Err(JSError::ParseError);
                             }
                             if matches!(tokens[0], Token::RParen) {
                                 break;
                             }
                             if !matches!(tokens[0], Token::Comma) {
-                                return Err(());
+                                return Err(JSError::ParseError);
                             }
                             tokens.remove(0); // consume ,
                         } else {
-                            return Err(());
+                            return Err(JSError::ParseError);
                         }
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume )
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume }
                 return Ok(Statement::Let(name, Expr::Function(params, body)));
@@ -907,33 +908,33 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
     if tokens.len() >= 1 && matches!(tokens[0], Token::If) {
         tokens.remove(0); // consume if
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume )
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume {
         let then_body = parse_statements(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume }
 
         let else_body = if !tokens.is_empty() && matches!(tokens[0], Token::Else) {
             tokens.remove(0); // consume else
             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(());
+                return Err(JSError::ParseError);
             }
             tokens.remove(0); // consume {
             let body = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(());
+                return Err(JSError::ParseError);
             }
             tokens.remove(0); // consume }
             Some(body)
@@ -946,7 +947,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
     if tokens.len() >= 1 && matches!(tokens[0], Token::For) {
         tokens.remove(0); // consume for
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume (
 
@@ -962,7 +963,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume first ;
 
@@ -974,7 +975,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume second ;
 
@@ -986,19 +987,19 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume )
 
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume {
 
         let body = parse_statements(tokens)?;
 
         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(());
+            return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume }
 
@@ -1036,7 +1037,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
 pub fn evaluate_statements(
     env: &mut std::collections::HashMap<String, Value>,
     statements: &[Statement],
-) -> Result<Value, ()> {
+) -> Result<Value, JSError> {
     let mut last_value = Value::Number(0.0);
     for stmt in statements {
         match stmt {
@@ -1078,7 +1079,11 @@ pub fn evaluate_statements(
                         Statement::Expr(expr) => {
                             evaluate_expr(env, expr)?;
                         }
-                        _ => return Err(()), // For now, only support let and expr in init
+                        _ => {
+                            return Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        } // For now, only support let and expr in init
                     }
                 }
 
@@ -1086,7 +1091,7 @@ pub fn evaluate_statements(
                 let mut iterations = 0;
                 loop {
                     if iterations >= 1000 {
-                        return Err(()); // Prevent infinite loops
+                        return Err(JSError::InfiniteLoopError { iterations: 1000 });
                     }
 
                     // Check condition
@@ -1094,7 +1099,7 @@ pub fn evaluate_statements(
                         let cond_val = evaluate_expr(env, cond_expr)?;
                         is_truthy(&cond_val)
                     } else {
-                        iterations == 0 // No condition means execute once
+                        true // No condition means infinite loop
                     };
 
                     if !should_continue {
@@ -1105,7 +1110,7 @@ pub fn evaluate_statements(
                     let result = evaluate_statements(env, body);
                     match result {
                         Ok(val) => last_value = val,
-                        Err(()) => return Err(()),
+                        Err(err) => return Err(err),
                     }
 
                     // Execute increment
@@ -1122,14 +1127,15 @@ pub fn evaluate_statements(
                                     evaluate_expr(env, expr)?;
                                 }
                             },
-                            _ => return Err(()), // For now, only support expr in increment
+                            _ => {
+                                return Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            } // For now, only support expr in increment
                         }
                     }
 
                     iterations += 1;
-                    if condition.is_none() {
-                        break; // Execute only once if no condition
-                    }
                 }
             }
         }
@@ -1137,7 +1143,10 @@ pub fn evaluate_statements(
     Ok(last_value)
 }
 
-fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) -> Result<Value, ()> {
+fn evaluate_expr(
+    env: &std::collections::HashMap<String, Value>,
+    expr: &Expr,
+) -> Result<Value, JSError> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
@@ -1160,7 +1169,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
             let val = evaluate_expr(env, expr)?;
             match val {
                 Value::Number(n) => Ok(Value::Number(-n)),
-                _ => Err(()),
+                _ => Err(JSError::EvaluationError {
+                    message: "error".to_string(),
+                }),
             }
         }
         Expr::Binary(left, op, right) => {
@@ -1184,25 +1195,35 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
                         Ok(Value::String(result))
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::Sub => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::Mul => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::Div => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => {
                         if rn == 0.0 {
-                            Err(())
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
                         } else {
                             Ok(Value::Number(ln / rn))
                         }
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::Equal => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => {
@@ -1229,7 +1250,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     (Value::String(ls), Value::String(rs)) => {
                         Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 }))
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::GreaterThan => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => {
@@ -1238,7 +1261,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     (Value::String(ls), Value::String(rs)) => {
                         Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 }))
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::LessEqual => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => {
@@ -1247,7 +1272,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     (Value::String(ls), Value::String(rs)) => {
                         Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 }))
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
                 BinaryOp::GreaterEqual => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => {
@@ -1256,7 +1283,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                     (Value::String(ls), Value::String(rs)) => {
                         Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 }))
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 },
             }
         }
@@ -1272,7 +1301,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         Ok(Value::String(Vec::new())) // or return undefined, but use empty string here
                     }
                 }
-                _ => Err(()), // other types of indexing not supported yet
+                _ => Err(JSError::EvaluationError {
+                    message: "error".to_string(),
+                }), // other types of indexing not supported yet
             }
         }
         Expr::Property(obj, prop) => {
@@ -1286,7 +1317,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 }
                 _ => {
                     println!("Property not found");
-                    Err(())
+                    Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    })
                 }
             }
         }
@@ -1333,7 +1366,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 }
                             }
                         } else {
-                            Err(())
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
                         }
                     }
                     (Value::String(s), method) => {
@@ -1343,7 +1378,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 if args.is_empty() {
                                     Ok(Value::String(s.clone()))
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "substring" => {
@@ -1358,13 +1395,19 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                         if start_idx <= end_idx && end_idx <= utf16_len(&s) {
                                             Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
                                         } else {
-                                            Err(())
+                                            Err(JSError::EvaluationError {
+                                                message: "error".to_string(),
+                                            })
                                         }
                                     } else {
-                                        Err(())
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
                                     }
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "slice" => {
@@ -1402,14 +1445,18 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 if args.is_empty() {
                                     Ok(Value::String(utf16_to_uppercase(&s)))
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "toLowerCase" => {
                                 if args.is_empty() {
                                     Ok(Value::String(utf16_to_lowercase(&s)))
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "indexOf" => {
@@ -1422,10 +1469,14 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                             Ok(Value::Number(-1.0))
                                         }
                                     } else {
-                                        Err(())
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
                                     }
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "lastIndexOf" => {
@@ -1438,10 +1489,14 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                             Ok(Value::Number(-1.0))
                                         }
                                     } else {
-                                        Err(())
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
                                     }
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "replace" => {
@@ -1453,10 +1508,14 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                     {
                                         Ok(Value::String(utf16_replace(&s, &search, &replace)))
                                     } else {
-                                        Err(())
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
                                     }
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
                             "split" => {
@@ -1471,16 +1530,24 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                             Ok(Value::String(s.clone()))
                                         }
                                     } else {
-                                        Err(())
+                                        Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        })
                                     }
                                 } else {
-                                    Err(())
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
                                 }
                             }
-                            _ => Err(()), // method not found
+                            _ => Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            }), // method not found
                         }
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 }
             } else {
                 // Regular function call
@@ -1513,12 +1580,14 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
                             }
                         }
-                        _ => Err(()),
+                        _ => Err(JSError::EvaluationError {
+                            message: "error".to_string(),
+                        }),
                     },
                     Value::Closure(params, body, captured_env) => {
                         // Function call
                         if params.len() != args.len() {
-                            return Err(());
+                            return Err(JSError::ParseError);
                         }
                         // Create new environment starting with captured environment
                         let mut func_env = captured_env.clone();
@@ -1530,7 +1599,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         // Execute function body
                         evaluate_statements(&mut func_env, &body)
                     }
-                    _ => Err(()),
+                    _ => Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    }),
                 }
             }
         }
@@ -1668,13 +1739,17 @@ pub enum BinaryOp {
     GreaterEqual,
 }
 
-fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, ()> {
+fn parse_string_literal(
+    chars: &[char],
+    start: &mut usize,
+    end_char: char,
+) -> Result<Vec<u16>, JSError> {
     let mut result = Vec::new();
     while *start < chars.len() && chars[*start] != end_char {
         if chars[*start] == '\\' {
             *start += 1;
             if *start >= chars.len() {
-                return Err(());
+                return Err(JSError::TokenizationError);
             }
             match chars[*start] {
                 'n' => result.push('\n' as u16),
@@ -1688,7 +1763,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                     // Unicode escape sequence \uXXXX
                     *start += 1;
                     if *start + 4 > chars.len() {
-                        return Err(());
+                        return Err(JSError::TokenizationError);
                     }
                     let hex_str: String = chars[*start..*start + 4].iter().collect();
                     *start += 3; // will be incremented by 1 at the end
@@ -1696,10 +1771,10 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                         Ok(code) => {
                             result.push(code);
                         }
-                        Err(_) => return Err(()), // Invalid hex
+                        Err(_) => return Err(JSError::TokenizationError), // Invalid hex
                     }
                 }
-                _ => return Err(()), // Invalid escape sequence
+                _ => return Err(JSError::TokenizationError), // Invalid escape sequence
             }
         } else {
             result.push(chars[*start] as u16);
@@ -1707,12 +1782,12 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
         *start += 1;
     }
     if *start >= chars.len() {
-        return Err(());
+        return Err(JSError::TokenizationError);
     }
     Ok(result)
 }
 
-pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
+pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
@@ -1801,7 +1876,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                let num = num_str.parse::<f64>().map_err(|_| ())?;
+                let num = num_str
+                    .parse::<f64>()
+                    .map_err(|_| JSError::TokenizationError)?;
                 tokens.push(Token::Number(num));
             }
             '"' => {
@@ -1843,7 +1920,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                             i += 1;
                         }
                         if brace_count != 0 {
-                            return Err(());
+                            return Err(JSError::TokenizationError);
                         }
                         let expr_str: String = chars[expr_start..i - 1].iter().collect();
                         // Tokenize the expression inside ${}
@@ -1855,7 +1932,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                     }
                 }
                 if i >= chars.len() {
-                    return Err(());
+                    return Err(JSError::TokenizationError);
                 }
                 // Add remaining string part
                 if current_start < i {
@@ -1891,7 +1968,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 tokens.push(Token::Semicolon);
                 i += 1;
             }
-            _ => return Err(()),
+            _ => return Err(JSError::TokenizationError),
         }
     }
     Ok(tokens)
@@ -1949,11 +2026,11 @@ fn is_truthy(val: &Value) -> bool {
     }
 }
 
-fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     parse_assignment(tokens)
 }
 
-fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_comparison(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
@@ -1967,7 +2044,7 @@ fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     }
 }
 
-fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_additive(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
@@ -2031,7 +2108,7 @@ fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     }
 }
 
-fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_multiplicative(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
@@ -2051,7 +2128,7 @@ fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     }
 }
 
-fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_primary(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
@@ -2071,9 +2148,9 @@ fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     }
 }
 
-fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     if tokens.is_empty() {
-        return Err(());
+        return Err(JSError::ParseError);
     }
     let mut expr = match tokens.remove(0) {
         Token::Number(n) => Expr::Number(n),
@@ -2127,47 +2204,51 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                             tokens.remove(0);
                             params.push(param);
                             if tokens.is_empty() {
-                                return Err(());
+                                return Err(JSError::ParseError);
                             }
                             if matches!(tokens[0], Token::RParen) {
                                 break;
                             }
                             if !matches!(tokens[0], Token::Comma) {
-                                return Err(());
+                                return Err(JSError::ParseError);
                             }
                             tokens.remove(0); // consume ,
                         } else {
-                            return Err(());
+                            return Err(JSError::ParseError);
                         }
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume )
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume }
                 Expr::Function(params, body)
             } else {
-                return Err(());
+                return Err(JSError::ParseError);
             }
         }
         Token::LParen => {
             let expr = parse_expression(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                return Err(());
+                return Err(JSError::ParseError);
             }
             tokens.remove(0);
             expr
         }
-        _ => return Err(()),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            })
+        }
     };
 
     // Handle postfix operators like index access
@@ -2177,7 +2258,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                 tokens.remove(0); // consume '['
                 let index_expr = parse_expression(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBracket) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume ']'
                 expr = Expr::Index(Box::new(expr), Box::new(index_expr));
@@ -2185,12 +2266,12 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
             Token::Dot => {
                 tokens.remove(0); // consume '.'
                 if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 if let Token::Identifier(prop) = tokens.remove(0) {
                     expr = Expr::Property(Box::new(expr), prop);
                 } else {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
             }
             Token::LParen => {
@@ -2201,19 +2282,19 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                         let arg = parse_expression(tokens)?;
                         args.push(arg);
                         if tokens.is_empty() {
-                            return Err(());
+                            return Err(JSError::ParseError);
                         }
                         if matches!(tokens[0], Token::RParen) {
                             break;
                         }
                         if !matches!(tokens[0], Token::Comma) {
-                            return Err(());
+                            return Err(JSError::ParseError);
                         }
                         tokens.remove(0); // consume ','
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(());
+                    return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume ')'
                 expr = Expr::Call(Box::new(expr), args);

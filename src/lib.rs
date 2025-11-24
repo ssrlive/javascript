@@ -2,4 +2,5 @@
 // pub mod libregexp;
 // pub mod libunicode;
 // pub mod libunicode_table;
+pub mod error;
 pub mod quickjs;

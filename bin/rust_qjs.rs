@@ -16,8 +16,8 @@ fn main() {
     // Tokenize
     let tokens = match tokenize(script) {
         Ok(tokens) => tokens,
-        Err(_) => {
-            eprintln!("Tokenization failed");
+        Err(err) => {
+            eprintln!("Tokenization failed: {:?}", err);
             process::exit(1);
         }
     };
@@ -26,8 +26,8 @@ fn main() {
     let mut tokens = tokens;
     let statements = match parse_statements(&mut tokens) {
         Ok(statements) => statements,
-        Err(_) => {
-            eprintln!("Parsing failed");
+        Err(err) => {
+            eprintln!("Parsing failed: {:?}", err);
             process::exit(1);
         }
     };
@@ -36,8 +36,8 @@ fn main() {
     let mut env = std::collections::HashMap::new();
     let result = match evaluate_statements(&mut env, &statements) {
         Ok(value) => value,
-        Err(_) => {
-            eprintln!("Evaluation failed (possibly due to infinite loop protection)");
+        Err(err) => {
+            eprintln!("Evaluation failed: {:?}", err);
             process::exit(1);
         }
     };

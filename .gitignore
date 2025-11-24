@@ -1,0 +1,5 @@
+.vscode/
+.VSCodeCounter/
+Cargo.lock
+target/
+

@@ -804,16 +804,110 @@ pub unsafe fn JS_Eval(
     let s = std::slice::from_raw_parts(input as *const u8, input_len);
     let script = std::str::from_utf8(s).unwrap_or("");
 
-    // Simple expression evaluator
-    match evaluate_expression(script.trim()) {
+    // Evaluate statements
+    match evaluate_script(script.trim()) {
         Ok(num) => JSValue::new_float64(num),
         Err(_) => JS_UNDEFINED,
     }
 }
 
-fn evaluate_expression(expr: &str) -> Result<f64, ()> {
-    let mut tokens = tokenize(expr)?;
-    parse_expression(&mut tokens)
+fn evaluate_script(script: &str) -> Result<f64, ()> {
+    let mut tokens = tokenize(script)?;
+    let statements = parse_statements(&mut tokens)?;
+    let mut env = std::collections::HashMap::new();
+    evaluate_statements(&mut env, &statements)
+}
+
+fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
+    let mut statements = Vec::new();
+    while !tokens.is_empty() {
+        let stmt = parse_statement(tokens)?;
+        statements.push(stmt);
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+            tokens.remove(0);
+        }
+    }
+    Ok(statements)
+}
+
+fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Let) {
+        tokens.remove(0); // consume let
+        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+            tokens.remove(0);
+            if tokens.len() >= 1 && matches!(tokens[0], Token::Assign) {
+                tokens.remove(0);
+                let expr = parse_expression(tokens)?;
+                return Ok(Statement::Let(name, expr));
+            }
+        }
+    }
+    let expr = parse_expression(tokens)?;
+    Ok(Statement::Expr(expr))
+}
+
+fn evaluate_statements(
+    env: &mut std::collections::HashMap<String, f64>,
+    statements: &[Statement],
+) -> Result<f64, ()> {
+    let mut last_value = 0.0;
+    for stmt in statements {
+        match stmt {
+            Statement::Let(name, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                env.insert(name.clone(), val);
+                last_value = val;
+            }
+            Statement::Expr(expr) => {
+                last_value = evaluate_expr(env, expr)?;
+            }
+        }
+    }
+    Ok(last_value)
+}
+
+fn evaluate_expr(env: &std::collections::HashMap<String, f64>, expr: &Expr) -> Result<f64, ()> {
+    match expr {
+        Expr::Number(n) => Ok(*n),
+        Expr::Var(name) => env.get(name).cloned().ok_or(()),
+        Expr::Binary(left, op, right) => {
+            let l = evaluate_expr(env, left)?;
+            let r = evaluate_expr(env, right)?;
+            match op {
+                BinaryOp::Add => Ok(l + r),
+                BinaryOp::Sub => Ok(l - r),
+                BinaryOp::Mul => Ok(l * r),
+                BinaryOp::Div => {
+                    if r == 0.0 {
+                        Err(())
+                    } else {
+                        Ok(l / r)
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Statement {
+    Let(String, Expr),
+    Expr(Expr),
+}
+
+#[derive(Debug)]
+enum Expr {
+    Number(f64),
+    Var(String),
+    Binary(Box<Expr>, BinaryOp, Box<Expr>),
+}
+
+#[derive(Debug)]
+enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
@@ -856,76 +950,97 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 let num = num_str.parse::<f64>().map_err(|_| ())?;
                 tokens.push(Token::Number(num));
             }
+            'a'..='z' | 'A'..='Z' | '_' => {
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                let ident = &expr[start..i];
+                match ident {
+                    "let" => tokens.push(Token::Let),
+                    _ => tokens.push(Token::Identifier(ident.to_string())),
+                }
+            }
+            '=' => {
+                tokens.push(Token::Assign);
+                i += 1;
+            }
+            ';' => {
+                tokens.push(Token::Semicolon);
+                i += 1;
+            }
             _ => return Err(()),
         }
     }
     Ok(tokens)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Token {
     Number(f64),
+    Identifier(String),
     Plus,
     Minus,
     Multiply,
     Divide,
     LParen,
     RParen,
+    Let,
+    Assign,
+    Semicolon,
 }
 
-fn parse_expression(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     parse_additive(tokens)
 }
 
-fn parse_additive(tokens: &mut Vec<Token>) -> Result<f64, ()> {
-    let mut left = parse_multiplicative(tokens)?;
-    while !tokens.is_empty() {
-        match tokens[0] {
-            Token::Plus => {
-                tokens.remove(0);
-                let right = parse_multiplicative(tokens)?;
-                left += right;
-            }
-            Token::Minus => {
-                tokens.remove(0);
-                let right = parse_multiplicative(tokens)?;
-                left -= right;
-            }
-            _ => break,
-        }
+fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+    let left = parse_multiplicative(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
     }
-    Ok(left)
+    match &tokens[0] {
+        Token::Plus => {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(right)))
+        }
+        Token::Minus => {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(right)))
+        }
+        _ => Ok(left),
+    }
 }
 
-fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<f64, ()> {
-    let mut left = parse_primary(tokens)?;
-    while !tokens.is_empty() {
-        match tokens[0] {
-            Token::Multiply => {
-                tokens.remove(0);
-                let right = parse_primary(tokens)?;
-                left *= right;
-            }
-            Token::Divide => {
-                tokens.remove(0);
-                let right = parse_primary(tokens)?;
-                if right == 0.0 {
-                    return Err(());
-                }
-                left /= right;
-            }
-            _ => break,
-        }
+fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
+    let left = parse_primary(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
     }
-    Ok(left)
+    match &tokens[0] {
+        Token::Multiply => {
+            tokens.remove(0);
+            let right = parse_multiplicative(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(right)))
+        }
+        Token::Divide => {
+            tokens.remove(0);
+            let right = parse_multiplicative(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(right)))
+        }
+        _ => Ok(left),
+    }
 }
 
-fn parse_primary(tokens: &mut Vec<Token>) -> Result<f64, ()> {
+fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     if tokens.is_empty() {
         return Err(());
     }
     match tokens.remove(0) {
-        Token::Number(n) => Ok(n),
+        Token::Number(n) => Ok(Expr::Number(n)),
+        Token::Identifier(name) => Ok(Expr::Var(name)),
         Token::LParen => {
             let expr = parse_expression(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {

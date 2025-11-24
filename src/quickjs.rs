@@ -945,6 +945,13 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 _ => Err(()), // other types of indexing not supported yet
             }
         }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match (obj_val, prop.as_str()) {
+                (Value::String(s), "length") => Ok(Value::Number(s.len() as f64)),
+                _ => Err(()), // property not found or not supported
+            }
+        }
     }
 }
 
@@ -967,6 +974,7 @@ enum Expr {
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    Property(Box<Expr>, String),
 }
 
 #[derive(Debug)]
@@ -1045,7 +1053,11 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 tokens.push(Token::RBracket);
                 i += 1;
             }
-            '0'..='9' | '.' => {
+            '.' => {
+                tokens.push(Token::Dot);
+                i += 1;
+            }
+            '0'..='9' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_digit(10) || chars[i] == '.') {
                     i += 1;
@@ -1162,6 +1174,7 @@ enum Token {
     RParen,
     LBracket,
     RBracket,
+    Dot,
     Let,
     Var,
     Assign,
@@ -1275,6 +1288,17 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                 }
                 tokens.remove(0); // consume ']'
                 expr = Expr::Index(Box::new(expr), Box::new(index_expr));
+            }
+            Token::Dot => {
+                tokens.remove(0); // consume '.'
+                if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
+                    return Err(());
+                }
+                if let Token::Identifier(prop) = tokens.remove(0) {
+                    expr = Expr::Property(Box::new(expr), prop);
+                } else {
+                    return Err(());
+                }
             }
             _ => break,
         }

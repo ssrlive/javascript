@@ -855,8 +855,8 @@ fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, ()> {
 }
 
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Let) {
-        tokens.remove(0); // consume let
+    if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
+        tokens.remove(0); // consume let/var
         if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
             tokens.remove(0);
             if tokens.len() >= 1 && matches!(tokens[0], Token::Assign) {
@@ -929,6 +929,22 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                 },
             }
         }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::String(s), Value::Number(n)) => {
+                    let idx = n as usize;
+                    if idx < s.len() {
+                        let ch = s.chars().nth(idx).unwrap();
+                        Ok(Value::String(ch.to_string()))
+                    } else {
+                        Ok(Value::String(String::new())) // or return undefined, but use empty string here
+                    }
+                }
+                _ => Err(()), // other types of indexing not supported yet
+            }
+        }
     }
 }
 
@@ -950,6 +966,7 @@ enum Expr {
     StringLit(String),
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
+    Index(Box<Expr>, Box<Expr>),
 }
 
 #[derive(Debug)]
@@ -1018,6 +1035,14 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                i += 1;
+            }
+            '[' => {
+                tokens.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
                 i += 1;
             }
             '0'..='9' | '.' => {
@@ -1099,6 +1124,7 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 let ident = &expr[start..i];
                 match ident {
                     "let" => tokens.push(Token::Let),
+                    "var" => tokens.push(Token::Var),
                     _ => tokens.push(Token::Identifier(ident.to_string())),
                 }
             }
@@ -1134,7 +1160,10 @@ enum Token {
     Divide,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
     Let,
+    Var,
     Assign,
     Semicolon,
 }
@@ -1187,18 +1216,18 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     if tokens.is_empty() {
         return Err(());
     }
-    match tokens.remove(0) {
-        Token::Number(n) => Ok(Expr::Number(n)),
-        Token::StringLit(s) => Ok(Expr::StringLit(s)),
+    let mut expr = match tokens.remove(0) {
+        Token::Number(n) => Expr::Number(n),
+        Token::StringLit(s) => Expr::StringLit(s),
         Token::TemplateString(parts) => {
             if parts.is_empty() {
-                Ok(Expr::StringLit(String::new()))
+                Expr::StringLit(String::new())
             } else if parts.len() == 1 {
                 match &parts[0] {
-                    TemplatePart::String(s) => Ok(Expr::StringLit(s.clone())),
+                    TemplatePart::String(s) => Expr::StringLit(s.clone()),
                     TemplatePart::Expr(expr_tokens) => {
                         let mut expr_tokens = expr_tokens.clone();
-                        parse_expression(&mut expr_tokens)
+                        parse_expression(&mut expr_tokens)?
                     }
                 }
             } else {
@@ -1220,20 +1249,38 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
                     };
                     expr = Expr::Binary(Box::new(expr), BinaryOp::Add, Box::new(right));
                 }
-                Ok(expr)
+                expr
             }
         }
-        Token::Identifier(name) => Ok(Expr::Var(name)),
+        Token::Identifier(name) => Expr::Var(name),
         Token::LParen => {
             let expr = parse_expression(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
                 return Err(());
             }
             tokens.remove(0);
-            Ok(expr)
+            expr
         }
-        _ => Err(()),
+        _ => return Err(()),
+    };
+
+    // Handle postfix operators like index access
+    while !tokens.is_empty() {
+        match &tokens[0] {
+            Token::LBracket => {
+                tokens.remove(0); // consume '['
+                let index_expr = parse_expression(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::RBracket) {
+                    return Err(());
+                }
+                tokens.remove(0); // consume ']'
+                expr = Expr::Index(Box::new(expr), Box::new(index_expr));
+            }
+            _ => break,
+        }
     }
+
+    Ok(expr)
 }
 
 pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom) -> JSValue {
@@ -1344,23 +1391,23 @@ mod tests {
             let ctx = JS_NewContext(rt);
             assert!(!ctx.is_null());
 
-            // 创建对象
+            // create object
             let obj = JS_NewObject(ctx);
             assert_eq!(obj.get_tag(), JS_TAG_OBJECT);
             let obj_ptr = obj.get_ptr() as *mut JSObject;
             assert!(!obj_ptr.is_null());
 
-            // 创建属性名 atom
+            // create property name atom
             let key = CString::new("a").unwrap();
             let atom = (*rt).js_new_atom_len(key.as_ptr() as *const u8, 1);
             assert!(atom != 0);
 
-            // 设置属性值
+            // set property value
             let val = JSValue::new_int32(42);
             let ret = JS_DefinePropertyValue(ctx, obj, atom, val, 0);
             assert_eq!(ret, 1);
 
-            // 查找属性
+            // find property
             let shape = (*obj_ptr).shape;
             let (idx, _) = (*shape).find_own_property(atom).unwrap();
             let prop_val = (*(*obj_ptr).prop.offset(idx as isize)).u.value;

@@ -960,6 +960,35 @@ enum BinaryOp {
     Div,
 }
 
+fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<String, ()> {
+    let mut result = String::new();
+    while *start < chars.len() && chars[*start] != end_char {
+        if chars[*start] == '\\' {
+            *start += 1;
+            if *start >= chars.len() {
+                return Err(());
+            }
+            match chars[*start] {
+                'n' => result.push('\n'),
+                't' => result.push('\t'),
+                'r' => result.push('\r'),
+                '\\' => result.push('\\'),
+                '"' => result.push('"'),
+                '\'' => result.push('\''),
+                '`' => result.push('`'),
+                _ => return Err(()), // Invalid escape sequence
+            }
+        } else {
+            result.push(chars[*start]);
+        }
+        *start += 1;
+    }
+    if *start >= chars.len() {
+        return Err(());
+    }
+    Ok(result)
+}
+
 fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
@@ -1002,29 +1031,17 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
             }
             '"' => {
                 i += 1; // skip opening quote
-                let start = i;
-                while i < chars.len() && chars[i] != '"' {
-                    i += 1;
-                }
-                if i >= chars.len() {
-                    return Err(());
-                }
-                let str_lit = &expr[start..i];
-                tokens.push(Token::StringLit(str_lit.to_string()));
-                i += 1; // skip closing quote
+                let mut start = i;
+                let str_lit = parse_string_literal(&chars, &mut start, '"')?;
+                tokens.push(Token::StringLit(str_lit));
+                i = start + 1; // skip closing quote
             }
             '\'' => {
                 i += 1; // skip opening quote
-                let start = i;
-                while i < chars.len() && chars[i] != '\'' {
-                    i += 1;
-                }
-                if i >= chars.len() {
-                    return Err(());
-                }
-                let str_lit = &expr[start..i];
-                tokens.push(Token::StringLit(str_lit.to_string()));
-                i += 1; // skip closing quote
+                let mut start = i;
+                let str_lit = parse_string_literal(&chars, &mut start, '\'')?;
+                tokens.push(Token::StringLit(str_lit));
+                i = start + 1; // skip closing quote
             }
             '`' => {
                 i += 1; // skip opening backtick
@@ -1034,8 +1051,10 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                     if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
                         // Found ${, add string part before it
                         if current_start < i {
-                            let str_part = &expr[current_start..i];
-                            parts.push(TemplatePart::String(str_part.to_string()));
+                            let mut start_idx = current_start;
+                            let str_part = parse_string_literal(&chars, &mut start_idx, '$')?;
+                            parts.push(TemplatePart::String(str_part));
+                            i = start_idx; // Update i to after the parsed string
                         }
                         i += 2; // skip ${
                         let expr_start = i;
@@ -1065,8 +1084,9 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 }
                 // Add remaining string part
                 if current_start < i {
-                    let str_part = &expr[current_start..i];
-                    parts.push(TemplatePart::String(str_part.to_string()));
+                    let mut start_idx = current_start;
+                    let str_part = parse_string_literal(&chars, &mut start_idx, '`')?;
+                    parts.push(TemplatePart::String(str_part));
                 }
                 tokens.push(Token::TemplateString(parts));
                 i += 1; // skip closing backtick

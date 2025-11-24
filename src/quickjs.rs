@@ -832,6 +832,9 @@ pub unsafe fn JS_Eval(
     match evaluate_script(script.trim()) {
         Ok(Value::Number(num)) => JSValue::new_float64(num),
         Ok(Value::String(s)) => JS_NewString(_ctx, &s),
+        Ok(Value::Undefined) => JS_UNDEFINED,
+        Ok(Value::Object(_)) => JS_UNDEFINED,   // For now
+        Ok(Value::Function(_)) => JS_UNDEFINED, // For now
         Err(_) => JS_UNDEFINED,
     }
 }
@@ -895,7 +898,15 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
-        Expr::Var(name) => env.get(name).cloned().ok_or(()),
+        Expr::Var(name) => {
+            if let Some(val) = env.get(name) {
+                Ok(val.clone())
+            } else if name == "console" {
+                Ok(Value::Object("console".to_string()))
+            } else {
+                Err(())
+            }
+        }
         Expr::UnaryNeg(expr) => {
             let val = evaluate_expr(env, expr)?;
             match val {
@@ -924,6 +935,7 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
                         result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
                         Ok(Value::String(result))
                     }
+                    _ => Err(()),
                 },
                 BinaryOp::Sub => match (l, r) {
                     (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
@@ -1016,175 +1028,188 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
         }
         Expr::Property(obj, prop) => {
             let obj_val = evaluate_expr(env, obj)?;
+            println!("Property: obj_val={:?}, prop={}", obj_val, prop);
             match (obj_val, prop.as_str()) {
                 (Value::String(s), "length") => Ok(Value::Number(utf16_len(&s) as f64)),
-                _ => Err(()), // property not found or not supported
+                (Value::Object(obj_name), method) if obj_name == "console" && method == "log" => {
+                    println!("Returning console.log function");
+                    Ok(Value::Function("console.log".to_string()))
+                }
+                _ => {
+                    println!("Property not found");
+                    Err(())
+                }
             }
         }
         Expr::Call(func_expr, args) => {
-            // Check if it's a method call on an object
+            // Check if it's a method call first
             if let Expr::Property(obj_expr, method_name) = &**func_expr {
                 let obj_val = evaluate_expr(env, obj_expr)?;
-                if let Value::String(s) = obj_val {
-                    match method_name.as_str() {
-                        "substring" => {
-                            if args.len() == 2 {
-                                let start_val = evaluate_expr(env, &args[0])?;
-                                let end_val = evaluate_expr(env, &args[1])?;
-                                if let (Value::Number(start), Value::Number(end)) =
-                                    (start_val, end_val)
-                                {
-                                    let start_idx = start as usize;
-                                    let end_idx = end as usize;
-                                    if start_idx <= end_idx && end_idx <= utf16_len(&s) {
-                                        Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
+                match (obj_val, method_name.as_str()) {
+                    (Value::Object(obj_name), "log") if obj_name == "console" => {
+                        // console.log call
+                        for arg in args {
+                            let arg_val = evaluate_expr(env, arg)?;
+                            match arg_val {
+                                Value::Number(n) => print!("{}", n),
+                                Value::String(s) => {
+                                    print!("{}", String::from_utf16_lossy(&s))
+                                }
+                                Value::Undefined => print!("undefined"),
+                                Value::Object(name) => print!("[object {}]", name),
+                                Value::Function(name) => print!("[Function: {}]", name),
+                            }
+                        }
+                        println!();
+                        Ok(Value::Undefined)
+                    }
+                    (Value::String(s), method) => {
+                        // String method call
+                        match method {
+                            "substring" => {
+                                if args.len() == 2 {
+                                    let start_val = evaluate_expr(env, &args[0])?;
+                                    let end_val = evaluate_expr(env, &args[1])?;
+                                    if let (Value::Number(start), Value::Number(end)) =
+                                        (start_val, end_val)
+                                    {
+                                        let start_idx = start as usize;
+                                        let end_idx = end as usize;
+                                        if start_idx <= end_idx && end_idx <= utf16_len(&s) {
+                                            Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
+                                        } else {
+                                            Err(())
+                                        }
                                     } else {
                                         Err(())
                                     }
                                 } else {
                                     Err(())
                                 }
-                            } else {
-                                Err(())
                             }
-                        }
-                        "slice" => {
-                            let start = if args.len() >= 1 {
-                                match evaluate_expr(env, &args[0])? {
-                                    Value::Number(n) => n as isize,
-                                    _ => 0isize,
+                            "slice" => {
+                                let start = if args.len() >= 1 {
+                                    match evaluate_expr(env, &args[0])? {
+                                        Value::Number(n) => n as isize,
+                                        _ => 0isize,
+                                    }
+                                } else {
+                                    0isize
+                                };
+                                let end = if args.len() >= 2 {
+                                    match evaluate_expr(env, &args[1])? {
+                                        Value::Number(n) => n as isize,
+                                        _ => s.len() as isize,
+                                    }
+                                } else {
+                                    s.len() as isize
+                                };
+
+                                let len = utf16_len(&s) as isize;
+                                let start = if start < 0 { len + start } else { start };
+                                let end = if end < 0 { len + end } else { end };
+
+                                let start = start.max(0).min(len) as usize;
+                                let end = end.max(0).min(len) as usize;
+
+                                if start <= end {
+                                    Ok(Value::String(utf16_slice(&s, start, end)))
+                                } else {
+                                    Ok(Value::String(Vec::new()))
                                 }
-                            } else {
-                                0isize
-                            };
-                            let end = if args.len() >= 2 {
-                                match evaluate_expr(env, &args[1])? {
-                                    Value::Number(n) => n as isize,
-                                    _ => s.len() as isize,
+                            }
+                            "toUpperCase" => {
+                                if args.is_empty() {
+                                    Ok(Value::String(utf16_to_uppercase(&s)))
+                                } else {
+                                    Err(())
                                 }
-                            } else {
-                                s.len() as isize
-                            };
-
-                            let len = utf16_len(&s) as isize;
-                            let start = if start < 0 { len + start } else { start };
-                            let end = if end < 0 { len + end } else { end };
-
-                            let start = start.max(0).min(len) as usize;
-                            let end = end.max(0).min(len) as usize;
-
-                            if start <= end {
-                                Ok(Value::String(utf16_slice(&s, start, end)))
-                            } else {
-                                Ok(Value::String(Vec::new()))
                             }
-                        }
-                        "toUpperCase" => {
-                            if args.is_empty() {
-                                Ok(Value::String(utf16_to_uppercase(&s)))
-                            } else {
-                                Err(())
+                            "toLowerCase" => {
+                                if args.is_empty() {
+                                    Ok(Value::String(utf16_to_lowercase(&s)))
+                                } else {
+                                    Err(())
+                                }
                             }
-                        }
-                        "toLowerCase" => {
-                            if args.is_empty() {
-                                Ok(Value::String(utf16_to_lowercase(&s)))
-                            } else {
-                                Err(())
-                            }
-                        }
-                        "indexOf" => {
-                            if args.len() == 1 {
-                                let search_val = evaluate_expr(env, &args[0])?;
-                                if let Value::String(search) = search_val {
-                                    if let Some(pos) = utf16_find(&s, &search) {
-                                        Ok(Value::Number(pos as f64))
+                            "indexOf" => {
+                                if args.len() == 1 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(search) = search_val {
+                                        if let Some(pos) = utf16_find(&s, &search) {
+                                            Ok(Value::Number(pos as f64))
+                                        } else {
+                                            Ok(Value::Number(-1.0))
+                                        }
                                     } else {
-                                        Ok(Value::Number(-1.0))
+                                        Err(())
                                     }
                                 } else {
                                     Err(())
                                 }
-                            } else {
-                                Err(())
                             }
-                        }
-                        "lastIndexOf" => {
-                            if args.len() == 1 {
-                                let search_val = evaluate_expr(env, &args[0])?;
-                                if let Value::String(search) = search_val {
-                                    if let Some(pos) = utf16_rfind(&s, &search) {
-                                        Ok(Value::Number(pos as f64))
+                            "lastIndexOf" => {
+                                if args.len() == 1 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(search) = search_val {
+                                        if let Some(pos) = utf16_rfind(&s, &search) {
+                                            Ok(Value::Number(pos as f64))
+                                        } else {
+                                            Ok(Value::Number(-1.0))
+                                        }
                                     } else {
-                                        Ok(Value::Number(-1.0))
+                                        Err(())
                                     }
                                 } else {
                                     Err(())
                                 }
-                            } else {
-                                Err(())
                             }
-                        }
-                        "replace" => {
-                            if args.len() == 2 {
-                                let search_val = evaluate_expr(env, &args[0])?;
-                                let replace_val = evaluate_expr(env, &args[1])?;
-                                if let (Value::String(search), Value::String(replace)) =
-                                    (search_val, replace_val)
-                                {
-                                    Ok(Value::String(utf16_replace(&s, &search, &replace)))
-                                } else {
-                                    Err(())
-                                }
-                            } else {
-                                Err(())
-                            }
-                        }
-                        "split" => {
-                            if args.len() == 1 {
-                                let sep_val = evaluate_expr(env, &args[0])?;
-                                if let Value::String(sep) = sep_val {
-                                    // For simplicity, return the first part only as a string
-                                    // In real JS, split returns an array
-                                    if let Some(pos) = utf16_find(&s, &sep) {
-                                        Ok(Value::String(utf16_slice(&s, 0, pos)))
+                            "replace" => {
+                                if args.len() == 2 {
+                                    let search_val = evaluate_expr(env, &args[0])?;
+                                    let replace_val = evaluate_expr(env, &args[1])?;
+                                    if let (Value::String(search), Value::String(replace)) =
+                                        (search_val, replace_val)
+                                    {
+                                        Ok(Value::String(utf16_replace(&s, &search, &replace)))
                                     } else {
-                                        Ok(Value::String(s.clone()))
+                                        Err(())
                                     }
                                 } else {
                                     Err(())
                                 }
-                            } else {
-                                Err(())
                             }
+                            "split" => {
+                                if args.len() == 1 {
+                                    let sep_val = evaluate_expr(env, &args[0])?;
+                                    if let Value::String(sep) = sep_val {
+                                        // For simplicity, return the first part only as a string
+                                        // In real JS, split returns an array
+                                        if let Some(pos) = utf16_find(&s, &sep) {
+                                            Ok(Value::String(utf16_slice(&s, 0, pos)))
+                                        } else {
+                                            Ok(Value::String(s.clone()))
+                                        }
+                                    } else {
+                                        Err(())
+                                    }
+                                } else {
+                                    Err(())
+                                }
+                            }
+                            _ => Err(()), // method not found
                         }
-                        _ => Err(()), // method not found
                     }
-                } else {
-                    Err(())
+                    _ => Err(()),
                 }
             } else {
-                // Check if it's a global function call
-                if let Expr::Var(func_name) = &**func_expr {
-                    match func_name.as_str() {
-                        "console.log" => {
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => println!("{}", n),
-                                    Value::String(s) => {
-                                        println!("{}", String::from_utf16_lossy(&s))
-                                    }
-                                }
-                                Ok(Value::Number(0.0)) // console.log returns undefined, but we return 0
-                            } else {
-                                Err(())
-                            }
-                        }
-                        _ => Err(()), // function not found
-                    }
-                } else {
-                    Err(())
+                // Regular function call
+                let func_val = evaluate_expr(env, func_expr)?;
+                match func_val {
+                    Value::Function(func_name) => match func_name.as_str() {
+                        _ => Err(()),
+                    },
+                    _ => Err(()),
                 }
             }
         }
@@ -1195,6 +1220,9 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) ->
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
+    Undefined,
+    Object(String),   // For now, just a name
+    Function(String), // Function name
 }
 
 // Helper functions for UTF-16 string operations

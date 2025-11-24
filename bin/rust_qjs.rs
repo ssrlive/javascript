@@ -46,5 +46,8 @@ fn main() {
     match result {
         Value::Number(n) => println!("{}", n),
         Value::String(s) => println!("{}", String::from_utf16_lossy(&s)),
+        Value::Undefined => println!("undefined"),
+        Value::Object(name) => println!("[object {}]", name),
+        Value::Function(name) => println!("[Function: {}]", name),
     }
 }

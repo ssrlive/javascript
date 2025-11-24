@@ -1013,6 +1013,19 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 tokens.push(Token::StringLit(str_lit.to_string()));
                 i += 1; // skip closing quote
             }
+            '\'' => {
+                i += 1; // skip opening quote
+                let start = i;
+                while i < chars.len() && chars[i] != '\'' {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(());
+                }
+                let str_lit = &expr[start..i];
+                tokens.push(Token::StringLit(str_lit.to_string()));
+                i += 1; // skip closing quote
+            }
             'a'..='z' | 'A'..='Z' | '_' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {

@@ -128,6 +128,23 @@ impl list_head {
         self.prev = self;
         self.next = self;
     }
+
+    pub unsafe fn add_tail(&mut self, new_entry: *mut list_head) {
+        let prev = self.prev;
+        (*new_entry).next = self;
+        (*new_entry).prev = prev;
+        (*prev).next = new_entry;
+        self.prev = new_entry;
+    }
+
+    pub unsafe fn del(&mut self) {
+        let next = self.next;
+        let prev = self.prev;
+        (*next).prev = prev;
+        (*prev).next = next;
+        self.next = std::ptr::null_mut();
+        self.prev = std::ptr::null_mut();
+    }
 }
 
 #[repr(C)]
@@ -659,4 +676,33 @@ pub unsafe extern "C" fn js_def_malloc_usable_size(ptr: *const c_void) -> usize 
 
     #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     return 0; // TODO: support other platforms
+}
+
+pub unsafe fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext {
+    let ctx_ptr = (*rt).js_malloc_rt(std::mem::size_of::<JSContext>()) as *mut JSContext;
+    if ctx_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let ctx = &mut *ctx_ptr;
+    std::ptr::write_bytes(ctx_ptr, 0, 1);
+
+    ctx.header.ref_count = 1;
+    ctx.rt = rt;
+    ctx.link.init();
+
+    (*rt).context_list.add_tail(&mut ctx.link);
+
+    // TODO: Initialize built-in objects (Global, Object, Array, etc.)
+    // This requires JS_NewObject and other helpers which are not implemented yet.
+
+    ctx_ptr
+}
+
+pub unsafe fn JS_FreeContext(ctx: *mut JSContext) {
+    let rt = (*ctx).rt;
+    (*ctx).link.del();
+
+    // TODO: Free built-in objects
+
+    (*rt).js_free_rt(ctx as *mut c_void);
 }

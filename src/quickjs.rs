@@ -806,12 +806,16 @@ pub unsafe fn JS_Eval(
 
     // Evaluate statements
     match evaluate_script(script.trim()) {
-        Ok(num) => JSValue::new_float64(num),
+        Ok(Value::Number(num)) => JSValue::new_float64(num),
+        Ok(Value::String(s)) => {
+            // For simplicity, return the length as int for now
+            JSValue::new_int32(s.len() as i32)
+        }
         Err(_) => JS_UNDEFINED,
     }
 }
 
-fn evaluate_script(script: &str) -> Result<f64, ()> {
+fn evaluate_script(script: &str) -> Result<Value, ()> {
     let mut tokens = tokenize(script)?;
     let statements = parse_statements(&mut tokens)?;
     let mut env = std::collections::HashMap::new();
@@ -847,15 +851,15 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, ()> {
 }
 
 fn evaluate_statements(
-    env: &mut std::collections::HashMap<String, f64>,
+    env: &mut std::collections::HashMap<String, Value>,
     statements: &[Statement],
-) -> Result<f64, ()> {
-    let mut last_value = 0.0;
+) -> Result<Value, ()> {
+    let mut last_value = Value::Number(0.0);
     for stmt in statements {
         match stmt {
             Statement::Let(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
-                env.insert(name.clone(), val);
+                env.insert(name.clone(), val.clone());
                 last_value = val;
             }
             Statement::Expr(expr) => {
@@ -866,27 +870,52 @@ fn evaluate_statements(
     Ok(last_value)
 }
 
-fn evaluate_expr(env: &std::collections::HashMap<String, f64>, expr: &Expr) -> Result<f64, ()> {
+fn evaluate_expr(env: &std::collections::HashMap<String, Value>, expr: &Expr) -> Result<Value, ()> {
     match expr {
-        Expr::Number(n) => Ok(*n),
+        Expr::Number(n) => Ok(Value::Number(*n)),
+        Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Var(name) => env.get(name).cloned().ok_or(()),
         Expr::Binary(left, op, right) => {
             let l = evaluate_expr(env, left)?;
             let r = evaluate_expr(env, right)?;
             match op {
-                BinaryOp::Add => Ok(l + r),
-                BinaryOp::Sub => Ok(l - r),
-                BinaryOp::Mul => Ok(l * r),
-                BinaryOp::Div => {
-                    if r == 0.0 {
-                        Err(())
-                    } else {
-                        Ok(l / r)
+                BinaryOp::Add => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::String(ls + &rs)),
+                    (Value::Number(ln), Value::String(rs)) => {
+                        Ok(Value::String(ln.to_string() + &rs))
                     }
-                }
+                    (Value::String(ls), Value::Number(rn)) => {
+                        Ok(Value::String(ls + &rn.to_string()))
+                    }
+                },
+                BinaryOp::Sub => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
+                    _ => Err(()),
+                },
+                BinaryOp::Mul => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
+                    _ => Err(()),
+                },
+                BinaryOp::Div => match (l, r) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        if rn == 0.0 {
+                            Err(())
+                        } else {
+                            Ok(Value::Number(ln / rn))
+                        }
+                    }
+                    _ => Err(()),
+                },
             }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum Value {
+    Number(f64),
+    String(String),
 }
 
 #[derive(Debug)]
@@ -898,6 +927,7 @@ enum Statement {
 #[derive(Debug)]
 enum Expr {
     Number(f64),
+    StringLit(String),
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
 }
@@ -950,6 +980,19 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
                 let num = num_str.parse::<f64>().map_err(|_| ())?;
                 tokens.push(Token::Number(num));
             }
+            '"' => {
+                i += 1; // skip opening quote
+                let start = i;
+                while i < chars.len() && chars[i] != '"' {
+                    i += 1;
+                }
+                if i >= chars.len() {
+                    return Err(());
+                }
+                let str_lit = &expr[start..i];
+                tokens.push(Token::StringLit(str_lit.to_string()));
+                i += 1; // skip closing quote
+            }
             'a'..='z' | 'A'..='Z' | '_' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
@@ -978,6 +1021,7 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ()> {
 #[derive(Debug, Clone)]
 enum Token {
     Number(f64),
+    StringLit(String),
     Identifier(String),
     Plus,
     Minus,
@@ -1040,6 +1084,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, ()> {
     }
     match tokens.remove(0) {
         Token::Number(n) => Ok(Expr::Number(n)),
+        Token::StringLit(s) => Ok(Expr::StringLit(s)),
         Token::Identifier(name) => Ok(Expr::Var(name)),
         Token::LParen => {
             let expr = parse_expression(tokens)?;

@@ -704,4 +704,173 @@ mod builtin_functions_tests {
             ),
         }
     }
+
+    #[test]
+    fn test_array_splice() {
+        // Test basic splice - remove elements
+        let script = "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); arr.push(4); let removed = arr.splice(1, 2); removed.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "2,3");
+            }
+            _ => panic!("Expected splice to return '2,3', got {:?}", result),
+        }
+
+        // Test splice with insertion (no elements removed)
+        let script2 = "let arr = Array(); arr.push(1); arr.push(4); let removed = arr.splice(1, 0, 2, 3); removed.length";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 0.0), // No elements were removed
+            _ => panic!(
+                "Expected splice with insertion to return empty array (length 0), got {:?}",
+                result2
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_shift() {
+        let script = "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); let first = arr.shift(); arr.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "2,3");
+            }
+            _ => panic!("Expected shift to result in '2,3', got {:?}", result),
+        }
+
+        // Test shift on empty array
+        let script2 = "let arr = Array(); arr.shift()";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Undefined) => {}
+            _ => panic!(
+                "Expected shift on empty array to return undefined, got {:?}",
+                result2
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_unshift() {
+        let script = "let arr = Array(); arr.push(3); arr.push(4); let len = arr.unshift(1, 2); arr.join(',') + ',' + len";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "1,2,3,4,4");
+            }
+            _ => panic!("Expected unshift to return '1,2,3,4,4', got {:?}", result),
+        }
+
+        // Test unshift on empty array
+        let script2 = "let arr = Array(); let len = arr.unshift(1, 2, 3); len";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!(
+                "Expected unshift on empty array to return 3, got {:?}",
+                result2
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_fill() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(4); let filled = arr5.fill(9, 1, 3); filled.join(',')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "1,9,9,4");
+            }
+            _ => panic!("Expected fill to return '1,9,9,4', got {:?}", result),
+        }
+
+        // Test fill entire array
+        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let filled = arr4.fill(0); filled.join(',')";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "0,0,0");
+            }
+            _ => panic!(
+                "Expected fill entire array to return '0,0,0', got {:?}",
+                result2
+            ),
+        }
+    }
+
+    #[test]
+    fn test_array_last_index_of() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); let arr6 = arr5.push(1); arr6.lastIndexOf(2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected lastIndexOf(2) to return 3, got {:?}", result),
+        }
+
+        // Test element not found
+        let script2 =
+            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.lastIndexOf(4)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected lastIndexOf(4) to return -1, got {:?}", result2),
+        }
+
+        // Test with fromIndex
+        let script3 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); arr5.lastIndexOf(2, 2)";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected lastIndexOf(2, 2) to return 1, got {:?}", result3),
+        }
+    }
+
+    #[test]
+    fn test_array_to_string() {
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.toString()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "1,2,3");
+            }
+            _ => panic!("Expected toString to return '1,2,3', got {:?}", result),
+        }
+
+        // Test empty array
+        let script2 = "let arr = Array(); arr.toString()";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "");
+            }
+            _ => panic!(
+                "Expected empty array toString to return '', got {:?}",
+                result2
+            ),
+        }
+
+        // Test array with different types
+        let script3 =
+            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push('hello'); let arr4 = arr3.push(true); arr4.toString()";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "1,hello,true");
+            }
+            _ => panic!(
+                "Expected mixed array toString to return '1,hello,true', got {:?}",
+                result3
+            ),
+        }
+    }
 }

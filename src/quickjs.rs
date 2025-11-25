@@ -828,7 +828,39 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
 pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     let mut tokens = tokenize(script)?;
     let statements = parse_statements(&mut tokens)?;
-    let mut env = std::collections::HashMap::new();
+    let mut env: std::collections::HashMap<String, Rc<RefCell<Value>>> = std::collections::HashMap::new();
+
+    // Inject simple host `std` / `os` shims when importing with the pattern:
+    //   import * as NAME from "std";
+    for line in script.lines() {
+        let l = line.trim();
+        if l.starts_with("import * as") && l.contains("from") {
+            if let Some(as_idx) = l.find("as") {
+                if let Some(from_idx) = l.find("from") {
+                    let name_part = &l[as_idx + 2..from_idx].trim();
+                    let name = name_part.trim();
+                    if let Some(start_quote) = l[from_idx..].find('"') {
+                        let rest = &l[from_idx + start_quote + 1..];
+                        if let Some(end_quote) = rest.find('"') {
+                            let module = &rest[..end_quote];
+                            if module == "std" {
+                                env.insert(
+                                    name.to_string(),
+                                    Rc::new(RefCell::new(Value::Object(crate::host_shims::make_std_object()))),
+                                );
+                            } else if module == "os" {
+                                env.insert(
+                                    name.to_string(),
+                                    Rc::new(RefCell::new(Value::Object(crate::host_shims::make_os_object()))),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     evaluate_statements(&mut env, &statements)
 }
 
@@ -1409,6 +1441,232 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                         }
                     }
                     (Value::Object(mut obj_map), method) => {
+                        // If this object looks like the `std` module (we used 'sprintf' as marker)
+                        if obj_map.contains_key("sprintf") {
+                            match method {
+                                "tmpfile" => {
+                                    // create a simple in-memory file-like object
+                                    let mut tmp = std::collections::HashMap::new();
+                                    obj_set_val(&mut tmp, "__buf", Value::String(utf8_to_utf16("")));
+                                    obj_set_val(&mut tmp, "__pos", Value::Number(0.0));
+                                    // methods
+                                    obj_set_val(&mut tmp, "puts", Value::Function("tmp.puts".to_string()));
+                                    obj_set_val(&mut tmp, "readAsString", Value::Function("tmp.readAsString".to_string()));
+                                    obj_set_val(&mut tmp, "seek", Value::Function("tmp.seek".to_string()));
+                                    obj_set_val(&mut tmp, "tell", Value::Function("tmp.tell".to_string()));
+                                    obj_set_val(&mut tmp, "putByte", Value::Function("tmp.putByte".to_string()));
+                                    obj_set_val(&mut tmp, "getByte", Value::Function("tmp.getByte".to_string()));
+                                    obj_set_val(&mut tmp, "getline", Value::Function("tmp.getline".to_string()));
+                                    obj_set_val(&mut tmp, "eof", Value::Function("tmp.eof".to_string()));
+                                    obj_set_val(&mut tmp, "close", Value::Function("tmp.close".to_string()));
+                                    return Ok(Value::Object(tmp));
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // If this object is a file-like object (we use '__buf' as marker)
+                        if obj_map.contains_key("__buf") {
+                            match method {
+                                "puts" => {
+                                    // append string arguments to buffer
+                                    // prefer mutating env variable when possible
+                                    let mut target_map = obj_map.clone();
+                                    if let Expr::Var(varname) = &**obj_expr {
+                                        if let Some(rc) = env_get(env, varname) {
+                                            let mut borrowed = rc.borrow_mut();
+                                            if let Value::Object(ref mut stored_map) = *borrowed {
+                                                target_map = stored_map.clone();
+                                            }
+                                        }
+                                    }
+                                    // build string to append
+                                    let mut to_append = String::new();
+                                    for a in args {
+                                        let av = evaluate_expr(env, a)?;
+                                        match av {
+                                            Value::String(sv) => to_append.push_str(&utf16_to_utf8(&sv)),
+                                            Value::Number(n) => to_append.push_str(&n.to_string()),
+                                            Value::Boolean(b) => to_append.push_str(&b.to_string()),
+                                            _ => {}
+                                        }
+                                    }
+                                    // get current buffer
+                                    if let Some(rcbuf) = target_map.get("__buf") {
+                                        let mut cur = rcbuf.borrow().clone();
+                                        if let Value::String(mut vec) = cur {
+                                            let mut s = utf16_to_utf8(&vec);
+                                            s.push_str(&to_append);
+                                            obj_set_val(&mut target_map, "__buf", Value::String(utf8_to_utf16(&s)));
+                                        }
+                                    }
+                                    // write back to env if needed
+                                    if let Expr::Var(varname) = &**obj_expr {
+                                        if let Some(rc) = env_get(env, varname) {
+                                            let mut borrowed = rc.borrow_mut();
+                                            *borrowed = Value::Object(target_map);
+                                        }
+                                    }
+                                    return Ok(Value::Undefined);
+                                }
+                                "readAsString" => {
+                                    if let Some(rcbuf) = obj_map.get("__buf") {
+                                        let cur = rcbuf.borrow().clone();
+                                        if let Value::String(vec) = cur {
+                                            return Ok(Value::String(vec));
+                                        }
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "seek" => {
+                                    // seek(offset, whence)
+                                    if args.len() >= 2 {
+                                        let offv = evaluate_expr(env, &args[0])?;
+                                        let whv = evaluate_expr(env, &args[1])?;
+                                        let offset = match offv { Value::Number(n) => n as i64, _ => 0 } as i64;
+                                        let whence = match whv { Value::Number(n) => n as i32, _ => 0 };
+                                        // get current buffer length
+                                        let len = if let Some(rcbuf) = obj_map.get("__buf") {
+                                            if let Value::String(vec) = rcbuf.borrow().clone() { utf16_to_utf8(&vec).len() as i64 } else { 0 }
+                                        } else { 0 };
+                                        let newpos = if whence == 0 { offset } else { len + offset };
+                                        let posn = if newpos < 0 { 0 } else if newpos > len { len } else { newpos } as f64;
+                                        // mutate target
+                                        if let Expr::Var(varname) = &**obj_expr {
+                                            if let Some(rc) = env_get(env, varname) {
+                                                let mut borrowed = rc.borrow_mut();
+                                                if let Value::Object(ref mut stored_map) = *borrowed {
+                                                    obj_set_val(stored_map, "__pos", Value::Number(posn));
+                                                }
+                                            }
+                                        }
+                                        return Ok(Value::Number(0.0));
+                                    }
+                                    return Ok(Value::Number(-1.0));
+                                }
+                                "tell" => {
+                                    if let Some(rcpos) = obj_map.get("__pos") {
+                                        if let Value::Number(n) = rcpos.borrow().clone() {
+                                            return Ok(Value::Number(n));
+                                        }
+                                    }
+                                    return Ok(Value::Number(0.0));
+                                }
+                                "putByte" => {
+                                    if args.len() >= 1 {
+                                        let bv = evaluate_expr(env, &args[0])?;
+                                        let byte = match bv { Value::Number(n) => n as u8, _ => 0 };
+                                        // mutate buffer
+                                        let mut target_map = obj_map.clone();
+                                        if let Expr::Var(varname) = &**obj_expr {
+                                            if let Some(rc) = env_get(env, varname) {
+                                                let mut borrowed = rc.borrow_mut();
+                                                if let Value::Object(ref mut stored_map) = *borrowed {
+                                                    target_map = stored_map.clone();
+                                                }
+                                            }
+                                        }
+                                        if let Some(rcbuf) = target_map.get("__buf") {
+                                            let mut cur = rcbuf.borrow().clone();
+                                            if let Value::String(mut vec) = cur {
+                                                let mut s = utf16_to_utf8(&vec);
+                                                s.push(byte as char);
+                                                obj_set_val(&mut target_map, "__buf", Value::String(utf8_to_utf16(&s)));
+                                            }
+                                        }
+                                        if let Expr::Var(varname) = &**obj_expr {
+                                            if let Some(rc) = env_get(env, varname) {
+                                                let mut borrowed = rc.borrow_mut();
+                                                *borrowed = Value::Object(target_map);
+                                            }
+                                        }
+                                        return Ok(Value::Undefined);
+                                    }
+                                    return Ok(Value::Undefined);
+                                }
+                                "getByte" => {
+                                    // return byte at current pos and advance
+                                    let mut pos = 0usize;
+                                    if let Some(rcpos) = obj_map.get("__pos") {
+                                        if let Value::Number(n) = rcpos.borrow().clone() { pos = n as usize; }
+                                    }
+                                    if let Some(rcbuf) = obj_map.get("__buf") {
+                                        if let Value::String(vec) = rcbuf.borrow().clone() {
+                                            let s = utf16_to_utf8(&vec);
+                                            if pos < s.len() {
+                                                let b = s.as_bytes()[pos] as i32;
+                                                // advance pos in env if var
+                                                if let Expr::Var(varname) = &**obj_expr {
+                                                    if let Some(rc) = env_get(env, varname) {
+                                                        let mut borrowed = rc.borrow_mut();
+                                                        if let Value::Object(ref mut stored_map) = *borrowed {
+                                                            obj_set_val(stored_map, "__pos", Value::Number((pos + 1) as f64));
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Value::Number(b as f64));
+                                            }
+                                        }
+                                    }
+                                    return Ok(Value::Number(-1.0));
+                                }
+                                "getline" => {
+                                    let mut pos = 0usize;
+                                    if let Some(rcpos) = obj_map.get("__pos") {
+                                        if let Value::Number(n) = rcpos.borrow().clone() { pos = n as usize; }
+                                    }
+                                    if let Some(rcbuf) = obj_map.get("__buf") {
+                                        if let Value::String(vec) = rcbuf.borrow().clone() {
+                                            let s = utf16_to_utf8(&vec);
+                                            if pos >= s.len() { return Ok(Value::Undefined); }
+                                            if let Some(idx) = s[pos..].find('\n') {
+                                                let line = &s[pos..pos+idx];
+                                                // advance pos
+                                                if let Expr::Var(varname) = &**obj_expr {
+                                                    if let Some(rc) = env_get(env, varname) {
+                                                        let mut borrowed = rc.borrow_mut();
+                                                        if let Value::Object(ref mut stored_map) = *borrowed {
+                                                            obj_set_val(stored_map, "__pos", Value::Number((pos + idx + 1) as f64));
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Value::String(utf8_to_utf16(line)));
+                                            } else {
+                                                // return rest
+                                                let line = &s[pos..];
+                                                if let Expr::Var(varname) = &**obj_expr {
+                                                    if let Some(rc) = env_get(env, varname) {
+                                                        let mut borrowed = rc.borrow_mut();
+                                                        if let Value::Object(ref mut stored_map) = *borrowed {
+                                                            obj_set_val(stored_map, "__pos", Value::Number(s.len() as f64));
+                                                        }
+                                                    }
+                                                }
+                                                return Ok(Value::String(utf8_to_utf16(line)));
+                                            }
+                                        }
+                                    }
+                                    return Ok(Value::Undefined);
+                                }
+                                "eof" => {
+                                    let mut pos = 0usize;
+                                    if let Some(rcpos) = obj_map.get("__pos") {
+                                        if let Value::Number(n) = rcpos.borrow().clone() { pos = n as usize; }
+                                    }
+                                    if let Some(rcbuf) = obj_map.get("__buf") {
+                                        if let Value::String(vec) = rcbuf.borrow().clone() {
+                                            let s = utf16_to_utf8(&vec);
+                                            return Ok(Value::Boolean(pos >= s.len()));
+                                        }
+                                    }
+                                    return Ok(Value::Boolean(true));
+                                }
+                                "close" => {
+                                    return Ok(Value::Undefined);
+                                }
+                                _ => {}
+                            }
+                        }
                         // Check if this is the Math object
                         if obj_map.contains_key("PI") && obj_map.contains_key("E") {
                             // Math methods

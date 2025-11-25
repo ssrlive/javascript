@@ -167,8 +167,7 @@ pub struct JSMallocState {
 pub struct JSMallocFunctions {
     pub js_malloc: Option<unsafe extern "C" fn(*mut JSMallocState, usize) -> *mut c_void>,
     pub js_free: Option<unsafe extern "C" fn(*mut JSMallocState, *mut c_void)>,
-    pub js_realloc:
-        Option<unsafe extern "C" fn(*mut JSMallocState, *mut c_void, usize) -> *mut c_void>,
+    pub js_realloc: Option<unsafe extern "C" fn(*mut JSMallocState, *mut c_void, usize) -> *mut c_void>,
     pub js_malloc_usable_size: Option<unsafe extern "C" fn(*const c_void) -> usize>,
 }
 
@@ -300,17 +299,7 @@ pub struct JSContext {
     pub loaded_modules: list_head,
 
     pub compile_regexp: Option<unsafe extern "C" fn(*mut JSContext, JSValue, JSValue) -> JSValue>,
-    pub eval_internal: Option<
-        unsafe extern "C" fn(
-            *mut JSContext,
-            JSValue,
-            *const i8,
-            usize,
-            *const i8,
-            i32,
-            i32,
-        ) -> JSValue,
-    >,
+    pub eval_internal: Option<unsafe extern "C" fn(*mut JSContext, JSValue, *const i8, usize, *const i8, i32, i32) -> JSValue>,
     pub user_opaque: *mut c_void,
 }
 
@@ -393,9 +382,7 @@ pub struct JSClassDef {
     pub class_name: *const i8,
     pub finalizer: Option<unsafe extern "C" fn(*mut JSRuntime, JSValue)>,
     pub gc_mark: Option<unsafe extern "C" fn(*mut JSRuntime, JSValue, *mut c_void)>,
-    pub call: Option<
-        unsafe extern "C" fn(*mut JSContext, JSValue, JSValue, i32, *mut JSValue, i32) -> JSValue,
-    >,
+    pub call: Option<unsafe extern "C" fn(*mut JSContext, JSValue, JSValue, i32, *mut JSValue, i32) -> JSValue>,
     pub exotic: *mut c_void,
 }
 
@@ -442,18 +429,13 @@ impl JSRuntime {
 
     pub unsafe fn add_property(&mut self, sh: *mut JSShape, atom: JSAtom, flags: u8) -> i32 {
         // Check if property already exists
-        if let Some(_) = (*sh).find_own_property(atom) {
+        if let Some((idx, _)) = (*sh).find_own_property(atom) {
             // Already exists
-            let (idx, _) = (*sh).find_own_property(atom).unwrap();
             return idx;
         }
 
         if (*sh).prop_count >= (*sh).prop_size {
-            let new_size = if (*sh).prop_size == 0 {
-                4
-            } else {
-                (*sh).prop_size * 3 / 2
-            };
+            let new_size = if (*sh).prop_size == 0 { 4 } else { (*sh).prop_size * 3 / 2 };
             if self.resize_shape(sh, new_size) < 0 {
                 return -1;
             }
@@ -523,18 +505,14 @@ impl JSRuntime {
         self.atom_count = 0;
         self.atom_size = 16;
         self.atom_count_resize = 8;
-        self.atom_hash = self
-            .js_malloc_rt((self.atom_hash_size as usize) * std::mem::size_of::<u32>())
-            as *mut u32;
+        self.atom_hash = self.js_malloc_rt((self.atom_hash_size as usize) * std::mem::size_of::<u32>()) as *mut u32;
         if self.atom_hash.is_null() {
             return;
         }
         for i in 0..self.atom_hash_size {
             *self.atom_hash.offset(i as isize) = 0;
         }
-        self.atom_array = self
-            .js_malloc_rt((self.atom_size as usize) * std::mem::size_of::<*mut JSAtomStruct>())
-            as *mut *mut JSAtomStruct;
+        self.atom_array = self.js_malloc_rt((self.atom_size as usize) * std::mem::size_of::<*mut JSAtomStruct>()) as *mut *mut JSAtomStruct;
         if self.atom_array.is_null() {
             self.js_free_rt(self.atom_hash as *mut c_void);
             self.atom_hash = std::ptr::null_mut();
@@ -583,13 +561,7 @@ impl JSRuntime {
     }
 }
 
-pub unsafe fn JS_DefinePropertyValue(
-    ctx: *mut JSContext,
-    this_obj: JSValue,
-    prop: JSAtom,
-    val: JSValue,
-    flags: i32,
-) -> i32 {
+pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue, flags: i32) -> i32 {
     if this_obj.tag != JS_TAG_OBJECT as i64 {
         return -1; // TypeError
     }
@@ -653,11 +625,7 @@ pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
     unsafe extern "C" fn my_free(_state: *mut JSMallocState, ptr: *mut c_void) {
         libc::free(ptr);
     }
-    unsafe extern "C" fn my_realloc(
-        _state: *mut JSMallocState,
-        ptr: *mut c_void,
-        size: usize,
-    ) -> *mut c_void {
+    unsafe extern "C" fn my_realloc(_state: *mut JSMallocState, ptr: *mut c_void, size: usize) -> *mut c_void {
         libc::realloc(ptr, size)
     }
 
@@ -821,13 +789,7 @@ pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &[u16]) -> JSValue {
     JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
 }
 
-pub unsafe fn JS_Eval(
-    _ctx: *mut JSContext,
-    input: *const i8,
-    input_len: usize,
-    _filename: *const i8,
-    _eval_flags: i32,
-) -> JSValue {
+pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, _filename: *const i8, _eval_flags: i32) -> JSValue {
     if input_len == 0 {
         return JS_UNDEFINED;
     }
@@ -964,9 +926,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume (
 
         // Parse initialization
-        let init = if tokens.len() >= 1
-            && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var))
-        {
+        let init = if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
             Some(Box::new(parse_statement(tokens)?))
         } else if !matches!(tokens[0], Token::Semicolon) {
             Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
@@ -1055,12 +1015,12 @@ pub fn evaluate_statements(
         match stmt {
             Statement::Let(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
-                env.insert(name.clone(), Rc::new(RefCell::new(val.clone())));
+                env_set(env, name.as_str(), val.clone());
                 last_value = val;
             }
             Statement::Assign(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
-                env.insert(name.clone(), Rc::new(RefCell::new(val.clone())));
+                env_set(env, name.as_str(), val.clone());
                 last_value = val;
             }
             Statement::Expr(expr) => {
@@ -1086,7 +1046,7 @@ pub fn evaluate_statements(
                     match init_stmt.as_ref() {
                         Statement::Let(name, expr) => {
                             let val = evaluate_expr(env, expr)?;
-                            env.insert(name.clone(), Rc::new(RefCell::new(val)));
+                            env_set(env, name.as_str(), val);
                         }
                         Statement::Expr(expr) => {
                             evaluate_expr(env, expr)?;
@@ -1134,7 +1094,7 @@ pub fn evaluate_statements(
                                 Expr::Assign(target, value) => {
                                     if let Expr::Var(name) = target.as_ref() {
                                         let val = evaluate_expr(env, value)?;
-                                        env.insert(name.clone(), Rc::new(RefCell::new(val)));
+                                        env_set(env, name.as_str(), val);
                                     }
                                 }
                                 _ => {
@@ -1157,98 +1117,44 @@ pub fn evaluate_statements(
     Ok(last_value)
 }
 
-fn evaluate_expr(
-    env: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    expr: &Expr,
-) -> Result<Value, JSError> {
+fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, expr: &Expr) -> Result<Value, JSError> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
         Expr::Var(name) => {
-            if let Some(val) = env.get(name) {
+            if let Some(val) = env_get(env, name) {
                 Ok(val.borrow().clone())
             } else if name == "console" {
                 let mut console_obj = std::collections::HashMap::new();
-                console_obj.insert(
-                    "log".to_string(),
-                    Rc::new(RefCell::new(Value::Function("console.log".to_string()))),
-                );
+                obj_set_val(&mut console_obj, "log", Value::Function("console.log".to_string()));
                 Ok(Value::Object(console_obj))
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
             } else if name == "Math" {
                 let mut math_obj = std::collections::HashMap::new();
-                math_obj.insert(
-                    "PI".to_string(),
-                    Rc::new(RefCell::new(Value::Number(std::f64::consts::PI))),
-                );
-                math_obj.insert(
-                    "E".to_string(),
-                    Rc::new(RefCell::new(Value::Number(std::f64::consts::E))),
-                );
-                math_obj.insert(
-                    "floor".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.floor".to_string()))),
-                );
-                math_obj.insert(
-                    "ceil".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.ceil".to_string()))),
-                );
-                math_obj.insert(
-                    "round".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.round".to_string()))),
-                );
-                math_obj.insert(
-                    "abs".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.abs".to_string()))),
-                );
-                math_obj.insert(
-                    "sqrt".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.sqrt".to_string()))),
-                );
-                math_obj.insert(
-                    "pow".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.pow".to_string()))),
-                );
-                math_obj.insert(
-                    "sin".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.sin".to_string()))),
-                );
-                math_obj.insert(
-                    "cos".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.cos".to_string()))),
-                );
-                math_obj.insert(
-                    "tan".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.tan".to_string()))),
-                );
-                math_obj.insert(
-                    "random".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Math.random".to_string()))),
-                );
+                obj_set_val(&mut math_obj, "PI", Value::Number(std::f64::consts::PI));
+                obj_set_val(&mut math_obj, "E", Value::Number(std::f64::consts::E));
+                obj_set_val(&mut math_obj, "floor", Value::Function("Math.floor".to_string()));
+                obj_set_val(&mut math_obj, "ceil", Value::Function("Math.ceil".to_string()));
+                obj_set_val(&mut math_obj, "round", Value::Function("Math.round".to_string()));
+                obj_set_val(&mut math_obj, "abs", Value::Function("Math.abs".to_string()));
+                obj_set_val(&mut math_obj, "sqrt", Value::Function("Math.sqrt".to_string()));
+                obj_set_val(&mut math_obj, "pow", Value::Function("Math.pow".to_string()));
+                obj_set_val(&mut math_obj, "sin", Value::Function("Math.sin".to_string()));
+                obj_set_val(&mut math_obj, "cos", Value::Function("Math.cos".to_string()));
+                obj_set_val(&mut math_obj, "tan", Value::Function("Math.tan".to_string()));
+                obj_set_val(&mut math_obj, "random", Value::Function("Math.random".to_string()));
                 Ok(Value::Object(math_obj))
             } else if name == "JSON" {
                 let mut json_obj = std::collections::HashMap::new();
-                json_obj.insert(
-                    "parse".to_string(),
-                    Rc::new(RefCell::new(Value::Function("JSON.parse".to_string()))),
-                );
-                json_obj.insert(
-                    "stringify".to_string(),
-                    Rc::new(RefCell::new(Value::Function("JSON.stringify".to_string()))),
-                );
+                obj_set_val(&mut json_obj, "parse", Value::Function("JSON.parse".to_string()));
+                obj_set_val(&mut json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
                 Ok(Value::Object(json_obj))
             } else if name == "Object" {
                 let mut object_obj = std::collections::HashMap::new();
-                object_obj.insert(
-                    "keys".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Object.keys".to_string()))),
-                );
-                object_obj.insert(
-                    "values".to_string(),
-                    Rc::new(RefCell::new(Value::Function("Object.values".to_string()))),
-                );
+                obj_set_val(&mut object_obj, "keys", Value::Function("Object.keys".to_string()));
+                obj_set_val(&mut object_obj, "values", Value::Function("Object.values".to_string()));
                 Ok(Value::Object(object_obj))
             } else if name == "parseInt" {
                 Ok(Value::Function("parseInt".to_string()))
@@ -1347,63 +1253,39 @@ fn evaluate_expr(
                     }),
                 },
                 BinaryOp::Equal => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
                     _ => Ok(Value::Number(0.0)), // Different types are not equal
                 },
                 BinaryOp::StrictEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
                     _ => Ok(Value::Number(0.0)), // Different types are not equal
                 },
                 BinaryOp::LessThan => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
                     _ => Err(JSError::EvaluationError {
                         message: "error".to_string(),
                     }),
                 },
                 BinaryOp::GreaterThan => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
                     _ => Err(JSError::EvaluationError {
                         message: "error".to_string(),
                     }),
                 },
                 BinaryOp::LessEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
                     _ => Err(JSError::EvaluationError {
                         message: "error".to_string(),
                     }),
                 },
                 BinaryOp::GreaterEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 }))
-                    }
-                    (Value::String(ls), Value::String(rs)) => {
-                        Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 }))
-                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
+                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
                     _ => Err(JSError::EvaluationError {
                         message: "error".to_string(),
                     }),
@@ -1433,7 +1315,7 @@ fn evaluate_expr(
             match obj_val {
                 Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
                 Value::Object(obj_map) => {
-                    if let Some(val) = obj_map.get(prop.as_str()) {
+                    if let Some(val) = obj_get(&obj_map, prop.as_str()) {
                         Ok(val.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
@@ -1475,19 +1357,14 @@ fn evaluate_expr(
                         // toString method for all values
                         if args.is_empty() {
                             match obj_val {
-                                Value::Number(n) => {
-                                    Ok(Value::String(utf8_to_utf16(&n.to_string())))
-                                }
+                                Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                                 Value::String(s) => Ok(Value::String(s.clone())),
-                                Value::Boolean(b) => {
-                                    Ok(Value::String(utf8_to_utf16(&b.to_string())))
-                                }
+                                Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                                 Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
                                 Value::Object(ref obj_map) => {
                                     // If this object looks like an array (has a length), join elements with comma
                                     if obj_map.contains_key("length") {
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -1496,11 +1373,9 @@ fn evaluate_expr(
                                         };
                                         let mut parts = Vec::new();
                                         for i in 0..current_len {
-                                            if let Some(val_rc) = obj_map.get(&i.to_string()) {
+                                            if let Some(val_rc) = obj_get(&obj_map, &i.to_string()) {
                                                 match &*val_rc.borrow() {
-                                                    Value::String(s) => {
-                                                        parts.push(String::from_utf16_lossy(s))
-                                                    }
+                                                    Value::String(s) => parts.push(String::from_utf16_lossy(s)),
                                                     Value::Number(n) => parts.push(n.to_string()),
                                                     Value::Boolean(b) => parts.push(b.to_string()),
                                                     _ => parts.push("[object Object]".to_string()),
@@ -1514,12 +1389,8 @@ fn evaluate_expr(
                                         Ok(Value::String(utf8_to_utf16("[object Object]")))
                                     }
                                 }
-                                Value::Function(name) => Ok(Value::String(utf8_to_utf16(
-                                    &format!("[Function: {}]", name),
-                                ))),
-                                Value::Closure(_, _, _) => {
-                                    Ok(Value::String(utf8_to_utf16("[Function]")))
-                                }
+                                Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
+                                Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                             }
                         } else {
                             Err(JSError::EvaluationError {
@@ -1544,8 +1415,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.floor expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.floor expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1561,8 +1431,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.ceil expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.ceil expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1578,8 +1447,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.round expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.round expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1595,8 +1463,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.abs expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.abs expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1612,8 +1479,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.sqrt expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.sqrt expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1621,9 +1487,7 @@ fn evaluate_expr(
                                     if args.len() == 2 {
                                         let base_val = evaluate_expr(env, &args[0])?;
                                         let exp_val = evaluate_expr(env, &args[1])?;
-                                        if let (Value::Number(base), Value::Number(exp)) =
-                                            (base_val, exp_val)
-                                        {
+                                        if let (Value::Number(base), Value::Number(exp)) = (base_val, exp_val) {
                                             Ok(Value::Number(base.powf(exp)))
                                         } else {
                                             Err(JSError::EvaluationError {
@@ -1632,8 +1496,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.pow expects exactly two arguments"
-                                                .to_string(),
+                                            message: "Math.pow expects exactly two arguments".to_string(),
                                         })
                                     }
                                 }
@@ -1649,8 +1512,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.sin expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.sin expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1666,8 +1528,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.cos expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.cos expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1683,23 +1544,20 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Math.tan expects exactly one argument"
-                                                .to_string(),
+                                            message: "Math.tan expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
                                 "random" => {
                                     if args.len() == 0 {
                                         use std::time::{SystemTime, UNIX_EPOCH};
-                                        let duration =
-                                            SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                                        let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                                         let seed = duration.as_nanos() as u64;
                                         // Simple linear congruential generator for random number
                                         let a = 1664525u64;
                                         let c = 1013904223u64;
                                         let m = 2u64.pow(32);
-                                        let random_u32 =
-                                            ((seed.wrapping_mul(a).wrapping_add(c)) % m) as u32;
+                                        let random_u32 = ((seed.wrapping_mul(a).wrapping_add(c)) % m) as u32;
                                         let random_f64 = random_u32 as f64 / m as f64;
                                         Ok(Value::Number(random_f64))
                                     } else {
@@ -1712,8 +1570,7 @@ fn evaluate_expr(
                                     message: format!("Math.{} is not implemented", method),
                                 }),
                             }
-                        } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify")
-                        {
+                        } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
                             // JSON methods
                             match method {
                                 "parse" => {
@@ -1731,8 +1588,7 @@ fn evaluate_expr(
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "JSON.parse expects exactly one argument"
-                                                .to_string(),
+                                            message: "JSON.parse expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1740,28 +1596,19 @@ fn evaluate_expr(
                                     if args.len() == 1 {
                                         let arg_val = evaluate_expr(env, &args[0])?;
                                         match arg_val {
-                                            Value::Number(n) => {
-                                                Ok(Value::String(utf8_to_utf16(&n.to_string())))
-                                            }
+                                            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                                             Value::String(s) => {
                                                 // Simple JSON stringification - just return the string
                                                 Ok(Value::String(s))
                                             }
-                                            Value::Boolean(b) => {
-                                                Ok(Value::String(utf8_to_utf16(&b.to_string())))
-                                            }
-                                            Value::Undefined => {
-                                                Ok(Value::String(utf8_to_utf16("null")))
-                                            }
-                                            Value::Object(_) => {
-                                                Ok(Value::String(utf8_to_utf16("{}")))
-                                            } // Simple object representation
+                                            Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                                            Value::Undefined => Ok(Value::String(utf8_to_utf16("null"))),
+                                            Value::Object(_) => Ok(Value::String(utf8_to_utf16("{}"))), // Simple object representation
                                             _ => Ok(Value::String(utf8_to_utf16("null"))),
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "JSON.stringify expects exactly one argument"
-                                                .to_string(),
+                                            message: "JSON.stringify expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1786,28 +1633,19 @@ fn evaluate_expr(
                                             // Create a simple array-like object for keys
                                             let mut result_obj = std::collections::HashMap::new();
                                             for (i, key) in keys.into_iter().enumerate() {
-                                                result_obj.insert(
-                                                    i.to_string(),
-                                                    Rc::new(RefCell::new(key)),
-                                                );
+                                                obj_set_val(&mut result_obj, &i.to_string(), key);
                                             }
-                                            result_obj.insert(
-                                                "length".to_string(),
-                                                Rc::new(RefCell::new(Value::Number(
-                                                    result_obj.len() as f64,
-                                                ))),
-                                            );
+                                            let len = Value::Number(result_obj.len() as f64);
+                                            obj_set_val(&mut result_obj, "length", len);
                                             Ok(Value::Object(result_obj))
                                         } else {
                                             Err(JSError::EvaluationError {
-                                                message: "Object.keys expects an object"
-                                                    .to_string(),
+                                                message: "Object.keys expects an object".to_string(),
                                             })
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Object.keys expects exactly one argument"
-                                                .to_string(),
+                                            message: "Object.keys expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1825,28 +1663,19 @@ fn evaluate_expr(
                                             // Create a simple array-like object for values
                                             let mut result_obj = std::collections::HashMap::new();
                                             for (i, value) in values.into_iter().enumerate() {
-                                                result_obj.insert(
-                                                    i.to_string(),
-                                                    Rc::new(RefCell::new(value.borrow().clone())),
-                                                );
+                                                obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
                                             }
-                                            result_obj.insert(
-                                                "length".to_string(),
-                                                Rc::new(RefCell::new(Value::Number(
-                                                    result_obj.len() as f64,
-                                                ))),
-                                            );
+                                            let len = Value::Number(result_obj.len() as f64);
+                                            obj_set_val(&mut result_obj, "length", len);
                                             Ok(Value::Object(result_obj))
                                         } else {
                                             Err(JSError::EvaluationError {
-                                                message: "Object.values expects an object"
-                                                    .to_string(),
+                                                message: "Object.values expects an object".to_string(),
                                             })
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Object.values expects exactly one argument"
-                                                .to_string(),
+                                            message: "Object.values expects exactly one argument".to_string(),
                                         })
                                     }
                                 }
@@ -1863,8 +1692,7 @@ fn evaluate_expr(
                                         // so that push is chainable (returns the array) and mutations persist.
                                         // Evaluate all args and append them.
                                         // First determine current length from the local obj_map
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let mut current_len = match length {
@@ -1873,27 +1701,23 @@ fn evaluate_expr(
                                         };
 
                                         // Helper closure to push a value into a map
-                                        let mut push_into_map = |map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, val: Value| {
-                                            map.insert(current_len.to_string(), Rc::new(RefCell::new(val)));
-                                            current_len += 1;
-                                        };
+                                        let mut push_into_map =
+                                            |map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, val: Value| {
+                                                obj_set_val(map, &current_len.to_string(), val);
+                                                current_len += 1;
+                                            };
 
                                         // If obj_expr is a variable referring to an object stored in env,
                                         // mutate that stored object directly so changes persist.
                                         if let Expr::Var(varname) = &**obj_expr {
-                                            if let Some(rc_val) = env.get(varname) {
+                                            if let Some(rc_val) = env_get(env, varname) {
                                                 let mut borrowed = rc_val.borrow_mut();
                                                 if let Value::Object(ref mut map) = *borrowed {
                                                     for arg in args {
                                                         let val = evaluate_expr(env, arg)?;
                                                         push_into_map(map, val);
                                                     }
-                                                    map.insert(
-                                                        "length".to_string(),
-                                                        Rc::new(RefCell::new(Value::Number(
-                                                            current_len as f64,
-                                                        ))),
-                                                    );
+                                                    obj_set_val(map, "length", Value::Number(current_len as f64));
 
                                                     // Return the original object
                                                     return Ok(Value::Object(map.clone()));
@@ -1906,25 +1730,18 @@ fn evaluate_expr(
                                             let val = evaluate_expr(env, arg)?;
                                             push_into_map(&mut obj_map, val);
                                         }
-                                        obj_map.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(
-                                                current_len as f64,
-                                            ))),
-                                        );
+                                        obj_set_val(&mut obj_map, "length", Value::Number(current_len as f64));
                                         println!("PUSH after: obj_map: {:?}", obj_map);
                                         // Return the array object (chainable)
                                         Ok(Value::Object(obj_map.clone()))
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.push expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.push expects at least one argument".to_string(),
                                         })
                                     }
                                 }
                                 "pop" => {
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -1934,22 +1751,14 @@ fn evaluate_expr(
                                     if current_len > 0 {
                                         let last_idx = (current_len - 1).to_string();
                                         let val = obj_map.remove(&last_idx);
-                                        obj_map.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(
-                                                (current_len - 1) as f64,
-                                            ))),
-                                        );
-                                        Ok(val
-                                            .map(|v| v.borrow().clone())
-                                            .unwrap_or(Value::Undefined))
+                                        obj_set_val(&mut obj_map, "length", Value::Number((current_len - 1) as f64));
+                                        Ok(val.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
                                     } else {
                                         Ok(Value::Undefined)
                                     }
                                 }
                                 "length" => {
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     Ok(length)
@@ -1965,8 +1774,7 @@ fn evaluate_expr(
                                         ",".to_string()
                                     };
 
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -1979,15 +1787,11 @@ fn evaluate_expr(
                                         if i > 0 {
                                             result.push_str(&separator);
                                         }
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             match &*val.borrow() {
-                                                Value::String(s) => {
-                                                    result.push_str(&String::from_utf16_lossy(s))
-                                                }
+                                                Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
                                                 Value::Number(n) => result.push_str(&n.to_string()),
-                                                Value::Boolean(b) => {
-                                                    result.push_str(&b.to_string())
-                                                }
+                                                Value::Boolean(b) => result.push_str(&b.to_string()),
                                                 _ => result.push_str("[object Object]"),
                                             }
                                         }
@@ -2007,8 +1811,7 @@ fn evaluate_expr(
                                         match evaluate_expr(env, &args[1])? {
                                             Value::Number(n) => n as isize,
                                             _ => {
-                                                let length = obj_map
-                                                    .get("length")
+                                                let length = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 match length {
@@ -2018,8 +1821,7 @@ fn evaluate_expr(
                                             }
                                         }
                                     } else {
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         match length {
@@ -2028,8 +1830,7 @@ fn evaluate_expr(
                                         }
                                     };
 
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -2047,26 +1848,19 @@ fn evaluate_expr(
                                     let mut new_array = std::collections::HashMap::new();
                                     let mut idx = 0;
                                     for i in start..end {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
-                                            new_array.insert(
-                                                idx.to_string(),
-                                                Rc::new(RefCell::new(val.borrow().clone())),
-                                            );
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                            obj_set_val(&mut new_array, &idx.to_string(), val.borrow().clone());
                                             idx += 1;
                                         }
                                     }
-                                    new_array.insert(
-                                        "length".to_string(),
-                                        Rc::new(RefCell::new(Value::Number(idx as f64))),
-                                    );
+                                    obj_set_val(&mut new_array, "length", Value::Number(idx as f64));
                                     Ok(Value::Object(new_array))
                                 }
                                 "forEach" => {
                                     if args.len() >= 1 {
                                         // Evaluate the callback expression
                                         let callback_val = evaluate_expr(env, &args[0])?;
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -2075,46 +1869,26 @@ fn evaluate_expr(
                                         };
 
                                         for i in 0..current_len {
-                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                                 match &callback_val {
                                                     Value::Closure(params, body, captured_env) => {
                                                         // Prepare function environment
                                                         let mut func_env = captured_env.clone();
                                                         // Map params: (element, index, array)
                                                         if params.len() >= 1 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    val.borrow().clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), val.borrow().clone());
                                                         }
                                                         if params.len() >= 2 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Number(i as f64),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
                                                         }
                                                         if params.len() >= 3 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
-                                                        let _ = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let _ = evaluate_statements(&mut func_env, &body)?;
                                                     }
                                                     _ => {
                                                         return Err(JSError::EvaluationError {
-                                                            message:
-                                                                "Array.forEach expects a function"
-                                                                    .to_string(),
+                                                            message: "Array.forEach expects a function".to_string(),
                                                         })
                                                     }
                                                 }
@@ -2123,16 +1897,14 @@ fn evaluate_expr(
                                         Ok(Value::Undefined)
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.forEach expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.forEach expects at least one argument".to_string(),
                                         })
                                     }
                                 }
                                 "map" => {
                                     if args.len() >= 1 {
                                         let callback_val = evaluate_expr(env, &args[0])?;
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -2143,71 +1915,44 @@ fn evaluate_expr(
                                         let mut new_array = std::collections::HashMap::new();
                                         let mut idx = 0;
                                         for i in 0..current_len {
-                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                                 match &callback_val {
                                                     Value::Closure(params, body, captured_env) => {
                                                         // Prepare function environment
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() >= 1 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    val.borrow().clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), val.borrow().clone());
                                                         }
                                                         if params.len() >= 2 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Number(i as f64),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
                                                         }
                                                         if params.len() >= 3 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
-                                                        new_array.insert(
-                                                            idx.to_string(),
-                                                            Rc::new(RefCell::new(res)),
-                                                        );
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
+                                                        obj_set_val(&mut new_array, &idx.to_string(), res);
                                                         idx += 1;
                                                     }
                                                     _ => {
                                                         return Err(JSError::EvaluationError {
-                                                            message: "Array.map expects a function"
-                                                                .to_string(),
+                                                            message: "Array.map expects a function".to_string(),
                                                         })
                                                     }
                                                 }
                                             }
                                         }
-                                        new_array.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(idx as f64))),
-                                        );
+                                        obj_set_val(&mut new_array, "length", Value::Number(idx as f64));
                                         Ok(Value::Object(new_array))
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.map expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.map expects at least one argument".to_string(),
                                         })
                                     }
                                 }
                                 "filter" => {
                                     if args.len() >= 1 {
                                         let callback_val = evaluate_expr(env, &args[0])?;
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -2218,38 +1963,20 @@ fn evaluate_expr(
                                         let mut new_array = std::collections::HashMap::new();
                                         let mut idx = 0;
                                         for i in 0..current_len {
-                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                                 match &callback_val {
                                                     Value::Closure(params, body, captured_env) => {
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() >= 1 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    val.borrow().clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), val.borrow().clone());
                                                         }
                                                         if params.len() >= 2 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Number(i as f64),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
                                                         }
                                                         if params.len() >= 3 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         // truthy check
                                                         let include = match res {
                                                             Value::Boolean(b) => b,
@@ -2260,34 +1987,23 @@ fn evaluate_expr(
                                                             _ => false,
                                                         };
                                                         if include {
-                                                            new_array.insert(
-                                                                idx.to_string(),
-                                                                Rc::new(RefCell::new(
-                                                                    val.borrow().clone(),
-                                                                )),
-                                                            );
+                                                            obj_set_val(&mut new_array, &idx.to_string(), val.borrow().clone());
                                                             idx += 1;
                                                         }
                                                     }
                                                     _ => {
                                                         return Err(JSError::EvaluationError {
-                                                            message:
-                                                                "Array.filter expects a function"
-                                                                    .to_string(),
+                                                            message: "Array.filter expects a function".to_string(),
                                                         })
                                                     }
                                                 }
                                             }
                                         }
-                                        new_array.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(idx as f64))),
-                                        );
+                                        obj_set_val(&mut new_array, "length", Value::Number(idx as f64));
                                         Ok(Value::Object(new_array))
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.filter expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.filter expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2300,8 +2016,7 @@ fn evaluate_expr(
                                             None
                                         };
 
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -2311,14 +2026,13 @@ fn evaluate_expr(
 
                                         if current_len == 0 && initial_value.is_none() {
                                             return Err(JSError::EvaluationError {
-                                                message: "Array.reduce called on empty array with no initial value"
-                                                    .to_string(),
+                                                message: "Array.reduce called on empty array with no initial value".to_string(),
                                             });
                                         }
 
                                         let mut accumulator = if let Some(ref val) = initial_value {
                                             val.clone()
-                                        } else if let Some(val) = obj_map.get(&0.to_string()) {
+                                        } else if let Some(val) = obj_get(&obj_map, &0.to_string()) {
                                             val.borrow().clone()
                                         } else {
                                             Value::Undefined
@@ -2326,54 +2040,29 @@ fn evaluate_expr(
 
                                         let start_idx = if initial_value.is_some() { 0 } else { 1 };
                                         for i in start_idx..current_len {
-                                            if let Some(val) = obj_map.get(&i.to_string()) {
+                                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                                 match &callback_val {
                                                     Value::Closure(params, body, captured_env) => {
                                                         let mut func_env = captured_env.clone();
                                                         // build args for callback: first acc, then current element
                                                         if params.len() >= 1 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    accumulator.clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), accumulator.clone());
                                                         }
                                                         if params.len() >= 2 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    val.borrow().clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), val.borrow().clone());
                                                         }
                                                         if params.len() >= 3 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Number(i as f64),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Number(i as f64));
                                                         }
                                                         if params.len() >= 4 {
-                                                            func_env.insert(
-                                                                params[3].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[3].as_str(), Value::Object(obj_map.clone()));
                                                         }
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         accumulator = res;
                                                     }
                                                     _ => {
                                                         return Err(JSError::EvaluationError {
-                                                            message:
-                                                                "Array.reduce expects a function"
-                                                                    .to_string(),
+                                                            message: "Array.reduce expects a function".to_string(),
                                                         })
                                                     }
                                                 }
@@ -2382,8 +2071,7 @@ fn evaluate_expr(
                                         Ok(accumulator)
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.reduce expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.reduce expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2392,8 +2080,7 @@ fn evaluate_expr(
                                         let callback = evaluate_expr(env, &args[0])?;
                                         match callback {
                                             Value::Closure(params, body, captured_env) => {
-                                                let length = obj_map
-                                                    .get("length")
+                                                let length = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 let current_len = match length {
@@ -2402,40 +2089,23 @@ fn evaluate_expr(
                                                 };
 
                                                 for i in 0..current_len {
-                                                    if let Some(value) = obj_map.get(&i.to_string())
-                                                    {
+                                                    if let Some(value) = obj_get(&obj_map, &i.to_string()) {
                                                         let element = value.borrow().clone();
                                                         let index_val = Value::Number(i as f64);
 
                                                         // Create new environment for callback
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() > 0 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    element.clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), element.clone());
                                                         }
                                                         if params.len() > 1 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(index_val)),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), index_val);
                                                         }
                                                         if params.len() > 2 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
 
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         // truthy check
                                                         let is_truthy = match res {
                                                             Value::Boolean(b) => b,
@@ -2454,15 +2124,13 @@ fn evaluate_expr(
                                             }
                                             _ => {
                                                 return Err(JSError::EvaluationError {
-                                                    message: "Array.find expects a function"
-                                                        .to_string(),
+                                                    message: "Array.find expects a function".to_string(),
                                                 })
                                             }
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.find expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.find expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2471,8 +2139,7 @@ fn evaluate_expr(
                                         let callback = evaluate_expr(env, &args[0])?;
                                         match callback {
                                             Value::Closure(params, body, captured_env) => {
-                                                let length = obj_map
-                                                    .get("length")
+                                                let length = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 let current_len = match length {
@@ -2481,40 +2148,23 @@ fn evaluate_expr(
                                                 };
 
                                                 for i in 0..current_len {
-                                                    if let Some(value) = obj_map.get(&i.to_string())
-                                                    {
+                                                    if let Some(value) = obj_get(&obj_map, &i.to_string()) {
                                                         let element = value.borrow().clone();
                                                         let index_val = Value::Number(i as f64);
 
                                                         // Create new environment for callback
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() > 0 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    element.clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), element.clone());
                                                         }
                                                         if params.len() > 1 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(index_val)),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), index_val);
                                                         }
                                                         if params.len() > 2 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
 
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         // truthy check
                                                         let is_truthy = match res {
                                                             Value::Boolean(b) => b,
@@ -2533,16 +2183,13 @@ fn evaluate_expr(
                                             }
                                             _ => {
                                                 return Err(JSError::EvaluationError {
-                                                    message: "Array.findIndex expects a function"
-                                                        .to_string(),
+                                                    message: "Array.findIndex expects a function".to_string(),
                                                 })
                                             }
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message:
-                                                "Array.findIndex expects at least one argument"
-                                                    .to_string(),
+                                            message: "Array.findIndex expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2551,8 +2198,7 @@ fn evaluate_expr(
                                         let callback = evaluate_expr(env, &args[0])?;
                                         match callback {
                                             Value::Closure(params, body, captured_env) => {
-                                                let length = obj_map
-                                                    .get("length")
+                                                let length = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 let current_len = match length {
@@ -2561,40 +2207,23 @@ fn evaluate_expr(
                                                 };
 
                                                 for i in 0..current_len {
-                                                    if let Some(value) = obj_map.get(&i.to_string())
-                                                    {
+                                                    if let Some(value) = obj_get(&obj_map, &i.to_string()) {
                                                         let element = value.borrow().clone();
                                                         let index_val = Value::Number(i as f64);
 
                                                         // Create new environment for callback
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() > 0 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    element.clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), element.clone());
                                                         }
                                                         if params.len() > 1 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(index_val)),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), index_val);
                                                         }
                                                         if params.len() > 2 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
 
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         // truthy check
                                                         let is_truthy = match res {
                                                             Value::Boolean(b) => b,
@@ -2613,15 +2242,13 @@ fn evaluate_expr(
                                             }
                                             _ => {
                                                 return Err(JSError::EvaluationError {
-                                                    message: "Array.some expects a function"
-                                                        .to_string(),
+                                                    message: "Array.some expects a function".to_string(),
                                                 })
                                             }
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.some expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.some expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2630,8 +2257,7 @@ fn evaluate_expr(
                                         let callback = evaluate_expr(env, &args[0])?;
                                         match callback {
                                             Value::Closure(params, body, captured_env) => {
-                                                let length = obj_map
-                                                    .get("length")
+                                                let length = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 let current_len = match length {
@@ -2640,40 +2266,23 @@ fn evaluate_expr(
                                                 };
 
                                                 for i in 0..current_len {
-                                                    if let Some(value) = obj_map.get(&i.to_string())
-                                                    {
+                                                    if let Some(value) = obj_get(&obj_map, &i.to_string()) {
                                                         let element = value.borrow().clone();
                                                         let index_val = Value::Number(i as f64);
 
                                                         // Create new environment for callback
                                                         let mut func_env = captured_env.clone();
                                                         if params.len() > 0 {
-                                                            func_env.insert(
-                                                                params[0].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    element.clone(),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[0].as_str(), element.clone());
                                                         }
                                                         if params.len() > 1 {
-                                                            func_env.insert(
-                                                                params[1].clone(),
-                                                                Rc::new(RefCell::new(index_val)),
-                                                            );
+                                                            env_set(&mut func_env, params[1].as_str(), index_val);
                                                         }
                                                         if params.len() > 2 {
-                                                            func_env.insert(
-                                                                params[2].clone(),
-                                                                Rc::new(RefCell::new(
-                                                                    Value::Object(obj_map.clone()),
-                                                                )),
-                                                            );
+                                                            env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
                                                         }
 
-                                                        let res = evaluate_statements(
-                                                            &mut func_env,
-                                                            &body,
-                                                        )?;
+                                                        let res = evaluate_statements(&mut func_env, &body)?;
                                                         // truthy check
                                                         let is_truthy = match res {
                                                             Value::Boolean(b) => b,
@@ -2692,15 +2301,13 @@ fn evaluate_expr(
                                             }
                                             _ => {
                                                 return Err(JSError::EvaluationError {
-                                                    message: "Array.every expects a function"
-                                                        .to_string(),
+                                                    message: "Array.every expects a function".to_string(),
                                                 })
                                             }
                                         }
                                     } else {
                                         Err(JSError::EvaluationError {
-                                            message: "Array.every expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.every expects at least one argument".to_string(),
                                         })
                                     }
                                 }
@@ -2708,8 +2315,7 @@ fn evaluate_expr(
                                     let mut result = std::collections::HashMap::new();
 
                                     // First, copy all elements from current array
-                                    let current_length = obj_map
-                                        .get("length")
+                                    let current_length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_length {
@@ -2719,11 +2325,8 @@ fn evaluate_expr(
 
                                     let mut new_index = 0;
                                     for i in 0..current_len {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
-                                            result.insert(
-                                                new_index.to_string(),
-                                                Rc::new(RefCell::new(val.borrow().clone())),
-                                            );
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                            obj_set_val(&mut result, &new_index.to_string(), val.borrow().clone());
                                             new_index += 1;
                                         }
                                     }
@@ -2734,46 +2337,34 @@ fn evaluate_expr(
                                         match arg_val {
                                             Value::Object(arg_obj) => {
                                                 // If argument is an array-like object, copy its elements
-                                                let arg_length = arg_obj
-                                                    .get("length")
-                                                    .map(|v| v.borrow().clone())
-                                                    .unwrap_or(Value::Number(0.0));
+                                                let arg_length =
+                                                    arg_obj.get("length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
                                                 let arg_len = match arg_length {
                                                     Value::Number(n) => n as usize,
                                                     _ => 0,
                                                 };
                                                 for i in 0..arg_len {
                                                     if let Some(val) = arg_obj.get(&i.to_string()) {
-                                                        result.insert(
-                                                            new_index.to_string(),
-                                                            val.clone(),
-                                                        );
+                                                        obj_set_rc(&mut result, &new_index.to_string(), val.clone());
                                                         new_index += 1;
                                                     }
                                                 }
                                             }
                                             _ => {
                                                 // If argument is not an array, append it directly
-                                                result.insert(
-                                                    new_index.to_string(),
-                                                    Rc::new(RefCell::new(arg_val)),
-                                                );
+                                                obj_set_val(&mut result, &new_index.to_string(), arg_val);
                                                 new_index += 1;
                                             }
                                         }
                                     }
 
-                                    result.insert(
-                                        "length".to_string(),
-                                        Rc::new(RefCell::new(Value::Number(new_index as f64))),
-                                    );
+                                    result.insert("length".to_string(), Rc::new(RefCell::new(Value::Number(new_index as f64))));
                                     Ok(Value::Object(result))
                                 }
                                 "indexOf" => {
                                     if args.is_empty() {
                                         return Err(JSError::EvaluationError {
-                                            message: "Array.indexOf expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.indexOf expects at least one argument".to_string(),
                                         });
                                     }
 
@@ -2787,8 +2378,7 @@ fn evaluate_expr(
                                         0isize
                                     };
 
-                                    let current_length = obj_map
-                                        .get("length")
+                                    let current_length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_length {
@@ -2803,7 +2393,7 @@ fn evaluate_expr(
                                     };
 
                                     for i in start..current_len {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             if values_equal(&val.borrow(), &search_element) {
                                                 return Ok(Value::Number(i as f64));
                                             }
@@ -2815,8 +2405,7 @@ fn evaluate_expr(
                                 "includes" => {
                                     if args.is_empty() {
                                         return Err(JSError::EvaluationError {
-                                            message: "Array.includes expects at least one argument"
-                                                .to_string(),
+                                            message: "Array.includes expects at least one argument".to_string(),
                                         });
                                     }
 
@@ -2830,8 +2419,7 @@ fn evaluate_expr(
                                         0isize
                                     };
 
-                                    let current_length = obj_map
-                                        .get("length")
+                                    let current_length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_length {
@@ -2846,7 +2434,7 @@ fn evaluate_expr(
                                     };
 
                                     for i in start..current_len {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             if values_equal(&val.borrow(), &search_element) {
                                                 return Ok(Value::Boolean(true));
                                             }
@@ -2856,8 +2444,7 @@ fn evaluate_expr(
                                     Ok(Value::Boolean(false))
                                 }
                                 "sort" => {
-                                    let current_length = obj_map
-                                        .get("length")
+                                    let current_length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_length {
@@ -2868,7 +2455,7 @@ fn evaluate_expr(
                                     // Extract array elements for sorting
                                     let mut elements: Vec<(String, Value)> = Vec::new();
                                     for i in 0..current_len {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             elements.push((i.to_string(), val.borrow().clone()));
                                         }
                                     }
@@ -2884,23 +2471,15 @@ fn evaluate_expr(
                                     } else {
                                         // Custom sort with compare function
                                         let compare_fn = evaluate_expr(env, &args[0])?;
-                                        if let Value::Closure(params, body, captured_env) =
-                                            compare_fn
-                                        {
+                                        if let Value::Closure(params, body, captured_env) = compare_fn {
                                             elements.sort_by(|a, b| {
                                                 // Create function environment for comparison
                                                 let mut func_env = captured_env.clone();
                                                 if params.len() > 0 {
-                                                    func_env.insert(
-                                                        params[0].clone(),
-                                                        Rc::new(RefCell::new(a.1.clone())),
-                                                    );
+                                                    env_set(&mut func_env, params[0].as_str(), a.1.clone());
                                                 }
                                                 if params.len() > 1 {
-                                                    func_env.insert(
-                                                        params[1].clone(),
-                                                        Rc::new(RefCell::new(b.1.clone())),
-                                                    );
+                                                    env_set(&mut func_env, params[1].as_str(), b.1.clone());
                                                 }
 
                                                 match evaluate_statements(&mut func_env, &body) {
@@ -2924,20 +2503,14 @@ fn evaluate_expr(
                                     }
 
                                     // Update the array with sorted elements
-                                    for (new_index, (_old_key, value)) in
-                                        elements.into_iter().enumerate()
-                                    {
-                                        obj_map.insert(
-                                            new_index.to_string(),
-                                            Rc::new(RefCell::new(value)),
-                                        );
+                                    for (new_index, (_old_key, value)) in elements.into_iter().enumerate() {
+                                        obj_set_val(&mut obj_map, &new_index.to_string(), value);
                                     }
 
                                     Ok(Value::Object(obj_map.clone()))
                                 }
                                 "reverse" => {
-                                    let current_length = obj_map
-                                        .get("length")
+                                    let current_length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_length {
@@ -2953,23 +2526,17 @@ fn evaluate_expr(
                                         let left_key = left.to_string();
                                         let right_key = right.to_string();
 
-                                        let left_val = obj_map
-                                            .get(&left_key)
-                                            .cloned()
-                                            .map(|v| v.borrow().clone());
-                                        let right_val = obj_map
-                                            .get(&right_key)
-                                            .cloned()
-                                            .map(|v| v.borrow().clone());
+                                        let left_val = obj_get(&obj_map, &left_key).map(|v| v.borrow().clone());
+                                        let right_val = obj_get(&obj_map, &right_key).map(|v| v.borrow().clone());
 
                                         if let Some(val) = right_val {
-                                            obj_map.insert(left_key, Rc::new(RefCell::new(val)));
+                                            obj_set_val(&mut obj_map, &left_key, val);
                                         } else {
                                             obj_map.remove(&left_key);
                                         }
 
                                         if let Some(val) = left_val {
-                                            obj_map.insert(right_key, Rc::new(RefCell::new(val)));
+                                            obj_set_val(&mut obj_map, &right_key, val);
                                         } else {
                                             obj_map.remove(&right_key);
                                         }
@@ -2985,8 +2552,7 @@ fn evaluate_expr(
                                     let start = if args.len() >= 1 {
                                         match evaluate_expr(env, &args[0])? {
                                             Value::Number(n) => {
-                                                let len = obj_map
-                                                    .get("length")
+                                                let len = obj_get(&obj_map, "length")
                                                     .map(|v| v.borrow().clone())
                                                     .unwrap_or(Value::Number(0.0));
                                                 let current_len = match len {
@@ -3011,8 +2577,7 @@ fn evaluate_expr(
                                             _ => 0,
                                         }
                                     } else {
-                                        let len = obj_map
-                                            .get("length")
+                                        let len = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         match len {
@@ -3021,8 +2586,7 @@ fn evaluate_expr(
                                         }
                                     };
 
-                                    let current_len = obj_map
-                                        .get("length")
+                                    let current_len = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match current_len {
@@ -3033,7 +2597,7 @@ fn evaluate_expr(
                                     // Collect elements to be deleted
                                     let mut deleted_elements = Vec::new();
                                     for i in start..(start + delete_count).min(current_len) {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             deleted_elements.push(val.borrow().clone());
                                         }
                                     }
@@ -3041,17 +2605,9 @@ fn evaluate_expr(
                                     // Create new array for deleted elements
                                     let mut deleted_array = std::collections::HashMap::new();
                                     for (i, val) in deleted_elements.iter().enumerate() {
-                                        deleted_array.insert(
-                                            i.to_string(),
-                                            Rc::new(RefCell::new(val.clone())),
-                                        );
+                                        obj_set_val(&mut deleted_array, &i.to_string(), val.clone());
                                     }
-                                    deleted_array.insert(
-                                        "length".to_string(),
-                                        Rc::new(RefCell::new(Value::Number(
-                                            deleted_elements.len() as f64,
-                                        ))),
-                                    );
+                                    obj_set_val(&mut deleted_array, "length", Value::Number(deleted_elements.len() as f64));
 
                                     // Remove deleted elements and shift remaining elements
                                     let mut new_len = start;
@@ -3061,22 +2617,16 @@ fn evaluate_expr(
                                     // Insert new items at start position
                                     for i in 2..args.len() {
                                         let item = evaluate_expr(env, &args[i])?;
-                                        obj_map.insert(
-                                            new_len.to_string(),
-                                            Rc::new(RefCell::new(item)),
-                                        );
+                                        obj_set_val(&mut obj_map, &new_len.to_string(), item);
                                         new_len += 1;
                                     }
 
                                     // Shift remaining elements after deleted section
                                     let shift_start = start + delete_count;
                                     for i in shift_start..current_len {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             let value = val.borrow().clone();
-                                            obj_map.insert(
-                                                (new_len).to_string(),
-                                                Rc::new(RefCell::new(value)),
-                                            );
+                                            obj_set_val(&mut obj_map, &(new_len).to_string(), value);
                                             new_len += 1;
                                         }
                                     }
@@ -3095,16 +2645,12 @@ fn evaluate_expr(
                                     }
 
                                     // Update length
-                                    obj_map.insert(
-                                        "length".to_string(),
-                                        Rc::new(RefCell::new(Value::Number(new_len as f64))),
-                                    );
+                                    obj_set_val(&mut obj_map, "length", Value::Number(new_len as f64));
 
                                     Ok(Value::Object(deleted_array))
                                 }
                                 "shift" => {
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -3116,54 +2662,38 @@ fn evaluate_expr(
                                         // Get the first element
                                         // Try to mutate the env-stored object when possible (chainable behavior)
                                         if let Expr::Var(varname) = &**obj_expr {
-                                            if let Some(rc_val) = env.get(varname) {
+                                            if let Some(rc_val) = env_get(env, varname) {
                                                 let mut borrowed = rc_val.borrow_mut();
                                                 if let Value::Object(ref mut map) = *borrowed {
-                                                    let first_element = map
-                                                        .get(&0.to_string())
-                                                        .map(|v| v.borrow().clone());
+                                                    let first_element = obj_get(map, &0.to_string()).map(|v| v.borrow().clone());
                                                     // Shift left
                                                     for i in 1..current_len {
-                                                        if let Some(val) = map.get(&i.to_string()) {
-                                                            map.insert(
-                                                                (i - 1).to_string(),
-                                                                val.clone(),
-                                                            );
+                                                        let val_rc_opt = obj_get(map, &i.to_string());
+                                                        if let Some(val_rc) = val_rc_opt {
+                                                            obj_set_rc(map, &(i - 1).to_string(), val_rc);
                                                         } else {
                                                             map.remove(&(i - 1).to_string());
                                                         }
                                                     }
                                                     map.remove(&(current_len - 1).to_string());
-                                                    map.insert(
-                                                        "length".to_string(),
-                                                        Rc::new(RefCell::new(Value::Number(
-                                                            (current_len - 1) as f64,
-                                                        ))),
-                                                    );
-                                                    return Ok(
-                                                        first_element.unwrap_or(Value::Undefined)
-                                                    );
+                                                    obj_set_val(map, "length", Value::Number((current_len - 1) as f64));
+                                                    return Ok(first_element.unwrap_or(Value::Undefined));
                                                 }
                                             }
                                         }
 
                                         // Fallback: mutate the local obj_map copy
-                                        let first_element =
-                                            obj_map.get(&0.to_string()).map(|v| v.borrow().clone());
+                                        let first_element = obj_get(&obj_map, &0.to_string()).map(|v| v.borrow().clone());
                                         for i in 1..current_len {
-                                            if let Some(val) = obj_map.get(&i.to_string()) {
-                                                obj_map.insert((i - 1).to_string(), val.clone());
+                                            let val_rc_opt = obj_get(&obj_map, &i.to_string());
+                                            if let Some(val_rc) = val_rc_opt {
+                                                obj_set_rc(&mut obj_map, &(i - 1).to_string(), val_rc);
                                             } else {
                                                 obj_map.remove(&(i - 1).to_string());
                                             }
                                         }
                                         obj_map.remove(&(current_len - 1).to_string());
-                                        obj_map.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(
-                                                (current_len - 1) as f64,
-                                            ))),
-                                        );
+                                        obj_set_val(&mut obj_map, "length", Value::Number((current_len - 1) as f64));
                                         Ok(first_element.unwrap_or(Value::Undefined))
                                     } else {
                                         Ok(Value::Undefined)
@@ -3171,8 +2701,7 @@ fn evaluate_expr(
                                 }
                                 "unshift" => {
                                     if args.is_empty() {
-                                        let length = obj_map
-                                            .get("length")
+                                        let length = obj_get(&obj_map, "length")
                                             .map(|v| v.borrow().clone())
                                             .unwrap_or(Value::Number(0.0));
                                         let current_len = match length {
@@ -3182,8 +2711,7 @@ fn evaluate_expr(
                                         return Ok(Value::Number(current_len));
                                     }
 
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -3193,14 +2721,15 @@ fn evaluate_expr(
 
                                     // Try to mutate env-stored object when possible
                                     if let Expr::Var(varname) = &**obj_expr {
-                                        if let Some(rc_val) = env.get(varname) {
+                                        if let Some(rc_val) = env_get(env, varname) {
                                             let mut borrowed = rc_val.borrow_mut();
                                             if let Value::Object(ref mut map) = *borrowed {
                                                 // Shift right by number of new elements
                                                 for i in (0..current_len).rev() {
                                                     let dest = (i + args.len()).to_string();
-                                                    if let Some(val) = map.get(&i.to_string()) {
-                                                        map.insert(dest, val.clone());
+                                                    let val_rc_opt = obj_get(map, &i.to_string());
+                                                    if let Some(val_rc) = val_rc_opt {
+                                                        obj_set_rc(map, &dest, val_rc);
                                                     } else {
                                                         map.remove(&dest);
                                                     }
@@ -3208,18 +2737,10 @@ fn evaluate_expr(
                                                 // Insert new elements
                                                 for (i, arg) in args.iter().enumerate() {
                                                     let val = evaluate_expr(env, arg)?;
-                                                    map.insert(
-                                                        i.to_string(),
-                                                        Rc::new(RefCell::new(val)),
-                                                    );
+                                                    obj_set_val(map, &i.to_string(), val);
                                                 }
                                                 let new_len = current_len + args.len();
-                                                map.insert(
-                                                    "length".to_string(),
-                                                    Rc::new(RefCell::new(Value::Number(
-                                                        new_len as f64,
-                                                    ))),
-                                                );
+                                                obj_set_val(map, "length", Value::Number(new_len as f64));
                                                 return Ok(Value::Number(new_len as f64));
                                             }
                                         }
@@ -3228,21 +2749,19 @@ fn evaluate_expr(
                                     // Fallback: mutate local copy (shift right by number of new elements)
                                     for i in (0..current_len).rev() {
                                         let dest = (i + args.len()).to_string();
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
-                                            obj_map.insert(dest, val.clone());
+                                        let val_rc_opt = obj_get(&obj_map, &i.to_string());
+                                        if let Some(val_rc) = val_rc_opt {
+                                            obj_set_rc(&mut obj_map, &dest, val_rc);
                                         } else {
                                             obj_map.remove(&dest);
                                         }
                                     }
                                     for (i, arg) in args.iter().enumerate() {
                                         let val = evaluate_expr(env, arg)?;
-                                        obj_map.insert(i.to_string(), Rc::new(RefCell::new(val)));
+                                        obj_set_val(&mut obj_map, &i.to_string(), val);
                                     }
                                     let new_len = current_len + args.len();
-                                    obj_map.insert(
-                                        "length".to_string(),
-                                        Rc::new(RefCell::new(Value::Number(new_len as f64))),
-                                    );
+                                    obj_set_val(&mut obj_map, "length", Value::Number(new_len as f64));
                                     Ok(Value::Number(new_len as f64))
                                 }
                                 "fill" => {
@@ -3252,8 +2771,7 @@ fn evaluate_expr(
 
                                     let fill_value = evaluate_expr(env, &args[0])?;
 
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -3292,10 +2810,7 @@ fn evaluate_expr(
                                     };
 
                                     for i in start..end.min(current_len) {
-                                        obj_map.insert(
-                                            i.to_string(),
-                                            Rc::new(RefCell::new(fill_value.clone())),
-                                        );
+                                        obj_map.insert(i.to_string(), Rc::new(RefCell::new(fill_value.clone())));
                                     }
 
                                     Ok(Value::Object(obj_map.clone()))
@@ -3307,8 +2822,7 @@ fn evaluate_expr(
 
                                     let search_element = evaluate_expr(env, &args[0])?;
 
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -3333,7 +2847,7 @@ fn evaluate_expr(
 
                                     // Search from from_index backwards
                                     for i in (0..=from_index).rev() {
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             if values_equal(&val.borrow(), &search_element) {
                                                 return Ok(Value::Number(i as f64));
                                             }
@@ -3343,8 +2857,7 @@ fn evaluate_expr(
                                     Ok(Value::Number(-1.0))
                                 }
                                 "toString" => {
-                                    let length = obj_map
-                                        .get("length")
+                                    let length = obj_get(&obj_map, "length")
                                         .map(|v| v.borrow().clone())
                                         .unwrap_or(Value::Number(0.0));
                                     let current_len = match length {
@@ -3357,17 +2870,11 @@ fn evaluate_expr(
                                         if i > 0 {
                                             result.push(',');
                                         }
-                                        if let Some(val) = obj_map.get(&i.to_string()) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
                                             match &*val.borrow() {
-                                                Value::String(ref s) => {
-                                                    result.push_str(&String::from_utf16_lossy(s))
-                                                }
-                                                Value::Number(ref n) => {
-                                                    result.push_str(&n.to_string())
-                                                }
-                                                Value::Boolean(ref b) => {
-                                                    result.push_str(&b.to_string())
-                                                }
+                                                Value::String(ref s) => result.push_str(&String::from_utf16_lossy(s)),
+                                                Value::Number(ref n) => result.push_str(&n.to_string()),
+                                                Value::Boolean(ref b) => result.push_str(&b.to_string()),
                                                 _ => result.push_str("[object Object]"),
                                             }
                                         }
@@ -3396,9 +2903,7 @@ fn evaluate_expr(
                                 if args.len() == 2 {
                                     let start_val = evaluate_expr(env, &args[0])?;
                                     let end_val = evaluate_expr(env, &args[1])?;
-                                    if let (Value::Number(start), Value::Number(end)) =
-                                        (start_val, end_val)
-                                    {
+                                    if let (Value::Number(start), Value::Number(end)) = (start_val, end_val) {
                                         let start_idx = start as usize;
                                         let end_idx = end as usize;
                                         if start_idx <= end_idx && end_idx <= utf16_len(&s) {
@@ -3512,9 +3017,7 @@ fn evaluate_expr(
                                 if args.len() == 2 {
                                     let search_val = evaluate_expr(env, &args[0])?;
                                     let replace_val = evaluate_expr(env, &args[1])?;
-                                    if let (Value::String(search), Value::String(replace)) =
-                                        (search_val, replace_val)
-                                    {
+                                    if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
                                         Ok(Value::String(utf16_replace(&s, &search, &replace)))
                                     } else {
                                         Err(JSError::EvaluationError {
@@ -3543,34 +3046,22 @@ fn evaluate_expr(
                                         } else {
                                             let mut start = 0usize;
                                             while start <= utf16_len(&s) {
-                                                if let Some(pos) =
-                                                    utf16_find(&s[start..].to_vec(), &sep)
-                                                {
+                                                if let Some(pos) = utf16_find(&s[start..].to_vec(), &sep) {
                                                     let end = start + pos;
                                                     parts.push(utf16_slice(&s, start, end));
                                                     start = end + utf16_len(&sep);
                                                 } else {
                                                     // remainder
-                                                    parts.push(utf16_slice(
-                                                        &s,
-                                                        start,
-                                                        utf16_len(&s),
-                                                    ));
+                                                    parts.push(utf16_slice(&s, start, utf16_len(&s)));
                                                     break;
                                                 }
                                             }
                                         }
                                         let mut arr = std::collections::HashMap::new();
                                         for (i, part) in parts.into_iter().enumerate() {
-                                            arr.insert(
-                                                i.to_string(),
-                                                Rc::new(RefCell::new(Value::String(part))),
-                                            );
+                                            arr.insert(i.to_string(), Rc::new(RefCell::new(Value::String(part))));
                                         }
-                                        arr.insert(
-                                            "length".to_string(),
-                                            Rc::new(RefCell::new(Value::Number(arr.len() as f64))),
-                                        );
+                                        arr.insert("length".to_string(), Rc::new(RefCell::new(Value::Number(arr.len() as f64))));
                                         Ok(Value::Object(arr))
                                     } else {
                                         Err(JSError::EvaluationError {
@@ -3625,8 +3116,7 @@ fn evaluate_expr(
                                 if args.len() == 1 {
                                     let search_val = evaluate_expr(env, &args[0])?;
                                     if let Value::String(search) = search_val {
-                                        let starts = s.len() >= search.len()
-                                            && s[..search.len()] == search[..];
+                                        let starts = s.len() >= search.len() && s[..search.len()] == search[..];
                                         Ok(Value::Boolean(starts))
                                     } else {
                                         Err(JSError::EvaluationError {
@@ -3643,8 +3133,7 @@ fn evaluate_expr(
                                 if args.len() == 1 {
                                     let search_val = evaluate_expr(env, &args[0])?;
                                     if let Value::String(search) = search_val {
-                                        let ends = s.len() >= search.len()
-                                            && s[s.len() - search.len()..] == search[..];
+                                        let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
                                         Ok(Value::Boolean(ends))
                                     } else {
                                         Err(JSError::EvaluationError {
@@ -3811,25 +3300,13 @@ fn evaluate_expr(
                             if args.len() == 1 {
                                 let arg_val = evaluate_expr(env, &args[0])?;
                                 match arg_val {
-                                    Value::Number(n) => {
-                                        Ok(Value::String(utf8_to_utf16(&n.to_string())))
-                                    }
+                                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                                     Value::String(s) => Ok(Value::String(s.clone())),
-                                    Value::Boolean(b) => {
-                                        Ok(Value::String(utf8_to_utf16(&b.to_string())))
-                                    }
-                                    Value::Undefined => {
-                                        Ok(Value::String(utf8_to_utf16("undefined")))
-                                    }
-                                    Value::Object(_) => {
-                                        Ok(Value::String(utf8_to_utf16("[object Object]")))
-                                    }
-                                    Value::Function(name) => Ok(Value::String(utf8_to_utf16(
-                                        &format!("[Function: {}]", name),
-                                    ))),
-                                    Value::Closure(_, _, _) => {
-                                        Ok(Value::String(utf8_to_utf16("[Function]")))
-                                    }
+                                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                                    Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                                    Value::Object(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+                                    Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
+                                    Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                                 }
                             } else {
                                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
@@ -3846,10 +3323,7 @@ fn evaluate_expr(
                                         let mut end_pos = 0;
                                         let mut chars = trimmed.chars();
                                         if let Some(first_char) = chars.next() {
-                                            if first_char == '-'
-                                                || first_char == '+'
-                                                || first_char.is_digit(10)
-                                            {
+                                            if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
                                                 end_pos = 1;
                                                 for ch in chars {
                                                     if ch.is_digit(10) {
@@ -3980,10 +3454,7 @@ fn evaluate_expr(
                             let mut array_obj = std::collections::HashMap::new();
                             // For now, just create an empty array representation
                             // In a real implementation, we'd need proper array support
-                            array_obj.insert(
-                                "length".to_string(),
-                                Rc::new(RefCell::new(Value::Number(0.0))),
-                            );
+                            obj_set_val(&mut array_obj, "length", Value::Number(0.0));
                             Ok(Value::Object(array_obj))
                         }
                         "Number" => {
@@ -3999,9 +3470,7 @@ fn evaluate_expr(
                                             Err(_) => Ok(Value::Number(f64::NAN)),
                                         }
                                     }
-                                    Value::Boolean(b) => {
-                                        Ok(Value::Number(if b { 1.0 } else { 0.0 }))
-                                    }
+                                    Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
                                     _ => Ok(Value::Number(f64::NAN)),
                                 }
                             } else {
@@ -4030,10 +3499,7 @@ fn evaluate_expr(
                             use std::time::{SystemTime, UNIX_EPOCH};
                             let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                             let timestamp = duration.as_millis() as f64;
-                            Ok(Value::String(utf8_to_utf16(&format!(
-                                "Date: {}",
-                                timestamp
-                            ))))
+                            Ok(Value::String(utf8_to_utf16(&format!("Date: {}", timestamp))))
                         }
                         "eval" => {
                             // eval function - basic implementation
@@ -4111,7 +3577,7 @@ fn evaluate_expr(
                         // Add parameters
                         for (param, arg) in params.iter().zip(args.iter()) {
                             let arg_val = evaluate_expr(env, arg)?;
-                            func_env.insert(param.clone(), Rc::new(RefCell::new(arg_val)));
+                            env_set(&mut func_env, param.as_str(), arg_val);
                         }
                         // Execute function body
                         evaluate_statements(&mut func_env, &body)
@@ -4122,14 +3588,12 @@ fn evaluate_expr(
                 }
             }
         }
-        Expr::Function(params, body) => {
-            Ok(Value::Closure(params.clone(), body.clone(), env.clone()))
-        }
+        Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => {
             let mut obj = std::collections::HashMap::new();
             for (key, value_expr) in properties {
                 let value = evaluate_expr(env, value_expr)?;
-                obj.insert(key.clone(), Rc::new(RefCell::new(value)));
+                obj_set_val(&mut obj, key.as_str(), value);
             }
             Ok(Value::Object(obj))
         }
@@ -4144,11 +3608,7 @@ pub enum Value {
     Undefined,
     Object(std::collections::HashMap<String, Rc<RefCell<Value>>>), // Object with properties
     Function(String),                                              // Function name
-    Closure(
-        Vec<String>,
-        Vec<Statement>,
-        std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    ), // parameters, body, captured environment
+    Closure(Vec<String>, Vec<Statement>, std::collections::HashMap<String, Rc<RefCell<Value>>>), // parameters, body, captured environment
 }
 
 // Helper functions for UTF-16 string operations
@@ -4257,6 +3717,82 @@ fn value_to_sort_string(val: &Value) -> String {
     }
 }
 
+// Helper accessors for objects and environments
+pub fn obj_get(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<Rc<RefCell<Value>>> {
+    map.get(key).cloned()
+}
+
+pub fn obj_set_val(map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val: Value) {
+    map.insert(key.to_string(), Rc::new(RefCell::new(val)));
+}
+
+pub fn obj_set_rc(map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val_rc: Rc<RefCell<Value>>) {
+    map.insert(key.to_string(), val_rc);
+}
+
+pub fn env_get(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<Rc<RefCell<Value>>> {
+    env.get(key).cloned()
+}
+
+pub fn env_set(env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val: Value) {
+    env.insert(key.to_string(), Rc::new(RefCell::new(val)));
+}
+
+pub fn env_set_rc(env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val_rc: Rc<RefCell<Value>>) {
+    env.insert(key.to_string(), val_rc);
+}
+
+// Higher-level property API that operates on expressions + environment.
+// `get_prop_env` evaluates `obj_expr` in `env` and returns the property's Rc if present.
+pub fn get_prop_env(
+    env: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    obj_expr: &Expr,
+    prop: &str,
+) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+    let obj_val = evaluate_expr(env, obj_expr)?;
+    match obj_val {
+        Value::Object(map) => Ok(obj_get(&map, prop)),
+        _ => Ok(None),
+    }
+}
+
+// `set_prop_env` attempts to set a property on the object referenced by `obj_expr`.
+// Behavior:
+// - If `obj_expr` is a variable name (Expr::Var) and that variable exists in `env`
+//   and is an object, it mutates the stored object in-place and returns `Ok(None)`.
+// - Otherwise it evaluates `obj_expr`, and if it yields an object, it inserts the
+//   property into that object's map and returns `Ok(Some(Value::Object(map)))` so
+//   the caller can decide what to do with the updated object value.
+pub fn set_prop_env(
+    env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    obj_expr: &Expr,
+    prop: &str,
+    val: Value,
+) -> Result<Option<Value>, JSError> {
+    // Fast path: obj_expr is a variable that we can mutate in-place in env
+    if let Expr::Var(varname) = obj_expr {
+        if let Some(rc_val) = env_get(&*env, varname) {
+            let mut borrowed = rc_val.borrow_mut();
+            if let Value::Object(ref mut map) = *borrowed {
+                map.insert(prop.to_string(), Rc::new(RefCell::new(val)));
+                return Ok(None);
+            }
+        }
+    }
+
+    // Fall back: evaluate the object expression and return an updated object value
+    let obj_val = evaluate_expr(&*env, obj_expr)?;
+    match obj_val {
+        Value::Object(mut map) => {
+            obj_set_val(&mut map, prop, val);
+            Ok(Some(Value::Object(map)))
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "not an object".to_string(),
+        }),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Statement {
     Let(String, Expr),
@@ -4264,12 +3800,7 @@ pub enum Statement {
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
-    For(
-        Option<Box<Statement>>,
-        Option<Expr>,
-        Option<Box<Statement>>,
-        Vec<Statement>,
-    ), // init, condition, increment, body
+    For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
 }
 
 #[derive(Debug, Clone)]
@@ -4302,11 +3833,7 @@ pub enum BinaryOp {
     GreaterEqual,
 }
 
-fn parse_string_literal(
-    chars: &[char],
-    start: &mut usize,
-    end_char: char,
-) -> Result<Vec<u16>, JSError> {
+fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
     let mut result = Vec::new();
     while *start < chars.len() && chars[*start] != end_char {
         if chars[*start] == '\\' {
@@ -4443,9 +3970,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
-                let num = num_str
-                    .parse::<f64>()
-                    .map_err(|_| JSError::TokenizationError)?;
+                let num = num_str.parse::<f64>().map_err(|_| JSError::TokenizationError)?;
                 tokens.push(Token::Number(num));
             }
             '"' => {
@@ -4626,56 +4151,32 @@ fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::Equal => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::Equal,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Equal, Box::new(right)))
         }
         Token::StrictEqual => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::StrictEqual,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::StrictEqual, Box::new(right)))
         }
         Token::LessThan => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::LessThan,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::LessThan, Box::new(right)))
         }
         Token::GreaterThan => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::GreaterThan,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::GreaterThan, Box::new(right)))
         }
         Token::LessEqual => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::LessEqual,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::LessEqual, Box::new(right)))
         }
         Token::GreaterEqual => {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
-            Ok(Expr::Binary(
-                Box::new(left),
-                BinaryOp::GreaterEqual,
-                Box::new(right),
-            ))
+            Ok(Expr::Binary(Box::new(left), BinaryOp::GreaterEqual, Box::new(right)))
         }
         _ => Ok(left),
     }
@@ -4940,12 +4441,7 @@ pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAt
     }
 }
 
-pub unsafe fn JS_SetProperty(
-    ctx: *mut JSContext,
-    this_obj: JSValue,
-    prop: JSAtom,
-    val: JSValue,
-) -> i32 {
+pub unsafe fn JS_SetProperty(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue) -> i32 {
     JS_DefinePropertyValue(ctx, this_obj, prop, val, 0)
 }
 
@@ -4957,9 +4453,7 @@ impl JSRuntime {
         // Compute hash
         let mut h = 0u32;
         for i in 0..len {
-            h = h
-                .wrapping_mul(31)
-                .wrapping_add(*name.offset(i as isize) as u32);
+            h = h.wrapping_mul(31).wrapping_add(*name.offset(i as isize) as u32);
         }
         // Find in hash table
         let hash_index = (h % self.atom_hash_size as u32) as i32;
@@ -5071,13 +4565,7 @@ mod tests {
             assert!(!ctx.is_null());
 
             let script = b"42.5";
-            let result = JS_Eval(
-                ctx,
-                script.as_ptr() as *const i8,
-                script.len(),
-                std::ptr::null(),
-                0,
-            );
+            let result = JS_Eval(ctx, script.as_ptr() as *const i8, script.len(), std::ptr::null(), 0);
             assert_eq!(result.get_tag(), JS_TAG_FLOAT64);
             assert_eq!(result.u.float64, 42.5);
 

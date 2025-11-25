@@ -84,10 +84,7 @@ mod builtin_functions_tests {
             Ok(Value::Number(n)) => {
                 assert!(n >= 0.0 && n < 1.0);
             }
-            _ => panic!(
-                "Expected Math.random() to be a number between 0 and 1, got {:?}",
-                result
-            ),
+            _ => panic!("Expected Math.random() to be a number between 0 and 1, got {:?}", result),
         }
     }
 
@@ -167,8 +164,7 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_push() {
-        let script =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.length";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.length";
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
@@ -178,8 +174,7 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_array_pop() {
-        let script =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.pop()";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.pop()";
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
@@ -206,10 +201,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
-            _ => panic!(
-                "Expected Object.keys(obj).length to be 2.0, got {:?}",
-                result
-            ),
+            _ => panic!("Expected Object.keys(obj).length to be 2.0, got {:?}", result),
         }
     }
 
@@ -222,10 +214,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "hello%20world");
             }
-            _ => panic!(
-                "Expected encodeURIComponent('hello world') to be 'hello%20world', got {:?}",
-                result
-            ),
+            _ => panic!("Expected encodeURIComponent('hello world') to be 'hello%20world', got {:?}", result),
         }
     }
 
@@ -238,10 +227,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "hello world");
             }
-            _ => panic!(
-                "Expected decodeURIComponent('hello%20world') to be 'hello world', got {:?}",
-                result
-            ),
+            _ => panic!("Expected decodeURIComponent('hello%20world') to be 'hello world', got {:?}", result),
         }
     }
 
@@ -287,10 +273,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "hello%20world");
             }
-            _ => panic!(
-                "Expected encodeURI('hello world') to be 'hello%20world', got {:?}",
-                result
-            ),
+            _ => panic!("Expected encodeURI('hello world') to be 'hello%20world', got {:?}", result),
         }
     }
 
@@ -303,17 +286,13 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "hello world");
             }
-            _ => panic!(
-                "Expected decodeURI('hello%20world') to be 'hello world', got {:?}",
-                result
-            ),
+            _ => panic!("Expected decodeURI('hello%20world') to be 'hello world', got {:?}", result),
         }
     }
 
     #[test]
     fn test_array_for_each() {
-        let script =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.forEach(function(x) { return x; })";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.forEach(function(x) { return x; })";
         let result = evaluate_script(script);
         match result {
             Ok(Value::Undefined) => {
@@ -369,10 +348,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-            _ => panic!(
-                "Expected split empty-sep length to be 3.0, got {:?}",
-                result
-            ),
+            _ => panic!("Expected split empty-sep length to be 3.0, got {:?}", result),
         }
     }
 
@@ -612,8 +588,7 @@ mod builtin_functions_tests {
         }
 
         // Test indexOf with element not found
-        let script =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.indexOf(5)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.indexOf(5)";
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
@@ -639,8 +614,7 @@ mod builtin_functions_tests {
         }
 
         // Test includes with element not found
-        let script =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
         let result = evaluate_script(script);
         match result {
             Ok(Value::Boolean(b)) => assert_eq!(b, false),
@@ -652,10 +626,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Boolean(b)) => assert_eq!(b, true),
-            _ => panic!(
-                "Expected arr.includes(2, 2) to return true, got {:?}",
-                result
-            ),
+            _ => panic!("Expected arr.includes(2, 2) to return true, got {:?}", result),
         }
     }
 
@@ -668,10 +639,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "1,2,3");
             }
-            _ => panic!(
-                "Expected sorted array join to return '1,2,3', got {:?}",
-                result
-            ),
+            _ => panic!("Expected sorted array join to return '1,2,3', got {:?}", result),
         }
 
         // Test sort with custom compare function
@@ -682,10 +650,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "3,2,1");
             }
-            _ => panic!(
-                "Expected sorted array join to return '3,2,1', got {:?}",
-                result
-            ),
+            _ => panic!("Expected sorted array join to return '3,2,1', got {:?}", result),
         }
     }
 
@@ -698,17 +663,15 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "3,2,1");
             }
-            _ => panic!(
-                "Expected reversed array join to return '3,2,1', got {:?}",
-                result
-            ),
+            _ => panic!("Expected reversed array join to return '3,2,1', got {:?}", result),
         }
     }
 
     #[test]
     fn test_array_splice() {
         // Test basic splice - remove elements
-        let script = "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); arr.push(4); let removed = arr.splice(1, 2); removed.join(',')";
+        let script =
+            "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); arr.push(4); let removed = arr.splice(1, 2); removed.join(',')";
         let result = evaluate_script(script);
         match result {
             Ok(Value::String(s)) => {
@@ -723,10 +686,7 @@ mod builtin_functions_tests {
         let result2 = evaluate_script(script2);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 0.0), // No elements were removed
-            _ => panic!(
-                "Expected splice with insertion to return empty array (length 0), got {:?}",
-                result2
-            ),
+            _ => panic!("Expected splice with insertion to return empty array (length 0), got {:?}", result2),
         }
     }
 
@@ -747,10 +707,7 @@ mod builtin_functions_tests {
         let result2 = evaluate_script(script2);
         match result2 {
             Ok(Value::Undefined) => {}
-            _ => panic!(
-                "Expected shift on empty array to return undefined, got {:?}",
-                result2
-            ),
+            _ => panic!("Expected shift on empty array to return undefined, got {:?}", result2),
         }
     }
 
@@ -771,10 +728,7 @@ mod builtin_functions_tests {
         let result2 = evaluate_script(script2);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-            _ => panic!(
-                "Expected unshift on empty array to return 3, got {:?}",
-                result2
-            ),
+            _ => panic!("Expected unshift on empty array to return 3, got {:?}", result2),
         }
     }
 
@@ -798,10 +752,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "0,0,0");
             }
-            _ => panic!(
-                "Expected fill entire array to return '0,0,0', got {:?}",
-                result2
-            ),
+            _ => panic!("Expected fill entire array to return '0,0,0', got {:?}", result2),
         }
     }
 
@@ -815,8 +766,7 @@ mod builtin_functions_tests {
         }
 
         // Test element not found
-        let script2 =
-            "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.lastIndexOf(4)";
+        let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.lastIndexOf(4)";
         let result2 = evaluate_script(script2);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
@@ -852,10 +802,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "");
             }
-            _ => panic!(
-                "Expected empty array toString to return '', got {:?}",
-                result2
-            ),
+            _ => panic!("Expected empty array toString to return '', got {:?}", result2),
         }
 
         // Test array with different types
@@ -867,10 +814,7 @@ mod builtin_functions_tests {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "1,hello,true");
             }
-            _ => panic!(
-                "Expected mixed array toString to return '1,hello,true', got {:?}",
-                result3
-            ),
+            _ => panic!("Expected mixed array toString to return '1,hello,true', got {:?}", result3),
         }
     }
 }

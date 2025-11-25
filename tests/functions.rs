@@ -57,8 +57,7 @@ mod function_tests {
 
     #[test]
     fn test_function_with_console_log() {
-        let script =
-            "function greet(name) { console.log('Hello', name); return 'done'; } greet('World')";
+        let script = "function greet(name) { console.log('Hello', name); return 'done'; } greet('World')";
         let result = evaluate_script(script);
         match result {
             Ok(Value::String(s)) => {

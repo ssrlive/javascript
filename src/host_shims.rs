@@ -1,7 +1,5 @@
+use crate::quickjs::JSObjectData;
 use crate::quickjs::{obj_set_val, Value};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
 
 // local helper (currently unused but kept for future use)
 #[allow(dead_code)]
@@ -9,8 +7,8 @@ fn utf8_to_utf16_local(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
-pub fn make_std_object() -> HashMap<String, Rc<RefCell<Value>>> {
-    let mut obj = HashMap::new();
+pub fn make_std_object() -> JSObjectData {
+    let mut obj = JSObjectData::new();
     obj_set_val(&mut obj, "sprintf", Value::Function("std.sprintf".to_string()));
     obj_set_val(&mut obj, "tmpfile", Value::Function("std.tmpfile".to_string()));
     obj_set_val(&mut obj, "loadFile", Value::Function("std.loadFile".to_string()));
@@ -23,8 +21,8 @@ pub fn make_std_object() -> HashMap<String, Rc<RefCell<Value>>> {
     obj
 }
 
-pub fn make_os_object() -> HashMap<String, Rc<RefCell<Value>>> {
-    let mut obj = HashMap::new();
+pub fn make_os_object() -> JSObjectData {
+    let mut obj = JSObjectData::new();
     obj_set_val(&mut obj, "remove", Value::Function("os.remove".to_string()));
     obj_set_val(&mut obj, "mkdir", Value::Function("os.mkdir".to_string()));
     obj_set_val(&mut obj, "open", Value::Function("os.open".to_string()));
@@ -63,8 +61,8 @@ pub fn make_os_object() -> HashMap<String, Rc<RefCell<Value>>> {
     obj
 }
 
-pub fn make_path_object() -> HashMap<String, Rc<RefCell<Value>>> {
-    let mut obj = HashMap::new();
+pub fn make_path_object() -> JSObjectData {
+    let mut obj = JSObjectData::new();
     obj_set_val(&mut obj, "join", Value::Function("os.path.join".to_string()));
     obj_set_val(&mut obj, "dirname", Value::Function("os.path.dirname".to_string()));
     obj_set_val(&mut obj, "basename", Value::Function("os.path.basename".to_string()));

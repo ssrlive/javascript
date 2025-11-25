@@ -901,7 +901,7 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
 
     let mut tokens = tokenize(&filtered)?;
     let statements = parse_statements(&mut tokens)?;
-    let mut env: std::collections::HashMap<String, Rc<RefCell<Value>>> = std::collections::HashMap::new();
+    let mut env: JSObjectData = JSObjectData::new();
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
     //   import * as NAME from "std";
@@ -1122,10 +1122,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     Ok(Statement::Expr(expr))
 }
 
-pub fn evaluate_statements(
-    env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    statements: &[Statement],
-) -> Result<Value, JSError> {
+pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> Result<Value, JSError> {
     let mut last_value = Value::Number(0.0);
     for stmt in statements {
         match stmt {
@@ -1233,7 +1230,7 @@ pub fn evaluate_statements(
     Ok(last_value)
 }
 
-pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, expr: &Expr) -> Result<Value, JSError> {
+pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
@@ -1242,13 +1239,13 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
             if let Some(val) = env_get(env, name) {
                 Ok(val.borrow().clone())
             } else if name == "console" {
-                let mut console_obj = std::collections::HashMap::new();
+                let mut console_obj = JSObjectData::new();
                 obj_set_val(&mut console_obj, "log", Value::Function("console.log".to_string()));
                 Ok(Value::Object(console_obj))
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
             } else if name == "Math" {
-                let mut math_obj = std::collections::HashMap::new();
+                let mut math_obj = JSObjectData::new();
                 obj_set_val(&mut math_obj, "PI", Value::Number(std::f64::consts::PI));
                 obj_set_val(&mut math_obj, "E", Value::Number(std::f64::consts::E));
                 obj_set_val(&mut math_obj, "floor", Value::Function("Math.floor".to_string()));
@@ -1263,12 +1260,12 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                 obj_set_val(&mut math_obj, "random", Value::Function("Math.random".to_string()));
                 Ok(Value::Object(math_obj))
             } else if name == "JSON" {
-                let mut json_obj = std::collections::HashMap::new();
+                let mut json_obj = JSObjectData::new();
                 obj_set_val(&mut json_obj, "parse", Value::Function("JSON.parse".to_string()));
                 obj_set_val(&mut json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
                 Ok(Value::Object(json_obj))
             } else if name == "Object" {
-                let mut object_obj = std::collections::HashMap::new();
+                let mut object_obj = JSObjectData::new();
                 obj_set_val(&mut object_obj, "keys", Value::Function("Object.keys".to_string()));
                 obj_set_val(&mut object_obj, "values", Value::Function("Object.values".to_string()));
                 Ok(Value::Object(object_obj))
@@ -1539,7 +1536,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                             let file_id = get_next_file_id();
                                             FILE_STORE.lock().unwrap().insert(file_id, file);
 
-                                            let mut tmp = std::collections::HashMap::new();
+                                            let mut tmp = JSObjectData::new();
                                             obj_set_val(&mut tmp, "__file_id", Value::Number(file_id as f64));
                                             obj_set_val(&mut tmp, "__eof", Value::Boolean(false));
                                             // methods
@@ -1786,7 +1783,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                         };
                                         match std::fs::read_dir(&dirname) {
                                             Ok(entries) => {
-                                                let mut obj = std::collections::HashMap::new();
+                                                let mut obj = JSObjectData::new();
                                                 let mut i = 0;
                                                 for entry in entries {
                                                     if let Ok(entry) = entry {
@@ -1800,13 +1797,13 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                                 return Ok(Value::Object(obj));
                                             }
                                             Err(_) => {
-                                                let mut obj = std::collections::HashMap::new();
+                                                let mut obj = JSObjectData::new();
                                                 obj_set_val(&mut obj, "length", Value::Number(0.0));
                                                 return Ok(Value::Object(obj));
                                             }
                                         }
                                     }
-                                    let mut obj = std::collections::HashMap::new();
+                                    let mut obj = JSObjectData::new();
                                     obj_set_val(&mut obj, "length", Value::Number(0.0));
                                     return Ok(Value::Object(obj));
                                 }
@@ -2350,7 +2347,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                                 }
                                             }
                                             // Create a simple array-like object for keys
-                                            let mut result_obj = std::collections::HashMap::new();
+                                            let mut result_obj = JSObjectData::new();
                                             for (i, key) in keys.into_iter().enumerate() {
                                                 obj_set_val(&mut result_obj, &i.to_string(), key);
                                             }
@@ -2380,7 +2377,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                                 }
                                             }
                                             // Create a simple array-like object for values
-                                            let mut result_obj = std::collections::HashMap::new();
+                                            let mut result_obj = JSObjectData::new();
                                             for (i, value) in values.into_iter().enumerate() {
                                                 obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
                                             }
@@ -2582,7 +2579,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
                                                 }
                                             }
                                         }
-                                        let mut arr = std::collections::HashMap::new();
+                                        let mut arr = JSObjectData::new();
                                         for (i, part) in parts.into_iter().enumerate() {
                                             arr.insert(i.to_string(), Rc::new(RefCell::new(Value::String(part))));
                                         }
@@ -3111,7 +3108,7 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
         }
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => {
-            let mut obj = std::collections::HashMap::new();
+            let mut obj = JSObjectData::new();
             for (key, value_expr) in properties {
                 let value = evaluate_expr(env, value_expr)?;
                 obj_set_val(&mut obj, key.as_str(), value);
@@ -3121,15 +3118,17 @@ pub fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>
     }
 }
 
+pub type JSObjectData = std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>;
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
-    Object(std::collections::HashMap<String, Rc<RefCell<Value>>>), // Object with properties
-    Function(String),                                              // Function name
-    Closure(Vec<String>, Vec<Statement>, std::collections::HashMap<String, Rc<RefCell<Value>>>), // parameters, body, captured environment
+    Object(JSObjectData),                               // Object with properties
+    Function(String),                                   // Function name
+    Closure(Vec<String>, Vec<Statement>, JSObjectData), // parameters, body, captured environment
 }
 
 // Helper functions for UTF-16 string operations
@@ -3239,37 +3238,33 @@ pub fn value_to_sort_string(val: &Value) -> String {
 }
 
 // Helper accessors for objects and environments
-pub fn obj_get(map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<Rc<RefCell<Value>>> {
+pub fn obj_get(map: &JSObjectData, key: &str) -> Option<Rc<RefCell<Value>>> {
     map.get(key).cloned()
 }
 
-pub fn obj_set_val(map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val: Value) {
+pub fn obj_set_val(map: &mut JSObjectData, key: &str, val: Value) {
     map.insert(key.to_string(), Rc::new(RefCell::new(val)));
 }
 
-pub fn obj_set_rc(map: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val_rc: Rc<RefCell<Value>>) {
+pub fn obj_set_rc(map: &mut JSObjectData, key: &str, val_rc: Rc<RefCell<Value>>) {
     map.insert(key.to_string(), val_rc);
 }
 
-pub fn env_get(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str) -> Option<Rc<RefCell<Value>>> {
+pub fn env_get(env: &JSObjectData, key: &str) -> Option<Rc<RefCell<Value>>> {
     env.get(key).cloned()
 }
 
-pub fn env_set(env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val: Value) {
+pub fn env_set(env: &mut JSObjectData, key: &str, val: Value) {
     env.insert(key.to_string(), Rc::new(RefCell::new(val)));
 }
 
-pub fn env_set_rc(env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>, key: &str, val_rc: Rc<RefCell<Value>>) {
+pub fn env_set_rc(env: &mut JSObjectData, key: &str, val_rc: Rc<RefCell<Value>>) {
     env.insert(key.to_string(), val_rc);
 }
 
 // Higher-level property API that operates on expressions + environment.
 // `get_prop_env` evaluates `obj_expr` in `env` and returns the property's Rc if present.
-pub fn get_prop_env(
-    env: &std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    obj_expr: &Expr,
-    prop: &str,
-) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+pub fn get_prop_env(env: &JSObjectData, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     let obj_val = evaluate_expr(env, obj_expr)?;
     match obj_val {
         Value::Object(map) => Ok(obj_get(&map, prop)),
@@ -3284,12 +3279,7 @@ pub fn get_prop_env(
 // - Otherwise it evaluates `obj_expr`, and if it yields an object, it inserts the
 //   property into that object's map and returns `Ok(Some(Value::Object(map)))` so
 //   the caller can decide what to do with the updated object value.
-pub fn set_prop_env(
-    env: &mut std::collections::HashMap<String, Rc<RefCell<Value>>>,
-    obj_expr: &Expr,
-    prop: &str,
-    val: Value,
-) -> Result<Option<Value>, JSError> {
+pub fn set_prop_env(env: &mut JSObjectData, obj_expr: &Expr, prop: &str, val: Value) -> Result<Option<Value>, JSError> {
     // Fast path: obj_expr is a variable that we can mutate in-place in env
     if let Expr::Var(varname) = obj_expr {
         if let Some(rc_val) = env_get(&*env, varname) {
@@ -4184,7 +4174,7 @@ impl JSRuntime {
 }
 
 // Helper functions for array flattening
-fn flatten_array(obj_map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, result: &mut Vec<Value>, depth: usize) {
+fn flatten_array(obj_map: &JSObjectData, result: &mut Vec<Value>, depth: usize) {
     let length = obj_get(obj_map, "length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
     let current_len = match length {
         Value::Number(n) => n as usize,

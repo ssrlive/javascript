@@ -1,6 +1,5 @@
-use crate::error::JSError;
+use crate::{error::JSError, quickjs::JSObjectData};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use super::quickjs::{
@@ -9,7 +8,7 @@ use super::quickjs::{
 };
 
 /// Handle Array static method calls (Array.isArray, Array.from, Array.of)
-pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &HashMap<String, Rc<RefCell<Value>>>) -> Result<Value, JSError> {
+pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
     match method {
         "isArray" => {
             if args.len() != 1 {
@@ -95,7 +94,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &Hash
                 }
             }
 
-            let mut new_array = HashMap::new();
+            let mut new_array = JSObjectData::new();
             let result_len = result.len();
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_val(&mut new_array, &i.to_string(), val);
@@ -105,7 +104,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &Hash
         }
         "of" => {
             // Array.of(...elements)
-            let mut new_array = HashMap::new();
+            let mut new_array = JSObjectData::new();
             for (i, arg) in args.iter().enumerate() {
                 let val = evaluate_expr(env, arg)?;
                 obj_set_val(&mut new_array, &i.to_string(), val);
@@ -120,10 +119,10 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &Hash
 }
 
 /// Handle Array constructor calls
-pub(crate) fn handle_array_constructor(args: &[Expr], env: &HashMap<String, Rc<RefCell<Value>>>) -> Result<Value, JSError> {
+pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
     if args.is_empty() {
         // Array() - create empty array
-        let mut array_obj = HashMap::new();
+        let mut array_obj = JSObjectData::new();
         obj_set_val(&mut array_obj, "length", Value::Number(0.0));
         Ok(Value::Object(array_obj))
     } else if args.len() == 1 {
@@ -133,7 +132,7 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &HashMap<String, Rc<R
             Value::Number(n) => {
                 if n.fract() == 0.0 && n >= 0.0 && n <= u32::MAX as f64 {
                     // Array(length) - create array with specified length
-                    let mut array_obj = HashMap::new();
+                    let mut array_obj = JSObjectData::new();
                     obj_set_val(&mut array_obj, "length", Value::Number(n));
                     Ok(Value::Object(array_obj))
                 } else {
@@ -143,7 +142,7 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &HashMap<String, Rc<R
             }
             _ => {
                 // Array(element) - create array with single element
-                let mut array_obj = HashMap::new();
+                let mut array_obj = JSObjectData::new();
                 obj_set_val(&mut array_obj, "0", arg_val);
                 obj_set_val(&mut array_obj, "length", Value::Number(1.0));
                 Ok(Value::Object(array_obj))
@@ -151,7 +150,7 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &HashMap<String, Rc<R
         }
     } else {
         // Array(element1, element2, ...) - create array with multiple elements
-        let mut array_obj = HashMap::new();
+        let mut array_obj = JSObjectData::new();
         for (i, arg) in args.iter().enumerate() {
             let arg_val = evaluate_expr(env, arg)?;
             obj_set_val(&mut array_obj, &i.to_string(), arg_val);
@@ -163,10 +162,10 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &HashMap<String, Rc<R
 
 /// Handle Array instance method calls
 pub(crate) fn handle_array_instance_method(
-    obj_map: &mut HashMap<String, Rc<RefCell<Value>>>,
+    obj_map: &mut JSObjectData,
     method: &str,
     args: &[Expr],
-    env: &HashMap<String, Rc<RefCell<Value>>>,
+    env: &JSObjectData,
     obj_expr: &Expr,
 ) -> Result<Value, JSError> {
     match method {
@@ -183,7 +182,7 @@ pub(crate) fn handle_array_instance_method(
                 };
 
                 // Helper closure to push a value into a map
-                let mut push_into_map = |map: &mut HashMap<String, Rc<RefCell<Value>>>, val: Value| {
+                let mut push_into_map = |map: &mut JSObjectData, val: Value| {
                     obj_set_val(map, &current_len.to_string(), val);
                     current_len += 1;
                 };
@@ -313,7 +312,7 @@ pub(crate) fn handle_array_instance_method(
             let start = start.max(0).min(len) as usize;
             let end = end.max(0).min(len) as usize;
 
-            let mut new_array = HashMap::new();
+            let mut new_array = JSObjectData::new();
             let mut idx = 0;
             for i in start..end {
                 if let Some(val) = obj_get(obj_map, &i.to_string()) {
@@ -376,7 +375,7 @@ pub(crate) fn handle_array_instance_method(
                     _ => 0,
                 };
 
-                let mut new_array = HashMap::new();
+                let mut new_array = JSObjectData::new();
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get(obj_map, &i.to_string()) {
@@ -422,7 +421,7 @@ pub(crate) fn handle_array_instance_method(
                     _ => 0,
                 };
 
-                let mut new_array = HashMap::new();
+                let mut new_array = JSObjectData::new();
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get(obj_map, &i.to_string()) {
@@ -756,7 +755,7 @@ pub(crate) fn handle_array_instance_method(
             }
         }
         "concat" => {
-            let mut result = HashMap::new();
+            let mut result = JSObjectData::new();
 
             // First, copy all elements from current array
             let current_length = obj_get(obj_map, "length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
@@ -1030,7 +1029,7 @@ pub(crate) fn handle_array_instance_method(
             }
 
             // Create new array for deleted elements
-            let mut deleted_array = HashMap::new();
+            let mut deleted_array = JSObjectData::new();
             for (i, val) in deleted_elements.iter().enumerate() {
                 obj_set_val(&mut deleted_array, &i.to_string(), val.clone());
             }
@@ -1310,7 +1309,7 @@ pub(crate) fn handle_array_instance_method(
             flatten_array(obj_map, &mut result, depth);
 
             let length = Value::Number(result.len() as f64);
-            let mut new_array = HashMap::new();
+            let mut new_array = JSObjectData::new();
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_val(&mut new_array, &i.to_string(), val);
             }
@@ -1359,7 +1358,7 @@ pub(crate) fn handle_array_instance_method(
             }
 
             let length = Value::Number(result.len() as f64);
-            let mut new_array = HashMap::new();
+            let mut new_array = JSObjectData::new();
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_val(&mut new_array, &i.to_string(), val);
             }
@@ -1449,7 +1448,7 @@ pub(crate) fn handle_array_instance_method(
             for i in 0..current_len {
                 if let Some(val) = obj_get(obj_map, &i.to_string()) {
                     let entry = vec![Value::Number(i as f64), val.borrow().clone()];
-                    let mut entry_obj = HashMap::new();
+                    let mut entry_obj = JSObjectData::new();
                     obj_set_val(&mut entry_obj, &0.to_string(), entry[0].clone());
                     obj_set_val(&mut entry_obj, &1.to_string(), entry[1].clone());
                     obj_set_val(&mut entry_obj, "length", Value::Number(2.0));
@@ -1458,7 +1457,7 @@ pub(crate) fn handle_array_instance_method(
             }
 
             let length = Value::Number(entries.len() as f64);
-            let mut iterator = HashMap::new();
+            let mut iterator = JSObjectData::new();
             for (i, entry) in entries.into_iter().enumerate() {
                 obj_set_val(&mut iterator, &i.to_string(), entry);
             }
@@ -1472,7 +1471,7 @@ pub(crate) fn handle_array_instance_method(
 }
 
 // Helper functions for array flattening
-fn flatten_array(obj_map: &HashMap<String, Rc<RefCell<Value>>>, result: &mut Vec<Value>, depth: usize) {
+fn flatten_array(obj_map: &JSObjectData, result: &mut Vec<Value>, depth: usize) {
     let length = obj_get(obj_map, "length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
     let current_len = match length {
         Value::Number(n) => n as usize,

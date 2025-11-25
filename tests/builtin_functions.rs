@@ -817,4 +817,284 @@ mod builtin_functions_tests {
             _ => panic!("Expected mixed array toString to return '1,hello,true', got {:?}", result3),
         }
     }
+
+    #[test]
+    fn test_array_flat() {
+        // Test basic flat - create nested array manually
+        let script = "let arr = Array(); let subarr = Array(); let subarr2 = subarr.push(2); let subarr3 = subarr2.push(3); let arr2 = arr.push(1); let arr3 = arr2.push(subarr3); let arr4 = arr3.push(4); arr4.flat()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 4.0),
+                        _ => panic!("Expected length to be 4.0"),
+                    }
+                }
+                // Check elements
+                if let Some(val0) = obj.get("0") {
+                    match *val0.borrow() {
+                        Value::Number(n) => assert_eq!(n, 1.0),
+                        _ => panic!("Expected element 0 to be 1.0"),
+                    }
+                }
+                if let Some(val1) = obj.get("1") {
+                    match *val1.borrow() {
+                        Value::Number(n) => assert_eq!(n, 2.0),
+                        _ => panic!("Expected element 1 to be 2.0"),
+                    }
+                }
+                if let Some(val2) = obj.get("2") {
+                    match *val2.borrow() {
+                        Value::Number(n) => assert_eq!(n, 3.0),
+                        _ => panic!("Expected element 2 to be 3.0"),
+                    }
+                }
+                if let Some(val3) = obj.get("3") {
+                    match *val3.borrow() {
+                        Value::Number(n) => assert_eq!(n, 4.0),
+                        _ => panic!("Expected element 3 to be 4.0"),
+                    }
+                }
+            }
+            _ => panic!("Expected flat() to return an array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_flat_map() {
+        // Test basic flatMap - create arrays manually
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.flatMap(function(x) { let result = Array(); let r2 = result.push(x); let r3 = r2.push(x*2); return r3; })";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 4.0),
+                        _ => panic!("Expected length to be 4.0"),
+                    }
+                }
+                // Check elements
+                if let Some(val0) = obj.get("0") {
+                    match *val0.borrow() {
+                        Value::Number(n) => assert_eq!(n, 1.0),
+                        _ => panic!("Expected element 0 to be 1.0"),
+                    }
+                }
+                if let Some(val1) = obj.get("1") {
+                    match *val1.borrow() {
+                        Value::Number(n) => assert_eq!(n, 2.0),
+                        _ => panic!("Expected element 1 to be 2.0"),
+                    }
+                }
+                if let Some(val2) = obj.get("2") {
+                    match *val2.borrow() {
+                        Value::Number(n) => assert_eq!(n, 2.0),
+                        _ => panic!("Expected element 2 to be 2.0"),
+                    }
+                }
+                if let Some(val3) = obj.get("3") {
+                    match *val3.borrow() {
+                        Value::Number(n) => assert_eq!(n, 4.0),
+                        _ => panic!("Expected element 3 to be 4.0"),
+                    }
+                }
+            }
+            _ => panic!("Expected flatMap() to return an array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_copy_within() {
+        // Test copyWithin
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(4); arr5.copyWithin(0, 2, 4)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 4.0),
+                        _ => panic!("Expected length to be 4.0"),
+                    }
+                }
+                // Check elements after copyWithin(0, 2, 4)
+                if let Some(val0) = obj.get("0") {
+                    match *val0.borrow() {
+                        Value::Number(n) => assert_eq!(n, 3.0),
+                        _ => panic!("Expected element 0 to be 3.0"),
+                    }
+                }
+                if let Some(val1) = obj.get("1") {
+                    match *val1.borrow() {
+                        Value::Number(n) => assert_eq!(n, 4.0),
+                        _ => panic!("Expected element 1 to be 4.0"),
+                    }
+                }
+                if let Some(val2) = obj.get("2") {
+                    match *val2.borrow() {
+                        Value::Number(n) => assert_eq!(n, 3.0),
+                        _ => panic!("Expected element 2 to be 3.0"),
+                    }
+                }
+                if let Some(val3) = obj.get("3") {
+                    match *val3.borrow() {
+                        Value::Number(n) => assert_eq!(n, 4.0),
+                        _ => panic!("Expected element 3 to be 4.0"),
+                    }
+                }
+            }
+            _ => panic!("Expected copyWithin() to return an array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_entries() {
+        // Test entries
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.entries()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 2.0),
+                        _ => panic!("Expected length to be 2.0"),
+                    }
+                }
+                // Check first entry [0, 1]
+                if let Some(entry0) = obj.get("0") {
+                    match &*entry0.borrow() {
+                        Value::Object(entry_obj) => {
+                            if let Some(idx) = entry_obj.get("0") {
+                                match *idx.borrow() {
+                                    Value::Number(n) => assert_eq!(n, 0.0),
+                                    _ => panic!("Expected entry[0][0] to be 0.0"),
+                                }
+                            }
+                            if let Some(val) = entry_obj.get("1") {
+                                match *val.borrow() {
+                                    Value::Number(n) => assert_eq!(n, 1.0),
+                                    _ => panic!("Expected entry[0][1] to be 1.0"),
+                                }
+                            }
+                        }
+                        _ => panic!("Expected entry to be an object"),
+                    }
+                }
+                // Check second entry [1, 2]
+                if let Some(entry1) = obj.get("1") {
+                    match &*entry1.borrow() {
+                        Value::Object(entry_obj) => {
+                            if let Some(idx) = entry_obj.get("0") {
+                                match *idx.borrow() {
+                                    Value::Number(n) => assert_eq!(n, 1.0),
+                                    _ => panic!("Expected entry[1][0] to be 1.0"),
+                                }
+                            }
+                            if let Some(val) = entry_obj.get("1") {
+                                match *val.borrow() {
+                                    Value::Number(n) => assert_eq!(n, 2.0),
+                                    _ => panic!("Expected entry[1][1] to be 2.0"),
+                                }
+                            }
+                        }
+                        _ => panic!("Expected entry to be an object"),
+                    }
+                }
+            }
+            _ => panic!("Expected entries() to return an array of entries, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_from() {
+        // Test Array.from with array-like object
+        let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); Array.from(arr3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 2.0),
+                        _ => panic!("Expected length to be 2.0"),
+                    }
+                }
+                // Check elements
+                if let Some(val0) = obj.get("0") {
+                    match *val0.borrow() {
+                        Value::Number(n) => assert_eq!(n, 1.0),
+                        _ => panic!("Expected element 0 to be 1.0"),
+                    }
+                }
+                if let Some(val1) = obj.get("1") {
+                    match *val1.borrow() {
+                        Value::Number(n) => assert_eq!(n, 2.0),
+                        _ => panic!("Expected element 1 to be 2.0"),
+                    }
+                }
+            }
+            _ => panic!("Expected Array.from() to return an array, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_is_array() {
+        // Test Array.isArray with array
+        let script = "let arr = Array(); let arr2 = arr.push(1); Array.isArray(arr2)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected Array.isArray(array) to return true, got {:?}", result),
+        }
+
+        // Test Array.isArray with non-array
+        let script2 = "Array.isArray(42)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            _ => panic!("Expected Array.isArray(number) to return false, got {:?}", result2),
+        }
+    }
+
+    #[test]
+    fn test_array_of() {
+        // Test Array.of
+        let script = "Array.of(1, 2, 3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(obj)) => {
+                // Check length
+                if let Some(length_val) = obj.get("length") {
+                    match *length_val.borrow() {
+                        Value::Number(len) => assert_eq!(len, 3.0),
+                        _ => panic!("Expected length to be 3.0"),
+                    }
+                }
+                // Check elements
+                if let Some(val0) = obj.get("0") {
+                    match *val0.borrow() {
+                        Value::Number(n) => assert_eq!(n, 1.0),
+                        _ => panic!("Expected element 0 to be 1.0"),
+                    }
+                }
+                if let Some(val1) = obj.get("1") {
+                    match *val1.borrow() {
+                        Value::Number(n) => assert_eq!(n, 2.0),
+                        _ => panic!("Expected element 1 to be 2.0"),
+                    }
+                }
+                if let Some(val2) = obj.get("2") {
+                    match *val2.borrow() {
+                        Value::Number(n) => assert_eq!(n, 3.0),
+                        _ => panic!("Expected element 2 to be 3.0"),
+                    }
+                }
+            }
+            _ => panic!("Expected Array.of() to return an array, got {:?}", result),
+        }
+    }
 }

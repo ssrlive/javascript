@@ -1447,6 +1447,121 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
         Expr::Call(func_expr, args) => {
             // Check if it's a method call first
             if let Expr::Property(obj_expr, method_name) = &**func_expr {
+                // Special case for Array static methods
+                if let Expr::Var(var_name) = &**obj_expr {
+                    if var_name == "Array" {
+                        match method_name.as_str() {
+                            "isArray" => {
+                                if args.len() != 1 {
+                                    return Err(JSError::EvaluationError {
+                                        message: "Array.isArray requires exactly one argument".to_string(),
+                                    });
+                                }
+
+                                let arg = evaluate_expr(env, &args[0])?;
+                                let is_array = match arg {
+                                    Value::Object(obj_map) => obj_map.contains_key("length"),
+                                    _ => false,
+                                };
+                                return Ok(Value::Boolean(is_array));
+                            }
+                            "from" => {
+                                // Array.from(iterable, mapFn?, thisArg?)
+                                if args.is_empty() {
+                                    return Err(JSError::EvaluationError {
+                                        message: "Array.from requires at least one argument".to_string(),
+                                    });
+                                }
+
+                                let iterable = evaluate_expr(env, &args[0])?;
+                                let map_fn = if args.len() > 1 {
+                                    Some(evaluate_expr(env, &args[1])?)
+                                } else {
+                                    None
+                                };
+
+                                let mut result = Vec::new();
+
+                                // Handle different types of iterables
+                                match iterable {
+                                    Value::Object(obj_map) => {
+                                        // If it's an array-like object
+                                        if obj_map.contains_key("length") {
+                                            let length = obj_get(&obj_map, "length")
+                                                .map(|v| v.borrow().clone())
+                                                .unwrap_or(Value::Number(0.0));
+                                            let len = match length {
+                                                Value::Number(n) => n as usize,
+                                                _ => 0,
+                                            };
+
+                                            for i in 0..len {
+                                                if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                                    let element = val.borrow().clone();
+                                                    if let Some(ref fn_val) = map_fn {
+                                                        match fn_val {
+                                                            Value::Closure(params, body, captured_env) => {
+                                                                let mut func_env = captured_env.clone();
+                                                                if params.len() >= 1 {
+                                                                    env_set(&mut func_env, params[0].as_str(), element);
+                                                                }
+                                                                if params.len() >= 2 {
+                                                                    env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
+                                                                }
+                                                                let mapped = evaluate_statements(&mut func_env, &body)?;
+                                                                result.push(mapped);
+                                                            }
+                                                            _ => {
+                                                                return Err(JSError::EvaluationError {
+                                                                    message: "Array.from map function must be a function".to_string(),
+                                                                });
+                                                            }
+                                                        }
+                                                    } else {
+                                                        result.push(element);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Array.from iterable must be array-like".to_string(),
+                                            });
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Array.from iterable must be array-like".to_string(),
+                                        });
+                                    }
+                                }
+
+                                let mut new_array = std::collections::HashMap::new();
+                                let result_len = result.len();
+                                for (i, val) in result.into_iter().enumerate() {
+                                    obj_set_val(&mut new_array, &i.to_string(), val);
+                                }
+                                obj_set_val(&mut new_array, "length", Value::Number(result_len as f64));
+                                return Ok(Value::Object(new_array));
+                            }
+                            "of" => {
+                                // Array.of(...elements)
+                                let mut new_array = std::collections::HashMap::new();
+                                for (i, arg) in args.iter().enumerate() {
+                                    let val = evaluate_expr(env, arg)?;
+                                    obj_set_val(&mut new_array, &i.to_string(), val);
+                                }
+                                obj_set_val(&mut new_array, "length", Value::Number(args.len() as f64));
+                                return Ok(Value::Object(new_array));
+                            }
+                            _ => {
+                                return Err(JSError::EvaluationError {
+                                    message: format!("Array.{} is not implemented", method_name),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 let obj_val = evaluate_expr(env, obj_expr)?;
                 match (obj_val, method_name.as_str()) {
                     (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
@@ -2412,7 +2527,6 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                             match method {
                                 "push" => {
                                     if args.len() >= 1 {
-                                        // Try to mutate the original object in the environment when possible
                                         // so that push is chainable (returns the array) and mutations persist.
                                         // Evaluate all args and append them.
                                         // First determine current length from the local obj_map
@@ -3605,6 +3719,181 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                                     }
                                     Ok(Value::String(utf8_to_utf16(&result)))
                                 }
+                                "flat" => {
+                                    let depth = if args.len() >= 1 {
+                                        match evaluate_expr(env, &args[0])? {
+                                            Value::Number(n) => n as usize,
+                                            _ => 1,
+                                        }
+                                    } else {
+                                        1
+                                    };
+
+                                    let mut result = Vec::new();
+                                    flatten_array(&obj_map, &mut result, depth);
+
+                                    let length = Value::Number(result.len() as f64);
+                                    let mut new_array = std::collections::HashMap::new();
+                                    for (i, val) in result.into_iter().enumerate() {
+                                        obj_set_val(&mut new_array, &i.to_string(), val);
+                                    }
+                                    obj_set_val(&mut new_array, "length", length);
+                                    Ok(Value::Object(new_array))
+                                }
+                                "flatMap" => {
+                                    if args.is_empty() {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Array.flatMap expects at least one argument".to_string(),
+                                        });
+                                    }
+
+                                    let callback_val = evaluate_expr(env, &args[0])?;
+                                    let length = obj_get(&obj_map, "length")
+                                        .map(|v| v.borrow().clone())
+                                        .unwrap_or(Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let mut result = Vec::new();
+                                    for i in 0..current_len {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                            match &callback_val {
+                                                Value::Closure(params, body, captured_env) => {
+                                                    let mut func_env = captured_env.clone();
+                                                    if params.len() >= 1 {
+                                                        env_set(&mut func_env, params[0].as_str(), val.borrow().clone());
+                                                    }
+                                                    if params.len() >= 2 {
+                                                        env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
+                                                    }
+                                                    if params.len() >= 3 {
+                                                        env_set(&mut func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                                    }
+                                                    let mapped_val = evaluate_statements(&mut func_env, &body)?;
+                                                    flatten_single_value(mapped_val, &mut result, 1);
+                                                }
+                                                _ => {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "Array.flatMap expects a function".to_string(),
+                                                    })
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    let length = Value::Number(result.len() as f64);
+                                    let mut new_array = std::collections::HashMap::new();
+                                    for (i, val) in result.into_iter().enumerate() {
+                                        obj_set_val(&mut new_array, &i.to_string(), val);
+                                    }
+                                    obj_set_val(&mut new_array, "length", length);
+                                    Ok(Value::Object(new_array))
+                                }
+                                "copyWithin" => {
+                                    let length = obj_get(&obj_map, "length")
+                                        .map(|v| v.borrow().clone())
+                                        .unwrap_or(Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => n as usize,
+                                        _ => 0,
+                                    };
+
+                                    if args.is_empty() {
+                                        return Ok(Value::Object(obj_map.clone()));
+                                    }
+
+                                    let target = match evaluate_expr(env, &args[0])? {
+                                        Value::Number(n) => {
+                                            let mut idx = n as isize;
+                                            if idx < 0 {
+                                                idx = current_len as isize + idx;
+                                            }
+                                            idx.max(0) as usize
+                                        }
+                                        _ => 0,
+                                    };
+
+                                    let start = if args.len() >= 2 {
+                                        match evaluate_expr(env, &args[1])? {
+                                            Value::Number(n) => {
+                                                let mut idx = n as isize;
+                                                if idx < 0 {
+                                                    idx = current_len as isize + idx;
+                                                }
+                                                idx.max(0) as usize
+                                            }
+                                            _ => 0,
+                                        }
+                                    } else {
+                                        0
+                                    };
+
+                                    let end = if args.len() >= 3 {
+                                        match evaluate_expr(env, &args[2])? {
+                                            Value::Number(n) => {
+                                                let mut idx = n as isize;
+                                                if idx < 0 {
+                                                    idx = current_len as isize + idx;
+                                                }
+                                                idx.max(0) as usize
+                                            }
+                                            _ => current_len,
+                                        }
+                                    } else {
+                                        current_len
+                                    };
+
+                                    if target >= current_len || start >= end {
+                                        return Ok(Value::Object(obj_map.clone()));
+                                    }
+
+                                    let mut temp_values = Vec::new();
+                                    for i in start..end.min(current_len) {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                            temp_values.push(val.borrow().clone());
+                                        }
+                                    }
+
+                                    for (i, val) in temp_values.into_iter().enumerate() {
+                                        let dest_idx = target + i;
+                                        if dest_idx < current_len {
+                                            obj_set_val(&mut obj_map, &dest_idx.to_string(), val);
+                                        }
+                                    }
+
+                                    Ok(Value::Object(obj_map.clone()))
+                                }
+                                "entries" => {
+                                    let length = obj_get(&obj_map, "length")
+                                        .map(|v| v.borrow().clone())
+                                        .unwrap_or(Value::Number(0.0));
+                                    let current_len = match length {
+                                        Value::Number(n) => n as usize,
+                                        _ => 0,
+                                    };
+
+                                    let mut entries = Vec::new();
+                                    for i in 0..current_len {
+                                        if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                            let entry = vec![Value::Number(i as f64), val.borrow().clone()];
+                                            let mut entry_obj = std::collections::HashMap::new();
+                                            obj_set_val(&mut entry_obj, &0.to_string(), entry[0].clone());
+                                            obj_set_val(&mut entry_obj, &1.to_string(), entry[1].clone());
+                                            obj_set_val(&mut entry_obj, "length", Value::Number(2.0));
+                                            entries.push(Value::Object(entry_obj));
+                                        }
+                                    }
+
+                                    let length = Value::Number(entries.len() as f64);
+                                    let mut iterator = std::collections::HashMap::new();
+                                    for (i, entry) in entries.into_iter().enumerate() {
+                                        obj_set_val(&mut iterator, &i.to_string(), entry);
+                                    }
+                                    obj_set_val(&mut iterator, "length", length);
+                                    Ok(Value::Object(iterator))
+                                }
                                 _ => Err(JSError::EvaluationError {
                                     message: "error".to_string(),
                                 }), // array method not found
@@ -4036,6 +4325,109 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
                             }
                         }
+                        "Array.from" => {
+                            // Array.from(iterable, mapFn?, thisArg?)
+                            if args.is_empty() {
+                                return Err(JSError::EvaluationError {
+                                    message: "Array.from requires at least one argument".to_string(),
+                                });
+                            }
+
+                            let iterable = evaluate_expr(env, &args[0])?;
+                            let map_fn = if args.len() > 1 {
+                                Some(evaluate_expr(env, &args[1])?)
+                            } else {
+                                None
+                            };
+
+                            let mut result = Vec::new();
+
+                            // Handle different types of iterables
+                            match iterable {
+                                Value::Object(obj_map) => {
+                                    // If it's an array-like object
+                                    if obj_map.contains_key("length") {
+                                        let length = obj_get(&obj_map, "length")
+                                            .map(|v| v.borrow().clone())
+                                            .unwrap_or(Value::Number(0.0));
+                                        let len = match length {
+                                            Value::Number(n) => n as usize,
+                                            _ => 0,
+                                        };
+
+                                        for i in 0..len {
+                                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                                                let element = val.borrow().clone();
+                                                if let Some(ref fn_val) = map_fn {
+                                                    match fn_val {
+                                                        Value::Closure(params, body, captured_env) => {
+                                                            let mut func_env = captured_env.clone();
+                                                            if params.len() >= 1 {
+                                                                env_set(&mut func_env, params[0].as_str(), element);
+                                                            }
+                                                            if params.len() >= 2 {
+                                                                env_set(&mut func_env, params[1].as_str(), Value::Number(i as f64));
+                                                            }
+                                                            let mapped = evaluate_statements(&mut func_env, &body)?;
+                                                            result.push(mapped);
+                                                        }
+                                                        _ => {
+                                                            return Err(JSError::EvaluationError {
+                                                                message: "Array.from map function must be a function".to_string(),
+                                                            });
+                                                        }
+                                                    }
+                                                } else {
+                                                    result.push(element);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Array.from iterable must be array-like".to_string(),
+                                        });
+                                    }
+                                }
+                                _ => {
+                                    return Err(JSError::EvaluationError {
+                                        message: "Array.from iterable must be array-like".to_string(),
+                                    });
+                                }
+                            }
+
+                            let mut new_array = std::collections::HashMap::new();
+                            let result_len = result.len();
+                            for (i, val) in result.into_iter().enumerate() {
+                                obj_set_val(&mut new_array, &i.to_string(), val);
+                            }
+                            obj_set_val(&mut new_array, "length", Value::Number(result_len as f64));
+                            Ok(Value::Object(new_array))
+                        }
+                        "Array.isArray" => {
+                            // Array.isArray(obj)
+                            if args.len() != 1 {
+                                return Err(JSError::EvaluationError {
+                                    message: "Array.isArray requires exactly one argument".to_string(),
+                                });
+                            }
+
+                            let arg = evaluate_expr(env, &args[0])?;
+                            let is_array = match arg {
+                                Value::Object(obj_map) => obj_map.contains_key("length"),
+                                _ => false,
+                            };
+                            Ok(Value::Boolean(is_array))
+                        }
+                        "Array.of" => {
+                            // Array.of(...elements)
+                            let mut new_array = std::collections::HashMap::new();
+                            for (i, arg) in args.iter().enumerate() {
+                                let val = evaluate_expr(env, arg)?;
+                                obj_set_val(&mut new_array, &i.to_string(), val);
+                            }
+                            obj_set_val(&mut new_array, "length", Value::Number(args.len() as f64));
+                            Ok(Value::Object(new_array))
+                        }
                         "parseInt" => {
                             if args.len() >= 1 {
                                 let arg_val = evaluate_expr(env, &args[0])?;
@@ -4175,11 +4567,44 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                         }
                         "Array" => {
                             // Array constructor - create an array-like object
-                            let mut array_obj = std::collections::HashMap::new();
-                            // For now, just create an empty array representation
-                            // In a real implementation, we'd need proper array support
-                            obj_set_val(&mut array_obj, "length", Value::Number(0.0));
-                            Ok(Value::Object(array_obj))
+                            if args.is_empty() {
+                                // Array() - create empty array
+                                let mut array_obj = std::collections::HashMap::new();
+                                obj_set_val(&mut array_obj, "length", Value::Number(0.0));
+                                Ok(Value::Object(array_obj))
+                            } else if args.len() == 1 {
+                                // Array(length) or Array(element)
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => {
+                                        if n.fract() == 0.0 && n >= 0.0 && n <= u32::MAX as f64 {
+                                            // Array(length) - create array with specified length
+                                            let mut array_obj = std::collections::HashMap::new();
+                                            obj_set_val(&mut array_obj, "length", Value::Number(n));
+                                            Ok(Value::Object(array_obj))
+                                        } else {
+                                            // Invalid length
+                                            Ok(Value::Undefined)
+                                        }
+                                    }
+                                    _ => {
+                                        // Array(element) - create array with single element
+                                        let mut array_obj = std::collections::HashMap::new();
+                                        obj_set_val(&mut array_obj, "0", arg_val);
+                                        obj_set_val(&mut array_obj, "length", Value::Number(1.0));
+                                        Ok(Value::Object(array_obj))
+                                    }
+                                }
+                            } else {
+                                // Array(element1, element2, ...) - create array with multiple elements
+                                let mut array_obj = std::collections::HashMap::new();
+                                for (i, arg) in args.iter().enumerate() {
+                                    let arg_val = evaluate_expr(env, arg)?;
+                                    obj_set_val(&mut array_obj, &i.to_string(), arg_val);
+                                }
+                                obj_set_val(&mut array_obj, "length", Value::Number(args.len() as f64));
+                                Ok(Value::Object(array_obj))
+                            }
                         }
                         "Number" => {
                             // Number constructor
@@ -5595,4 +6020,41 @@ fn sprintf_impl(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, for
     }
 
     Ok(result)
+}
+
+// Helper functions for array flattening
+fn flatten_array(obj_map: &std::collections::HashMap<String, Rc<RefCell<Value>>>, result: &mut Vec<Value>, depth: usize) {
+    let length = obj_get(obj_map, "length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
+    let current_len = match length {
+        Value::Number(n) => n as usize,
+        _ => 0,
+    };
+
+    for i in 0..current_len {
+        if let Some(val) = obj_get(obj_map, &i.to_string()) {
+            let value = val.borrow().clone();
+            flatten_single_value(value, result, depth);
+        }
+    }
+}
+
+fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) {
+    if depth == 0 {
+        result.push(value);
+        return;
+    }
+
+    match value {
+        Value::Object(obj) => {
+            // Check if it's an array-like object
+            if obj.contains_key("length") {
+                flatten_array(&obj, result, depth - 1);
+            } else {
+                result.push(Value::Object(obj));
+            }
+        }
+        _ => {
+            result.push(value);
+        }
+    }
 }

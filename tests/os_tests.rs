@@ -71,4 +71,86 @@ mod os_tests {
             _ => panic!("Expected string result"),
         }
     }
+
+    #[test]
+    fn test_os_getpid() {
+        let script = r#"
+            import * as os from "os";
+            os.getpid();
+        "#;
+        let result = evaluate_script(script);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::Number(pid) => {
+                assert!(pid > 0.0);
+            }
+            _ => panic!("Expected number result"),
+        }
+    }
+
+    #[test]
+    fn test_os_path_join() {
+        let script = r#"
+            import * as os from "os";
+            os.path.join("a", "b", "c");
+        "#;
+        let result = evaluate_script(script);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::String(s) => {
+                let joined = String::from_utf16_lossy(&s);
+                assert_eq!(joined, "a\\b\\c");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
+    fn test_os_path_basename() {
+        let script = r#"
+            import * as os from "os";
+            os.path.basename("C:\\path\\to\\file.txt");
+        "#;
+        let result = evaluate_script(script);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::String(s) => {
+                let basename = String::from_utf16_lossy(&s);
+                assert_eq!(basename, "file.txt");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
+    fn test_os_path_extname() {
+        let script = r#"
+            import * as os from "os";
+            os.path.extname("file.txt");
+        "#;
+        let result = evaluate_script(script);
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::String(s) => {
+                let ext = String::from_utf16_lossy(&s);
+                assert_eq!(ext, ".txt");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
+    fn test_os_getppid() {
+        let script = r#"
+            import * as os from "os";
+            os.getppid();
+        "#;
+        let result = evaluate_script(script);
+        // Just check that it doesn't crash and returns some number
+        assert!(result.is_ok());
+        match result.unwrap() {
+            Value::Number(ppid) => assert!(ppid > 0.0),
+            _ => panic!("Expected number result"),
+        }
+    }
 }

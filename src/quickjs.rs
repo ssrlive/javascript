@@ -31,6 +31,43 @@ fn get_next_os_file_id() -> u64 {
     current
 }
 
+#[cfg(windows)]
+fn get_parent_pid_windows() -> u32 {
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+    };
+
+    let current_pid = std::process::id();
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+
+    if snapshot == INVALID_HANDLE_VALUE {
+        return 0;
+    }
+
+    let mut pe: PROCESSENTRY32 = unsafe { std::mem::zeroed() };
+    pe.dwSize = std::mem::size_of::<PROCESSENTRY32>() as u32;
+
+    if unsafe { Process32First(snapshot, &mut pe) } == FALSE {
+        unsafe { CloseHandle(snapshot) };
+        return 0;
+    }
+
+    let mut ppid = 0;
+    loop {
+        if pe.th32ProcessID == current_pid {
+            ppid = pe.th32ParentProcessID;
+            break;
+        }
+        if unsafe { Process32Next(snapshot, &mut pe) } == FALSE {
+            break;
+        }
+    }
+
+    unsafe { CloseHandle(snapshot) };
+    ppid
+}
+
 /// Maximum number of loop iterations before triggering infinite loop detection
 pub const MAX_LOOP_ITERATIONS: usize = 1000;
 
@@ -1788,6 +1825,141 @@ fn evaluate_expr(env: &std::collections::HashMap<String, Rc<RefCell<Value>>>, ex
                                         _ => {}
                                     }
                                     return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "getpid" => {
+                                    return Ok(Value::Number(std::process::id() as f64));
+                                }
+                                "getppid" => {
+                                    #[cfg(unix)]
+                                    {
+                                        let ppid = unsafe { libc::getppid() };
+                                        return Ok(Value::Number(ppid as f64));
+                                    }
+                                    #[cfg(windows)]
+                                    {
+                                        let ppid = get_parent_pid_windows();
+                                        return Ok(Value::Number(ppid as f64));
+                                    }
+                                    #[cfg(not(any(unix, windows)))]
+                                    {
+                                        return Ok(Value::Number(0.0));
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // If this object looks like the `os.path` module
+                        if obj_map.contains_key("join") {
+                            match method {
+                                "join" => {
+                                    let mut result = String::new();
+                                    for (i, arg) in args.iter().enumerate() {
+                                        let val = evaluate_expr(env, arg)?;
+                                        let part = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        if i > 0 {
+                                            result.push('\\'); // Windows path separator
+                                        }
+                                        result.push_str(&part);
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16(&result)));
+                                }
+                                "dirname" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        let path_obj = std::path::Path::new(&path);
+                                        if let Some(parent) = path_obj.parent() {
+                                            if let Some(parent_str) = parent.to_str() {
+                                                return Ok(Value::String(utf8_to_utf16(parent_str)));
+                                            }
+                                        }
+                                        return Ok(Value::String(utf8_to_utf16(".")));
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16(".")));
+                                }
+                                "basename" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        let path_obj = std::path::Path::new(&path);
+                                        if let Some(filename) = path_obj.file_name() {
+                                            if let Some(filename_str) = filename.to_str() {
+                                                return Ok(Value::String(utf8_to_utf16(filename_str)));
+                                            }
+                                        }
+                                        return Ok(Value::String(utf8_to_utf16("")));
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "extname" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        let path_obj = std::path::Path::new(&path);
+                                        if let Some(extension) = path_obj.extension() {
+                                            if let Some(ext_str) = extension.to_str() {
+                                                return Ok(Value::String(utf8_to_utf16(&format!(".{}", ext_str))));
+                                            }
+                                        }
+                                        return Ok(Value::String(utf8_to_utf16("")));
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "resolve" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        match std::fs::canonicalize(&path) {
+                                            Ok(canonical) => {
+                                                if let Some(canonical_str) = canonical.to_str() {
+                                                    return Ok(Value::String(utf8_to_utf16(canonical_str)));
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                        return Ok(Value::String(utf8_to_utf16(&path)));
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "normalize" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        let normalized = std::path::Path::new(&path).to_string_lossy().to_string();
+                                        return Ok(Value::String(utf8_to_utf16(&normalized)));
+                                    }
+                                    return Ok(Value::String(utf8_to_utf16("")));
+                                }
+                                "isAbsolute" => {
+                                    if args.len() >= 1 {
+                                        let val = evaluate_expr(env, &args[0])?;
+                                        let path = match val {
+                                            Value::String(s) => utf16_to_utf8(&s),
+                                            _ => "".to_string(),
+                                        };
+                                        let is_absolute = std::path::Path::new(&path).is_absolute();
+                                        return Ok(Value::Boolean(is_absolute));
+                                    }
+                                    return Ok(Value::Boolean(false));
                                 }
                                 _ => {}
                             }

@@ -45,6 +45,8 @@ pub fn make_os_object() -> HashMap<String, Rc<RefCell<Value>>> {
     obj_set_val(&mut obj, "waitpid", Value::Function("os.waitpid".to_string()));
     obj_set_val(&mut obj, "kill", Value::Function("os.kill".to_string()));
     obj_set_val(&mut obj, "isatty", Value::Function("os.isatty".to_string()));
+    obj_set_val(&mut obj, "getpid", Value::Function("os.getpid".to_string()));
+    obj_set_val(&mut obj, "getppid", Value::Function("os.getppid".to_string()));
     obj_set_val(&mut obj, "O_RDWR", Value::Number(2.0));
     obj_set_val(&mut obj, "O_CREAT", Value::Number(64.0));
     obj_set_val(&mut obj, "O_TRUNC", Value::Number(512.0));
@@ -53,5 +55,24 @@ pub fn make_os_object() -> HashMap<String, Rc<RefCell<Value>>> {
     obj_set_val(&mut obj, "S_IFREG", Value::Number(0o100000 as f64));
     obj_set_val(&mut obj, "S_IFLNK", Value::Number(0o120000 as f64));
     obj_set_val(&mut obj, "SIGTERM", Value::Number(15.0));
+
+    // Add path submodule
+    let path_obj = make_path_object();
+    obj_set_val(&mut obj, "path", Value::Object(path_obj));
+
+    obj
+}
+
+pub fn make_path_object() -> HashMap<String, Rc<RefCell<Value>>> {
+    let mut obj = HashMap::new();
+    obj_set_val(&mut obj, "join", Value::Function("os.path.join".to_string()));
+    obj_set_val(&mut obj, "dirname", Value::Function("os.path.dirname".to_string()));
+    obj_set_val(&mut obj, "basename", Value::Function("os.path.basename".to_string()));
+    obj_set_val(&mut obj, "extname", Value::Function("os.path.extname".to_string()));
+    obj_set_val(&mut obj, "resolve", Value::Function("os.path.resolve".to_string()));
+    obj_set_val(&mut obj, "normalize", Value::Function("os.path.normalize".to_string()));
+    obj_set_val(&mut obj, "relative", Value::Function("os.path.relative".to_string()));
+    obj_set_val(&mut obj, "isAbsolute", Value::Function("os.path.isAbsolute".to_string()));
+    obj_set_val(&mut obj, "sep", Value::String("\\".encode_utf16().collect())); // Windows path separator
     obj
 }

@@ -80,7 +80,8 @@ impl JSValue {
     }
 
     pub fn has_ref_count(&self) -> bool {
-        (self.tag as i32) >= JS_TAG_FIRST
+        let t = self.tag as i32;
+        (t >= JS_TAG_FIRST) && (t <= JS_TAG_OBJECT)
     }
 
     pub fn get_ptr(&self) -> *mut c_void {
@@ -123,7 +124,6 @@ pub const JS_UNINITIALIZED: JSValue = JSValue {
 };
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct list_head {
     pub prev: *mut list_head,
     pub next: *mut list_head,
@@ -154,7 +154,6 @@ impl list_head {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSMallocState {
     pub malloc_count: usize,
     pub malloc_size: usize,
@@ -163,7 +162,6 @@ pub struct JSMallocState {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSMallocFunctions {
     pub js_malloc: Option<unsafe extern "C" fn(*mut JSMallocState, usize) -> *mut c_void>,
     pub js_free: Option<unsafe extern "C" fn(*mut JSMallocState, *mut c_void)>,
@@ -174,7 +172,6 @@ pub struct JSMallocFunctions {
 pub type JSAtom = u32;
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSRefCountHeader {
     pub ref_count: i32,
 }
@@ -233,7 +230,6 @@ pub struct JSRuntime {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSGCObjectHeader {
     pub ref_count: i32,
     pub gc_obj_type: u8, // 4 bits
@@ -245,7 +241,6 @@ pub struct JSGCObjectHeader {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSShape {
     pub header: JSGCObjectHeader,
     pub is_hashed: u8,
@@ -261,7 +256,6 @@ pub struct JSShape {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct JSContext {
     pub header: JSGCObjectHeader,
     pub rt: *mut JSRuntime,
@@ -601,6 +595,7 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     // It seems we assume it matches shape's prop_count or prop_size?
 
     // Let's implement a simple resize for object prop
+    let old_prop = (*p).prop;
     let new_prop = (*(*ctx).rt).js_realloc_rt(
         (*p).prop as *mut c_void,
         ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>(),
@@ -610,9 +605,24 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
         return -1;
     }
     (*p).prop = new_prop;
+    // If the prop array was just created, zero-initialize it to avoid reading
+    // uninitialized JSProperty values later.
+    if old_prop.is_null() && !new_prop.is_null() {
+        let size_bytes = ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>();
+        std::ptr::write_bytes(new_prop as *mut u8, 0, size_bytes);
+    }
 
     // Set value
     let pr = (*p).prop.offset(idx as isize);
+    // If replacing an existing value, free it
+    let old_val = (*pr).u.value;
+    if old_val.has_ref_count() {
+        JS_FreeValue((*ctx).rt, old_val);
+    }
+    // Duplicate incoming value if it's ref-counted
+    if val.has_ref_count() {
+        JS_DupValue((*ctx).rt, val);
+    }
     (*pr).u.value = val;
 
     1
@@ -4435,10 +4445,157 @@ pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAt
     let sh = (*p).shape;
     if let Some((idx, _)) = (*sh).find_own_property(prop) {
         let prop_val = (*(*p).prop.offset(idx as isize)).u.value;
+        // Duplicate returned value when it's ref-counted so caller owns a reference
+        if prop_val.has_ref_count() {
+            JS_DupValue((*_ctx).rt, prop_val);
+        }
         prop_val
     } else {
         JS_UNDEFINED
     }
+}
+
+// Reference-count helpers: basic dup/free on objects/strings that store a ref_count
+// NOTE: This is a minimal implementation. Proper finalizers and nested frees
+// are not implemented here and should be added per object type.
+pub unsafe fn JS_DupValue(_rt: *mut JSRuntime, v: JSValue) {
+    if v.has_ref_count() {
+        let p = v.get_ptr();
+        if !p.is_null() {
+            let header = p as *mut JSRefCountHeader;
+            (*header).ref_count += 1;
+        }
+    }
+}
+
+pub unsafe fn JS_FreeValue(rt: *mut JSRuntime, v: JSValue) {
+    if v.has_ref_count() {
+        let p = v.get_ptr();
+        if p.is_null() {
+            return;
+        }
+        let header = p as *mut JSRefCountHeader;
+        (*header).ref_count -= 1;
+        if (*header).ref_count > 0 {
+            return;
+        }
+        // ref_count reached zero: dispatch based on tag to proper finalizer
+        match v.get_tag() {
+            x if x == JS_TAG_STRING => {
+                js_free_string(rt, v);
+            }
+            x if x == JS_TAG_OBJECT => {
+                js_free_object(rt, v);
+            }
+            x if x == JS_TAG_FUNCTION_BYTECODE => {
+                js_free_function_bytecode(rt, v);
+            }
+            x if x == JS_TAG_SYMBOL => {
+                js_free_symbol(rt, v);
+            }
+            x if x == JS_TAG_BIG_INT => {
+                js_free_bigint(rt, v);
+            }
+            x if x == JS_TAG_MODULE => {
+                js_free_module(rt, v);
+            }
+            // For other heap types, do a default free of the pointer
+            _ => {
+                (*rt).js_free_rt(p as *mut c_void);
+            }
+        }
+    }
+}
+
+unsafe fn js_free_string(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr() as *mut JSString;
+    if p.is_null() {
+        return;
+    }
+    // The whole JSString allocation was allocated via js_malloc_rt
+    (*rt).js_free_rt(p as *mut c_void);
+}
+
+unsafe fn js_free_object(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr() as *mut JSObject;
+    if p.is_null() {
+        return;
+    }
+    // Free property array
+    if !(*p).prop.is_null() {
+        (*rt).js_free_rt((*p).prop as *mut c_void);
+        (*p).prop = std::ptr::null_mut();
+    }
+    // Free shape
+    if !(*p).shape.is_null() {
+        (*rt).js_free_shape((*p).shape);
+        (*p).shape = std::ptr::null_mut();
+    }
+    // Free object struct
+    (*rt).js_free_rt(p as *mut c_void);
+}
+
+unsafe fn js_free_function_bytecode(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr() as *mut JSFunctionBytecode;
+    if p.is_null() {
+        return;
+    }
+    // Free bytecode buffer
+    if !(*p).byte_code_buf.is_null() {
+        (*rt).js_free_rt((*p).byte_code_buf as *mut c_void);
+        (*p).byte_code_buf = std::ptr::null_mut();
+    }
+    // Free pc2line buffer
+    if !(*p).pc2line_buf.is_null() {
+        (*rt).js_free_rt((*p).pc2line_buf as *mut c_void);
+        (*p).pc2line_buf = std::ptr::null_mut();
+    }
+    // Free source
+    if !(*p).source.is_null() {
+        (*rt).js_free_rt((*p).source as *mut c_void);
+        (*p).source = std::ptr::null_mut();
+    }
+    // Free cpool values
+    if !(*p).cpool.is_null() && (*p).cpool_count > 0 {
+        for i in 0..(*p).cpool_count as isize {
+            let val = *(*p).cpool.offset(i);
+            if val.has_ref_count() {
+                JS_FreeValue(rt, val);
+            }
+        }
+        (*rt).js_free_rt((*p).cpool as *mut c_void);
+        (*p).cpool = std::ptr::null_mut();
+    }
+    // Finally free the struct
+    (*rt).js_free_rt(p as *mut c_void);
+}
+
+unsafe fn js_free_symbol(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr();
+    if p.is_null() {
+        return;
+    }
+    // Symbols typically store their name as a JSString or internal struct
+    // For now, free the pointer directly. Add type-aware finalizer later.
+    (*rt).js_free_rt(p as *mut c_void);
+}
+
+unsafe fn js_free_bigint(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr();
+    if p.is_null() {
+        return;
+    }
+    // BigInt representation may be inline or heap-allocated. Here we free pointer.
+    (*rt).js_free_rt(p as *mut c_void);
+}
+
+unsafe fn js_free_module(rt: *mut JSRuntime, v: JSValue) {
+    let p = v.get_ptr();
+    if p.is_null() {
+        return;
+    }
+    // Module structure not modelled here; free pointer for now.
+    (*rt).js_free_rt(p as *mut c_void);
 }
 
 pub unsafe fn JS_SetProperty(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue) -> i32 {

@@ -87,3 +87,115 @@ fn test_tmpfile_getline() {
         Err(e) => panic!("evaluate_script error: {:?}", e),
     }
 }
+
+#[test]
+fn test_sprintf_basic() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"a=%d s=%s\", 123, \"abc\")";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "a=123 s=abc");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_zero_pad() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%010d\", 123)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "0000000123");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_hex() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%x\", -2)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "fffffffe");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_float() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%10.1f\", 2.1)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "       2.1");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_dynamic_width() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%*.*f\", 10, 2, -2.13)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "     -2.13");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_long_hex() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%lx\", -2)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "fffffffffffffffe");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}
+
+#[test]
+fn test_sprintf_hex_with_prefix() {
+    let src = "import * as std from \"std\";\nstd.sprintf(\"%#lx\", 123)";
+    match rust_quickjs::quickjs::evaluate_script(src) {
+        Ok(val) => {
+            if let Value::String(vec) = val {
+                let s = String::from_utf16_lossy(&vec);
+                assert_eq!(s, "0x7b");
+            } else {
+                panic!("expected string from evaluate_script, got {:?}", val);
+            }
+        }
+        Err(e) => panic!("evaluate_script error: {:?}", e),
+    }
+}

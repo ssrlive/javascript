@@ -13,28 +13,8 @@ fn main() {
 
     let script = &args[2];
 
-    // Tokenize
-    let tokens = match tokenize(script) {
-        Ok(tokens) => tokens,
-        Err(err) => {
-            eprintln!("Tokenization failed: {:?}", err);
-            process::exit(1);
-        }
-    };
-
-    // Parse
-    let mut tokens = tokens;
-    let statements = match parse_statements(&mut tokens) {
-        Ok(statements) => statements,
-        Err(err) => {
-            eprintln!("Parsing failed: {:?}", err);
-            process::exit(1);
-        }
-    };
-
-    // Evaluate
-    let mut env = std::collections::HashMap::new();
-    let result = match evaluate_statements(&mut env, &statements) {
+    // Evaluate using the script evaluator that handles imports
+    let result = match evaluate_script(script) {
         Ok(value) => value,
         Err(err) => {
             eprintln!("Evaluation failed: {:?}", err);

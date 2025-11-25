@@ -3,6 +3,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+// local helper (currently unused but kept for future use)
+#[allow(dead_code)]
 fn utf8_to_utf16_local(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }

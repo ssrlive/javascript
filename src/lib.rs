@@ -8,3 +8,4 @@ pub mod host_shims;
 pub mod os;
 pub mod quickjs;
 pub mod sprintf;
+pub mod tmpfile;

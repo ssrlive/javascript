@@ -5,5 +5,6 @@
 pub mod array;
 pub mod error;
 pub mod host_shims;
+pub mod os;
 pub mod quickjs;
 pub mod sprintf;

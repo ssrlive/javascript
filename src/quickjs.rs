@@ -860,13 +860,10 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
                             if module == "std" {
                                 env.insert(
                                     name.to_string(),
-                                    Rc::new(RefCell::new(Value::Object(crate::host_shims::make_std_object()))),
+                                    Rc::new(RefCell::new(Value::Object(crate::js_std::make_std_object()))),
                                 );
                             } else if module == "os" {
-                                env.insert(
-                                    name.to_string(),
-                                    Rc::new(RefCell::new(Value::Object(crate::host_shims::make_os_object()))),
-                                );
+                                env.insert(name.to_string(), Rc::new(RefCell::new(Value::Object(crate::os::make_os_object()))));
                             }
                         }
                     }

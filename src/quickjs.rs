@@ -995,6 +995,69 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         return Ok(Statement::If(condition, then_body, else_body));
     }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Try) {
+        tokens.remove(0); // consume try
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume {
+        let try_body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume }
+
+        // Parse optional catch
+        let mut catch_param = String::new();
+        let mut catch_body: Vec<Statement> = Vec::new();
+        let mut finally_body: Option<Vec<Statement>> = None;
+
+        if !tokens.is_empty() && matches!(tokens[0], Token::Catch) {
+            tokens.remove(0); // consume catch
+            if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume (
+            if tokens.is_empty() {
+                return Err(JSError::ParseError);
+            }
+            if let Token::Identifier(name) = tokens.remove(0) {
+                catch_param = name;
+            } else {
+                return Err(JSError::ParseError);
+            }
+            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume )
+            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume {
+            catch_body = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+        }
+
+        // Optional finally
+        if !tokens.is_empty() && matches!(tokens[0], Token::Finally) {
+            tokens.remove(0); // consume finally
+            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume {
+            let fb = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+            finally_body = Some(fb);
+        }
+
+        return Ok(Statement::TryCatch(try_body, catch_param, catch_body, finally_body));
+    }
     if tokens.len() >= 1 && matches!(tokens[0], Token::For) {
         tokens.remove(0); // consume for
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
@@ -1112,6 +1175,33 @@ pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> 
                     last_value = evaluate_statements(env, then_body)?;
                 } else if let Some(else_stmts) = else_body {
                     last_value = evaluate_statements(env, else_stmts)?;
+                }
+            }
+            Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
+                // Execute try block and handle catch/finally semantics
+                match evaluate_statements(env, try_body) {
+                    Ok(v) => last_value = v,
+                    Err(err) => {
+                        if catch_param.is_empty() {
+                            // No catch: run finally if present then propagate error
+                            if let Some(finally_body) = finally_body_opt {
+                                let _ = evaluate_statements(env, finally_body)?;
+                            }
+                            return Err(err);
+                        } else {
+                            let mut catch_env = env.clone();
+                            env_set(
+                                &mut catch_env,
+                                catch_param.as_str(),
+                                Value::String(utf8_to_utf16(&format!("{:?}", err))),
+                            );
+                            last_value = evaluate_statements(&mut catch_env, catch_body)?;
+                        }
+                    }
+                }
+                // Finally block executes after try/catch
+                if let Some(finally_body) = finally_body_opt {
+                    last_value = evaluate_statements(env, finally_body)?;
                 }
             }
             Statement::For(init, condition, increment, body) => {
@@ -2594,6 +2684,7 @@ pub enum Statement {
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
+    TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
 }
 
 impl std::fmt::Debug for Statement {
@@ -2609,6 +2700,9 @@ impl std::fmt::Debug for Statement {
             }
             Statement::For(init, cond, incr, body) => {
                 write!(f, "For({:?}, {:?}, {:?}, {:?})", init, cond, incr, body)
+            }
+            Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
+                write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
             }
         }
     }
@@ -2861,6 +2955,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 match ident.as_str() {
                     "let" => tokens.push(Token::Let),
                     "var" => tokens.push(Token::Var),
+                    "try" => tokens.push(Token::Try),
+                    "catch" => tokens.push(Token::Catch),
+                    "finally" => tokens.push(Token::Finally),
                     "function" => tokens.push(Token::Function),
                     "return" => tokens.push(Token::Return),
                     "if" => tokens.push(Token::If),
@@ -2918,6 +3015,9 @@ pub enum Token {
     If,
     Else,
     For,
+    Try,
+    Catch,
+    Finally,
     Assign,
     Semicolon,
     Equal,

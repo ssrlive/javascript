@@ -7,6 +7,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     // Initialize logger (controlled by RUST_LOG)
+    #[cfg(feature = "env_logger")]
     env_logger::init();
 
     if args.len() < 3 || args[1] != "-e" {

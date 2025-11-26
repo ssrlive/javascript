@@ -69,6 +69,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
                             })
                         }
                     };
+                    log::trace!("os.open called with filename={} args={}", filename, args.len());
                     let flags = if args.len() >= 2 {
                         match evaluate_expr(env, &args[1])? {
                             Value::Number(n) => n as i32,
@@ -103,9 +104,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
                             return Ok(Value::Number(fd as f64));
                         }
                         Err(e) => {
+                            log::debug!("os.open failed: {e}");
                             return Err(JSError::EvaluationError {
-                                message: format!("Failed to open file: {}", e),
-                            })
+                                message: format!("Failed to open file: {e}"),
+                            });
                         }
                     }
                 }
@@ -177,6 +179,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
                     };
+                    log::trace!("os.write called fd={} data_len={}", fd, data.len());
                     let mut store = OS_FILE_STORE.lock().unwrap();
                     if let Some(file) = store.get_mut(&fd) {
                         match file.write_all(data.as_bytes()) {

@@ -2,6 +2,13 @@ use rust_quickjs::quickjs::evaluate_script;
 use rust_quickjs::quickjs::Value;
 use rust_quickjs::quickjs::MAX_LOOP_ITERATIONS;
 
+// Initialize logger for this integration test binary so `RUST_LOG` is honored.
+// Using `ctor` ensures initialization runs before tests start.
+#[ctor::ctor]
+fn __init_test_logger() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
+}
+
 #[cfg(test)]
 mod control_flow_tests {
     use rust_quickjs::error::JSError;

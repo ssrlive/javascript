@@ -1,6 +1,13 @@
 use rust_quickjs::quickjs::*;
 use std::ffi::CString;
 
+// Initialize logger for this integration test binary so `RUST_LOG` is honored.
+// Using `ctor` ensures initialization runs before tests start.
+#[ctor::ctor]
+fn __init_test_logger() {
+    let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
+}
+
 #[test]
 fn test_object_property() {
     unsafe {

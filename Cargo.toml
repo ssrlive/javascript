@@ -3,15 +3,6 @@ name = "rust_quickjs"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-libc = "0.2.177"
-thiserror = "2.0.17"
-log = "0.4"
-env_logger = "0.11"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
-
 [[bin]]
 name = "qjs"
 path = "bin/qjs.rs"
@@ -19,3 +10,16 @@ path = "bin/qjs.rs"
 [[bin]]
 name = "rust_qjs"
 path = "bin/rust_qjs.rs"
+
+[dependencies]
+env_logger = { version = "0.11", optional = true }
+libc = "0.2.177"
+log = "0.4"
+thiserror = "2.0.17"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
+
+[dev-dependencies]
+ctor = "0.6"
+env_logger = { version = "0.11" }

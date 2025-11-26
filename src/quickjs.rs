@@ -860,8 +860,20 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     let filtered = filtered.trim_end_matches('\n').to_string();
 
     log::trace!("filtered script:\n{}", filtered);
-    let mut tokens = tokenize(&filtered)?;
-    let statements = parse_statements(&mut tokens)?;
+    let mut tokens = match tokenize(&filtered) {
+        Ok(t) => t,
+        Err(e) => {
+            log::debug!("tokenize error: {e:?}");
+            return Err(e);
+        }
+    };
+    let statements = match parse_statements(&mut tokens) {
+        Ok(s) => s,
+        Err(e) => {
+            log::debug!("parse_statements error: {e:?}");
+            return Err(e);
+        }
+    };
     log::debug!("parsed {} statements", statements.len());
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("stmt[{i}] = {stmt:?}");
@@ -900,7 +912,13 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
         }
     }
 
-    evaluate_statements(&mut env, &statements)
+    match evaluate_statements(&mut env, &statements) {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            log::debug!("evaluate_statements error: {e:?}");
+            Err(e)
+        }
+    }
 }
 
 pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {

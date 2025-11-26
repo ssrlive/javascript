@@ -1615,72 +1615,7 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                 } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
                     return crate::js_json::handle_json_method(method, args, env);
                 } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
-                    // Object methods
-                    match method {
-                        "keys" => {
-                            if args.len() == 1 {
-                                let obj_val = evaluate_expr(env, &args[0])?;
-                                if let Value::Object(obj) = obj_val {
-                                    let mut keys = Vec::new();
-                                    for key in obj.keys() {
-                                        if key != "length" {
-                                            // Skip array length property
-                                            keys.push(Value::String(utf8_to_utf16(key)));
-                                        }
-                                    }
-                                    // Create a simple array-like object for keys
-                                    let mut result_obj = JSObjectData::new();
-                                    for (i, key) in keys.into_iter().enumerate() {
-                                        obj_set_val(&mut result_obj, &i.to_string(), key);
-                                    }
-                                    let len = result_obj.len();
-                                    set_array_length(&mut result_obj, len);
-                                    Ok(Value::Object(result_obj))
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "Object.keys expects an object".to_string(),
-                                    })
-                                }
-                            } else {
-                                Err(JSError::EvaluationError {
-                                    message: "Object.keys expects exactly one argument".to_string(),
-                                })
-                            }
-                        }
-                        "values" => {
-                            if args.len() == 1 {
-                                let obj_val = evaluate_expr(env, &args[0])?;
-                                if let Value::Object(obj) = obj_val {
-                                    let mut values = Vec::new();
-                                    for (key, value) in obj.iter() {
-                                        if key != "length" {
-                                            // Skip array length property
-                                            values.push(value.clone());
-                                        }
-                                    }
-                                    // Create a simple array-like object for values
-                                    let mut result_obj = JSObjectData::new();
-                                    for (i, value) in values.into_iter().enumerate() {
-                                        obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
-                                    }
-                                    let len = result_obj.len();
-                                    set_array_length(&mut result_obj, len);
-                                    Ok(Value::Object(result_obj))
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "Object.values expects an object".to_string(),
-                                    })
-                                }
-                            } else {
-                                Err(JSError::EvaluationError {
-                                    message: "Object.values expects exactly one argument".to_string(),
-                                })
-                            }
-                        }
-                        _ => Err(JSError::EvaluationError {
-                            message: format!("Object.{} is not implemented", method),
-                        }),
-                    }
+                    return crate::js_object::handle_object_method(method, args, env);
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, &**obj_expr);

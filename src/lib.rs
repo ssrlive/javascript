@@ -4,6 +4,7 @@
 // pub mod libunicode_table;
 pub mod array;
 pub mod error;
+pub mod js_math;
 pub mod js_std;
 pub mod os;
 pub mod quickjs;

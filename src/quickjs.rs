@@ -3,6 +3,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::error::JSError;
+use crate::js_console;
 use crate::js_math;
 use crate::sprintf;
 use crate::tmpfile;
@@ -1177,9 +1178,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
             if let Some(val) = env_get(env, name) {
                 Ok(val.borrow().clone())
             } else if name == "console" {
-                let mut console_obj = JSObjectData::new();
-                obj_set_val(&mut console_obj, "log", Value::Function("console.log".to_string()));
-                Ok(Value::Object(console_obj))
+                Ok(Value::Object(js_console::make_console_object()))
             } else if name == "String" {
                 Ok(Value::Function("String".to_string()))
             } else if name == "Math" {
@@ -1380,23 +1379,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
                 let obj_val = evaluate_expr(env, obj_expr)?;
                 match (obj_val, method_name.as_str()) {
                     (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
-                        // console.log call
-                        for arg in args {
-                            let arg_val = evaluate_expr(env, arg)?;
-                            match arg_val {
-                                Value::Number(n) => print!("{}", n),
-                                Value::String(s) => {
-                                    print!("{}", String::from_utf16_lossy(&s))
-                                }
-                                Value::Boolean(b) => print!("{}", b),
-                                Value::Undefined => print!("undefined"),
-                                Value::Object(_) => print!("[object Object]"),
-                                Value::Function(name) => print!("[Function: {}]", name),
-                                Value::Closure(_, _, _) => print!("[Function]"),
-                            }
-                        }
-                        println!();
-                        Ok(Value::Undefined)
+                        return js_console::handle_console_method(method_name, args, env);
                     }
                     (obj_val, "toString") => {
                         // toString method for all values

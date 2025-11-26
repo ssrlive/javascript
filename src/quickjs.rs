@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 
@@ -1584,7 +1583,11 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                         Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                         Value::String(s) => Ok(Value::String(s.clone())),
                         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                        Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                        Value::Undefined => {
+                            return Err(JSError::EvaluationError {
+                                message: "TypeError: undefined has no toString method".to_string(),
+                            });
+                        }
                         Value::Object(ref obj_map) => {
                             // If this object looks like an array (has a length), join elements with comma
                             if obj_map.contains_key("length") {
@@ -3632,42 +3635,5 @@ impl JSRuntime {
         *self.atom_hash.offset(hash_index as isize) = new_atom;
         self.atom_count += 1;
         new_atom
-    }
-}
-
-// Helper functions for array flattening
-fn flatten_array(obj_map: &JSObjectData, result: &mut Vec<Value>, depth: usize) {
-    let length = obj_get(obj_map, "length").map(|v| v.borrow().clone()).unwrap_or(Value::Number(0.0));
-    let current_len = match length {
-        Value::Number(n) => n as usize,
-        _ => 0,
-    };
-
-    for i in 0..current_len {
-        if let Some(val) = obj_get(obj_map, &i.to_string()) {
-            let value = val.borrow().clone();
-            flatten_single_value(value, result, depth);
-        }
-    }
-}
-
-fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) {
-    if depth == 0 {
-        result.push(value);
-        return;
-    }
-
-    match value {
-        Value::Object(obj) => {
-            // Check if it's an array-like object
-            if obj.contains_key("length") {
-                flatten_array(&obj, result, depth - 1);
-            } else {
-                result.push(Value::Object(obj));
-            }
-        }
-        _ => {
-            result.push(value);
-        }
     }
 }

@@ -935,6 +935,15 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
 }
 
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Throw) {
+        tokens.remove(0); // consume throw
+        let expr = parse_expression(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume ;
+        return Ok(Statement::Throw(expr));
+    }
     if tokens.len() >= 1 && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
         if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
@@ -1191,6 +1200,12 @@ pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> 
                     Some(expr) => evaluate_expr(env, expr),
                     None => Ok(Value::Undefined),
                 };
+            }
+            Statement::Throw(expr) => {
+                let throw_val = evaluate_expr(env, expr)?;
+                return Err(JSError::EvaluationError {
+                    message: format!("{:?}", throw_val),
+                });
             }
             Statement::If(condition, then_body, else_body) => {
                 let cond_val = evaluate_expr(env, condition)?;
@@ -1889,6 +1904,7 @@ pub enum Statement {
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
     TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
+    Throw(Expr),                                      // throw expression
 }
 
 impl std::fmt::Debug for Statement {
@@ -1907,6 +1923,9 @@ impl std::fmt::Debug for Statement {
             }
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
                 write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
+            }
+            Statement::Throw(expr) => {
+                write!(f, "Throw({:?})", expr)
             }
         }
     }
@@ -2162,6 +2181,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
+                    "throw" => tokens.push(Token::Throw),
                     "function" => tokens.push(Token::Function),
                     "return" => tokens.push(Token::Return),
                     "if" => tokens.push(Token::If),
@@ -2222,6 +2242,7 @@ pub enum Token {
     Try,
     Catch,
     Finally,
+    Throw,
     Assign,
     Semicolon,
     Equal,

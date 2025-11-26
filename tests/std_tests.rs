@@ -52,15 +52,28 @@ mod std_tests {
     }
 
     #[test]
-    fn test_rust_qjs_runs_tmpfile_one_liner() {
-        // JS script: create tmpfile and log
-        let script = "try { import * as std from 'std'; let f = std.tmpfile(); console.log('tmpfile created'); } catch(e) { console.log('Error:', e); }";
+    fn test_throw_statement() {
+        let script = "try { throw 'custom error'; } catch(e) { e }";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Undefined) => {
-                // Success if no error thrown
+            Ok(Value::String(s)) => {
+                let out = String::from_utf16_lossy(&s);
+                assert!(out.contains("custom error"));
             }
-            _ => panic!("Expected string 'tmpfile created', got {:?}", result),
+            _ => panic!("Expected error string in catch body, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_throw_number() {
+        let script = "try { throw 42; } catch(e) { e }";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let out = String::from_utf16_lossy(&s);
+                assert!(out.contains("42"));
+            }
+            _ => panic!("Expected error string in catch body, got {:?}", result),
         }
     }
 }

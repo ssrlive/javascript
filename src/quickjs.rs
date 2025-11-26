@@ -1174,254 +1174,475 @@ pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> 
 
 pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> {
     match expr {
-        Expr::Number(n) => Ok(Value::Number(*n)),
-        Expr::StringLit(s) => Ok(Value::String(s.clone())),
-        Expr::Boolean(b) => Ok(Value::Boolean(*b)),
-        Expr::Var(name) => {
-            if let Some(val) = env_get(env, name) {
+        Expr::Number(n) => evaluate_number(*n),
+        Expr::StringLit(s) => evaluate_string_lit(s),
+        Expr::Boolean(b) => evaluate_boolean(*b),
+        Expr::Var(name) => evaluate_var(env, name),
+        Expr::Assign(_target, value) => evaluate_assign(env, value),
+        Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
+        Expr::Binary(left, op, right) => evaluate_binary(env, left, op, right),
+        Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
+        Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
+        Expr::Call(func_expr, args) => evaluate_call(env, func_expr, args),
+        Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::Object(properties) => evaluate_object(env, properties),
+    }
+}
+
+fn evaluate_number(n: f64) -> Result<Value, JSError> {
+    Ok(Value::Number(n))
+}
+
+fn evaluate_string_lit(s: &Vec<u16>) -> Result<Value, JSError> {
+    Ok(Value::String(s.clone()))
+}
+
+fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
+    Ok(Value::Boolean(b))
+}
+
+fn evaluate_var(env: &JSObjectData, name: &str) -> Result<Value, JSError> {
+    if let Some(val) = env_get(env, name) {
+        Ok(val.borrow().clone())
+    } else if name == "console" {
+        Ok(Value::Object(js_console::make_console_object()))
+    } else if name == "String" {
+        Ok(Value::Function("String".to_string()))
+    } else if name == "Math" {
+        Ok(Value::Object(js_math::make_math_object()))
+    } else if name == "JSON" {
+        let mut json_obj = JSObjectData::new();
+        obj_set_val(&mut json_obj, "parse", Value::Function("JSON.parse".to_string()));
+        obj_set_val(&mut json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
+        Ok(Value::Object(json_obj))
+    } else if name == "Object" {
+        let mut object_obj = JSObjectData::new();
+        obj_set_val(&mut object_obj, "keys", Value::Function("Object.keys".to_string()));
+        obj_set_val(&mut object_obj, "values", Value::Function("Object.values".to_string()));
+        Ok(Value::Object(object_obj))
+    } else if name == "parseInt" {
+        Ok(Value::Function("parseInt".to_string()))
+    } else if name == "parseFloat" {
+        Ok(Value::Function("parseFloat".to_string()))
+    } else if name == "isNaN" {
+        Ok(Value::Function("isNaN".to_string()))
+    } else if name == "isFinite" {
+        Ok(Value::Function("isFinite".to_string()))
+    } else if name == "encodeURIComponent" {
+        Ok(Value::Function("encodeURIComponent".to_string()))
+    } else if name == "decodeURIComponent" {
+        Ok(Value::Function("decodeURIComponent".to_string()))
+    } else if name == "eval" {
+        Ok(Value::Function("eval".to_string()))
+    } else if name == "encodeURI" {
+        Ok(Value::Function("encodeURI".to_string()))
+    } else if name == "decodeURI" {
+        Ok(Value::Function("decodeURI".to_string()))
+    } else if name == "Array" {
+        Ok(Value::Function("Array".to_string()))
+    } else if name == "Number" {
+        Ok(Value::Function("Number".to_string()))
+    } else if name == "Boolean" {
+        Ok(Value::Function("Boolean".to_string()))
+    } else if name == "Date" {
+        Ok(Value::Function("Date".to_string()))
+    } else if name == "NaN" {
+        Ok(Value::Number(f64::NAN))
+    } else {
+        Ok(Value::Undefined)
+    }
+}
+
+fn evaluate_assign(env: &JSObjectData, value: &Expr) -> Result<Value, JSError> {
+    // Assignment is handled at statement level, just evaluate the value
+    evaluate_expr(env, value)
+}
+
+fn evaluate_unary_neg(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    match val {
+        Value::Number(n) => Ok(Value::Number(-n)),
+        _ => Err(JSError::EvaluationError {
+            message: "error".to_string(),
+        }),
+    }
+}
+
+fn evaluate_binary(env: &JSObjectData, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
+    let l = evaluate_expr(env, left)?;
+    let r = evaluate_expr(env, right)?;
+    match op {
+        BinaryOp::Add => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+            (Value::String(ls), Value::String(rs)) => {
+                let mut result = ls.clone();
+                result.extend_from_slice(&rs);
+                Ok(Value::String(result))
+            }
+            (Value::Number(ln), Value::String(rs)) => {
+                let mut result = utf8_to_utf16(&ln.to_string());
+                result.extend_from_slice(&rs);
+                Ok(Value::String(result))
+            }
+            (Value::String(ls), Value::Number(rn)) => {
+                let mut result = ls.clone();
+                result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
+                Ok(Value::String(result))
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::Sub => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::Mul => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::Div => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                if rn == 0.0 {
+                    Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    })
+                } else {
+                    Ok(Value::Number(ln / rn))
+                }
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::Equal => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            _ => Ok(Value::Number(0.0)), // Different types are not equal
+        },
+        BinaryOp::StrictEqual => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            _ => Ok(Value::Number(0.0)), // Different types are not equal
+        },
+        BinaryOp::LessThan => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::GreaterThan => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::LessEqual => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::GreaterEqual => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+    }
+}
+
+fn evaluate_index(env: &JSObjectData, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
+    let obj_val = evaluate_expr(env, obj)?;
+    let idx_val = evaluate_expr(env, idx)?;
+    match (obj_val, idx_val) {
+        (Value::String(s), Value::Number(n)) => {
+            let idx = n as usize;
+            if let Some(ch) = utf16_char_at(&s, idx) {
+                Ok(Value::String(vec![ch]))
+            } else {
+                Ok(Value::String(Vec::new())) // or return undefined, but use empty string here
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "error".to_string(),
+        }), // other types of indexing not supported yet
+    }
+}
+
+fn evaluate_property(env: &JSObjectData, obj: &Expr, prop: &str) -> Result<Value, JSError> {
+    let obj_val = evaluate_expr(env, obj)?;
+    println!("Property: obj_val={:?}, prop={}", obj_val, prop);
+    match obj_val {
+        Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
+        Value::Object(obj_map) => {
+            if let Some(val) = obj_get(&obj_map, prop) {
                 Ok(val.borrow().clone())
-            } else if name == "console" {
-                Ok(Value::Object(js_console::make_console_object()))
-            } else if name == "String" {
-                Ok(Value::Function("String".to_string()))
-            } else if name == "Math" {
-                Ok(Value::Object(js_math::make_math_object()))
-            } else if name == "JSON" {
-                let mut json_obj = JSObjectData::new();
-                obj_set_val(&mut json_obj, "parse", Value::Function("JSON.parse".to_string()));
-                obj_set_val(&mut json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
-                Ok(Value::Object(json_obj))
-            } else if name == "Object" {
-                let mut object_obj = JSObjectData::new();
-                obj_set_val(&mut object_obj, "keys", Value::Function("Object.keys".to_string()));
-                obj_set_val(&mut object_obj, "values", Value::Function("Object.values".to_string()));
-                Ok(Value::Object(object_obj))
-            } else if name == "parseInt" {
-                Ok(Value::Function("parseInt".to_string()))
-            } else if name == "parseFloat" {
-                Ok(Value::Function("parseFloat".to_string()))
-            } else if name == "isNaN" {
-                Ok(Value::Function("isNaN".to_string()))
-            } else if name == "isFinite" {
-                Ok(Value::Function("isFinite".to_string()))
-            } else if name == "encodeURIComponent" {
-                Ok(Value::Function("encodeURIComponent".to_string()))
-            } else if name == "decodeURIComponent" {
-                Ok(Value::Function("decodeURIComponent".to_string()))
-            } else if name == "eval" {
-                Ok(Value::Function("eval".to_string()))
-            } else if name == "encodeURI" {
-                Ok(Value::Function("encodeURI".to_string()))
-            } else if name == "decodeURI" {
-                Ok(Value::Function("decodeURI".to_string()))
-            } else if name == "Array" {
-                Ok(Value::Function("Array".to_string()))
-            } else if name == "Number" {
-                Ok(Value::Function("Number".to_string()))
-            } else if name == "Boolean" {
-                Ok(Value::Function("Boolean".to_string()))
-            } else if name == "Date" {
-                Ok(Value::Function("Date".to_string()))
-            } else if name == "NaN" {
-                Ok(Value::Number(f64::NAN))
             } else {
                 Ok(Value::Undefined)
             }
         }
-        Expr::Assign(_target, value) => {
-            // Assignment is handled at statement level, just evaluate the value
-            evaluate_expr(env, value)
+        _ => {
+            println!("Property not found");
+            Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            })
         }
-        Expr::UnaryNeg(expr) => {
-            let val = evaluate_expr(env, expr)?;
-            match val {
-                Value::Number(n) => Ok(Value::Number(-n)),
-                _ => Err(JSError::EvaluationError {
-                    message: "error".to_string(),
-                }),
+    }
+}
+
+fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
+    // Check if it's a method call first
+    if let Expr::Property(obj_expr, method_name) = func_expr {
+        // Special case for Array static methods
+        if let Expr::Var(var_name) = &**obj_expr {
+            if var_name == "Array" {
+                return crate::js_array::handle_array_static_method(method_name, args, env);
             }
         }
-        Expr::Binary(left, op, right) => {
-            let l = evaluate_expr(env, left)?;
-            let r = evaluate_expr(env, right)?;
-            match op {
-                BinaryOp::Add => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-                    (Value::String(ls), Value::String(rs)) => {
-                        let mut result = ls.clone();
-                        result.extend_from_slice(&rs);
-                        Ok(Value::String(result))
-                    }
-                    (Value::Number(ln), Value::String(rs)) => {
-                        let mut result = utf8_to_utf16(&ln.to_string());
-                        result.extend_from_slice(&rs);
-                        Ok(Value::String(result))
-                    }
-                    (Value::String(ls), Value::Number(rn)) => {
-                        let mut result = ls.clone();
-                        result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
-                        Ok(Value::String(result))
-                    }
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::Sub => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::Mul => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::Div => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => {
-                        if rn == 0.0 {
-                            Err(JSError::EvaluationError {
-                                message: "error".to_string(),
-                            })
-                        } else {
-                            Ok(Value::Number(ln / rn))
+
+        let obj_val = evaluate_expr(env, &**obj_expr)?;
+        match (obj_val, method_name.as_str()) {
+            (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
+                return js_console::handle_console_method(method_name, args, env);
+            }
+            (obj_val, "toString") => {
+                // toString method for all values
+                if args.is_empty() {
+                    match obj_val {
+                        Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                        Value::String(s) => Ok(Value::String(s.clone())),
+                        Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                        Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                        Value::Object(ref obj_map) => {
+                            // If this object looks like an array (has a length), join elements with comma
+                            if obj_map.contains_key("length") {
+                                let length = obj_get(&obj_map, "length")
+                                    .map(|v| v.borrow().clone())
+                                    .unwrap_or(Value::Number(0.0));
+                                let current_len = match length {
+                                    Value::Number(n) => n as usize,
+                                    _ => 0,
+                                };
+                                let mut parts = Vec::new();
+                                for i in 0..current_len {
+                                    if let Some(val_rc) = obj_get(&obj_map, &i.to_string()) {
+                                        match &*val_rc.borrow() {
+                                            Value::String(s) => parts.push(String::from_utf16_lossy(s)),
+                                            Value::Number(n) => parts.push(n.to_string()),
+                                            Value::Boolean(b) => parts.push(b.to_string()),
+                                            _ => parts.push("[object Object]".to_string()),
+                                        }
+                                    } else {
+                                        parts.push("".to_string())
+                                    }
+                                }
+                                Ok(Value::String(utf8_to_utf16(&parts.join(","))))
+                            } else {
+                                Ok(Value::String(utf8_to_utf16("[object Object]")))
+                            }
                         }
+                        Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
+                        Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                     }
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::Equal => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
-                    _ => Ok(Value::Number(0.0)), // Different types are not equal
-                },
-                BinaryOp::StrictEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
-                    _ => Ok(Value::Number(0.0)), // Different types are not equal
-                },
-                BinaryOp::LessThan => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::GreaterThan => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::LessEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-                BinaryOp::GreaterEqual => match (l, r) {
-                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
-                    (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
-                },
-            }
-        }
-        Expr::Index(obj, idx) => {
-            let obj_val = evaluate_expr(env, obj)?;
-            let idx_val = evaluate_expr(env, idx)?;
-            match (obj_val, idx_val) {
-                (Value::String(s), Value::Number(n)) => {
-                    let idx = n as usize;
-                    if let Some(ch) = utf16_char_at(&s, idx) {
-                        Ok(Value::String(vec![ch]))
-                    } else {
-                        Ok(Value::String(Vec::new())) // or return undefined, but use empty string here
-                    }
-                }
-                _ => Err(JSError::EvaluationError {
-                    message: "error".to_string(),
-                }), // other types of indexing not supported yet
-            }
-        }
-        Expr::Property(obj, prop) => {
-            let obj_val = evaluate_expr(env, obj)?;
-            println!("Property: obj_val={:?}, prop={}", obj_val, prop);
-            match obj_val {
-                Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
-                Value::Object(obj_map) => {
-                    if let Some(val) = obj_get(&obj_map, prop.as_str()) {
-                        Ok(val.borrow().clone())
-                    } else {
-                        Ok(Value::Undefined)
-                    }
-                }
-                _ => {
-                    println!("Property not found");
+                } else {
                     Err(JSError::EvaluationError {
                         message: "error".to_string(),
                     })
                 }
             }
-        }
-        Expr::Call(func_expr, args) => {
-            // Check if it's a method call first
-            if let Expr::Property(obj_expr, method_name) = &**func_expr {
-                // Special case for Array static methods
-                if let Expr::Var(var_name) = &**obj_expr {
-                    if var_name == "Array" {
-                        return crate::js_array::handle_array_static_method(method_name, args, env);
+            (Value::Object(mut obj_map), method) => {
+                // If this object looks like the `std` module (we used 'sprintf' as marker)
+                if obj_map.contains_key("sprintf") {
+                    match method {
+                        "sprintf" => {
+                            return sprintf::handle_sprintf_call(env, args);
+                        }
+                        "tmpfile" => {
+                            return tmpfile::create_tmpfile();
+                        }
+                        _ => {}
                     }
                 }
 
-                let obj_val = evaluate_expr(env, obj_expr)?;
-                match (obj_val, method_name.as_str()) {
-                    (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
-                        return js_console::handle_console_method(method_name, args, env);
-                    }
-                    (obj_val, "toString") => {
-                        // toString method for all values
-                        if args.is_empty() {
-                            match obj_val {
-                                Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                                Value::String(s) => Ok(Value::String(s.clone())),
-                                Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                                Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
-                                Value::Object(ref obj_map) => {
-                                    // If this object looks like an array (has a length), join elements with comma
-                                    if obj_map.contains_key("length") {
-                                        let length = obj_get(&obj_map, "length")
-                                            .map(|v| v.borrow().clone())
-                                            .unwrap_or(Value::Number(0.0));
-                                        let current_len = match length {
-                                            Value::Number(n) => n as usize,
-                                            _ => 0,
-                                        };
-                                        let mut parts = Vec::new();
-                                        for i in 0..current_len {
-                                            if let Some(val_rc) = obj_get(&obj_map, &i.to_string()) {
-                                                match &*val_rc.borrow() {
-                                                    Value::String(s) => parts.push(String::from_utf16_lossy(s)),
-                                                    Value::Number(n) => parts.push(n.to_string()),
-                                                    Value::Boolean(b) => parts.push(b.to_string()),
-                                                    _ => parts.push("[object Object]".to_string()),
-                                                }
-                                            } else {
-                                                parts.push("".to_string())
-                                            }
-                                        }
-                                        Ok(Value::String(utf8_to_utf16(&parts.join(","))))
-                                    } else {
-                                        Ok(Value::String(utf8_to_utf16("[object Object]")))
+                // If this object looks like the `os` module (we used 'open' as marker)
+                if obj_map.contains_key("open") {
+                    return crate::js_os::handle_os_method(&obj_map, method, args, env);
+                }
+
+                // If this object looks like the `os.path` module
+                if obj_map.contains_key("join") {
+                    return crate::js_os::handle_os_method(&obj_map, method, args, env);
+                }
+
+                // If this object is a file-like object (we use '__file_id' as marker)
+                if obj_map.contains_key("__file_id") {
+                    return tmpfile::handle_file_method(&obj_map, method, args, env);
+                }
+                // Check if this is the Math object
+                if obj_map.contains_key("PI") && obj_map.contains_key("E") {
+                    return js_math::handle_math_method(method, args, env);
+                } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
+                    // JSON methods
+                    match method {
+                        "parse" => {
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::String(s) => {
+                                        // Simple JSON parsing - for now just return the string as-is
+                                        // In a real implementation, this would parse JSON
+                                        Ok(Value::String(s))
                                     }
+                                    _ => Err(JSError::EvaluationError {
+                                        message: "JSON.parse expects a string".to_string(),
+                                    }),
                                 }
-                                Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
-                                Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "JSON.parse expects exactly one argument".to_string(),
+                                })
+                            }
+                        }
+                        "stringify" => {
+                            if args.len() == 1 {
+                                let arg_val = evaluate_expr(env, &args[0])?;
+                                match arg_val {
+                                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                                    Value::String(s) => {
+                                        // Simple JSON stringification - just return the string
+                                        Ok(Value::String(s))
+                                    }
+                                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                                    Value::Undefined => Ok(Value::String(utf8_to_utf16("null"))),
+                                    Value::Object(_) => Ok(Value::String(utf8_to_utf16("{}"))), // Simple object representation
+                                    _ => Ok(Value::String(utf8_to_utf16("null"))),
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "JSON.stringify expects exactly one argument".to_string(),
+                                })
+                            }
+                        }
+                        _ => Err(JSError::EvaluationError {
+                            message: format!("JSON.{} is not implemented", method),
+                        }),
+                    }
+                } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
+                    // Object methods
+                    match method {
+                        "keys" => {
+                            if args.len() == 1 {
+                                let obj_val = evaluate_expr(env, &args[0])?;
+                                if let Value::Object(obj) = obj_val {
+                                    let mut keys = Vec::new();
+                                    for key in obj.keys() {
+                                        if key != "length" {
+                                            // Skip array length property
+                                            keys.push(Value::String(utf8_to_utf16(key)));
+                                        }
+                                    }
+                                    // Create a simple array-like object for keys
+                                    let mut result_obj = JSObjectData::new();
+                                    for (i, key) in keys.into_iter().enumerate() {
+                                        obj_set_val(&mut result_obj, &i.to_string(), key);
+                                    }
+                                    let len = Value::Number(result_obj.len() as f64);
+                                    obj_set_val(&mut result_obj, "length", len);
+                                    Ok(Value::Object(result_obj))
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "Object.keys expects an object".to_string(),
+                                    })
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "Object.keys expects exactly one argument".to_string(),
+                                })
+                            }
+                        }
+                        "values" => {
+                            if args.len() == 1 {
+                                let obj_val = evaluate_expr(env, &args[0])?;
+                                if let Value::Object(obj) = obj_val {
+                                    let mut values = Vec::new();
+                                    for (key, value) in obj.iter() {
+                                        if key != "length" {
+                                            // Skip array length property
+                                            values.push(value.clone());
+                                        }
+                                    }
+                                    // Create a simple array-like object for values
+                                    let mut result_obj = JSObjectData::new();
+                                    for (i, value) in values.into_iter().enumerate() {
+                                        obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
+                                    }
+                                    let len = Value::Number(result_obj.len() as f64);
+                                    obj_set_val(&mut result_obj, "length", len);
+                                    Ok(Value::Object(result_obj))
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "Object.values expects an object".to_string(),
+                                    })
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "Object.values expects exactly one argument".to_string(),
+                                })
+                            }
+                        }
+                        _ => Err(JSError::EvaluationError {
+                            message: format!("Object.{} is not implemented", method),
+                        }),
+                    }
+                } else if obj_map.contains_key("length") {
+                    // Array instance methods
+                    return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, &**obj_expr);
+                } else {
+                    // Other object methods not implemented
+                    return Err(JSError::EvaluationError {
+                        message: format!("Method {} not implemented for this object type", method),
+                    });
+                }
+            }
+            (Value::String(s), method) => {
+                // String method call
+                match method {
+                    "toString" => {
+                        if args.is_empty() {
+                            Ok(Value::String(s.clone()))
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "substring" => {
+                        if args.len() == 2 {
+                            let start_val = evaluate_expr(env, &args[0])?;
+                            let end_val = evaluate_expr(env, &args[1])?;
+                            if let (Value::Number(start), Value::Number(end)) = (start_val, end_val) {
+                                let start_idx = start as usize;
+                                let end_idx = end as usize;
+                                if start_idx <= end_idx && end_idx <= utf16_len(&s) {
+                                    Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    })
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
                             }
                         } else {
                             Err(JSError::EvaluationError {
@@ -1429,867 +1650,674 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
                             })
                         }
                     }
-                    (Value::Object(mut obj_map), method) => {
-                        // If this object looks like the `std` module (we used 'sprintf' as marker)
-                        if obj_map.contains_key("sprintf") {
-                            match method {
-                                "sprintf" => {
-                                    return sprintf::handle_sprintf_call(env, args);
-                                }
-                                "tmpfile" => {
-                                    return tmpfile::create_tmpfile();
-                                }
-                                _ => {}
+                    "slice" => {
+                        let start = if args.len() >= 1 {
+                            match evaluate_expr(env, &args[0])? {
+                                Value::Number(n) => n as isize,
+                                _ => 0isize,
                             }
-                        }
-
-                        // If this object looks like the `os` module (we used 'open' as marker)
-                        if obj_map.contains_key("open") {
-                            return crate::js_os::handle_os_method(&obj_map, method, args, env);
-                        }
-
-                        // If this object looks like the `os.path` module
-                        if obj_map.contains_key("join") {
-                            return crate::js_os::handle_os_method(&obj_map, method, args, env);
-                        }
-
-                        // If this object is a file-like object (we use '__file_id' as marker)
-                        if obj_map.contains_key("__file_id") {
-                            return tmpfile::handle_file_method(&obj_map, method, args, env);
-                        }
-                        // Check if this is the Math object
-                        if obj_map.contains_key("PI") && obj_map.contains_key("E") {
-                            return js_math::handle_math_method(method, args, env);
-                        } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
-                            // JSON methods
-                            match method {
-                                "parse" => {
-                                    if args.len() == 1 {
-                                        let arg_val = evaluate_expr(env, &args[0])?;
-                                        match arg_val {
-                                            Value::String(s) => {
-                                                // Simple JSON parsing - for now just return the string as-is
-                                                // In a real implementation, this would parse JSON
-                                                Ok(Value::String(s))
-                                            }
-                                            _ => Err(JSError::EvaluationError {
-                                                message: "JSON.parse expects a string".to_string(),
-                                            }),
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "JSON.parse expects exactly one argument".to_string(),
-                                        })
-                                    }
-                                }
-                                "stringify" => {
-                                    if args.len() == 1 {
-                                        let arg_val = evaluate_expr(env, &args[0])?;
-                                        match arg_val {
-                                            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                                            Value::String(s) => {
-                                                // Simple JSON stringification - just return the string
-                                                Ok(Value::String(s))
-                                            }
-                                            Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                                            Value::Undefined => Ok(Value::String(utf8_to_utf16("null"))),
-                                            Value::Object(_) => Ok(Value::String(utf8_to_utf16("{}"))), // Simple object representation
-                                            _ => Ok(Value::String(utf8_to_utf16("null"))),
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "JSON.stringify expects exactly one argument".to_string(),
-                                        })
-                                    }
-                                }
-                                _ => Err(JSError::EvaluationError {
-                                    message: format!("JSON.{} is not implemented", method),
-                                }),
-                            }
-                        } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
-                            // Object methods
-                            match method {
-                                "keys" => {
-                                    if args.len() == 1 {
-                                        let obj_val = evaluate_expr(env, &args[0])?;
-                                        if let Value::Object(obj) = obj_val {
-                                            let mut keys = Vec::new();
-                                            for key in obj.keys() {
-                                                if key != "length" {
-                                                    // Skip array length property
-                                                    keys.push(Value::String(utf8_to_utf16(key)));
-                                                }
-                                            }
-                                            // Create a simple array-like object for keys
-                                            let mut result_obj = JSObjectData::new();
-                                            for (i, key) in keys.into_iter().enumerate() {
-                                                obj_set_val(&mut result_obj, &i.to_string(), key);
-                                            }
-                                            let len = Value::Number(result_obj.len() as f64);
-                                            obj_set_val(&mut result_obj, "length", len);
-                                            Ok(Value::Object(result_obj))
-                                        } else {
-                                            Err(JSError::EvaluationError {
-                                                message: "Object.keys expects an object".to_string(),
-                                            })
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "Object.keys expects exactly one argument".to_string(),
-                                        })
-                                    }
-                                }
-                                "values" => {
-                                    if args.len() == 1 {
-                                        let obj_val = evaluate_expr(env, &args[0])?;
-                                        if let Value::Object(obj) = obj_val {
-                                            let mut values = Vec::new();
-                                            for (key, value) in obj.iter() {
-                                                if key != "length" {
-                                                    // Skip array length property
-                                                    values.push(value.clone());
-                                                }
-                                            }
-                                            // Create a simple array-like object for values
-                                            let mut result_obj = JSObjectData::new();
-                                            for (i, value) in values.into_iter().enumerate() {
-                                                obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
-                                            }
-                                            let len = Value::Number(result_obj.len() as f64);
-                                            obj_set_val(&mut result_obj, "length", len);
-                                            Ok(Value::Object(result_obj))
-                                        } else {
-                                            Err(JSError::EvaluationError {
-                                                message: "Object.values expects an object".to_string(),
-                                            })
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "Object.values expects exactly one argument".to_string(),
-                                        })
-                                    }
-                                }
-                                _ => Err(JSError::EvaluationError {
-                                    message: format!("Object.{} is not implemented", method),
-                                }),
-                            }
-                        } else if obj_map.contains_key("length") {
-                            // Array instance methods
-                            return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, obj_expr);
                         } else {
-                            // Other object methods not implemented
-                            return Err(JSError::EvaluationError {
-                                message: format!("Method {} not implemented for this object type", method),
-                            });
+                            0isize
+                        };
+                        let end = if args.len() >= 2 {
+                            match evaluate_expr(env, &args[1])? {
+                                Value::Number(n) => n as isize,
+                                _ => s.len() as isize,
+                            }
+                        } else {
+                            s.len() as isize
+                        };
+
+                        let len = utf16_len(&s) as isize;
+                        let start = if start < 0 { len + start } else { start };
+                        let end = if end < 0 { len + end } else { end };
+
+                        let start = start.max(0).min(len) as usize;
+                        let end = end.max(0).min(len) as usize;
+
+                        if start <= end {
+                            Ok(Value::String(utf16_slice(&s, start, end)))
+                        } else {
+                            Ok(Value::String(Vec::new()))
                         }
                     }
-                    (Value::String(s), method) => {
-                        // String method call
-                        match method {
-                            "toString" => {
-                                if args.is_empty() {
-                                    Ok(Value::String(s.clone()))
+                    "toUpperCase" => {
+                        if args.is_empty() {
+                            Ok(Value::String(utf16_to_uppercase(&s)))
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "toLowerCase" => {
+                        if args.is_empty() {
+                            Ok(Value::String(utf16_to_lowercase(&s)))
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "indexOf" => {
+                        if args.len() == 1 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(search) = search_val {
+                                if let Some(pos) = utf16_find(&s, &search) {
+                                    Ok(Value::Number(pos as f64))
                                 } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
+                                    Ok(Value::Number(-1.0))
                                 }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
                             }
-                            "substring" => {
-                                if args.len() == 2 {
-                                    let start_val = evaluate_expr(env, &args[0])?;
-                                    let end_val = evaluate_expr(env, &args[1])?;
-                                    if let (Value::Number(start), Value::Number(end)) = (start_val, end_val) {
-                                        let start_idx = start as usize;
-                                        let end_idx = end as usize;
-                                        if start_idx <= end_idx && end_idx <= utf16_len(&s) {
-                                            Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
-                                        } else {
-                                            Err(JSError::EvaluationError {
-                                                message: "error".to_string(),
-                                            })
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "lastIndexOf" => {
+                        if args.len() == 1 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(search) = search_val {
+                                if let Some(pos) = utf16_rfind(&s, &search) {
+                                    Ok(Value::Number(pos as f64))
+                                } else {
+                                    Ok(Value::Number(-1.0))
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "replace" => {
+                        if args.len() == 2 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            let replace_val = evaluate_expr(env, &args[1])?;
+                            if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
+                                Ok(Value::String(utf16_replace(&s, &search, &replace)))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "split" => {
+                        if args.len() == 1 {
+                            let sep_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(sep) = sep_val {
+                                // Implement split returning an array-like object
+                                let mut parts: Vec<Vec<u16>> = Vec::new();
+                                if sep.is_empty() {
+                                    // split by empty separator => each UTF-16 code unit as string
+                                    for i in 0..utf16_len(&s) {
+                                        if let Some(ch) = utf16_char_at(&s, i) {
+                                            parts.push(vec![ch]);
                                         }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
                                     }
                                 } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
+                                    let mut start = 0usize;
+                                    while start <= utf16_len(&s) {
+                                        if let Some(pos) = utf16_find(&s[start..].to_vec(), &sep) {
+                                            let end = start + pos;
+                                            parts.push(utf16_slice(&s, start, end));
+                                            start = end + utf16_len(&sep);
+                                        } else {
+                                            // remainder
+                                            parts.push(utf16_slice(&s, start, utf16_len(&s)));
+                                            break;
+                                        }
+                                    }
                                 }
+                                let mut arr = JSObjectData::new();
+                                for (i, part) in parts.into_iter().enumerate() {
+                                    arr.insert(i.to_string(), Rc::new(RefCell::new(Value::String(part))));
+                                }
+                                arr.insert("length".to_string(), Rc::new(RefCell::new(Value::Number(arr.len() as f64))));
+                                Ok(Value::Object(arr))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
                             }
-                            "slice" => {
-                                let start = if args.len() >= 1 {
-                                    match evaluate_expr(env, &args[0])? {
-                                        Value::Number(n) => n as isize,
-                                        _ => 0isize,
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "charAt" => {
+                        if args.len() == 1 {
+                            let idx_val = evaluate_expr(env, &args[0])?;
+                            if let Value::Number(n) = idx_val {
+                                let idx = n as isize;
+                                // let len = utf16_len(&s) as isize;
+                                let idx = if idx < 0 { 0 } else { idx } as usize;
+                                if idx < utf16_len(&s) {
+                                    if let Some(ch) = utf16_char_at(&s, idx) {
+                                        Ok(Value::String(vec![ch]))
+                                    } else {
+                                        Ok(Value::String(Vec::new()))
                                     }
-                                } else {
-                                    0isize
-                                };
-                                let end = if args.len() >= 2 {
-                                    match evaluate_expr(env, &args[1])? {
-                                        Value::Number(n) => n as isize,
-                                        _ => s.len() as isize,
-                                    }
-                                } else {
-                                    s.len() as isize
-                                };
-
-                                let len = utf16_len(&s) as isize;
-                                let start = if start < 0 { len + start } else { start };
-                                let end = if end < 0 { len + end } else { end };
-
-                                let start = start.max(0).min(len) as usize;
-                                let end = end.max(0).min(len) as usize;
-
-                                if start <= end {
-                                    Ok(Value::String(utf16_slice(&s, start, end)))
                                 } else {
                                     Ok(Value::String(Vec::new()))
                                 }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
                             }
-                            "toUpperCase" => {
-                                if args.is_empty() {
-                                    Ok(Value::String(utf16_to_uppercase(&s)))
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "toLowerCase" => {
-                                if args.is_empty() {
-                                    Ok(Value::String(utf16_to_lowercase(&s)))
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "indexOf" => {
-                                if args.len() == 1 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(search) = search_val {
-                                        if let Some(pos) = utf16_find(&s, &search) {
-                                            Ok(Value::Number(pos as f64))
-                                        } else {
-                                            Ok(Value::Number(-1.0))
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "lastIndexOf" => {
-                                if args.len() == 1 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(search) = search_val {
-                                        if let Some(pos) = utf16_rfind(&s, &search) {
-                                            Ok(Value::Number(pos as f64))
-                                        } else {
-                                            Ok(Value::Number(-1.0))
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "replace" => {
-                                if args.len() == 2 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    let replace_val = evaluate_expr(env, &args[1])?;
-                                    if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
-                                        Ok(Value::String(utf16_replace(&s, &search, &replace)))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "split" => {
-                                if args.len() == 1 {
-                                    let sep_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(sep) = sep_val {
-                                        // Implement split returning an array-like object
-                                        let mut parts: Vec<Vec<u16>> = Vec::new();
-                                        if sep.is_empty() {
-                                            // split by empty separator => each UTF-16 code unit as string
-                                            for i in 0..utf16_len(&s) {
-                                                if let Some(ch) = utf16_char_at(&s, i) {
-                                                    parts.push(vec![ch]);
-                                                }
-                                            }
-                                        } else {
-                                            let mut start = 0usize;
-                                            while start <= utf16_len(&s) {
-                                                if let Some(pos) = utf16_find(&s[start..].to_vec(), &sep) {
-                                                    let end = start + pos;
-                                                    parts.push(utf16_slice(&s, start, end));
-                                                    start = end + utf16_len(&sep);
-                                                } else {
-                                                    // remainder
-                                                    parts.push(utf16_slice(&s, start, utf16_len(&s)));
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        let mut arr = JSObjectData::new();
-                                        for (i, part) in parts.into_iter().enumerate() {
-                                            arr.insert(i.to_string(), Rc::new(RefCell::new(Value::String(part))));
-                                        }
-                                        arr.insert("length".to_string(), Rc::new(RefCell::new(Value::Number(arr.len() as f64))));
-                                        Ok(Value::Object(arr))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "charAt" => {
-                                if args.len() == 1 {
-                                    let idx_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::Number(n) = idx_val {
-                                        let idx = n as isize;
-                                        // let len = utf16_len(&s) as isize;
-                                        let idx = if idx < 0 { 0 } else { idx } as usize;
-                                        if idx < utf16_len(&s) {
-                                            if let Some(ch) = utf16_char_at(&s, idx) {
-                                                Ok(Value::String(vec![ch]))
-                                            } else {
-                                                Ok(Value::String(Vec::new()))
-                                            }
-                                        } else {
-                                            Ok(Value::String(Vec::new()))
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "trim" => {
-                                if args.is_empty() {
-                                    let str_val = String::from_utf16_lossy(&s);
-                                    let trimmed = str_val.trim();
-                                    Ok(Value::String(utf8_to_utf16(trimmed)))
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "startsWith" => {
-                                if args.len() == 1 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(search) = search_val {
-                                        let starts = s.len() >= search.len() && s[..search.len()] == search[..];
-                                        Ok(Value::Boolean(starts))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "endsWith" => {
-                                if args.len() == 1 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(search) = search_val {
-                                        let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
-                                        Ok(Value::Boolean(ends))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "includes" => {
-                                if args.len() == 1 {
-                                    let search_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::String(search) = search_val {
-                                        let includes = utf16_find(&s, &search).is_some();
-                                        Ok(Value::Boolean(includes))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "repeat" => {
-                                if args.len() == 1 {
-                                    let count_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::Number(n) = count_val {
-                                        let count = n as usize;
-                                        let mut repeated = Vec::new();
-                                        for _ in 0..count {
-                                            repeated.extend_from_slice(&s);
-                                        }
-                                        Ok(Value::String(repeated))
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "concat" => {
-                                let mut result = s.clone();
-                                for arg in args {
-                                    let arg_val = evaluate_expr(env, arg)?;
-                                    if let Value::String(arg_str) = arg_val {
-                                        result.extend(arg_str);
-                                    } else {
-                                        // Convert to string
-                                        let str_val = match arg_val {
-                                            Value::Number(n) => utf8_to_utf16(&n.to_string()),
-                                            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
-                                            Value::Undefined => utf8_to_utf16("undefined"),
-                                            _ => utf8_to_utf16("[object Object]"),
-                                        };
-                                        result.extend(str_val);
-                                    }
-                                }
-                                Ok(Value::String(result))
-                            }
-                            "padStart" => {
-                                if args.len() >= 1 {
-                                    let target_len_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::Number(target_len) = target_len_val {
-                                        let target_len = target_len as usize;
-                                        let current_len = utf16_len(&s);
-                                        if current_len >= target_len {
-                                            Ok(Value::String(s.clone()))
-                                        } else {
-                                            let pad_char = if args.len() >= 2 {
-                                                let pad_val = evaluate_expr(env, &args[1])?;
-                                                if let Value::String(pad_str) = pad_val {
-                                                    if !pad_str.is_empty() {
-                                                        pad_str[0]
-                                                    } else {
-                                                        ' ' as u16
-                                                    }
-                                                } else {
-                                                    ' ' as u16
-                                                }
-                                            } else {
-                                                ' ' as u16
-                                            };
-                                            let pad_count = target_len - current_len;
-                                            let mut padded = vec![pad_char; pad_count];
-                                            padded.extend_from_slice(&s);
-                                            Ok(Value::String(padded))
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            "padEnd" => {
-                                if args.len() >= 1 {
-                                    let target_len_val = evaluate_expr(env, &args[0])?;
-                                    if let Value::Number(target_len) = target_len_val {
-                                        let target_len = target_len as usize;
-                                        let current_len = utf16_len(&s);
-                                        if current_len >= target_len {
-                                            Ok(Value::String(s.clone()))
-                                        } else {
-                                            let pad_char = if args.len() >= 2 {
-                                                let pad_val = evaluate_expr(env, &args[1])?;
-                                                if let Value::String(pad_str) = pad_val {
-                                                    if !pad_str.is_empty() {
-                                                        pad_str[0]
-                                                    } else {
-                                                        ' ' as u16
-                                                    }
-                                                } else {
-                                                    ' ' as u16
-                                                }
-                                            } else {
-                                                ' ' as u16
-                                            };
-                                            let pad_count = target_len - current_len;
-                                            let mut padded = s.clone();
-                                            padded.extend(vec![pad_char; pad_count]);
-                                            Ok(Value::String(padded))
-                                        }
-                                    } else {
-                                        Err(JSError::EvaluationError {
-                                            message: "error".to_string(),
-                                        })
-                                    }
-                                } else {
-                                    Err(JSError::EvaluationError {
-                                        message: "error".to_string(),
-                                    })
-                                }
-                            }
-                            _ => Err(JSError::EvaluationError {
+                        } else {
+                            Err(JSError::EvaluationError {
                                 message: "error".to_string(),
-                            }), // method not found
+                            })
+                        }
+                    }
+                    "trim" => {
+                        if args.is_empty() {
+                            let str_val = String::from_utf16_lossy(&s);
+                            let trimmed = str_val.trim();
+                            Ok(Value::String(utf8_to_utf16(trimmed)))
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "startsWith" => {
+                        if args.len() == 1 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(search) = search_val {
+                                let starts = s.len() >= search.len() && s[..search.len()] == search[..];
+                                Ok(Value::Boolean(starts))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "endsWith" => {
+                        if args.len() == 1 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(search) = search_val {
+                                let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
+                                Ok(Value::Boolean(ends))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "includes" => {
+                        if args.len() == 1 {
+                            let search_val = evaluate_expr(env, &args[0])?;
+                            if let Value::String(search) = search_val {
+                                let includes = utf16_find(&s, &search).is_some();
+                                Ok(Value::Boolean(includes))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "repeat" => {
+                        if args.len() == 1 {
+                            let count_val = evaluate_expr(env, &args[0])?;
+                            if let Value::Number(n) = count_val {
+                                let count = n as usize;
+                                let mut repeated = Vec::new();
+                                for _ in 0..count {
+                                    repeated.extend_from_slice(&s);
+                                }
+                                Ok(Value::String(repeated))
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "concat" => {
+                        let mut result = s.clone();
+                        for arg in args {
+                            let arg_val = evaluate_expr(env, arg)?;
+                            if let Value::String(arg_str) = arg_val {
+                                result.extend(arg_str);
+                            } else {
+                                // Convert to string
+                                let str_val = match arg_val {
+                                    Value::Number(n) => utf8_to_utf16(&n.to_string()),
+                                    Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+                                    Value::Undefined => utf8_to_utf16("undefined"),
+                                    _ => utf8_to_utf16("[object Object]"),
+                                };
+                                result.extend(str_val);
+                            }
+                        }
+                        Ok(Value::String(result))
+                    }
+                    "padStart" => {
+                        if args.len() >= 1 {
+                            let target_len_val = evaluate_expr(env, &args[0])?;
+                            if let Value::Number(target_len) = target_len_val {
+                                let target_len = target_len as usize;
+                                let current_len = utf16_len(&s);
+                                if current_len >= target_len {
+                                    Ok(Value::String(s.clone()))
+                                } else {
+                                    let pad_char = if args.len() >= 2 {
+                                        let pad_val = evaluate_expr(env, &args[1])?;
+                                        if let Value::String(pad_str) = pad_val {
+                                            if !pad_str.is_empty() {
+                                                pad_str[0]
+                                            } else {
+                                                ' ' as u16
+                                            }
+                                        } else {
+                                            ' ' as u16
+                                        }
+                                    } else {
+                                        ' ' as u16
+                                    };
+                                    let pad_count = target_len - current_len;
+                                    let mut padded = vec![pad_char; pad_count];
+                                    padded.extend_from_slice(&s);
+                                    Ok(Value::String(padded))
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
+                        }
+                    }
+                    "padEnd" => {
+                        if args.len() >= 1 {
+                            let target_len_val = evaluate_expr(env, &args[0])?;
+                            if let Value::Number(target_len) = target_len_val {
+                                let target_len = target_len as usize;
+                                let current_len = utf16_len(&s);
+                                if current_len >= target_len {
+                                    Ok(Value::String(s.clone()))
+                                } else {
+                                    let pad_char = if args.len() >= 2 {
+                                        let pad_val = evaluate_expr(env, &args[1])?;
+                                        if let Value::String(pad_str) = pad_val {
+                                            if !pad_str.is_empty() {
+                                                pad_str[0]
+                                            } else {
+                                                ' ' as u16
+                                            }
+                                        } else {
+                                            ' ' as u16
+                                        }
+                                    } else {
+                                        ' ' as u16
+                                    };
+                                    let pad_count = target_len - current_len;
+                                    let mut padded = s.clone();
+                                    padded.extend(vec![pad_char; pad_count]);
+                                    Ok(Value::String(padded))
+                                }
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "error".to_string(),
+                                })
+                            }
+                        } else {
+                            Err(JSError::EvaluationError {
+                                message: "error".to_string(),
+                            })
                         }
                     }
                     _ => Err(JSError::EvaluationError {
                         message: "error".to_string(),
-                    }),
+                    }), // method not found
                 }
-            } else {
-                // Regular function call
-                let func_val = evaluate_expr(env, func_expr)?;
-                match func_val {
-                    Value::Function(func_name) => match func_name.as_str() {
-                        "String" => {
-                            // String() constructor
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                                    Value::String(s) => Ok(Value::String(s.clone())),
-                                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                                    Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
-                                    Value::Object(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
-                                    Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
-                                    Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
-                                }
-                            } else {
-                                Ok(Value::String(Vec::new())) // String() with no args returns empty string
-                            }
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        }
+    } else {
+        // Regular function call
+        let func_val = evaluate_expr(env, func_expr)?;
+        match func_val {
+            Value::Function(func_name) => match func_name.as_str() {
+                "String" => {
+                    // String() constructor
+                    if args.len() == 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                            Value::String(s) => Ok(Value::String(s.clone())),
+                            Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                            Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                            Value::Object(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+                            Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
+                            Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                         }
+                    } else {
+                        Ok(Value::String(Vec::new())) // String() with no args returns empty string
+                    }
+                }
 
-                        "parseInt" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        // Parse integer from the beginning of the string
-                                        let trimmed = str_val.trim();
-                                        let mut end_pos = 0;
-                                        let mut chars = trimmed.chars();
-                                        if let Some(first_char) = chars.next() {
-                                            if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
-                                                end_pos = 1;
-                                                for ch in chars {
-                                                    if ch.is_digit(10) {
-                                                        end_pos += 1;
-                                                    } else {
-                                                        break;
-                                                    }
-                                                }
+                "parseInt" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                // Parse integer from the beginning of the string
+                                let trimmed = str_val.trim();
+                                let mut end_pos = 0;
+                                let mut chars = trimmed.chars();
+                                if let Some(first_char) = chars.next() {
+                                    if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
+                                        end_pos = 1;
+                                        for ch in chars {
+                                            if ch.is_digit(10) {
+                                                end_pos += 1;
+                                            } else {
+                                                break;
                                             }
                                         }
-                                        let num_str = &trimmed[0..end_pos];
-                                        match num_str.parse::<i32>() {
-                                            Ok(n) => Ok(Value::Number(n as f64)),
-                                            Err(_) => Ok(Value::Number(f64::NAN)),
-                                        }
-                                    }
-                                    Value::Number(n) => Ok(Value::Number(n.trunc())),
-                                    _ => Ok(Value::Number(f64::NAN)),
-                                }
-                            } else {
-                                Ok(Value::Number(f64::NAN))
-                            }
-                        }
-                        "parseFloat" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        match str_val.trim().parse::<f64>() {
-                                            Ok(n) => Ok(Value::Number(n)),
-                                            Err(_) => Ok(Value::Number(f64::NAN)),
-                                        }
-                                    }
-                                    Value::Number(n) => Ok(Value::Number(n)),
-                                    _ => Ok(Value::Number(f64::NAN)),
-                                }
-                            } else {
-                                Ok(Value::Number(f64::NAN))
-                            }
-                        }
-                        "isNaN" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
-                                    _ => Ok(Value::Boolean(false)),
-                                }
-                            } else {
-                                Ok(Value::Boolean(false))
-                            }
-                        }
-                        "isFinite" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
-                                    _ => Ok(Value::Boolean(false)),
-                                }
-                            } else {
-                                Ok(Value::Boolean(false))
-                            }
-                        }
-                        "encodeURIComponent" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        // Simple URI encoding - replace spaces with %20 and some special chars
-                                        let encoded = str_val
-                                            .replace("%", "%25")
-                                            .replace(" ", "%20")
-                                            .replace("\"", "%22")
-                                            .replace("'", "%27")
-                                            .replace("<", "%3C")
-                                            .replace(">", "%3E")
-                                            .replace("&", "%26");
-                                        Ok(Value::String(utf8_to_utf16(&encoded)))
-                                    }
-                                    _ => {
-                                        // For non-string values, convert to string first
-                                        let str_val = match arg_val {
-                                            Value::Number(n) => n.to_string(),
-                                            Value::Boolean(b) => b.to_string(),
-                                            _ => "[object Object]".to_string(),
-                                        };
-                                        Ok(Value::String(utf8_to_utf16(&str_val)))
                                     }
                                 }
-                            } else {
-                                Ok(Value::String(Vec::new()))
-                            }
-                        }
-                        "decodeURIComponent" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        // Simple URI decoding - replace %20 with spaces and some special chars
-                                        let decoded = str_val
-                                            .replace("%20", " ")
-                                            .replace("%22", "\"")
-                                            .replace("%27", "'")
-                                            .replace("%3C", "<")
-                                            .replace("%3E", ">")
-                                            .replace("%26", "&")
-                                            .replace("%25", "%");
-                                        Ok(Value::String(utf8_to_utf16(&decoded)))
-                                    }
-                                    _ => {
-                                        // For non-string values, convert to string first
-                                        let str_val = match arg_val {
-                                            Value::Number(n) => n.to_string(),
-                                            Value::Boolean(b) => b.to_string(),
-                                            _ => "[object Object]".to_string(),
-                                        };
-                                        Ok(Value::String(utf8_to_utf16(&str_val)))
-                                    }
+                                let num_str = &trimmed[0..end_pos];
+                                match num_str.parse::<i32>() {
+                                    Ok(n) => Ok(Value::Number(n as f64)),
+                                    Err(_) => Ok(Value::Number(f64::NAN)),
                                 }
-                            } else {
-                                Ok(Value::String(Vec::new()))
                             }
+                            Value::Number(n) => Ok(Value::Number(n.trunc())),
+                            _ => Ok(Value::Number(f64::NAN)),
                         }
-                        "Array" => {
-                            return crate::js_array::handle_array_constructor(args, env);
-                        }
-                        "Number" => {
-                            // Number constructor
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => Ok(Value::Number(n)),
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        match str_val.trim().parse::<f64>() {
-                                            Ok(n) => Ok(Value::Number(n)),
-                                            Err(_) => Ok(Value::Number(f64::NAN)),
-                                        }
-                                    }
-                                    Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
-                                    _ => Ok(Value::Number(f64::NAN)),
-                                }
-                            } else {
-                                Ok(Value::Number(0.0)) // Number() with no args returns 0
-                            }
-                        }
-                        "Boolean" => {
-                            // Boolean constructor
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                let bool_val = match arg_val {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0 && !n.is_nan(),
-                                    Value::String(s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                Ok(Value::Boolean(bool_val))
-                            } else {
-                                Ok(Value::Boolean(false)) // Boolean() with no args returns false
-                            }
-                        }
-                        "Date" => {
-                            // Date constructor - for now just return current timestamp
-                            use std::time::{SystemTime, UNIX_EPOCH};
-                            let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                            let timestamp = duration.as_millis() as f64;
-                            Ok(Value::String(utf8_to_utf16(&format!("Date: {}", timestamp))))
-                        }
-                        "eval" => {
-                            // eval function - basic implementation
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        // For now, just return the string as-is
-                                        // In a real implementation, this would parse and execute the code
-                                        Ok(Value::String(s))
-                                    }
-                                    _ => Ok(arg_val),
-                                }
-                            } else {
-                                Ok(Value::Undefined)
-                            }
-                        }
-                        "encodeURI" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        // Simple URI encoding - replace spaces with %20
-                                        let encoded = str_val.replace(" ", "%20");
-                                        Ok(Value::String(utf8_to_utf16(&encoded)))
-                                    }
-                                    _ => {
-                                        let str_val = match arg_val {
-                                            Value::Number(n) => n.to_string(),
-                                            Value::Boolean(b) => b.to_string(),
-                                            _ => "[object Object]".to_string(),
-                                        };
-                                        Ok(Value::String(utf8_to_utf16(&str_val)))
-                                    }
-                                }
-                            } else {
-                                Ok(Value::String(Vec::new()))
-                            }
-                        }
-                        "decodeURI" => {
-                            if args.len() >= 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        let str_val = String::from_utf16_lossy(&s);
-                                        // Simple URI decoding - replace %20 with spaces
-                                        let decoded = str_val.replace("%20", " ");
-                                        Ok(Value::String(utf8_to_utf16(&decoded)))
-                                    }
-                                    _ => {
-                                        let str_val = match arg_val {
-                                            Value::Number(n) => n.to_string(),
-                                            Value::Boolean(b) => b.to_string(),
-                                            _ => "[object Object]".to_string(),
-                                        };
-                                        Ok(Value::String(utf8_to_utf16(&str_val)))
-                                    }
-                                }
-                            } else {
-                                Ok(Value::String(Vec::new()))
-                            }
-                        }
-                        _ => Err(JSError::EvaluationError {
-                            message: "error".to_string(),
-                        }),
-                    },
-                    Value::Closure(params, body, captured_env) => {
-                        // Function call
-                        if params.len() != args.len() {
-                            return Err(JSError::ParseError);
-                        }
-                        // Create new environment starting with captured environment
-                        let mut func_env = captured_env.clone();
-                        // Add parameters
-                        for (param, arg) in params.iter().zip(args.iter()) {
-                            let arg_val = evaluate_expr(env, arg)?;
-                            env_set(&mut func_env, param.as_str(), arg_val);
-                        }
-                        // Execute function body
-                        evaluate_statements(&mut func_env, &body)
+                    } else {
+                        Ok(Value::Number(f64::NAN))
                     }
-                    _ => Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    }),
                 }
+                "parseFloat" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                match str_val.trim().parse::<f64>() {
+                                    Ok(n) => Ok(Value::Number(n)),
+                                    Err(_) => Ok(Value::Number(f64::NAN)),
+                                }
+                            }
+                            Value::Number(n) => Ok(Value::Number(n)),
+                            _ => Ok(Value::Number(f64::NAN)),
+                        }
+                    } else {
+                        Ok(Value::Number(f64::NAN))
+                    }
+                }
+                "isNaN" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
+                            _ => Ok(Value::Boolean(false)),
+                        }
+                    } else {
+                        Ok(Value::Boolean(false))
+                    }
+                }
+                "isFinite" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
+                            _ => Ok(Value::Boolean(false)),
+                        }
+                    } else {
+                        Ok(Value::Boolean(false))
+                    }
+                }
+                "encodeURIComponent" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                // Simple URI encoding - replace spaces with %20 and some special chars
+                                let encoded = str_val
+                                    .replace("%", "%25")
+                                    .replace(" ", "%20")
+                                    .replace("\"", "%22")
+                                    .replace("'", "%27")
+                                    .replace("<", "%3C")
+                                    .replace(">", "%3E")
+                                    .replace("&", "%26");
+                                Ok(Value::String(utf8_to_utf16(&encoded)))
+                            }
+                            _ => {
+                                // For non-string values, convert to string first
+                                let str_val = match arg_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::Boolean(b) => b.to_string(),
+                                    _ => "[object Object]".to_string(),
+                                };
+                                Ok(Value::String(utf8_to_utf16(&str_val)))
+                            }
+                        }
+                    } else {
+                        Ok(Value::String(Vec::new()))
+                    }
+                }
+                "decodeURIComponent" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                // Simple URI decoding - replace %20 with spaces and some special chars
+                                let decoded = str_val
+                                    .replace("%20", " ")
+                                    .replace("%22", "\"")
+                                    .replace("%27", "'")
+                                    .replace("%3C", "<")
+                                    .replace("%3E", ">")
+                                    .replace("%26", "&")
+                                    .replace("%25", "%");
+                                Ok(Value::String(utf8_to_utf16(&decoded)))
+                            }
+                            _ => {
+                                // For non-string values, convert to string first
+                                let str_val = match arg_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::Boolean(b) => b.to_string(),
+                                    _ => "[object Object]".to_string(),
+                                };
+                                Ok(Value::String(utf8_to_utf16(&str_val)))
+                            }
+                        }
+                    } else {
+                        Ok(Value::String(Vec::new()))
+                    }
+                }
+                "Array" => {
+                    return crate::js_array::handle_array_constructor(args, env);
+                }
+                "Number" => {
+                    // Number constructor
+                    if args.len() == 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::Number(n) => Ok(Value::Number(n)),
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                match str_val.trim().parse::<f64>() {
+                                    Ok(n) => Ok(Value::Number(n)),
+                                    Err(_) => Ok(Value::Number(f64::NAN)),
+                                }
+                            }
+                            Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                            _ => Ok(Value::Number(f64::NAN)),
+                        }
+                    } else {
+                        Ok(Value::Number(0.0)) // Number() with no args returns 0
+                    }
+                }
+                "Boolean" => {
+                    // Boolean constructor
+                    if args.len() == 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        let bool_val = match arg_val {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0 && !n.is_nan(),
+                            Value::String(s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        Ok(Value::Boolean(bool_val))
+                    } else {
+                        Ok(Value::Boolean(false)) // Boolean() with no args returns false
+                    }
+                }
+                "Date" => {
+                    // Date constructor - for now just return current timestamp
+                    use std::time::{SystemTime, UNIX_EPOCH};
+                    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+                    let timestamp = duration.as_millis() as f64;
+                    Ok(Value::String(utf8_to_utf16(&format!("Date: {}", timestamp))))
+                }
+                "eval" => {
+                    // eval function - basic implementation
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                // For now, just return the string as-is
+                                // In a real implementation, this would parse and execute the code
+                                Ok(Value::String(s))
+                            }
+                            _ => Ok(arg_val),
+                        }
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                }
+                "encodeURI" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                // Simple URI encoding - replace spaces with %20
+                                let encoded = str_val.replace(" ", "%20");
+                                Ok(Value::String(utf8_to_utf16(&encoded)))
+                            }
+                            _ => {
+                                let str_val = match arg_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::Boolean(b) => b.to_string(),
+                                    _ => "[object Object]".to_string(),
+                                };
+                                Ok(Value::String(utf8_to_utf16(&str_val)))
+                            }
+                        }
+                    } else {
+                        Ok(Value::String(Vec::new()))
+                    }
+                }
+                "decodeURI" => {
+                    if args.len() >= 1 {
+                        let arg_val = evaluate_expr(env, &args[0])?;
+                        match arg_val {
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                // Simple URI decoding - replace %20 with spaces
+                                let decoded = str_val.replace("%20", " ");
+                                Ok(Value::String(utf8_to_utf16(&decoded)))
+                            }
+                            _ => {
+                                let str_val = match arg_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::Boolean(b) => b.to_string(),
+                                    _ => "[object Object]".to_string(),
+                                };
+                                Ok(Value::String(utf8_to_utf16(&str_val)))
+                            }
+                        }
+                    } else {
+                        Ok(Value::String(Vec::new()))
+                    }
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "error".to_string(),
+                }),
+            },
+            Value::Closure(params, body, captured_env) => {
+                // Function call
+                if params.len() != args.len() {
+                    return Err(JSError::ParseError);
+                }
+                // Create new environment starting with captured environment
+                let mut func_env = captured_env.clone();
+                // Add parameters
+                for (param, arg) in params.iter().zip(args.iter()) {
+                    let arg_val = evaluate_expr(env, arg)?;
+                    env_set(&mut func_env, param.as_str(), arg_val);
+                }
+                // Execute function body
+                evaluate_statements(&mut func_env, &body)
             }
-        }
-        Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
-        Expr::Object(properties) => {
-            let mut obj = JSObjectData::new();
-            for (key, value_expr) in properties {
-                let value = evaluate_expr(env, value_expr)?;
-                obj_set_val(&mut obj, key.as_str(), value);
-            }
-            Ok(Value::Object(obj))
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
         }
     }
+}
+
+fn evaluate_object(env: &JSObjectData, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
+    let mut obj = JSObjectData::new();
+    for (key, value_expr) in properties {
+        let value = evaluate_expr(env, value_expr)?;
+        obj_set_val(&mut obj, key.as_str(), value);
+    }
+    Ok(Value::Object(obj))
 }
 
 pub type JSObjectData = std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>;

@@ -835,7 +835,8 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     for (i, line) in script.lines().enumerate() {
         // A line may contain multiple statements separated by ';' (common when passing -e).
         // Split on ';' and handle each segment individually so we don't drop non-import statements.
-        for part in line.split(';') {
+        let parts: Vec<&str> = line.split(';').collect();
+        for (pi, part) in parts.iter().enumerate() {
             let p = part.trim();
             if p.is_empty() {
                 continue;
@@ -846,7 +847,10 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
                 continue;
             }
             filtered.push_str(p);
-            filtered.push(';');
+            // Re-add semicolon only if this part was followed by a semicolon in the original line
+            if pi + 1 < parts.len() {
+                filtered.push(';');
+            }
         }
         filtered.push('\n');
     }

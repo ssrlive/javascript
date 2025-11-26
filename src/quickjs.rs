@@ -2,6 +2,9 @@
 #![allow(non_camel_case_types)]
 
 use crate::error::JSError;
+use crate::js_array::get_array_length;
+use crate::js_array::is_array;
+use crate::js_array::set_array_length;
 use crate::js_console;
 use crate::js_math;
 use crate::sprintf;
@@ -1674,8 +1677,8 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                                     for (i, key) in keys.into_iter().enumerate() {
                                         obj_set_val(&mut result_obj, &i.to_string(), key);
                                     }
-                                    let len = Value::Number(result_obj.len() as f64);
-                                    obj_set_val(&mut result_obj, "length", len);
+                                    let len = result_obj.len();
+                                    set_array_length(&mut result_obj, len);
                                     Ok(Value::Object(result_obj))
                                 } else {
                                     Err(JSError::EvaluationError {
@@ -1704,8 +1707,8 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                                     for (i, value) in values.into_iter().enumerate() {
                                         obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
                                     }
-                                    let len = Value::Number(result_obj.len() as f64);
-                                    obj_set_val(&mut result_obj, "length", len);
+                                    let len = result_obj.len();
+                                    set_array_length(&mut result_obj, len);
                                     Ok(Value::Object(result_obj))
                                 } else {
                                     Err(JSError::EvaluationError {
@@ -1722,7 +1725,7 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                             message: format!("Object.{} is not implemented", method),
                         }),
                     }
-                } else if obj_map.contains_key("length") {
+                } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, &**obj_expr);
                 } else {
@@ -1904,9 +1907,10 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                                 }
                                 let mut arr = JSObjectData::new();
                                 for (i, part) in parts.into_iter().enumerate() {
-                                    arr.insert(i.to_string(), Rc::new(RefCell::new(Value::String(part))));
+                                    obj_set_val(&mut arr, &i.to_string(), Value::String(part));
                                 }
-                                arr.insert("length".to_string(), Rc::new(RefCell::new(Value::Number(arr.len() as f64))));
+                                let len = arr.len();
+                                set_array_length(&mut arr, len);
                                 Ok(Value::Object(arr))
                             } else {
                                 Err(JSError::EvaluationError {
@@ -2449,7 +2453,7 @@ fn evaluate_array(env: &JSObjectData, elements: &Vec<Expr>) -> Result<Value, JSE
         obj_set_val(&mut arr, &i.to_string(), value);
     }
     // Set length property
-    obj_set_val(&mut arr, "length", Value::Number(elements.len() as f64));
+    set_array_length(&mut arr, elements.len());
     Ok(Value::Object(arr))
 }
 
@@ -3607,15 +3611,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             });
         }
         Value::Object(ref obj_map) => {
-            // If this object looks like an array (has a length), join elements with comma
-            if obj_map.contains_key("length") {
-                let length = obj_get(&obj_map, "length")
-                    .map(|v| v.borrow().clone())
-                    .unwrap_or(Value::Number(0.0));
-                let current_len = match length {
-                    Value::Number(n) => n as usize,
-                    _ => 0,
-                };
+            // If this object looks like an array, join elements with comma
+            if is_array(obj_map) {
+                let current_len = get_array_length(obj_map).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
                     if let Some(val_rc) = obj_get(&obj_map, &i.to_string()) {

@@ -4,6 +4,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
 use crate::error::JSError;
+use crate::js_array::set_array_length;
 use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, Value};
 
 static OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -289,18 +290,18 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
                                     }
                                 }
                             }
-                            obj_set_val(&mut obj, "length", Value::Number(i as f64));
+                            set_array_length(&mut obj, i);
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
                             let mut obj = JSObjectData::new();
-                            obj_set_val(&mut obj, "length", Value::Number(0.0));
+                            set_array_length(&mut obj, 0);
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
                 let mut obj = JSObjectData::new();
-                obj_set_val(&mut obj, "length", Value::Number(0.0));
+                set_array_length(&mut obj, 0);
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {

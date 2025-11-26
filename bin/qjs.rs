@@ -20,6 +20,9 @@ unsafe fn get_js_string(val: &JSValue) -> String {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // Initialize logger (controlled by RUST_LOG)
+    env_logger::init();
+
     if args.len() < 2 {
         eprintln!("Usage: {} [options] [file.js | -e script]", args[0]);
         eprintln!("Options:");

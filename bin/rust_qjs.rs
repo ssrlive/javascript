@@ -6,6 +6,9 @@ use rust_quickjs::quickjs::*;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
+    // Initialize logger (controlled by RUST_LOG)
+    env_logger::init();
+
     if args.len() < 3 || args[1] != "-e" {
         eprintln!("Usage: {} -e script", args[0]);
         process::exit(1);

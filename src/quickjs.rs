@@ -829,20 +829,39 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
 }
 
 pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
+    log::debug!("evaluate_script called with script len {}", script.len());
     // Remove simple import lines that we've already handled via shim injection
     let mut filtered = String::new();
-    for line in script.lines() {
-        let l = line.trim();
-        if l.starts_with("import * as") && l.contains("from") {
-            // skip this import line (already injected into env)
-            continue;
+    for (i, line) in script.lines().enumerate() {
+        // A line may contain multiple statements separated by ';' (common when passing -e).
+        // Split on ';' and handle each segment individually so we don't drop non-import statements.
+        for part in line.split(';') {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            log::trace!("script part[{i}]='{p}'");
+            if p.starts_with("import * as") && p.contains("from") {
+                log::debug!("skipping import part[{i}]: \"{p}\"");
+                continue;
+            }
+            filtered.push_str(p);
+            filtered.push(';');
         }
-        filtered.push_str(line);
         filtered.push('\n');
     }
 
+    // Remove any trailing newline(s) added during filtering to avoid an extra
+    // empty statement at the end when tokenizing/parsing.
+    let filtered = filtered.trim_end_matches('\n').to_string();
+
+    log::trace!("filtered script:\n{}", filtered);
     let mut tokens = tokenize(&filtered)?;
     let statements = parse_statements(&mut tokens)?;
+    log::debug!("parsed {} statements", statements.len());
+    for (i, stmt) in statements.iter().enumerate() {
+        log::trace!("stmt[{i}] = {stmt:?}");
+    }
     let mut env: JSObjectData = JSObjectData::new();
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
@@ -1413,7 +1432,7 @@ fn evaluate_index(env: &JSObjectData, obj: &Expr, idx: &Expr) -> Result<Value, J
 
 fn evaluate_property(env: &JSObjectData, obj: &Expr, prop: &str) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
-    println!("Property: obj_val={:?}, prop={}", obj_val, prop);
+    log::trace!("Property: obj_val={obj_val:?}, prop={prop}");
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         Value::Object(obj_map) => {
@@ -1423,16 +1442,14 @@ fn evaluate_property(env: &JSObjectData, obj: &Expr, prop: &str) -> Result<Value
                 Ok(Value::Undefined)
             }
         }
-        _ => {
-            println!("Property not found");
-            Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            })
-        }
+        _ => Err(JSError::EvaluationError {
+            message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
+        }),
     }
 }
 
 fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
+    log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods
@@ -1443,6 +1460,7 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
         }
 
         let obj_val = evaluate_expr(env, &**obj_expr)?;
+        log::trace!("evaluate_call - object eval result: {obj_val:?}");
         match (obj_val, method_name.as_str()) {
             (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
                 return js_console::handle_console_method(method_name, args, env);
@@ -1497,6 +1515,7 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                 if obj_map.contains_key("sprintf") {
                     match method {
                         "sprintf" => {
+                            log::trace!("js dispatch calling sprintf with {} args", args.len());
                             return sprintf::handle_sprintf_call(env, args);
                         }
                         "tmpfile" => {
@@ -2054,6 +2073,9 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
         let func_val = evaluate_expr(env, func_expr)?;
         match func_val {
             Value::Function(func_name) => match func_name.as_str() {
+                "std.sprintf" => {
+                    return sprintf::handle_sprintf_call(env, args);
+                }
                 "String" => {
                     // String() constructor
                     if args.len() == 1 {
@@ -2366,7 +2388,7 @@ fn evaluate_array(env: &JSObjectData, elements: &Vec<Expr>) -> Result<Value, JSE
 
 pub type JSObjectData = std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
@@ -2375,6 +2397,20 @@ pub enum Value {
     Object(JSObjectData),                               // Object with properties
     Function(String),                                   // Function name
     Closure(Vec<String>, Vec<Statement>, JSObjectData), // parameters, body, captured environment
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "Number({n})"),
+            Value::String(s) => write!(f, "String({})", String::from_utf16_lossy(s)),
+            Value::Boolean(b) => write!(f, "Boolean({b})"),
+            Value::Undefined => write!(f, "Undefined"),
+            Value::Object(_) => write!(f, "Object(...)"),
+            Value::Function(name) => write!(f, "Function({name})"),
+            Value::Closure(_, _, _) => write!(f, "Closure(...)"),
+        }
+    }
 }
 
 // Helper functions for UTF-16 string operations
@@ -2550,7 +2586,7 @@ pub fn set_prop_env(env: &mut JSObjectData, obj_expr: &Expr, prop: &str, val: Va
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Statement {
     Let(String, Expr),
     Assign(String, Expr), // variable assignment
@@ -2558,6 +2594,24 @@ pub enum Statement {
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
+}
+
+impl std::fmt::Debug for Statement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
+            Statement::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
+            Statement::Expr(expr) => write!(f, "Expr({:?})", expr),
+            Statement::Return(Some(expr)) => write!(f, "Return({:?})", expr),
+            Statement::Return(None) => write!(f, "Return(None)"),
+            Statement::If(cond, then_body, else_body) => {
+                write!(f, "If({:?}, {:?}, {:?})", cond, then_body, else_body)
+            }
+            Statement::For(init, cond, incr, body) => {
+                write!(f, "For({:?}, {:?}, {:?}, {:?})", init, cond, incr, body)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

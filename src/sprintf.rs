@@ -3,6 +3,7 @@ use crate::quickjs::JSObjectData;
 use crate::quickjs::{evaluate_expr, utf16_to_utf8, utf8_to_utf16, Expr, Value};
 
 pub(crate) fn handle_sprintf_call(env: &JSObjectData, args: &[Expr]) -> Result<Value, JSError> {
+    log::trace!("handle_sprintf_call called with {} args", args.len());
     if args.is_empty() {
         return Ok(Value::String(utf8_to_utf16("")));
     }

@@ -865,7 +865,10 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
                                     Rc::new(RefCell::new(Value::Object(crate::js_std::make_std_object()))),
                                 );
                             } else if module == "os" {
-                                env.insert(name.to_string(), Rc::new(RefCell::new(Value::Object(crate::os::make_os_object()))));
+                                env.insert(
+                                    name.to_string(),
+                                    Rc::new(RefCell::new(Value::Object(crate::js_os::make_os_object()))),
+                                );
                             }
                         }
                     }
@@ -1442,12 +1445,12 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
 
                         // If this object looks like the `os` module (we used 'open' as marker)
                         if obj_map.contains_key("open") {
-                            return crate::os::handle_os_method(&obj_map, method, args, env);
+                            return crate::js_os::handle_os_method(&obj_map, method, args, env);
                         }
 
                         // If this object looks like the `os.path` module
                         if obj_map.contains_key("join") {
-                            return crate::os::handle_os_method(&obj_map, method, args, env);
+                            return crate::js_os::handle_os_method(&obj_map, method, args, env);
                         }
 
                         // If this object is a file-like object (we use '__file_id' as marker)

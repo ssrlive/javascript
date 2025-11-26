@@ -26,78 +26,138 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
 
         "parseInt" => {
-            if args.len() >= 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
-                match arg_val {
-                    Value::String(s) => {
-                        let str_val = String::from_utf16_lossy(&s);
-                        // Parse integer from the beginning of the string
-                        let trimmed = str_val.trim();
-                        let mut end_pos = 0;
-                        let mut chars = trimmed.chars();
-                        if let Some(first_char) = chars.next() {
-                            if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
-                                end_pos = 1;
-                                for ch in chars {
-                                    if ch.is_digit(10) {
-                                        end_pos += 1;
-                                    } else {
-                                        break;
-                                    }
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "parseInt requires at least one argument".to_string(),
+                });
+            }
+            let arg_val = evaluate_expr(env, &args[0])?;
+            match arg_val {
+                Value::String(s) => {
+                    let str_val = String::from_utf16_lossy(&s);
+                    // Parse integer from the beginning of the string
+                    let trimmed = str_val.trim();
+                    if trimmed.is_empty() {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    let mut end_pos = 0;
+                    let mut chars = trimmed.chars();
+                    if let Some(first_char) = chars.next() {
+                        if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
+                            end_pos = 1;
+                            for ch in chars {
+                                if ch.is_digit(10) {
+                                    end_pos += 1;
+                                } else {
+                                    break;
                                 }
                             }
                         }
-                        let num_str = &trimmed[0..end_pos];
-                        match num_str.parse::<i32>() {
-                            Ok(n) => Ok(Value::Number(n as f64)),
-                            Err(_) => Ok(Value::Number(f64::NAN)),
-                        }
                     }
-                    Value::Number(n) => Ok(Value::Number(n.trunc())),
-                    _ => Ok(Value::Number(f64::NAN)),
+                    if end_pos == 0 {
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                    let num_str = &trimmed[0..end_pos];
+                    match num_str.parse::<i32>() {
+                        Ok(n) => Ok(Value::Number(n as f64)),
+                        Err(_) => Ok(Value::Number(f64::NAN)), // This shouldn't happen with our validation
+                    }
                 }
-            } else {
-                Ok(Value::Number(f64::NAN))
+                Value::Number(n) => Ok(Value::Number(n.trunc())),
+                Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                Value::Undefined => Ok(Value::Number(f64::NAN)),
+                _ => {
+                    // Convert to string first, then parse
+                    let str_val = match arg_val {
+                        Value::Object(_) => "[object Object]".to_string(),
+                        Value::Function(name) => format!("[Function: {}]", name),
+                        Value::Closure(_, _, _) => "[Function]".to_string(),
+                        _ => unreachable!(), // All cases covered above
+                    };
+                    match str_val.parse::<i32>() {
+                        Ok(n) => Ok(Value::Number(n as f64)),
+                        Err(_) => Ok(Value::Number(f64::NAN)),
+                    }
+                }
             }
         }
         "parseFloat" => {
-            if args.len() >= 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
-                match arg_val {
-                    Value::String(s) => {
-                        let str_val = String::from_utf16_lossy(&s);
-                        match str_val.trim().parse::<f64>() {
-                            Ok(n) => Ok(Value::Number(n)),
-                            Err(_) => Ok(Value::Number(f64::NAN)),
-                        }
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "parseFloat requires at least one argument".to_string(),
+                });
+            }
+            let arg_val = evaluate_expr(env, &args[0])?;
+            match arg_val {
+                Value::String(s) => {
+                    let str_val = String::from_utf16_lossy(&s);
+                    let trimmed = str_val.trim();
+                    if trimmed.is_empty() {
+                        return Ok(Value::Number(f64::NAN));
                     }
-                    Value::Number(n) => Ok(Value::Number(n)),
-                    _ => Ok(Value::Number(f64::NAN)),
+                    match trimmed.parse::<f64>() {
+                        Ok(n) => Ok(Value::Number(n)),
+                        Err(_) => Ok(Value::Number(f64::NAN)),
+                    }
                 }
-            } else {
-                Ok(Value::Number(f64::NAN))
+                Value::Number(n) => Ok(Value::Number(n)),
+                Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                Value::Undefined => Ok(Value::Number(f64::NAN)),
+                _ => {
+                    // Convert to string first, then parse
+                    let str_val = match arg_val {
+                        Value::Object(_) => "[object Object]".to_string(),
+                        Value::Function(name) => format!("[Function: {}]", name),
+                        Value::Closure(_, _, _) => "[Function]".to_string(),
+                        _ => unreachable!(), // All cases covered above
+                    };
+                    match str_val.parse::<f64>() {
+                        Ok(n) => Ok(Value::Number(n)),
+                        Err(_) => Ok(Value::Number(f64::NAN)),
+                    }
+                }
             }
         }
         "isNaN" => {
-            if args.len() >= 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
-                match arg_val {
-                    Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
-                    _ => Ok(Value::Boolean(false)),
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "isNaN requires at least one argument".to_string(),
+                });
+            }
+            let arg_val = evaluate_expr(env, &args[0])?;
+            match arg_val {
+                Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
+                Value::String(s) => {
+                    let str_val = String::from_utf16_lossy(&s);
+                    match str_val.trim().parse::<f64>() {
+                        Ok(n) => Ok(Value::Boolean(n.is_nan())),
+                        Err(_) => Ok(Value::Boolean(true)), // Non-numeric strings are NaN when parsed
+                    }
                 }
-            } else {
-                Ok(Value::Boolean(false))
+                Value::Boolean(_) => Ok(Value::Boolean(false)), // Booleans are never NaN
+                Value::Undefined => Ok(Value::Boolean(true)),   // undefined is NaN
+                _ => Ok(Value::Boolean(false)),                 // Objects, functions, etc. are not NaN
             }
         }
         "isFinite" => {
-            if args.len() >= 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
-                match arg_val {
-                    Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
-                    _ => Ok(Value::Boolean(false)),
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "isFinite requires at least one argument".to_string(),
+                });
+            }
+            let arg_val = evaluate_expr(env, &args[0])?;
+            match arg_val {
+                Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
+                Value::String(s) => {
+                    let str_val = String::from_utf16_lossy(&s);
+                    match str_val.trim().parse::<f64>() {
+                        Ok(n) => Ok(Value::Boolean(n.is_finite())),
+                        Err(_) => Ok(Value::Boolean(false)), // Non-numeric strings are not finite
+                    }
                 }
-            } else {
-                Ok(Value::Boolean(false))
+                Value::Boolean(_) => Ok(Value::Boolean(true)), // Booleans are finite
+                Value::Undefined => Ok(Value::Boolean(false)), // undefined is not finite
+                _ => Ok(Value::Boolean(false)),                // Objects, functions, etc. are not finite
             }
         }
         "encodeURIComponent" => {

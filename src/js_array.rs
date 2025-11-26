@@ -123,15 +123,30 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectData) -> Res
         let arg_val = evaluate_expr(env, &args[0])?;
         match arg_val {
             Value::Number(n) => {
-                if n.fract() == 0.0 && n >= 0.0 && n <= u32::MAX as f64 {
-                    // Array(length) - create array with specified length
-                    let mut array_obj = JSObjectData::new();
-                    set_array_length(&mut array_obj, n as usize);
-                    Ok(Value::Object(array_obj))
-                } else {
-                    // Invalid length
-                    Ok(Value::Undefined)
+                if n.is_nan() {
+                    return Err(JSError::TypeError {
+                        message: "Invalid array length".to_string(),
+                    });
                 }
+                if n.fract() != 0.0 {
+                    return Err(JSError::TypeError {
+                        message: "Array length must be an integer".to_string(),
+                    });
+                }
+                if n < 0.0 {
+                    return Err(JSError::TypeError {
+                        message: "Array length cannot be negative".to_string(),
+                    });
+                }
+                if n > u32::MAX as f64 {
+                    return Err(JSError::TypeError {
+                        message: "Array length too large".to_string(),
+                    });
+                }
+                // Array(length) - create array with specified length
+                let mut array_obj = JSObjectData::new();
+                set_array_length(&mut array_obj, n as usize);
+                Ok(Value::Object(array_obj))
             }
             _ => {
                 // Array(element) - create array with single element

@@ -5,9 +5,19 @@ use crate::quickjs::{evaluate_expr, obj_get, obj_set_val, utf8_to_utf16, Expr, J
 pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
     match method {
         "keys" => {
-            if args.len() == 1 {
-                let obj_val = evaluate_expr(env, &args[0])?;
-                if let Value::Object(obj) = obj_val {
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Object.keys requires at least one argument".to_string(),
+                });
+            }
+            if args.len() > 1 {
+                return Err(JSError::TypeError {
+                    message: "Object.keys accepts only one argument".to_string(),
+                });
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            match obj_val {
+                Value::Object(obj) => {
                     let mut keys = Vec::new();
                     for key in obj.keys() {
                         if key != "length" {
@@ -23,45 +33,61 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
                     let len = result_obj.len();
                     set_array_length(&mut result_obj, len);
                     Ok(Value::Object(result_obj))
-                } else {
-                    Err(JSError::EvaluationError {
-                        message: "Object.keys expects an object".to_string(),
-                    })
                 }
-            } else {
-                Err(JSError::EvaluationError {
-                    message: "Object.keys expects exactly one argument".to_string(),
-                })
+                Value::Undefined => {
+                    return Err(JSError::TypeError {
+                        message: "Object.keys called on undefined".to_string(),
+                    });
+                }
+                _ => {
+                    // For primitive values, return empty array (like in JS)
+                    let mut result_obj = JSObjectData::new();
+                    set_array_length(&mut result_obj, 0);
+                    Ok(Value::Object(result_obj))
+                }
             }
         }
         "values" => {
-            if args.len() == 1 {
-                let obj_val = evaluate_expr(env, &args[0])?;
-                if let Value::Object(obj) = obj_val {
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Object.values requires at least one argument".to_string(),
+                });
+            }
+            if args.len() > 1 {
+                return Err(JSError::TypeError {
+                    message: "Object.values accepts only one argument".to_string(),
+                });
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            match obj_val {
+                Value::Object(obj) => {
                     let mut values = Vec::new();
                     for (key, value) in obj.iter() {
                         if key != "length" {
                             // Skip array length property
-                            values.push(value.clone());
+                            values.push(value.borrow().clone());
                         }
                     }
                     // Create a simple array-like object for values
                     let mut result_obj = JSObjectData::new();
                     for (i, value) in values.into_iter().enumerate() {
-                        obj_set_val(&mut result_obj, &i.to_string(), value.borrow().clone());
+                        obj_set_val(&mut result_obj, &i.to_string(), value);
                     }
                     let len = result_obj.len();
                     set_array_length(&mut result_obj, len);
                     Ok(Value::Object(result_obj))
-                } else {
-                    Err(JSError::EvaluationError {
-                        message: "Object.values expects an object".to_string(),
-                    })
                 }
-            } else {
-                Err(JSError::EvaluationError {
-                    message: "Object.values expects exactly one argument".to_string(),
-                })
+                Value::Undefined => {
+                    return Err(JSError::TypeError {
+                        message: "Object.values called on undefined".to_string(),
+                    });
+                }
+                _ => {
+                    // For primitive values, return empty array (like in JS)
+                    let mut result_obj = JSObjectData::new();
+                    set_array_length(&mut result_obj, 0);
+                    Ok(Value::Object(result_obj))
+                }
             }
         }
         _ => Err(JSError::EvaluationError {
@@ -72,8 +98,20 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
 
 pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
     if !args.is_empty() {
-        return Err(JSError::EvaluationError {
-            message: format!("{obj_val:?}.toString() takes no arguments, but {} were provided", args.len()),
+        return Err(JSError::TypeError {
+            message: format!(
+                "{}.toString() takes no arguments, but {} were provided",
+                match obj_val {
+                    Value::Number(_) => "Number",
+                    Value::String(_) => "String",
+                    Value::Boolean(_) => "Boolean",
+                    Value::Object(_) => "Object",
+                    Value::Function(_) => "Function",
+                    Value::Closure(_, _, _) => "Function",
+                    Value::Undefined => "undefined",
+                },
+                args.len()
+            ),
         });
     }
     match obj_val {
@@ -81,8 +119,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Undefined => {
-            return Err(JSError::EvaluationError {
-                message: "TypeError: undefined has no toString method".to_string(),
+            return Err(JSError::TypeError {
+                message: "Cannot convert undefined to object".to_string(),
             });
         }
         Value::Object(ref obj_map) => {

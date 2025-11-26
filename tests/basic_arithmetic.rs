@@ -54,4 +54,24 @@ mod basic_arithmetic_tests {
             _ => panic!("Expected number 3.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_modulo_operation() {
+        let script = "let x = 7; let y = 3; x % y";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected number 1.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_modulo_zero_remainder() {
+        let script = "let x = 6; let y = 3; x % y";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 0.0),
+            _ => panic!("Expected number 0.0, got {:?}", result),
+        }
+    }
 }

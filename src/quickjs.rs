@@ -1358,6 +1358,20 @@ fn evaluate_binary(env: &JSObjectData, left: &Expr, op: &BinaryOp, right: &Expr)
                 message: "error".to_string(),
             }),
         },
+        BinaryOp::Mod => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                if rn == 0.0 {
+                    Err(JSError::EvaluationError {
+                        message: "Division by zero".to_string(),
+                    })
+                } else {
+                    Ok(Value::Number(ln % rn))
+                }
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "Modulo operation only supported for numbers".to_string(),
+            }),
+        },
     }
 }
 
@@ -2569,6 +2583,7 @@ pub enum BinaryOp {
     Sub,
     Mul,
     Div,
+    Mod,
     Equal,
     StrictEqual,
     LessThan,
@@ -2642,6 +2657,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '/' => {
                 tokens.push(Token::Divide);
+                i += 1;
+            }
+            '%' => {
+                tokens.push(Token::Mod);
                 i += 1;
             }
             '(' => {
@@ -2828,6 +2847,7 @@ pub enum Token {
     Minus,
     Multiply,
     Divide,
+    Mod,
     LParen,
     RParen,
     LBracket,
@@ -2961,6 +2981,11 @@ fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             tokens.remove(0);
             let right = parse_multiplicative(tokens)?;
             Ok(Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(right)))
+        }
+        Token::Mod => {
+            tokens.remove(0);
+            let right = parse_multiplicative(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(right)))
         }
         _ => Ok(left),
     }

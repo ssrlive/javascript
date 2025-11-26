@@ -1613,51 +1613,7 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                 if obj_map.contains_key("PI") && obj_map.contains_key("E") {
                     return js_math::handle_math_method(method, args, env);
                 } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
-                    // JSON methods
-                    match method {
-                        "parse" => {
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::String(s) => {
-                                        // Simple JSON parsing - for now just return the string as-is
-                                        // In a real implementation, this would parse JSON
-                                        Ok(Value::String(s))
-                                    }
-                                    _ => Err(JSError::EvaluationError {
-                                        message: "JSON.parse expects a string".to_string(),
-                                    }),
-                                }
-                            } else {
-                                Err(JSError::EvaluationError {
-                                    message: "JSON.parse expects exactly one argument".to_string(),
-                                })
-                            }
-                        }
-                        "stringify" => {
-                            if args.len() == 1 {
-                                let arg_val = evaluate_expr(env, &args[0])?;
-                                match arg_val {
-                                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                                    Value::String(s) => {
-                                        // Simple JSON stringification - just return the string
-                                        Ok(Value::String(s))
-                                    }
-                                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                                    Value::Undefined => Ok(Value::String(utf8_to_utf16("null"))),
-                                    Value::Object(_) => Ok(Value::String(utf8_to_utf16("{}"))), // Simple object representation
-                                    _ => Ok(Value::String(utf8_to_utf16("null"))),
-                                }
-                            } else {
-                                Err(JSError::EvaluationError {
-                                    message: "JSON.stringify expects exactly one argument".to_string(),
-                                })
-                            }
-                        }
-                        _ => Err(JSError::EvaluationError {
-                            message: format!("JSON.{} is not implemented", method),
-                        }),
-                    }
+                    return crate::js_json::handle_json_method(method, args, env);
                 } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
                     // Object methods
                     match method {

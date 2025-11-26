@@ -170,6 +170,62 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_json_parse_stringify_roundtrip() {
+        let script = r#"let obj = JSON.parse('{"name":"John","age":30,"city":"New York"}'); JSON.stringify(obj)"#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                // Should be the same as input (order may differ, but for this simple case it should match)
+                assert_eq!(str_val, r#"{"age":30,"city":"New York","name":"John"}"#);
+            }
+            _ => panic!("Expected JSON roundtrip to return string, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_json_parse_array() {
+        let script = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr.length"#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 4.0),
+            _ => panic!("Expected parsed array length to be 4.0, got {:?}", result),
+        }
+
+        // Check elements
+        let script2 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[0]"#;
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected arr[0] to be 1.0, got {:?}", result2),
+        }
+
+        let script3 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[1]"#;
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello");
+            }
+            _ => panic!("Expected arr[1] to be 'hello', got {:?}", result3),
+        }
+
+        let script4 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[2]"#;
+        let result4 = evaluate_script(script4);
+        match result4 {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected arr[2] to be true, got {:?}", result4),
+        }
+
+        let script5 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[3]"#;
+        let result5 = evaluate_script(script5);
+        match result5 {
+            Ok(Value::Undefined) => {}
+            _ => panic!("Expected arr[3] to be undefined (null), got {:?}", result5),
+        }
+    }
+
+    #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.length";
         let result = evaluate_script(script);

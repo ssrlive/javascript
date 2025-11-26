@@ -5,6 +5,7 @@
 pub mod error;
 pub mod js_array;
 pub mod js_console;
+pub mod js_json;
 pub mod js_math;
 pub mod js_os;
 pub mod js_std;

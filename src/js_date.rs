@@ -1,6 +1,8 @@
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, obj_set_val, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Parse a date string into a timestamp (milliseconds since Unix epoch)
 fn parse_date_string(date_str: &str) -> Option<f64> {
@@ -94,7 +96,7 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
 }
 
 /// Handle Date constructor calls
-pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let timestamp = if args.is_empty() {
@@ -150,8 +152,8 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectData) -> Resu
     };
 
     // Create a Date object with timestamp
-    let mut date_obj = JSObjectData::new();
-    obj_set_val(&mut date_obj, "__timestamp", Value::Number(timestamp));
+    let date_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&date_obj, "__timestamp", Value::Number(timestamp));
 
     // Add toString method
     Ok(Value::Object(date_obj))

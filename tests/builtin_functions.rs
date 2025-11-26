@@ -898,6 +898,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {
@@ -942,6 +943,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {
@@ -986,6 +988,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {
@@ -1030,6 +1033,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {
@@ -1041,6 +1045,7 @@ mod builtin_functions_tests {
                 if let Some(entry0) = obj.get("0") {
                     match &*entry0.borrow() {
                         Value::Object(entry_obj) => {
+                            let entry_obj = entry_obj.borrow();
                             if let Some(idx) = entry_obj.get("0") {
                                 match *idx.borrow() {
                                     Value::Number(n) => assert_eq!(n, 0.0),
@@ -1061,6 +1066,7 @@ mod builtin_functions_tests {
                 if let Some(entry1) = obj.get("1") {
                     match &*entry1.borrow() {
                         Value::Object(entry_obj) => {
+                            let entry_obj = entry_obj.borrow();
                             if let Some(idx) = entry_obj.get("0") {
                                 match *idx.borrow() {
                                     Value::Number(n) => assert_eq!(n, 1.0),
@@ -1089,6 +1095,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {
@@ -1140,6 +1147,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(obj)) => {
+                let obj = obj.borrow();
                 // Check length
                 if let Some(length_val) = obj.get("length") {
                     match *length_val.borrow() {

@@ -5,7 +5,9 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::error::JSError;
 use crate::js_array::set_array_length;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 static OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -55,9 +57,9 @@ fn get_parent_pid_windows() -> u32 {
 }
 
 /// Handle OS module method calls
-pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
-    if obj_map.contains_key("open") {
+    if obj_map.borrow().contains_key("open") {
         match method {
             "open" => {
                 if args.len() >= 1 {
@@ -280,28 +282,28 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
                     };
                     match std::fs::read_dir(&dirname) {
                         Ok(entries) => {
-                            let mut obj = JSObjectData::new();
+                            let obj = Rc::new(RefCell::new(JSObjectData::new()));
                             let mut i = 0;
                             for entry in entries {
                                 if let Ok(entry) = entry {
                                     if let Some(name) = entry.file_name().to_str() {
-                                        obj_set_val(&mut obj, &i.to_string(), Value::String(utf8_to_utf16(name)));
+                                        obj_set_val(&obj, &i.to_string(), Value::String(utf8_to_utf16(name)));
                                         i += 1;
                                     }
                                 }
                             }
-                            set_array_length(&mut obj, i);
+                            set_array_length(&obj, i);
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
-                            let mut obj = JSObjectData::new();
-                            set_array_length(&mut obj, 0);
+                            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                            set_array_length(&obj, 0);
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
-                let mut obj = JSObjectData::new();
-                set_array_length(&mut obj, 0);
+                let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                set_array_length(&obj, 0);
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {
@@ -339,7 +341,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
     }
 
     // If this object looks like the `os.path` module
-    if obj_map.contains_key("join") {
+    if obj_map.borrow().contains_key("join") {
         match method {
             "join" => {
                 let mut result = String::new();
@@ -460,57 +462,57 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectData, method: &str, args: &[Exp
 }
 
 /// Create the OS object with all OS-related functions and constants
-pub fn make_os_object() -> JSObjectData {
-    let mut obj = JSObjectData::new();
-    obj_set_val(&mut obj, "remove", Value::Function("os.remove".to_string()));
-    obj_set_val(&mut obj, "mkdir", Value::Function("os.mkdir".to_string()));
-    obj_set_val(&mut obj, "open", Value::Function("os.open".to_string()));
-    obj_set_val(&mut obj, "write", Value::Function("os.write".to_string()));
-    obj_set_val(&mut obj, "read", Value::Function("os.read".to_string()));
-    obj_set_val(&mut obj, "seek", Value::Function("os.seek".to_string()));
-    obj_set_val(&mut obj, "close", Value::Function("os.close".to_string()));
-    obj_set_val(&mut obj, "readdir", Value::Function("os.readdir".to_string()));
-    obj_set_val(&mut obj, "utimes", Value::Function("os.utimes".to_string()));
-    obj_set_val(&mut obj, "stat", Value::Function("os.stat".to_string()));
-    obj_set_val(&mut obj, "lstat", Value::Function("os.lstat".to_string()));
-    obj_set_val(&mut obj, "symlink", Value::Function("os.symlink".to_string()));
-    obj_set_val(&mut obj, "readlink", Value::Function("os.readlink".to_string()));
-    obj_set_val(&mut obj, "getcwd", Value::Function("os.getcwd".to_string()));
-    obj_set_val(&mut obj, "realpath", Value::Function("os.realpath".to_string()));
-    obj_set_val(&mut obj, "exec", Value::Function("os.exec".to_string()));
-    obj_set_val(&mut obj, "pipe", Value::Function("os.pipe".to_string()));
-    obj_set_val(&mut obj, "waitpid", Value::Function("os.waitpid".to_string()));
-    obj_set_val(&mut obj, "kill", Value::Function("os.kill".to_string()));
-    obj_set_val(&mut obj, "isatty", Value::Function("os.isatty".to_string()));
-    obj_set_val(&mut obj, "getpid", Value::Function("os.getpid".to_string()));
-    obj_set_val(&mut obj, "getppid", Value::Function("os.getppid".to_string()));
-    obj_set_val(&mut obj, "O_RDWR", Value::Number(2.0));
-    obj_set_val(&mut obj, "O_CREAT", Value::Number(64.0));
-    obj_set_val(&mut obj, "O_TRUNC", Value::Number(512.0));
-    obj_set_val(&mut obj, "O_RDONLY", Value::Number(0.0));
-    obj_set_val(&mut obj, "S_IFMT", Value::Number(0o170000 as f64));
-    obj_set_val(&mut obj, "S_IFREG", Value::Number(0o100000 as f64));
-    obj_set_val(&mut obj, "S_IFLNK", Value::Number(0o120000 as f64));
-    obj_set_val(&mut obj, "SIGTERM", Value::Number(15.0));
+pub fn make_os_object() -> JSObjectDataPtr {
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&obj, "remove", Value::Function("os.remove".to_string()));
+    obj_set_val(&obj, "mkdir", Value::Function("os.mkdir".to_string()));
+    obj_set_val(&obj, "open", Value::Function("os.open".to_string()));
+    obj_set_val(&obj, "write", Value::Function("os.write".to_string()));
+    obj_set_val(&obj, "read", Value::Function("os.read".to_string()));
+    obj_set_val(&obj, "seek", Value::Function("os.seek".to_string()));
+    obj_set_val(&obj, "close", Value::Function("os.close".to_string()));
+    obj_set_val(&obj, "readdir", Value::Function("os.readdir".to_string()));
+    obj_set_val(&obj, "utimes", Value::Function("os.utimes".to_string()));
+    obj_set_val(&obj, "stat", Value::Function("os.stat".to_string()));
+    obj_set_val(&obj, "lstat", Value::Function("os.lstat".to_string()));
+    obj_set_val(&obj, "symlink", Value::Function("os.symlink".to_string()));
+    obj_set_val(&obj, "readlink", Value::Function("os.readlink".to_string()));
+    obj_set_val(&obj, "getcwd", Value::Function("os.getcwd".to_string()));
+    obj_set_val(&obj, "realpath", Value::Function("os.realpath".to_string()));
+    obj_set_val(&obj, "exec", Value::Function("os.exec".to_string()));
+    obj_set_val(&obj, "pipe", Value::Function("os.pipe".to_string()));
+    obj_set_val(&obj, "waitpid", Value::Function("os.waitpid".to_string()));
+    obj_set_val(&obj, "kill", Value::Function("os.kill".to_string()));
+    obj_set_val(&obj, "isatty", Value::Function("os.isatty".to_string()));
+    obj_set_val(&obj, "getpid", Value::Function("os.getpid".to_string()));
+    obj_set_val(&obj, "getppid", Value::Function("os.getppid".to_string()));
+    obj_set_val(&obj, "O_RDWR", Value::Number(2.0));
+    obj_set_val(&obj, "O_CREAT", Value::Number(64.0));
+    obj_set_val(&obj, "O_TRUNC", Value::Number(512.0));
+    obj_set_val(&obj, "O_RDONLY", Value::Number(0.0));
+    obj_set_val(&obj, "S_IFMT", Value::Number(0o170000 as f64));
+    obj_set_val(&obj, "S_IFREG", Value::Number(0o100000 as f64));
+    obj_set_val(&obj, "S_IFLNK", Value::Number(0o120000 as f64));
+    obj_set_val(&obj, "SIGTERM", Value::Number(15.0));
 
     // Add path submodule
     let path_obj = make_path_object();
-    obj_set_val(&mut obj, "path", Value::Object(path_obj));
+    obj_set_val(&obj, "path", Value::Object(path_obj));
 
     obj
 }
 
 /// Create the OS path object with path-related functions
-pub fn make_path_object() -> JSObjectData {
-    let mut obj = JSObjectData::new();
-    obj_set_val(&mut obj, "join", Value::Function("os.path.join".to_string()));
-    obj_set_val(&mut obj, "dirname", Value::Function("os.path.dirname".to_string()));
-    obj_set_val(&mut obj, "basename", Value::Function("os.path.basename".to_string()));
-    obj_set_val(&mut obj, "extname", Value::Function("os.path.extname".to_string()));
-    obj_set_val(&mut obj, "resolve", Value::Function("os.path.resolve".to_string()));
-    obj_set_val(&mut obj, "normalize", Value::Function("os.path.normalize".to_string()));
-    obj_set_val(&mut obj, "relative", Value::Function("os.path.relative".to_string()));
-    obj_set_val(&mut obj, "isAbsolute", Value::Function("os.path.isAbsolute".to_string()));
-    obj_set_val(&mut obj, "sep", Value::String("\\".encode_utf16().collect())); // Windows path separator
+pub fn make_path_object() -> JSObjectDataPtr {
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&obj, "join", Value::Function("os.path.join".to_string()));
+    obj_set_val(&obj, "dirname", Value::Function("os.path.dirname".to_string()));
+    obj_set_val(&obj, "basename", Value::Function("os.path.basename".to_string()));
+    obj_set_val(&obj, "extname", Value::Function("os.path.extname".to_string()));
+    obj_set_val(&obj, "resolve", Value::Function("os.path.resolve".to_string()));
+    obj_set_val(&obj, "normalize", Value::Function("os.path.normalize".to_string()));
+    obj_set_val(&obj, "relative", Value::Function("os.path.relative".to_string()));
+    obj_set_val(&obj, "isAbsolute", Value::Function("os.path.isAbsolute".to_string()));
+    obj_set_val(&obj, "sep", Value::String("\\".encode_utf16().collect())); // Windows path separator
     obj
 }

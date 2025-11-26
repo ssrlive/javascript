@@ -1,8 +1,8 @@
 use crate::error::JSError;
-use crate::quickjs::JSObjectData;
+use crate::quickjs::JSObjectDataPtr;
 use crate::quickjs::{evaluate_expr, utf16_to_utf8, utf8_to_utf16, Expr, Value};
 
-pub(crate) fn handle_sprintf_call(env: &JSObjectData, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("handle_sprintf_call called with {} args", args.len());
     if args.is_empty() {
         return Ok(Value::String(utf8_to_utf16("")));
@@ -20,7 +20,7 @@ pub(crate) fn handle_sprintf_call(env: &JSObjectData, args: &[Expr]) -> Result<V
     Ok(Value::String(utf8_to_utf16(&result)))
 }
 
-pub fn sprintf_impl(env: &JSObjectData, format: &str, args: &[Expr]) -> Result<String, JSError> {
+pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Result<String, JSError> {
     let mut result = String::new();
     let mut arg_index = 0;
     let mut chars = format.chars().peekable();

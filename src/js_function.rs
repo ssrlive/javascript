@@ -1,9 +1,9 @@
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
-use crate::quickjs::{evaluate_expr, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, utf8_to_utf16, Expr, JSObjectDataPtr, Value};
 
-pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
         "std.sprintf" => {
             return crate::sprintf::handle_sprintf_call(env, args);

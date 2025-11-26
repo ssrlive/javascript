@@ -1,10 +1,12 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 
 static FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -28,7 +30,7 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             let file_id = get_next_file_id();
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
-            let mut tmp = JSObjectData::new();
+            let mut tmp = Rc::new(RefCell::new(JSObjectData::new()));
             obj_set_val(&mut tmp, "__file_id", Value::Number(file_id as f64));
             obj_set_val(&mut tmp, "__eof", Value::Boolean(false));
             // methods
@@ -50,10 +52,10 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 }
 
 /// Handle file object method calls
-pub(crate) fn handle_file_method(obj_map: &JSObjectData, method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if obj_map.contains_key("__file_id") {
-        let file_id_val = obj_map.get("__file_id").unwrap().borrow().clone();
+    if obj_map.borrow().contains_key("__file_id") {
+        let file_id_val = obj_map.borrow().get("__file_id").unwrap().borrow().clone();
         let file_id = match file_id_val {
             Value::Number(n) => n as u64,
             _ => {

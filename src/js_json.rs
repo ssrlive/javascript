@@ -1,8 +1,10 @@
 use crate::error::JSError;
 use crate::js_array::{is_array, set_array_length};
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "parse" => {
             if args.len() == 1 {
@@ -63,19 +65,19 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
         serde_json::Value::String(s) => Ok(Value::String(utf8_to_utf16(&s))),
         serde_json::Value::Array(arr) => {
             let len = arr.len();
-            let mut obj = JSObjectData::new();
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
-                obj_set_val(&mut obj, &i.to_string(), js_val);
+                obj_set_val(&obj, &i.to_string(), js_val);
             }
-            set_array_length(&mut obj, len);
+            set_array_length(&obj, len);
             Ok(Value::Object(obj))
         }
         serde_json::Value::Object(obj) => {
-            let mut js_obj = JSObjectData::new();
+            let js_obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (key, value) in obj.into_iter() {
                 let js_val = json_value_to_js_value(value)?;
-                obj_set_val(&mut js_obj, &key, js_val);
+                obj_set_val(&js_obj, &key, js_val);
             }
             Ok(Value::Object(js_obj))
         }
@@ -104,10 +106,10 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
         }
         Value::Object(obj) => {
             if is_array(&obj) {
-                let len = obj.len();
+                let len = obj.borrow().properties.len();
                 let mut arr = Vec::new();
                 for i in 0..len {
-                    if let Some(val) = obj.get(&i.to_string()) {
+                    if let Some(val) = obj.borrow().get(&i.to_string()) {
                         if let Some(json_val) = js_value_to_json_value(val.borrow().clone()) {
                             arr.push(json_val);
                         } else {
@@ -120,7 +122,7 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                 Some(serde_json::Value::Array(arr))
             } else {
                 let mut map = serde_json::Map::new();
-                for (key, value) in obj.iter() {
+                for (key, value) in obj.borrow().properties.iter() {
                     if key != "length" {
                         if let Some(json_val) = js_value_to_json_value(value.borrow().clone()) {
                             map.insert(key.clone(), json_val);

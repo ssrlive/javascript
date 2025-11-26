@@ -40,7 +40,9 @@ mod object_literal_tests {
         let script = "let empty = {}; empty";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Object(map)) => assert_eq!(map.len(), 0),
+            Ok(Value::Object(map)) => {
+                assert_eq!(map.borrow().properties.len(), 0)
+            }
             _ => panic!("Expected empty object, got {:?}", result),
         }
     }

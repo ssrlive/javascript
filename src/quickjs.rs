@@ -879,7 +879,7 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("stmt[{i}] = {stmt:?}");
     }
-    let mut env: JSObjectData = JSObjectData::new();
+    let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
     //   import * as NAME from "std";
@@ -896,12 +896,12 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
                         if let Some(end_quote) = rest.find(quote_char) {
                             let module = &rest[..end_quote];
                             if module == "std" {
-                                env.insert(
+                                env.borrow_mut().insert(
                                     name.to_string(),
                                     Rc::new(RefCell::new(Value::Object(crate::js_std::make_std_object()))),
                                 );
                             } else if module == "os" {
-                                env.insert(
+                                env.borrow_mut().insert(
                                     name.to_string(),
                                     Rc::new(RefCell::new(Value::Object(crate::js_os::make_os_object()))),
                                 );
@@ -913,7 +913,7 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
         }
     }
 
-    match evaluate_statements(&mut env, &statements) {
+    match evaluate_statements(&env, &statements) {
         Ok(v) => Ok(v),
         Err(e) => {
             log::debug!("evaluate_statements error: {e:?}");
@@ -1178,7 +1178,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     Ok(Statement::Expr(expr))
 }
 
-pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> Result<Value, JSError> {
+pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
     let mut last_value = Value::Number(0.0);
     for stmt in statements {
         match stmt {
@@ -1193,7 +1193,54 @@ pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> 
                 last_value = val;
             }
             Statement::Expr(expr) => {
-                last_value = evaluate_expr(env, expr)?;
+                // Special-case assignment expressions so we can mutate `env` or
+                // object properties. `parse_statement` only turns simple
+                // variable assignments into `Statement::Assign`, so here we
+                // handle expression-level assignments such as `obj.prop = val`
+                // and `arr[0] = val`.
+                if let Expr::Assign(target, value_expr) = expr {
+                    match target.as_ref() {
+                        Expr::Var(name) => {
+                            let v = evaluate_expr(env, value_expr)?;
+                            env_set(env, name.as_str(), v.clone());
+                            last_value = v;
+                        }
+                        Expr::Property(obj_expr, prop_name) => {
+                            let v = evaluate_expr(env, value_expr)?;
+                            // set_prop_env will attempt to mutate the env-held
+                            // object when possible, otherwise it will update
+                            // the evaluated object and return it.
+                            match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                Some(updated_obj) => last_value = updated_obj,
+                                None => last_value = v,
+                            }
+                        }
+                        Expr::Index(obj_expr, idx_expr) => {
+                            // Evaluate index to a string key
+                            let idx_val = evaluate_expr(env, idx_expr)?;
+                            let key = match idx_val {
+                                Value::Number(n) => n.to_string(),
+                                Value::String(s) => String::from_utf16_lossy(&s),
+                                _ => {
+                                    return Err(JSError::EvaluationError {
+                                        message: "Invalid index type".to_string(),
+                                    })
+                                }
+                            };
+                            let v = evaluate_expr(env, value_expr)?;
+                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                Some(updated_obj) => last_value = updated_obj,
+                                None => last_value = v,
+                            }
+                        }
+                        _ => {
+                            // Fallback: evaluate the expression normally
+                            last_value = evaluate_expr(env, expr)?;
+                        }
+                    }
+                } else {
+                    last_value = evaluate_expr(env, expr)?;
+                }
             }
             Statement::Return(expr_opt) => {
                 return match expr_opt {
@@ -1319,7 +1366,7 @@ pub fn evaluate_statements(env: &mut JSObjectData, statements: &[Statement]) -> 
     Ok(last_value)
 }
 
-pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> {
+pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     match expr {
         Expr::Number(n) => evaluate_number(*n),
         Expr::StringLit(s) => evaluate_string_lit(s),
@@ -1349,7 +1396,7 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
     Ok(Value::Boolean(b))
 }
 
-fn evaluate_var(env: &JSObjectData, name: &str) -> Result<Value, JSError> {
+fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     if let Some(val) = env_get(env, name) {
         Ok(val.borrow().clone())
     } else if name == "console" {
@@ -1359,14 +1406,14 @@ fn evaluate_var(env: &JSObjectData, name: &str) -> Result<Value, JSError> {
     } else if name == "Math" {
         Ok(Value::Object(js_math::make_math_object()))
     } else if name == "JSON" {
-        let mut json_obj = JSObjectData::new();
-        obj_set_val(&mut json_obj, "parse", Value::Function("JSON.parse".to_string()));
-        obj_set_val(&mut json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
+        let json_obj = Rc::new(RefCell::new(JSObjectData::new()));
+        obj_set_val(&json_obj, "parse", Value::Function("JSON.parse".to_string()));
+        obj_set_val(&json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
         Ok(Value::Object(json_obj))
     } else if name == "Object" {
-        let mut object_obj = JSObjectData::new();
-        obj_set_val(&mut object_obj, "keys", Value::Function("Object.keys".to_string()));
-        obj_set_val(&mut object_obj, "values", Value::Function("Object.values".to_string()));
+        let object_obj = Rc::new(RefCell::new(JSObjectData::new()));
+        obj_set_val(&object_obj, "keys", Value::Function("Object.keys".to_string()));
+        obj_set_val(&object_obj, "values", Value::Function("Object.values".to_string()));
         Ok(Value::Object(object_obj))
     } else if name == "parseInt" {
         Ok(Value::Function("parseInt".to_string()))
@@ -1401,12 +1448,12 @@ fn evaluate_var(env: &JSObjectData, name: &str) -> Result<Value, JSError> {
     }
 }
 
-fn evaluate_assign(env: &JSObjectData, value: &Expr) -> Result<Value, JSError> {
+fn evaluate_assign(env: &JSObjectDataPtr, value: &Expr) -> Result<Value, JSError> {
     // Assignment is handled at statement level, just evaluate the value
     evaluate_expr(env, value)
 }
 
-fn evaluate_unary_neg(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> {
+fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     let val = evaluate_expr(env, expr)?;
     match val {
         Value::Number(n) => Ok(Value::Number(-n)),
@@ -1416,7 +1463,7 @@ fn evaluate_unary_neg(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError>
     }
 }
 
-fn evaluate_binary(env: &JSObjectData, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
+fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
     let l = evaluate_expr(env, left)?;
     let r = evaluate_expr(env, right)?;
     match op {
@@ -1522,7 +1569,7 @@ fn evaluate_binary(env: &JSObjectData, left: &Expr, op: &BinaryOp, right: &Expr)
     }
 }
 
-fn evaluate_index(env: &JSObjectData, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
+fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
     let idx_val = evaluate_expr(env, idx)?;
     match (obj_val, idx_val) {
@@ -1558,7 +1605,7 @@ fn evaluate_index(env: &JSObjectData, obj: &Expr, idx: &Expr) -> Result<Value, J
     }
 }
 
-fn evaluate_property(env: &JSObjectData, obj: &Expr, prop: &str) -> Result<Value, JSError> {
+fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
     log::trace!("Property: obj_val={obj_val:?}, prop={prop}");
     match obj_val {
@@ -1576,7 +1623,7 @@ fn evaluate_property(env: &JSObjectData, obj: &Expr, prop: &str) -> Result<Value
     }
 }
 
-fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
+fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
@@ -1590,13 +1637,13 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
         let obj_val = evaluate_expr(env, &**obj_expr)?;
         log::trace!("evaluate_call - object eval result: {obj_val:?}");
         match (obj_val, method_name.as_str()) {
-            (Value::Object(obj_map), "log") if obj_map.contains_key("log") => {
+            (Value::Object(obj_map), "log") if obj_map.borrow().contains_key("log") => {
                 return js_console::handle_console_method(method_name, args, env);
             }
             (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
-            (Value::Object(mut obj_map), method) => {
+            (Value::Object(obj_map), method) => {
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
-                if obj_map.contains_key("sprintf") {
+                if obj_map.borrow().contains_key("sprintf") {
                     match method {
                         "sprintf" => {
                             log::trace!("js dispatch calling sprintf with {} args", args.len());
@@ -1610,32 +1657,32 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                 }
 
                 // If this object looks like the `os` module (we used 'open' as marker)
-                if obj_map.contains_key("open") {
+                if obj_map.borrow().contains_key("open") {
                     return crate::js_os::handle_os_method(&obj_map, method, args, env);
                 }
 
                 // If this object looks like the `os.path` module
-                if obj_map.contains_key("join") {
+                if obj_map.borrow().contains_key("join") {
                     return crate::js_os::handle_os_method(&obj_map, method, args, env);
                 }
 
                 // If this object is a file-like object (we use '__file_id' as marker)
-                if obj_map.contains_key("__file_id") {
+                if obj_map.borrow().contains_key("__file_id") {
                     return tmpfile::handle_file_method(&obj_map, method, args, env);
                 }
                 // Check if this is the Math object
-                if obj_map.contains_key("PI") && obj_map.contains_key("E") {
+                if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
                     return js_math::handle_math_method(method, args, env);
-                } else if obj_map.contains_key("parse") && obj_map.contains_key("stringify") {
+                } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
                     return crate::js_json::handle_json_method(method, args, env);
-                } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
+                } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
                     return crate::js_object::handle_object_method(method, args, env);
-                } else if obj_map.contains_key("__timestamp") {
+                } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
-                    return crate::js_date::handle_date_method(&obj_map, method, args);
+                    return crate::js_date::handle_date_method(&*obj_map.borrow(), method, args);
                 } else if is_array(&obj_map) {
                     // Array instance methods
-                    return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, &**obj_expr);
+                    return crate::js_array::handle_array_instance_method(&obj_map, method, args, env, &**obj_expr);
                 } else {
                     // Other object methods not implemented
                     return Err(JSError::EvaluationError {
@@ -1659,14 +1706,14 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                     return Err(JSError::ParseError);
                 }
                 // Create new environment starting with captured environment
-                let mut func_env = captured_env.clone();
+                let func_env = captured_env.clone();
                 // Add parameters
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let arg_val = evaluate_expr(env, arg)?;
-                    env_set(&mut func_env, param.as_str(), arg_val);
+                    env_set(&func_env, param.as_str(), arg_val);
                 }
                 // Execute function body
-                evaluate_statements(&mut func_env, &body)
+                evaluate_statements(&func_env, &body)
             }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
@@ -1675,8 +1722,8 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
     }
 }
 
-fn evaluate_object(env: &JSObjectData, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
-    let mut obj = JSObjectData::new();
+fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
+    let mut obj = Rc::new(RefCell::new(JSObjectData::new()));
     for (key, value_expr) in properties {
         let value = evaluate_expr(env, value_expr)?;
         obj_set_val(&mut obj, key.as_str(), value);
@@ -1684,8 +1731,8 @@ fn evaluate_object(env: &JSObjectData, properties: &Vec<(String, Expr)>) -> Resu
     Ok(Value::Object(obj))
 }
 
-fn evaluate_array(env: &JSObjectData, elements: &Vec<Expr>) -> Result<Value, JSError> {
-    let mut arr = JSObjectData::new();
+fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
+    let mut arr = Rc::new(RefCell::new(JSObjectData::new()));
     for (i, elem_expr) in elements.iter().enumerate() {
         let value = evaluate_expr(env, elem_expr)?;
         obj_set_val(&mut arr, &i.to_string(), value);
@@ -1695,7 +1742,42 @@ fn evaluate_array(env: &JSObjectData, elements: &Vec<Expr>) -> Result<Value, JSE
     Ok(Value::Object(arr))
 }
 
-pub type JSObjectData = std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>;
+pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
+
+#[derive(Clone)]
+pub struct JSObjectData {
+    pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    pub prototype: Option<Rc<RefCell<JSObjectData>>>,
+}
+
+impl JSObjectData {
+    pub fn new() -> Self {
+        JSObjectData {
+            properties: std::collections::HashMap::new(),
+            prototype: None,
+        }
+    }
+
+    pub fn insert(&mut self, key: String, val: Rc<RefCell<Value>>) {
+        self.properties.insert(key, val);
+    }
+
+    pub fn get(&self, key: &str) -> Option<Rc<RefCell<Value>>> {
+        self.properties.get(key).cloned()
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.properties.contains_key(key)
+    }
+
+    pub fn remove(&mut self, key: &str) -> Option<Rc<RefCell<Value>>> {
+        self.properties.remove(key)
+    }
+
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, String, Rc<RefCell<Value>>> {
+        self.properties.keys()
+    }
+}
 
 #[derive(Clone)]
 pub enum Value {
@@ -1703,9 +1785,9 @@ pub enum Value {
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
-    Object(JSObjectData),                               // Object with properties
-    Function(String),                                   // Function name
-    Closure(Vec<String>, Vec<Statement>, JSObjectData), // parameters, body, captured environment
+    Object(JSObjectDataPtr),                               // Object with properties
+    Function(String),                                      // Function name
+    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
 }
 
 impl std::fmt::Debug for Value {
@@ -1829,33 +1911,40 @@ pub fn value_to_sort_string(val: &Value) -> String {
 }
 
 // Helper accessors for objects and environments
-pub fn obj_get(map: &JSObjectData, key: &str) -> Option<Rc<RefCell<Value>>> {
-    map.get(key).cloned()
+pub fn obj_get(map: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
+    let obj = map.borrow();
+    if let Some(val) = obj.get(key) {
+        Some(val)
+    } else if let Some(ref proto) = obj.prototype {
+        obj_get(proto, key)
+    } else {
+        None
+    }
 }
 
-pub fn obj_set_val(map: &mut JSObjectData, key: &str, val: Value) {
-    map.insert(key.to_string(), Rc::new(RefCell::new(val)));
+pub fn obj_set_val(map: &JSObjectDataPtr, key: &str, val: Value) {
+    map.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
 }
 
-pub fn obj_set_rc(map: &mut JSObjectData, key: &str, val_rc: Rc<RefCell<Value>>) {
-    map.insert(key.to_string(), val_rc);
+pub fn obj_set_rc(map: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
+    map.borrow_mut().insert(key.to_string(), val_rc);
 }
 
-pub fn env_get(env: &JSObjectData, key: &str) -> Option<Rc<RefCell<Value>>> {
-    env.get(key).cloned()
+pub fn env_get(env: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
+    env.borrow().get(key)
 }
 
-pub fn env_set(env: &mut JSObjectData, key: &str, val: Value) {
-    env.insert(key.to_string(), Rc::new(RefCell::new(val)));
+pub fn env_set(env: &JSObjectDataPtr, key: &str, val: Value) {
+    env.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
 }
 
-pub fn env_set_rc(env: &mut JSObjectData, key: &str, val_rc: Rc<RefCell<Value>>) {
-    env.insert(key.to_string(), val_rc);
+pub fn env_set_rc(env: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
+    env.borrow_mut().insert(key.to_string(), val_rc);
 }
 
 // Higher-level property API that operates on expressions + environment.
 // `get_prop_env` evaluates `obj_expr` in `env` and returns the property's Rc if present.
-pub fn get_prop_env(env: &JSObjectData, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     let obj_val = evaluate_expr(env, obj_expr)?;
     match obj_val {
         Value::Object(map) => Ok(obj_get(&map, prop)),
@@ -1870,13 +1959,25 @@ pub fn get_prop_env(env: &JSObjectData, obj_expr: &Expr, prop: &str) -> Result<O
 // - Otherwise it evaluates `obj_expr`, and if it yields an object, it inserts the
 //   property into that object's map and returns `Ok(Some(Value::Object(map)))` so
 //   the caller can decide what to do with the updated object value.
-pub fn set_prop_env(env: &mut JSObjectData, obj_expr: &Expr, prop: &str, val: Value) -> Result<Option<Value>, JSError> {
+pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Value) -> Result<Option<Value>, JSError> {
     // Fast path: obj_expr is a variable that we can mutate in-place in env
     if let Expr::Var(varname) = obj_expr {
-        if let Some(rc_val) = env_get(&*env, varname) {
+        if let Some(rc_val) = env_get(env, varname) {
             let mut borrowed = rc_val.borrow_mut();
             if let Value::Object(ref mut map) = *borrowed {
-                map.insert(prop.to_string(), Rc::new(RefCell::new(val)));
+                // Special-case `__proto__` assignment: set the prototype
+                if prop == "__proto__" {
+                    if let Value::Object(proto_map) = val {
+                        map.borrow_mut().prototype = Some(proto_map);
+                        return Ok(None);
+                    } else {
+                        // Non-object assigned to __proto__: ignore or set to None
+                        map.borrow_mut().prototype = None;
+                        return Ok(None);
+                    }
+                }
+
+                map.borrow_mut().insert(prop.to_string(), Rc::new(RefCell::new(val)));
                 return Ok(None);
             }
         }
@@ -1885,9 +1986,20 @@ pub fn set_prop_env(env: &mut JSObjectData, obj_expr: &Expr, prop: &str, val: Va
     // Fall back: evaluate the object expression and return an updated object value
     let obj_val = evaluate_expr(&*env, obj_expr)?;
     match obj_val {
-        Value::Object(mut map) => {
-            obj_set_val(&mut map, prop, val);
-            Ok(Some(Value::Object(map)))
+        Value::Object(obj) => {
+            // Special-case `__proto__` assignment: set the object's prototype
+            if prop == "__proto__" {
+                if let Value::Object(proto_map) = val {
+                    obj.borrow_mut().prototype = Some(proto_map);
+                    return Ok(Some(Value::Object(obj)));
+                } else {
+                    obj.borrow_mut().prototype = None;
+                    return Ok(Some(Value::Object(obj)));
+                }
+            }
+
+            obj_set_val(&obj, prop, val);
+            Ok(Some(Value::Object(obj)))
         }
         _ => Err(JSError::EvaluationError {
             message: "not an object".to_string(),

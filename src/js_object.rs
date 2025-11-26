@@ -1,8 +1,10 @@
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
-use crate::quickjs::{evaluate_expr, obj_get, obj_set_val, utf8_to_utf16, Expr, JSObjectData, Value};
+use crate::quickjs::{evaluate_expr, obj_get, obj_set_val, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
 
-pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "keys" => {
             if args.is_empty() {
@@ -19,19 +21,19 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
             match obj_val {
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
-                    for key in obj.keys() {
+                    for key in obj.borrow().keys() {
                         if key != "length" {
                             // Skip array length property
                             keys.push(Value::String(utf8_to_utf16(key)));
                         }
                     }
                     // Create a simple array-like object for keys
-                    let mut result_obj = JSObjectData::new();
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, key) in keys.into_iter().enumerate() {
-                        obj_set_val(&mut result_obj, &i.to_string(), key);
+                        obj_set_val(&result_obj, &i.to_string(), key);
                     }
-                    let len = result_obj.len();
-                    set_array_length(&mut result_obj, len);
+                    let len = result_obj.borrow().properties.len();
+                    set_array_length(&result_obj, len);
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => {
@@ -41,8 +43,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
                 }
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let mut result_obj = JSObjectData::new();
-                    set_array_length(&mut result_obj, 0);
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    set_array_length(&result_obj, 0);
                     Ok(Value::Object(result_obj))
                 }
             }
@@ -62,19 +64,19 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
             match obj_val {
                 Value::Object(obj) => {
                     let mut values = Vec::new();
-                    for (key, value) in obj.iter() {
+                    for (key, value) in obj.borrow().properties.iter() {
                         if key != "length" {
                             // Skip array length property
                             values.push(value.borrow().clone());
                         }
                     }
                     // Create a simple array-like object for values
-                    let mut result_obj = JSObjectData::new();
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, value) in values.into_iter().enumerate() {
-                        obj_set_val(&mut result_obj, &i.to_string(), value);
+                        obj_set_val(&result_obj, &i.to_string(), value);
                     }
-                    let len = result_obj.len();
-                    set_array_length(&mut result_obj, len);
+                    let len = result_obj.borrow().properties.len();
+                    set_array_length(&result_obj, len);
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => {
@@ -84,8 +86,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectData) -> 
                 }
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let mut result_obj = JSObjectData::new();
-                    set_array_length(&mut result_obj, 0);
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    set_array_length(&result_obj, 0);
                     Ok(Value::Object(result_obj))
                 }
             }
@@ -125,8 +127,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         }
         Value::Object(ref obj_map) => {
             // If this object looks like a Date (has __timestamp), call Date.toString()
-            if obj_map.contains_key("__timestamp") {
-                return crate::js_date::handle_date_method(obj_map, "toString", args);
+            if obj_map.borrow().contains_key("__timestamp") {
+                return crate::js_date::handle_date_method(&*obj_map.borrow(), "toString", args);
             }
             // If this object looks like an array, join elements with comma
             if is_array(obj_map) {

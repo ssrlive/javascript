@@ -2,10 +2,12 @@ use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::quickjs::{
     evaluate_expr, obj_set_val, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase,
-    utf16_to_uppercase, utf8_to_utf16, Expr, JSObjectData, Value,
+    utf16_to_uppercase, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 
-pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
+pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "toString" => {
             if args.is_empty() {
@@ -177,12 +179,12 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                             }
                         }
                     }
-                    let mut arr = JSObjectData::new();
+                    let arr = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, part) in parts.into_iter().enumerate() {
-                        obj_set_val(&mut arr, &i.to_string(), Value::String(part));
+                        obj_set_val(&arr, &i.to_string(), Value::String(part));
                     }
-                    let len = arr.len();
-                    set_array_length(&mut arr, len);
+                    let len = arr.borrow().properties.len();
+                    set_array_length(&arr, len);
                     Ok(Value::Object(arr))
                 } else {
                     Err(JSError::EvaluationError {

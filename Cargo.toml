@@ -12,6 +12,7 @@ name = "rust_qjs"
 path = "bin/rust_qjs.rs"
 
 [dependencies]
+chrono = { version = "0.4", features = ["serde"] }
 env_logger = { version = "0.11", optional = true }
 libc = "0.2.177"
 log = "0.4"

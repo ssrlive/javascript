@@ -124,6 +124,10 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             });
         }
         Value::Object(ref obj_map) => {
+            // If this object looks like a Date (has __timestamp), call Date.toString()
+            if obj_map.contains_key("__timestamp") {
+                return crate::js_date::handle_date_method(obj_map, "toString", args);
+            }
             // If this object looks like an array, join elements with comma
             if is_array(obj_map) {
                 let current_len = get_array_length(obj_map).unwrap_or(0);

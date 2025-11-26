@@ -1,5 +1,6 @@
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
+use crate::js_date::handle_date_constructor;
 use crate::quickjs::{evaluate_expr, utf8_to_utf16, Expr, JSObjectData, Value};
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData) -> Result<Value, JSError> {
@@ -263,11 +264,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "Date" => {
-            // Date constructor - for now just return current timestamp
-            use std::time::{SystemTime, UNIX_EPOCH};
-            let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            let timestamp = duration.as_millis() as f64;
-            Ok(Value::String(utf8_to_utf16(&format!("Date: {}", timestamp))))
+            // Date constructor - create a Date object
+            handle_date_constructor(args, env)
         }
         "eval" => {
             // eval function - execute the code

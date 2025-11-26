@@ -1615,6 +1615,9 @@ fn evaluate_call(env: &JSObjectData, func_expr: &Expr, args: &[Expr]) -> Result<
                     return crate::js_json::handle_json_method(method, args, env);
                 } else if obj_map.contains_key("keys") && obj_map.contains_key("values") {
                     return crate::js_object::handle_object_method(method, args, env);
+                } else if obj_map.contains_key("__timestamp") {
+                    // Date instance methods
+                    return crate::js_date::handle_date_method(&obj_map, method, args);
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, &**obj_expr);

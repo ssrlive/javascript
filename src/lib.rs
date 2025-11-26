@@ -2,8 +2,8 @@
 // pub mod libregexp;
 // pub mod libunicode;
 // pub mod libunicode_table;
-pub mod array;
 pub mod error;
+pub mod js_array;
 pub mod js_console;
 pub mod js_math;
 pub mod js_std;

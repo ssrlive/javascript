@@ -1372,7 +1372,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
                 // Special case for Array static methods
                 if let Expr::Var(var_name) = &**obj_expr {
                     if var_name == "Array" {
-                        return crate::array::handle_array_static_method(method_name, args, env);
+                        return crate::js_array::handle_array_static_method(method_name, args, env);
                     }
                 }
 
@@ -1572,7 +1572,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
                             }
                         } else if obj_map.contains_key("length") {
                             // Array instance methods
-                            return crate::array::handle_array_instance_method(&mut obj_map, method, args, env, obj_expr);
+                            return crate::js_array::handle_array_instance_method(&mut obj_map, method, args, env, obj_expr);
                         } else {
                             // Other object methods not implemented
                             return Err(JSError::EvaluationError {
@@ -2144,7 +2144,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
                             }
                         }
                         "Array" => {
-                            return crate::array::handle_array_constructor(args, env);
+                            return crate::js_array::handle_array_constructor(args, env);
                         }
                         "Number" => {
                             // Number constructor

@@ -1186,6 +1186,7 @@ pub fn evaluate_expr(env: &JSObjectData, expr: &Expr) -> Result<Value, JSError> 
         Expr::Call(func_expr, args) => evaluate_call(env, func_expr, args),
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
+        Expr::Array(elements) => evaluate_array(env, elements),
     }
 }
 
@@ -1370,6 +1371,24 @@ fn evaluate_index(env: &JSObjectData, obj: &Expr, idx: &Expr) -> Result<Value, J
                 Ok(Value::String(vec![ch]))
             } else {
                 Ok(Value::String(Vec::new())) // or return undefined, but use empty string here
+            }
+        }
+        (Value::Object(obj_map), Value::Number(n)) => {
+            // Array-like indexing
+            let key = n.to_string();
+            if let Some(val) = obj_get(&obj_map, &key) {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        (Value::Object(obj_map), Value::String(s)) => {
+            // Object property access with string key
+            let key = String::from_utf16_lossy(&s);
+            if let Some(val) = obj_get(&obj_map, &key) {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
             }
         }
         _ => Err(JSError::EvaluationError {
@@ -2320,6 +2339,17 @@ fn evaluate_object(env: &JSObjectData, properties: &Vec<(String, Expr)>) -> Resu
     Ok(Value::Object(obj))
 }
 
+fn evaluate_array(env: &JSObjectData, elements: &Vec<Expr>) -> Result<Value, JSError> {
+    let mut arr = JSObjectData::new();
+    for (i, elem_expr) in elements.iter().enumerate() {
+        let value = evaluate_expr(env, elem_expr)?;
+        obj_set_val(&mut arr, &i.to_string(), value);
+    }
+    // Set length property
+    obj_set_val(&mut arr, "length", Value::Number(elements.len() as f64));
+    Ok(Value::Object(arr))
+}
+
 pub type JSObjectData = std::collections::HashMap<String, std::rc::Rc<std::cell::RefCell<Value>>>;
 
 #[derive(Debug, Clone)]
@@ -2530,6 +2560,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     Function(Vec<String>, Vec<Statement>), // parameters, body
     Object(Vec<(String, Expr)>),           // object literal: key-value pairs
+    Array(Vec<Expr>),                      // array literal: [elem1, elem2, ...]
 }
 
 #[derive(Debug, Clone)]
@@ -3026,6 +3057,34 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
             }
             Expr::Object(properties)
+        }
+        Token::LBracket => {
+            // Parse array literal
+            let mut elements = Vec::new();
+            if !tokens.is_empty() && matches!(tokens[0], Token::RBracket) {
+                // Empty array []
+                tokens.remove(0); // consume ]
+                return Ok(Expr::Array(elements));
+            }
+            loop {
+                // Parse element
+                let elem = parse_expression(tokens)?;
+                elements.push(elem);
+
+                // Check for comma or end
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
+                if matches!(tokens[0], Token::RBracket) {
+                    tokens.remove(0); // consume ]
+                    break;
+                } else if matches!(tokens[0], Token::Comma) {
+                    tokens.remove(0); // consume ,
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            }
+            Expr::Array(elements)
         }
         Token::Function => {
             // Parse function expression

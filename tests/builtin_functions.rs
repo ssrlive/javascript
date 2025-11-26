@@ -316,14 +316,24 @@ mod builtin_functions_tests {
 
     #[test]
     fn test_eval_function() {
-        let script = "eval('hello')";
+        let script = "eval('\"hello\"')";
         let result = evaluate_script(script);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
                 assert_eq!(str_val, "hello");
             }
-            _ => panic!("Expected eval('hello') to return 'hello', got {:?}", result),
+            _ => panic!("Expected eval('\"hello\"') to return 'hello', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_eval_expression() {
+        let script = "eval('1 + 2')";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected eval('1 + 2') to return 3.0, got {:?}", result),
         }
     }
 

@@ -5,11 +5,13 @@
 pub mod error;
 pub mod js_array;
 pub mod js_console;
+pub mod js_function;
 pub mod js_json;
 pub mod js_math;
 pub mod js_object;
 pub mod js_os;
 pub mod js_std;
+pub mod js_string;
 pub mod quickjs;
 pub mod sprintf;
 pub mod tmpfile;

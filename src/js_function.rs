@@ -21,6 +21,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::Object(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
                     Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
                     Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+                    Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string

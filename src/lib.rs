@@ -4,6 +4,7 @@
 // pub mod libunicode_table;
 pub mod error;
 pub mod js_array;
+pub mod js_class;
 pub mod js_console;
 pub mod js_date;
 pub mod js_function;

@@ -27,6 +27,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::Object(_) => print!("[object Object]"),
                     Value::Function(name) => print!("[Function: {}]", name),
                     Value::Closure(_, _, _) => print!("[Function]"),
+                    Value::ClassDefinition(_) => print!("[Class]"),
                 }
             }
             println!();

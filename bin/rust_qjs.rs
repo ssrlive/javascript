@@ -35,5 +35,6 @@ fn main() {
         Value::Object(_) => println!("[object Object]"),
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),
+        Value::ClassDefinition(_) => println!("[Class]"),
     }
 }

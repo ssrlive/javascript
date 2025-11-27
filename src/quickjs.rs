@@ -4,6 +4,9 @@
 use crate::error::JSError;
 use crate::js_array::is_array;
 use crate::js_array::set_array_length;
+use crate::js_class::{
+    call_class_method, create_class_object, evaluate_new, evaluate_this, is_class_instance, ClassDefinition, ClassMember,
+};
 use crate::js_console;
 use crate::js_math;
 use crate::sprintf;
@@ -822,9 +825,10 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
             }
         }
         Ok(Value::Undefined) => JS_UNDEFINED,
-        Ok(Value::Object(_)) => JS_UNDEFINED,        // For now
-        Ok(Value::Function(_)) => JS_UNDEFINED,      // For now
-        Ok(Value::Closure(_, _, _)) => JS_UNDEFINED, // For now
+        Ok(Value::Object(_)) => JS_UNDEFINED,          // For now
+        Ok(Value::Function(_)) => JS_UNDEFINED,        // For now
+        Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,   // For now
+        Ok(Value::ClassDefinition(_)) => JS_UNDEFINED, // For now
         Err(_) => JS_UNDEFINED,
     }
 }
@@ -1145,6 +1149,84 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             }
         }
     }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Class) {
+        tokens.remove(0); // consume class
+        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+            tokens.remove(0);
+            let extends = if tokens.len() >= 1 && matches!(tokens[0], Token::Extends) {
+                tokens.remove(0); // consume extends
+                if let Some(Token::Identifier(parent_name)) = tokens.get(0).cloned() {
+                    tokens.remove(0);
+                    Some(parent_name)
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            } else {
+                None
+            };
+
+            // Parse class body
+            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume {
+
+            let mut members = Vec::new();
+            while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+                let is_static = if tokens.len() >= 1 && matches!(tokens[0], Token::Static) {
+                    tokens.remove(0);
+                    true
+                } else {
+                    false
+                };
+
+                if let Some(Token::Identifier(ref method_name)) = tokens.get(0) {
+                    let method_name = method_name.clone();
+                    if method_name == "constructor" {
+                        tokens.remove(0);
+                        // Parse constructor
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume (
+                        let params = parse_parameters(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume {
+                        let body = parse_statement_block(tokens)?;
+                        members.push(ClassMember::Constructor(params, body));
+                    } else {
+                        tokens.remove(0);
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume (
+                        let params = parse_parameters(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume {
+                        let body = parse_statement_block(tokens)?;
+                        if is_static {
+                            members.push(ClassMember::StaticMethod(method_name, params, body));
+                        } else {
+                            members.push(ClassMember::Method(method_name, params, body));
+                        }
+                    }
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            }
+
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+
+            return Ok(Statement::Class(name, extends, members));
+        }
+    }
     let expr = parse_expression(tokens)?;
     // Check if this is an assignment expression
     if let Expr::Assign(target, value) = &expr {
@@ -1169,6 +1251,11 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                 let val = evaluate_expr(env, expr)?;
                 env_set_const(env, name.as_str(), val.clone());
                 last_value = val;
+            }
+            Statement::Class(name, extends, members) => {
+                let class_obj = create_class_object(name, extends, members, env)?;
+                env_set(env, name.as_str(), class_obj)?;
+                last_value = Value::Undefined;
             }
             Statement::Assign(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
@@ -1364,6 +1451,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
+        Expr::This => evaluate_this(env),
+        Expr::New(constructor, args) => evaluate_new(env, constructor, args),
     }
 }
 
@@ -1673,11 +1762,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&obj_map, method, args, env, &**obj_expr);
+                } else if is_class_instance(&obj_map) {
+                    return call_class_method(&obj_map, method, args, env);
                 } else {
-                    // Other object methods not implemented
-                    return Err(JSError::EvaluationError {
-                        message: format!("Method {} not implemented for this object type", method),
-                    });
+                    Err(JSError::EvaluationError {
+                        message: format!("Method {method} not found on object"),
+                    })
                 }
             }
             (Value::String(s), method) => crate::js_string::handle_string_method(&s, method, args, env),
@@ -1788,6 +1878,7 @@ pub enum Value {
     Object(JSObjectDataPtr),                               // Object with properties
     Function(String),                                      // Function name
     Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
+    ClassDefinition(Rc<ClassDefinition>),                  // Class definition
 }
 
 impl std::fmt::Debug for Value {
@@ -1800,6 +1891,7 @@ impl std::fmt::Debug for Value {
             Value::Object(_) => write!(f, "Object(...)"),
             Value::Function(name) => write!(f, "Function({name})"),
             Value::Closure(_, _, _) => write!(f, "Closure(...)"),
+            Value::ClassDefinition(_) => write!(f, "ClassDefinition(...)"),
         }
     }
 }
@@ -1907,6 +1999,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
         Value::Closure(_, _, _) => "[function]".to_string(),
+        Value::ClassDefinition(_) => "[class]".to_string(),
     }
 }
 
@@ -2023,7 +2116,8 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
 pub enum Statement {
     Let(String, Expr),
     Const(String, Expr),
-    Assign(String, Expr), // variable assignment
+    Class(String, Option<String>, Vec<ClassMember>), // name, extends, members
+    Assign(String, Expr),                            // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
@@ -2037,6 +2131,7 @@ impl std::fmt::Debug for Statement {
         match self {
             Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
             Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
+            Statement::Class(name, extends, members) => write!(f, "Class({name}, {extends:?}, {members:?})"),
             Statement::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
             Statement::Expr(expr) => write!(f, "Expr({:?})", expr),
             Statement::Return(Some(expr)) => write!(f, "Return({:?})", expr),
@@ -2072,6 +2167,8 @@ pub enum Expr {
     Function(Vec<String>, Vec<Statement>), // parameters, body
     Object(Vec<(String, Expr)>),           // object literal: key-value pairs
     Array(Vec<Expr>),                      // array literal: [elem1, elem2, ...]
+    This,                                  // this keyword
+    New(Box<Expr>, Vec<Expr>),             // new expression: new Constructor(args)
 }
 
 #[derive(Debug, Clone)]
@@ -2325,6 +2422,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "let" => tokens.push(Token::Let),
                     "var" => tokens.push(Token::Var),
                     "const" => tokens.push(Token::Const),
+                    "class" => tokens.push(Token::Class),
+                    "extends" => tokens.push(Token::Extends),
+                    "super" => tokens.push(Token::Super),
+                    "this" => tokens.push(Token::This),
+                    "static" => tokens.push(Token::Static),
+                    "new" => tokens.push(Token::New),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
@@ -2382,6 +2485,12 @@ pub enum Token {
     Let,
     Var,
     Const,
+    Class,
+    Extends,
+    Super,
+    This,
+    Static,
+    New,
     Function,
     Return,
     If,
@@ -2412,7 +2521,46 @@ fn is_truthy(val: &Value) -> bool {
         Value::Object(_) => true,
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
+        Value::ClassDefinition(_) => true,
     }
+}
+
+fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<String>, JSError> {
+    let mut params = Vec::new();
+    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+        loop {
+            if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                tokens.remove(0);
+                params.push(param);
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
+                if matches!(tokens[0], Token::RParen) {
+                    break;
+                }
+                if !matches!(tokens[0], Token::Comma) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume ,
+            } else {
+                return Err(JSError::ParseError);
+            }
+        }
+    }
+    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+        return Err(JSError::ParseError);
+    }
+    tokens.remove(0); // consume )
+    Ok(params)
+}
+
+fn parse_statement_block(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
+    let body = parse_statements(tokens)?;
+    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+        return Err(JSError::ParseError);
+    }
+    tokens.remove(0); // consume }
+    Ok(body)
 }
 
 fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
@@ -2527,6 +2675,43 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::StringLit(s) => Expr::StringLit(s),
         Token::True => Expr::Boolean(true),
         Token::False => Expr::Boolean(false),
+        Token::New => {
+            // Constructor should be a simple identifier or property access, not a full expression
+            let constructor = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                tokens.remove(0);
+                Expr::Var(name)
+            } else {
+                return Err(JSError::ParseError);
+            };
+            let args = if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                tokens.remove(0); // consume '('
+                let mut args = Vec::new();
+                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                    loop {
+                        let arg = parse_expression(tokens)?;
+                        args.push(arg);
+                        if tokens.is_empty() {
+                            return Err(JSError::ParseError);
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            break;
+                        }
+                        if !matches!(tokens[0], Token::Comma) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume ','
+                    }
+                }
+                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume ')'
+                args
+            } else {
+                Vec::new()
+            };
+            Expr::New(Box::new(constructor), args)
+        }
         Token::Minus => {
             let inner = parse_primary(tokens)?;
             Expr::UnaryNeg(Box::new(inner))
@@ -2564,58 +2749,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 expr
             }
         }
-        Token::Identifier(name) => {
-            if name == "new" {
-                // Parse only the constructor target and its immediate
-                // argument list (if present). Do NOT consume chained
-                // postfix operators (like `.toString()`) here — those
-                // belong to the overall expression after the `new`.
-                if tokens.is_empty() {
-                    return Err(JSError::ParseError);
-                }
-
-                // Expect a constructor identifier next
-                let constructor = match tokens.remove(0) {
-                    Token::Identifier(n) => Expr::Var(n),
-                    _ => return Err(JSError::ParseError),
-                };
-
-                // If there's a parenthesized argument list, parse it (but
-                // don't consume any further postfix operators)
-                let cons_call = if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                    tokens.remove(0); // consume '('
-                    let mut args = Vec::new();
-                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                        loop {
-                            let arg = parse_expression(tokens)?;
-                            args.push(arg);
-                            if tokens.is_empty() {
-                                return Err(JSError::ParseError);
-                            }
-                            if matches!(tokens[0], Token::RParen) {
-                                break;
-                            }
-                            if !matches!(tokens[0], Token::Comma) {
-                                return Err(JSError::ParseError);
-                            }
-                            tokens.remove(0); // consume ','
-                        }
-                    }
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume ')'
-                    Expr::Call(Box::new(constructor), args)
-                } else {
-                    // No argument list: treat as constructor reference
-                    constructor
-                };
-
-                Expr::Call(Box::new(Expr::Var("new".to_string())), vec![cons_call])
-            } else {
-                Expr::Var(name)
-            }
-        }
+        Token::Identifier(name) => Expr::Var(name),
+        Token::This => Expr::Var("this".to_string()),
         Token::LBrace => {
             // Parse object literal
             let mut properties = Vec::new();

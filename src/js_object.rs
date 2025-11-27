@@ -111,6 +111,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                     Value::Function(_) => "Function",
                     Value::Closure(_, _, _) => "Function",
                     Value::Undefined => "undefined",
+                    Value::ClassDefinition(_) => "Class",
                 },
                 args.len()
             ),
@@ -153,5 +154,6 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         }
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
         Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+        Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
     }
 }

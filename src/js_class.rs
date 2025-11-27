@@ -76,6 +76,14 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                         obj_set_val(&instance, "__proto__", prototype_val.borrow().clone());
                     }
 
+                    // Set instance properties
+                    for member in &class_def.members {
+                        if let ClassMember::Property(prop_name, value_expr) = member {
+                            let value = evaluate_expr(env, value_expr)?;
+                            obj_set_val(&instance, prop_name, value);
+                        }
+                    }
+
                     // Call constructor if it exists
                     for member in &class_def.members {
                         if let ClassMember::Constructor(params, body) = member {
@@ -221,13 +229,55 @@ pub(crate) fn create_class_object(
                 let method_closure = Value::Closure(params.clone(), body.clone(), env.clone());
                 obj_set_val(&class_obj, method_name, method_closure);
             }
-            ClassMember::StaticProperty(_, _) => {
-                // Static properties not implemented yet
+            ClassMember::StaticProperty(prop_name, value_expr) => {
+                // Add static property to class object
+                let value = evaluate_expr(env, &value_expr)?;
+                obj_set_val(&class_obj, &prop_name, value);
             }
         }
     }
 
     Ok(Value::Object(class_obj))
+}
+
+pub(crate) fn call_static_method(
+    class_obj: &JSObjectDataPtr,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
+    // Look for static method directly on the class object
+    if let Some(method_val) = obj_get(class_obj, method) {
+        match &*method_val.borrow() {
+            Value::Closure(params, body, _captured_env) => {
+                // Create function environment
+                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+
+                // Static methods don't have 'this' bound to an instance
+                // 'this' in static methods refers to the class itself
+                obj_set_val(&func_env, "this", Value::Object(class_obj.clone()));
+
+                // Bind parameters
+                for (i, param) in params.iter().enumerate() {
+                    if i < args.len() {
+                        let arg_val = evaluate_expr(env, &args[i])?;
+                        obj_set_val(&func_env, param, arg_val);
+                    }
+                }
+
+                // Execute method body
+                return evaluate_statements(&func_env, body);
+            }
+            _ => {
+                return Err(JSError::EvaluationError {
+                    message: format!("'{}' is not a static method", method),
+                });
+            }
+        }
+    }
+    Err(JSError::EvaluationError {
+        message: format!("Static method '{}' not found on class", method),
+    })
 }
 
 pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

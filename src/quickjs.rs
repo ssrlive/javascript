@@ -5,7 +5,7 @@ use crate::error::JSError;
 use crate::js_array::is_array;
 use crate::js_array::set_array_length;
 use crate::js_class::{
-    call_class_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call, evaluate_super_method,
+    call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call, evaluate_super_method,
     evaluate_super_property, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
 };
 use crate::js_console;
@@ -1199,20 +1199,38 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         members.push(ClassMember::Constructor(params, body));
                     } else {
                         tokens.remove(0);
-                        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                        if tokens.is_empty() {
                             return Err(JSError::ParseError);
                         }
-                        tokens.remove(0); // consume (
-                        let params = parse_parameters(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                            return Err(JSError::ParseError);
-                        }
-                        tokens.remove(0); // consume {
-                        let body = parse_statement_block(tokens)?;
-                        if is_static {
-                            members.push(ClassMember::StaticMethod(method_name, params, body));
+                        if matches!(tokens[0], Token::LParen) {
+                            // This is a method
+                            tokens.remove(0); // consume (
+                            let params = parse_parameters(tokens)?;
+                            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume {
+                            let body = parse_statement_block(tokens)?;
+                            if is_static {
+                                members.push(ClassMember::StaticMethod(method_name, params, body));
+                            } else {
+                                members.push(ClassMember::Method(method_name, params, body));
+                            }
+                        } else if matches!(tokens[0], Token::Assign) {
+                            // This is a property
+                            tokens.remove(0); // consume =
+                            let value = parse_expression(tokens)?;
+                            if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume ;
+                            if is_static {
+                                members.push(ClassMember::StaticProperty(method_name, value));
+                            } else {
+                                members.push(ClassMember::Property(method_name, value));
+                            }
                         } else {
-                            members.push(ClassMember::Method(method_name, params, body));
+                            return Err(JSError::ParseError);
                         }
                     }
                 } else {
@@ -1784,6 +1802,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&obj_map, method, args, env, &**obj_expr);
+                } else if obj_map.borrow().contains_key("__class_def__") {
+                    // Class static methods
+                    return call_static_method(&obj_map, method, args, env);
                 } else if is_class_instance(&obj_map) {
                     return call_class_method(&obj_map, method, args, env);
                 } else {

@@ -248,4 +248,32 @@ mod class_tests {
         }
         assert!(result.is_ok(), "super.method() should work");
     }
+
+    #[test]
+    fn test_static_members() {
+        let script = r#"
+            class Test {
+                static staticProp = "static value";
+                static staticMethod() {
+                    return "static method result";
+                }
+                constructor(name) {
+                    this.name = name;
+                }
+            }
+
+            let staticProp = Test.staticProp;
+            let staticResult = Test.staticMethod();
+            let instance = new Test("test");
+            let instanceName = instance.name;
+            staticProp + ", " + staticResult + ", " + instanceName;
+        "#;
+
+        let result = evaluate_script(script);
+        match &result {
+            Ok(val) => println!("Success: {:?}", val),
+            Err(e) => println!("Error: {:?}", e),
+        }
+        assert!(result.is_ok(), "Static property, method access and instance properties should work");
+    }
 }

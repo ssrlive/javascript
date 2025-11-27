@@ -1467,6 +1467,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Var(name) => evaluate_var(env, name),
         Expr::Assign(_target, value) => evaluate_assign(env, value),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
+        Expr::TypeOf(expr) => evaluate_typeof(env, expr),
         Expr::Binary(left, op, right) => evaluate_binary(env, left, op, right),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
@@ -1562,6 +1563,21 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             message: "error".to_string(),
         }),
     }
+}
+
+fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    let type_str = match val {
+        Value::Undefined => "undefined",
+        Value::Boolean(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Object(_) => "object",
+        Value::Function(_) => "function",
+        Value::Closure(_, _, _) => "function",
+        Value::ClassDefinition(_) => "function",
+    };
+    Ok(Value::String(utf8_to_utf16(type_str)))
 }
 
 fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
@@ -2216,6 +2232,7 @@ pub enum Expr {
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
+    TypeOf(Box<Expr>),
     Assign(Box<Expr>, Box<Expr>), // target, value
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
@@ -2490,6 +2507,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "static" => tokens.push(Token::Static),
                     "new" => tokens.push(Token::New),
                     "instanceof" => tokens.push(Token::InstanceOf),
+                    "typeof" => tokens.push(Token::TypeOf),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
@@ -2554,6 +2572,7 @@ pub enum Token {
     Static,
     New,
     InstanceOf,
+    TypeOf,
     Function,
     Return,
     If,
@@ -2743,6 +2762,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::StringLit(s) => Expr::StringLit(s),
         Token::True => Expr::Boolean(true),
         Token::False => Expr::Boolean(false),
+        Token::TypeOf => {
+            let inner = parse_primary(tokens)?;
+            Expr::TypeOf(Box::new(inner))
+        }
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression
             let constructor = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {

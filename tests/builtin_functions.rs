@@ -1178,4 +1178,50 @@ mod builtin_functions_tests {
             _ => panic!("Expected Array.of() to return an array, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_typeof_operator() {
+        // Test typeof with different types
+        let script = "typeof 42";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "number"),
+            _ => panic!("Expected typeof 42 to be 'number', got {:?}", result),
+        }
+
+        let script = "typeof 'hello'";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "string"),
+            _ => panic!("Expected typeof 'hello' to be 'string', got {:?}", result),
+        }
+
+        let script = "typeof true";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "boolean"),
+            _ => panic!("Expected typeof true to be 'boolean', got {:?}", result),
+        }
+
+        let script = "typeof undefined";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "undefined"),
+            _ => panic!("Expected typeof undefined to be 'undefined', got {:?}", result),
+        }
+
+        let script = "typeof {}";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "object"),
+            _ => panic!("Expected typeof {{}} to be 'object', got {:?}", result),
+        }
+
+        let script = "typeof function(){}";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "function"),
+            _ => panic!("Expected typeof function(){{}} to be 'function', got {:?}", result),
+        }
+    }
 }

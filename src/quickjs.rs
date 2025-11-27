@@ -17,9 +17,6 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::rc::Rc;
 
-/// Maximum number of loop iterations before triggering infinite loop detection
-pub const MAX_LOOP_ITERATIONS: usize = 1000;
-
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union JSValueUnion {
@@ -917,6 +914,136 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
 }
 
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Break) {
+        tokens.remove(0); // consume break
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume ;
+        return Ok(Statement::Break);
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Continue) {
+        tokens.remove(0); // consume continue
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume ;
+        return Ok(Statement::Continue);
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::While) {
+        tokens.remove(0); // consume while
+        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume (
+        let condition = parse_expression(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume )
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume {
+        let body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume }
+        return Ok(Statement::While(condition, body));
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Do) {
+        tokens.remove(0); // consume do
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume {
+        let body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume }
+        if tokens.is_empty() || !matches!(tokens[0], Token::While) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume while
+        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume (
+        let condition = parse_expression(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume )
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume ;
+        return Ok(Statement::DoWhile(body, condition));
+    }
+    if tokens.len() >= 1 && matches!(tokens[0], Token::Switch) {
+        tokens.remove(0); // consume switch
+        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume (
+        let expr = parse_expression(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume )
+        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume {
+        let mut cases = Vec::new();
+        while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+            if matches!(tokens[0], Token::Case) {
+                tokens.remove(0); // consume case
+                let case_value = parse_expression(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume :
+                let mut case_stmts = Vec::new();
+                while !tokens.is_empty()
+                    && !matches!(tokens[0], Token::Case)
+                    && !matches!(tokens[0], Token::Default)
+                    && !matches!(tokens[0], Token::RBrace)
+                {
+                    let stmt = parse_statement(tokens)?;
+                    case_stmts.push(stmt);
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                        tokens.remove(0);
+                    }
+                }
+                cases.push(SwitchCase::Case(case_value, case_stmts));
+            } else if matches!(tokens[0], Token::Default) {
+                tokens.remove(0); // consume default
+                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume :
+                let mut default_stmts = Vec::new();
+                while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+                    let stmt = parse_statement(tokens)?;
+                    default_stmts.push(stmt);
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                        tokens.remove(0);
+                    }
+                }
+                cases.push(SwitchCase::Default(default_stmts));
+            } else {
+                return Err(JSError::ParseError);
+            }
+        }
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume }
+        return Ok(Statement::Switch(expr, cases));
+    }
     if tokens.len() >= 1 && matches!(tokens[0], Token::Throw) {
         tokens.remove(0); // consume throw
         let expr = parse_expression(tokens)?;
@@ -1297,7 +1424,33 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     Ok(Statement::Expr(expr))
 }
 
+#[derive(Clone, Debug)]
+pub enum ControlFlow {
+    Normal(Value),
+    Break,
+    Continue,
+    Return(Value),
+}
+
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
+    match evaluate_statements_with_context(env, statements, false, false)? {
+        ControlFlow::Normal(val) => Ok(val),
+        ControlFlow::Break => Err(JSError::EvaluationError {
+            message: "break statement not in loop or switch".to_string(),
+        }),
+        ControlFlow::Continue => Err(JSError::EvaluationError {
+            message: "continue statement not in loop".to_string(),
+        }),
+        ControlFlow::Return(val) => Ok(val),
+    }
+}
+
+fn evaluate_statements_with_context(
+    env: &JSObjectDataPtr,
+    statements: &[Statement],
+    in_loop: bool,
+    in_switch: bool,
+) -> Result<ControlFlow, JSError> {
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
@@ -1354,7 +1507,7 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                                 _ => {
                                     return Err(JSError::EvaluationError {
                                         message: "Invalid index type".to_string(),
-                                    })
+                                    });
                                 }
                             };
                             let v = evaluate_expr(env, value_expr)?;
@@ -1373,10 +1526,11 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                 }
             }
             Statement::Return(expr_opt) => {
-                return match expr_opt {
-                    Some(expr) => evaluate_expr(env, expr),
-                    None => Ok(Value::Undefined),
+                let return_val = match expr_opt {
+                    Some(expr) => evaluate_expr(env, expr)?,
+                    None => Value::Undefined,
                 };
+                return Ok(ControlFlow::Return(return_val));
             }
             Statement::Throw(expr) => {
                 let throw_val = evaluate_expr(env, expr)?;
@@ -1387,20 +1541,35 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
             Statement::If(condition, then_body, else_body) => {
                 let cond_val = evaluate_expr(env, condition)?;
                 if is_truthy(&cond_val) {
-                    last_value = evaluate_statements(env, then_body)?;
+                    match evaluate_statements_with_context(env, then_body, in_loop, in_switch)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        cf => return Ok(cf),
+                    }
                 } else if let Some(else_stmts) = else_body {
-                    last_value = evaluate_statements(env, else_stmts)?;
+                    match evaluate_statements_with_context(env, else_stmts, in_loop, in_switch)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        cf => return Ok(cf),
+                    }
                 }
             }
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
                 // Execute try block and handle catch/finally semantics
-                match evaluate_statements(env, try_body) {
-                    Ok(v) => last_value = v,
+                match evaluate_statements_with_context(env, try_body, in_loop, in_switch) {
+                    Ok(ControlFlow::Normal(v)) => last_value = v,
+                    Ok(cf) => {
+                        // Handle control flow in try block
+                        match cf {
+                            ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+                            ControlFlow::Break => return Ok(ControlFlow::Break),
+                            ControlFlow::Continue => return Ok(ControlFlow::Continue),
+                            _ => unreachable!(),
+                        }
+                    }
                     Err(err) => {
                         if catch_param.is_empty() {
                             // No catch: run finally if present then propagate error
                             if let Some(finally_body) = finally_body_opt {
-                                let _ = evaluate_statements(env, finally_body)?;
+                                let _ = evaluate_statements_with_context(env, finally_body, in_loop, in_switch);
                             }
                             return Err(err);
                         } else {
@@ -1410,13 +1579,25 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                                 catch_param.as_str(),
                                 Value::String(utf8_to_utf16(&format!("{err:?}"))),
                             )?;
-                            last_value = evaluate_statements(&mut catch_env, catch_body)?;
+                            match evaluate_statements_with_context(&mut catch_env, catch_body, in_loop, in_switch)? {
+                                ControlFlow::Normal(val) => last_value = val,
+                                cf => {
+                                    // Finally block executes after try/catch
+                                    if let Some(finally_body) = finally_body_opt {
+                                        let _ = evaluate_statements_with_context(env, finally_body, in_loop, in_switch);
+                                    }
+                                    return Ok(cf);
+                                }
+                            }
                         }
                     }
                 }
                 // Finally block executes after try/catch
                 if let Some(finally_body) = finally_body_opt {
-                    last_value = evaluate_statements(env, finally_body)?;
+                    match evaluate_statements_with_context(env, finally_body, in_loop, in_switch)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        cf => return Ok(cf),
+                    }
                 }
             }
             Statement::For(init, condition, increment, body) => {
@@ -1433,20 +1614,12 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "error".to_string(),
-                            })
+                            });
                         } // For now, only support let and expr in init
                     }
                 }
 
-                // For now, limit to MAX_LOOP_ITERATIONS iterations to prevent infinite loops
-                let mut iterations = 0;
                 loop {
-                    if iterations >= MAX_LOOP_ITERATIONS {
-                        return Err(JSError::InfiniteLoopError {
-                            iterations: MAX_LOOP_ITERATIONS,
-                        });
-                    }
-
                     // Check condition
                     let should_continue = if let Some(cond_expr) = condition {
                         let cond_val = evaluate_expr(env, cond_expr)?;
@@ -1460,10 +1633,11 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     }
 
                     // Execute body
-                    let result = evaluate_statements(env, body);
-                    match result {
-                        Ok(val) => last_value = val,
-                        Err(err) => return Err(err),
+                    match evaluate_statements_with_context(env, body, true, false)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        ControlFlow::Break => break,
+                        ControlFlow::Continue => {}
+                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
                     }
 
                     // Execute increment
@@ -1483,12 +1657,10 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                             _ => {
                                 return Err(JSError::EvaluationError {
                                     message: "error".to_string(),
-                                })
+                                });
                             } // For now, only support expr in increment
                         }
                     }
-
-                    iterations += 1;
                 }
             }
             Statement::ForOf(var, iterable, body) => {
@@ -1497,24 +1669,18 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     Value::Object(obj_map) => {
                         if is_array(&obj_map) {
                             let len = get_array_length(&obj_map).unwrap_or(0);
-                            let mut iterations = 0;
                             for i in 0..len {
-                                if iterations >= MAX_LOOP_ITERATIONS {
-                                    return Err(JSError::InfiniteLoopError {
-                                        iterations: MAX_LOOP_ITERATIONS,
-                                    });
-                                }
                                 let key = i.to_string();
                                 if let Some(element_rc) = obj_get(&obj_map, &key) {
                                     let element = element_rc.borrow().clone();
                                     env_set(env, var.as_str(), element)?;
-                                    let result = evaluate_statements(env, body);
-                                    match result {
-                                        Ok(val) => last_value = val,
-                                        Err(err) => return Err(err),
+                                    match evaluate_statements_with_context(env, body, true, false)? {
+                                        ControlFlow::Normal(val) => last_value = val,
+                                        ControlFlow::Break => break,
+                                        ControlFlow::Continue => {}
+                                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
                                     }
                                 }
-                                iterations += 1;
                             }
                         } else {
                             return Err(JSError::EvaluationError {
@@ -1529,9 +1695,92 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     }
                 }
             }
+            Statement::While(condition, body) => {
+                loop {
+                    // Check condition
+                    let cond_val = evaluate_expr(env, condition)?;
+                    if !is_truthy(&cond_val) {
+                        break;
+                    }
+
+                    // Execute body
+                    match evaluate_statements_with_context(env, body, true, false)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        ControlFlow::Break => break,
+                        ControlFlow::Continue => {}
+                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+                    }
+                }
+            }
+            Statement::DoWhile(body, condition) => {
+                loop {
+                    // Execute body first
+                    match evaluate_statements_with_context(env, body, true, false)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        ControlFlow::Break => break,
+                        ControlFlow::Continue => {}
+                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+                    }
+
+                    // Check condition
+                    let cond_val = evaluate_expr(env, condition)?;
+                    if !is_truthy(&cond_val) {
+                        break;
+                    }
+                }
+            }
+            Statement::Switch(expr, cases) => {
+                let switch_val = evaluate_expr(env, expr)?;
+                let mut found_match = false;
+                let mut executed_default = false;
+
+                for case in cases {
+                    match case {
+                        SwitchCase::Case(case_expr, case_stmts) => {
+                            if !found_match {
+                                let case_val = evaluate_expr(env, case_expr)?;
+                                // Simple equality check for switch cases
+                                if values_equal(&switch_val, &case_val) {
+                                    found_match = true;
+                                }
+                            }
+                            if found_match {
+                                match evaluate_statements_with_context(env, case_stmts, false, true)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break => break,
+                                    cf => return Ok(cf),
+                                }
+                            }
+                        }
+                        SwitchCase::Default(default_stmts) => {
+                            if !found_match && !executed_default {
+                                executed_default = true;
+                                match evaluate_statements_with_context(env, default_stmts, false, true)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break => break,
+                                    cf => return Ok(cf),
+                                }
+                            } else if found_match {
+                                // Default case also falls through if a match was found before it
+                                match evaluate_statements_with_context(env, default_stmts, false, true)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break => break,
+                                    cf => return Ok(cf),
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Statement::Break => {
+                return Ok(ControlFlow::Break);
+            }
+            Statement::Continue => {
+                return Ok(ControlFlow::Continue);
+            }
         }
     }
-    Ok(last_value)
+    Ok(ControlFlow::Normal(last_value))
 }
 
 pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
@@ -2324,6 +2573,12 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum SwitchCase {
+    Case(Expr, Vec<Statement>), // case value, statements
+    Default(Vec<Statement>),    // default statements
+}
+
 #[derive(Clone)]
 pub enum Statement {
     Let(String, Expr),
@@ -2335,8 +2590,13 @@ pub enum Statement {
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
     ForOf(String, Expr, Vec<Statement>),              // variable, iterable, body
+    While(Expr, Vec<Statement>),                      // condition, body
+    DoWhile(Vec<Statement>, Expr),                    // body, condition
+    Switch(Expr, Vec<SwitchCase>),                    // expression, cases
+    Break,
+    Continue,
     TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
-    Throw(Expr),                                      // throw expression
+    Throw(Expr),                                                              // throw expression
 }
 
 impl std::fmt::Debug for Statement {
@@ -2358,6 +2618,17 @@ impl std::fmt::Debug for Statement {
             Statement::ForOf(var, iterable, body) => {
                 write!(f, "ForOf({}, {:?}, {:?})", var, iterable, body)
             }
+            Statement::While(cond, body) => {
+                write!(f, "While({:?}, {:?})", cond, body)
+            }
+            Statement::DoWhile(body, cond) => {
+                write!(f, "DoWhile({:?}, {:?})", body, cond)
+            }
+            Statement::Switch(expr, cases) => {
+                write!(f, "Switch({:?}, {:?})", expr, cases)
+            }
+            Statement::Break => write!(f, "Break"),
+            Statement::Continue => write!(f, "Continue"),
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
                 write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
             }
@@ -2667,6 +2938,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "if" => tokens.push(Token::If),
                     "else" => tokens.push(Token::Else),
                     "for" => tokens.push(Token::For),
+                    "while" => tokens.push(Token::While),
+                    "do" => tokens.push(Token::Do),
+                    "switch" => tokens.push(Token::Switch),
+                    "case" => tokens.push(Token::Case),
+                    "default" => tokens.push(Token::Default),
+                    "break" => tokens.push(Token::Break),
+                    "continue" => tokens.push(Token::Continue),
                     "true" => tokens.push(Token::True),
                     "false" => tokens.push(Token::False),
                     _ => tokens.push(Token::Identifier(ident)),
@@ -2731,6 +3009,13 @@ pub enum Token {
     If,
     Else,
     For,
+    While,
+    Do,
+    Switch,
+    Case,
+    Default,
+    Break,
+    Continue,
     Try,
     Catch,
     Finally,

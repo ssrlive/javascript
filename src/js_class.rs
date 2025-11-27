@@ -246,3 +246,24 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
         message: format!("Method {method} not implemented for this object type"),
     })
 }
+
+pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> bool {
+    // Get the prototype of the constructor
+    if let Some(constructor_proto) = obj_get(&constructor, "prototype") {
+        if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
+            // Check if obj's prototype chain contains constructor's prototype
+            let mut current_proto = obj_get(&obj, "__proto__");
+            while let Some(proto_val) = current_proto {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    if Rc::ptr_eq(proto_obj, constructor_proto_obj) {
+                        return true;
+                    }
+                    current_proto = obj_get(proto_obj, "__proto__");
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    false
+}

@@ -1,4 +1,4 @@
-use rust_quickjs::quickjs::evaluate_script;
+use rust_quickjs::quickjs::{evaluate_script, Value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -107,5 +107,54 @@ mod class_tests {
 
         // Note: We can't easily test is_class_instance from here since it's internal
         // But the fact that the script runs without errors means the logic is working
+    }
+
+    #[test]
+    fn test_instanceof_operator() {
+        let script = r#"
+            class Person {
+                constructor(name) {
+                    this.name = name;
+                }
+            }
+
+            class Animal {
+                constructor(type) {
+                    this.type = type;
+                }
+            }
+
+            let person = new Person("Alice");
+            let animal = new Animal("Dog");
+            let obj = {};
+
+            let is_person_instance = person instanceof Person;
+            let is_animal_instance = animal instanceof Animal;
+            let is_person_animal = person instanceof Animal;
+            let is_obj_person = obj instanceof Person;
+
+            "is_person_instance: " + is_person_instance + "\n" +
+            "is_animal_instance: " + is_animal_instance + "\n" +
+            "is_person_animal: " + is_person_animal + "\n" +
+            "is_obj_person: " + is_obj_person;
+        "#;
+
+        let result = evaluate_script(script);
+        match &result {
+            Ok(val) => {
+                if let Value::String(s) = val {
+                    let s = String::from_utf16_lossy(s);
+                    println!("{}", s);
+                    assert!(s.contains("is_person_instance: true"));
+                    assert!(s.contains("is_animal_instance: true"));
+                    assert!(s.contains("is_person_animal: false"));
+                    assert!(s.contains("is_obj_person: false"));
+                } else {
+                    println!("Unexpected result type: {:?}", val);
+                }
+            }
+            Err(e) => println!("Error: {:?}", e),
+        }
+        assert!(result.is_ok(), "instanceof operator should work");
     }
 }

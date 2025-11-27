@@ -5,7 +5,7 @@ use crate::error::JSError;
 use crate::js_array::is_array;
 use crate::js_array::set_array_length;
 use crate::js_class::{
-    call_class_method, create_class_object, evaluate_new, evaluate_this, is_class_instance, ClassDefinition, ClassMember,
+    call_class_method, create_class_object, evaluate_new, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
 };
 use crate::js_console;
 use crate::js_math;
@@ -1560,6 +1560,16 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
                 Ok(Value::String(result))
             }
+            (Value::Boolean(lb), Value::String(rs)) => {
+                let mut result = utf8_to_utf16(&lb.to_string());
+                result.extend_from_slice(&rs);
+                Ok(Value::String(result))
+            }
+            (Value::String(ls), Value::Boolean(rb)) => {
+                let mut result = ls.clone();
+                result.extend_from_slice(&utf8_to_utf16(&rb.to_string()));
+                Ok(Value::String(result))
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -1642,6 +1652,13 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 message: "Modulo operation only supported for numbers".to_string(),
             }),
         },
+        BinaryOp::InstanceOf => {
+            // Check if left is an instance of right (constructor)
+            match (l, r) {
+                (Value::Object(obj), Value::Object(constructor)) => Ok(Value::Boolean(is_instance_of(&obj, &constructor))),
+                _ => Ok(Value::Boolean(false)),
+            }
+        }
     }
 }
 
@@ -2184,6 +2201,7 @@ pub enum BinaryOp {
     GreaterThan,
     LessEqual,
     GreaterEqual,
+    InstanceOf,
 }
 
 fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
@@ -2428,6 +2446,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "this" => tokens.push(Token::This),
                     "static" => tokens.push(Token::Static),
                     "new" => tokens.push(Token::New),
+                    "instanceof" => tokens.push(Token::InstanceOf),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
@@ -2491,6 +2510,7 @@ pub enum Token {
     This,
     Static,
     New,
+    InstanceOf,
     Function,
     Return,
     If,
@@ -2616,6 +2636,11 @@ fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
             Ok(Expr::Binary(Box::new(left), BinaryOp::GreaterEqual, Box::new(right)))
+        }
+        Token::InstanceOf => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::InstanceOf, Box::new(right)))
         }
         _ => Ok(left),
     }

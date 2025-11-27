@@ -165,6 +165,27 @@ pub(crate) fn create_class_object(
 
     // Create the prototype object first
     let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+    // Handle inheritance if extends is specified
+    if let Some(parent_class_name) = extends {
+        // Look up the parent class in the environment
+        if let Some(parent_class_val) = obj_get(env, parent_class_name) {
+            if let Value::Object(parent_class_obj) = &*parent_class_val.borrow() {
+                // Get the parent class's prototype
+                if let Some(parent_proto_val) = obj_get(parent_class_obj, "prototype") {
+                    if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                        // Set the child class prototype's __proto__ to parent prototype
+                        obj_set_val(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()));
+                    }
+                }
+            }
+        } else {
+            return Err(JSError::EvaluationError {
+                message: format!("Parent class '{}' not found", parent_class_name),
+            });
+        }
+    }
+
     obj_set_val(&class_obj, "prototype", Value::Object(prototype_obj.clone()));
 
     // Store class definition for later use
@@ -266,4 +287,142 @@ pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPt
         }
     }
     false
+}
+
+pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // super refers to the parent class prototype
+    // We need to find it from the current class context
+    if let Some(this_val) = obj_get(env, "this") {
+        if let Value::Object(instance) = &*this_val.borrow() {
+            if let Some(proto_val) = obj_get(instance, "__proto__") {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    // Get the parent prototype from the current prototype's __proto__
+                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                        return Ok(parent_proto_val.borrow().clone());
+                    }
+                }
+            }
+        }
+    }
+    Err(JSError::EvaluationError {
+        message: "super can only be used in class methods or constructors".to_string(),
+    })
+}
+
+pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
+    // super() calls the parent constructor
+    if let Some(this_val) = obj_get(env, "this") {
+        if let Value::Object(instance) = &*this_val.borrow() {
+            if let Some(proto_val) = obj_get(instance, "__proto__") {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    // Get the parent prototype
+                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                            // Find the parent class constructor
+                            if let Some(parent_class_def_val) = obj_get(parent_proto_obj, "__class_def__") {
+                                if let Value::ClassDefinition(ref parent_class_def) = *parent_class_def_val.borrow() {
+                                    // Call parent constructor
+                                    for member in &parent_class_def.members {
+                                        if let ClassMember::Constructor(params, body) = member {
+                                            // Create function environment with 'this' bound to instance
+                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+
+                                            // Bind 'this' to the instance
+                                            obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+
+                                            // Bind parameters
+                                            for (i, param) in params.iter().enumerate() {
+                                                if i < args.len() {
+                                                    let arg_val = evaluate_expr(env, &args[i])?;
+                                                    obj_set_val(&func_env, param, arg_val);
+                                                }
+                                            }
+
+                                            // Execute parent constructor body
+                                            return evaluate_statements(&func_env, &body);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(JSError::EvaluationError {
+        message: "super() can only be called in class constructors".to_string(),
+    })
+}
+
+pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Result<Value, JSError> {
+    // super.property accesses parent class properties
+    if let Some(this_val) = obj_get(env, "this") {
+        if let Value::Object(instance) = &*this_val.borrow() {
+            if let Some(proto_val) = obj_get(instance, "__proto__") {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    // Get the parent prototype
+                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                            // Look for property in parent prototype
+                            if let Some(prop_val) = obj_get(parent_proto_obj, prop) {
+                                return Ok(prop_val.borrow().clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(JSError::EvaluationError {
+        message: format!("Property '{}' not found in parent class", prop),
+    })
+}
+
+pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &[Expr]) -> Result<Value, JSError> {
+    // super.method() calls parent class methods
+    if let Some(this_val) = obj_get(env, "this") {
+        if let Value::Object(instance) = &*this_val.borrow() {
+            if let Some(proto_val) = obj_get(instance, "__proto__") {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    // Get the parent prototype
+                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                            // Look for method in parent prototype
+                            if let Some(method_val) = obj_get(parent_proto_obj, method) {
+                                match &*method_val.borrow() {
+                                    Value::Closure(params, body, _captured_env) => {
+                                        // Create function environment with 'this' bound to instance
+                                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+
+                                        // Bind 'this' to the instance
+                                        obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+
+                                        // Bind parameters
+                                        for (i, param) in params.iter().enumerate() {
+                                            if i < args.len() {
+                                                let arg_val = evaluate_expr(env, &args[i])?;
+                                                obj_set_val(&func_env, param, arg_val);
+                                            }
+                                        }
+
+                                        // Execute method body
+                                        return evaluate_statements(&func_env, body);
+                                    }
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: format!("'{}' is not a method in parent class", method),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err(JSError::EvaluationError {
+        message: format!("Method '{}' not found in parent class", method),
+    })
 }

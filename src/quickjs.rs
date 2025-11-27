@@ -5,7 +5,8 @@ use crate::error::JSError;
 use crate::js_array::is_array;
 use crate::js_array::set_array_length;
 use crate::js_class::{
-    call_class_method, create_class_object, evaluate_new, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
+    call_class_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call, evaluate_super_method,
+    evaluate_super_property, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
 };
 use crate::js_console;
 use crate::js_math;
@@ -1453,6 +1454,10 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => evaluate_new(env, constructor, args),
+        Expr::Super => evaluate_super(env),
+        Expr::SuperCall(args) => evaluate_super_call(env, args),
+        Expr::SuperProperty(prop) => evaluate_super_property(env, prop),
+        Expr::SuperMethod(method, args) => evaluate_super_method(env, method, args),
     }
 }
 
@@ -2186,6 +2191,10 @@ pub enum Expr {
     Array(Vec<Expr>),                      // array literal: [elem1, elem2, ...]
     This,                                  // this keyword
     New(Box<Expr>, Vec<Expr>),             // new expression: new Constructor(args)
+    Super,                                 // super keyword
+    SuperCall(Vec<Expr>),                  // super() call in constructor
+    SuperProperty(String),                 // super.property access
+    SuperMethod(String, Vec<Expr>),        // super.method() call
 }
 
 #[derive(Debug, Clone)]
@@ -2775,7 +2784,75 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
         }
         Token::Identifier(name) => Expr::Var(name),
-        Token::This => Expr::Var("this".to_string()),
+        Token::This => Expr::This,
+        Token::Super => {
+            // Check if followed by ( for super() call
+            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                tokens.remove(0); // consume '('
+                let mut args = Vec::new();
+                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                    loop {
+                        let arg = parse_expression(tokens)?;
+                        args.push(arg);
+                        if tokens.is_empty() {
+                            return Err(JSError::ParseError);
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            break;
+                        }
+                        if !matches!(tokens[0], Token::Comma) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume ','
+                    }
+                }
+                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume ')'
+                Expr::SuperCall(args)
+            } else if !tokens.is_empty() && matches!(tokens[0], Token::Dot) {
+                tokens.remove(0); // consume '.'
+                if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
+                    return Err(JSError::ParseError);
+                }
+                let prop = if let Token::Identifier(name) = tokens.remove(0) {
+                    name
+                } else {
+                    return Err(JSError::ParseError);
+                };
+                // Check if followed by ( for method call
+                if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                    tokens.remove(0); // consume '('
+                    let mut args = Vec::new();
+                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                        loop {
+                            let arg = parse_expression(tokens)?;
+                            args.push(arg);
+                            if tokens.is_empty() {
+                                return Err(JSError::ParseError);
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[0], Token::Comma) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume ','
+                        }
+                    }
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume ')'
+                    Expr::SuperMethod(prop, args)
+                } else {
+                    Expr::SuperProperty(prop)
+                }
+            } else {
+                Expr::Super
+            }
+        }
         Token::LBrace => {
             // Parse object literal
             let mut properties = Vec::new();

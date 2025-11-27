@@ -157,4 +157,95 @@ mod class_tests {
         }
         assert!(result.is_ok(), "instanceof operator should work");
     }
+
+    #[test]
+    fn test_class_inheritance() {
+        let script = r#"
+            class Animal {
+                constructor(name) {
+                    this.name = name;
+                }
+
+                speak() {
+                    return this.name + " makes a sound";
+                }
+            }
+
+            class Dog extends Animal {
+                constructor(name, breed) {
+                    super(name);
+                    this.breed = breed;
+                }
+
+                speak() {
+                    return super.speak() + " - Woof!";
+                }
+
+                getBreed() {
+                    return this.breed;
+                }
+            }
+
+            let dog = new Dog("Buddy", "Golden Retriever");
+        "#;
+
+        let result = evaluate_script(script);
+        assert!(result.is_ok(), "Class inheritance should work");
+    }
+
+    #[test]
+    fn test_super_in_constructor() {
+        let script = r#"
+            class Parent {
+                constructor(value) {
+                    this.value = value;
+                }
+            }
+
+            class Child extends Parent {
+                constructor(value, extra) {
+                    super(value);
+                    this.extra = extra;
+                }
+            }
+
+            let child = new Child("test", "more");
+            child.value + " " + child.extra;
+        "#;
+
+        let result = evaluate_script(script);
+        match &result {
+            Ok(val) => println!("Success: {:?}", val),
+            Err(e) => println!("Error: {:?}", e),
+        }
+        assert!(result.is_ok(), "super() in constructor should work");
+    }
+
+    #[test]
+    fn test_super_method_call() {
+        let script = r#"
+            class Calculator {
+                add(a, b) {
+                    return a + b;
+                }
+            }
+
+            class AdvancedCalculator extends Calculator {
+                add(a, b) {
+                    let base = super.add(a, b);
+                    return base * 2;
+                }
+            }
+
+            let calc = new AdvancedCalculator();
+            calc.add(3, 4);
+        "#;
+
+        let result = evaluate_script(script);
+        match &result {
+            Ok(val) => println!("Success: {:?}", val),
+            Err(e) => println!("Error: {:?}", e),
+        }
+        assert!(result.is_ok(), "super.method() should work");
+    }
 }

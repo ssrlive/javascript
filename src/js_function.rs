@@ -1,6 +1,7 @@
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
+use crate::js_regexp::handle_regexp_constructor;
 use crate::quickjs::{evaluate_expr, utf8_to_utf16, Expr, JSObjectDataPtr, Value};
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -266,6 +267,32 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "Date" => {
             // Date constructor - create a Date object
             handle_date_constructor(args, env)
+        }
+        "new" => {
+            // Handle new expressions: new Constructor(args)
+            if args.len() == 1 {
+                if let Expr::Call(constructor_expr, constructor_args) = &args[0] {
+                    if let Expr::Var(constructor_name) = &**constructor_expr {
+                        match constructor_name.as_str() {
+                            "RegExp" => return crate::js_regexp::handle_regexp_constructor(constructor_args, env),
+                            "Array" => return crate::js_array::handle_array_constructor(constructor_args, env),
+                            "Date" => return crate::js_date::handle_date_constructor(constructor_args, env),
+                            _ => {
+                                return Err(JSError::EvaluationError {
+                                    message: format!("Constructor {constructor_name} not implemented"),
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+            Err(JSError::EvaluationError {
+                message: "Invalid new expression".to_string(),
+            })
+        }
+        "RegExp" => {
+            // RegExp constructor - create a RegExp object
+            handle_regexp_constructor(args, env)
         }
         "eval" => {
             // eval function - execute the code

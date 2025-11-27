@@ -831,35 +831,7 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
 
 pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
     log::debug!("evaluate_script called with script len {}", script.len());
-    // Remove simple import lines that we've already handled via shim injection
-    let mut filtered = String::new();
-    for (i, line) in script.lines().enumerate() {
-        // A line may contain multiple statements separated by ';' (common when passing -e).
-        // Split on ';' and handle each segment individually so we don't drop non-import statements.
-        let parts: Vec<&str> = line.split(';').collect();
-        for (pi, part) in parts.iter().enumerate() {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
-            }
-            log::trace!("script part[{i}]='{p}'");
-            if p.starts_with("import * as") && p.contains("from") {
-                log::debug!("skipping import part[{i}]: \"{p}\"");
-                continue;
-            }
-            filtered.push_str(p);
-            // Re-add semicolon only if this part was followed by a semicolon in the original line
-            if pi + 1 < parts.len() {
-                filtered.push(';');
-            }
-        }
-        filtered.push('\n');
-    }
-
-    // Remove any trailing newline(s) added during filtering to avoid an extra
-    // empty statement at the end when tokenizing/parsing.
-    let filtered = filtered.trim_end_matches('\n').to_string();
-
+    let filtered = filter_input_script(script);
     log::trace!("filtered script:\n{}", filtered);
     let mut tokens = match tokenize(&filtered) {
         Ok(t) => t,
@@ -1441,6 +1413,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("Boolean".to_string()))
     } else if name == "Date" {
         Ok(Value::Function("Date".to_string()))
+    } else if name == "RegExp" {
+        Ok(Value::Function("RegExp".to_string()))
+    } else if name == "new" {
+        Ok(Value::Function("new".to_string()))
     } else if name == "NaN" {
         Ok(Value::Number(f64::NAN))
     } else {
@@ -1680,6 +1656,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
                     return crate::js_date::handle_date_method(&*obj_map.borrow(), method, args);
+                } else if obj_map.borrow().contains_key("__regex") {
+                    // RegExp instance methods
+                    return crate::js_regexp::handle_regexp_method(&obj_map, method, args, env);
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     return crate::js_array::handle_array_instance_method(&obj_map, method, args, env, &**obj_expr);
@@ -2106,7 +2085,27 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                         Err(_) => return Err(JSError::TokenizationError), // Invalid hex
                     }
                 }
-                _ => return Err(JSError::TokenizationError), // Invalid escape sequence
+                'x' => {
+                    // Hex escape sequence \xHH
+                    *start += 1;
+                    if *start + 2 > chars.len() {
+                        return Err(JSError::TokenizationError);
+                    }
+                    let hex_str: String = chars[*start..*start + 2].iter().collect();
+                    *start += 1; // will be incremented by 1 at the end
+                    match u8::from_str_radix(&hex_str, 16) {
+                        Ok(code) => {
+                            result.push(code as u16);
+                        }
+                        Err(_) => return Err(JSError::TokenizationError),
+                    }
+                }
+                // For other escapes (regex escapes like \., \s, \], etc.) keep the backslash
+                // so the regex engine receives the escape sequence. Push '\' then the char.
+                other => {
+                    result.push('\\' as u16);
+                    result.push(other as u16);
+                }
             }
         } else {
             result.push(chars[*start] as u16);
@@ -2528,7 +2527,58 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 expr
             }
         }
-        Token::Identifier(name) => Expr::Var(name),
+        Token::Identifier(name) => {
+            if name == "new" {
+                // Parse only the constructor target and its immediate
+                // argument list (if present). Do NOT consume chained
+                // postfix operators (like `.toString()`) here — those
+                // belong to the overall expression after the `new`.
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
+
+                // Expect a constructor identifier next
+                let constructor = match tokens.remove(0) {
+                    Token::Identifier(n) => Expr::Var(n),
+                    _ => return Err(JSError::ParseError),
+                };
+
+                // If there's a parenthesized argument list, parse it (but
+                // don't consume any further postfix operators)
+                let cons_call = if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                    tokens.remove(0); // consume '('
+                    let mut args = Vec::new();
+                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                        loop {
+                            let arg = parse_expression(tokens)?;
+                            args.push(arg);
+                            if tokens.is_empty() {
+                                return Err(JSError::ParseError);
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[0], Token::Comma) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume ','
+                        }
+                    }
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume ')'
+                    Expr::Call(Box::new(constructor), args)
+                } else {
+                    // No argument list: treat as constructor reference
+                    constructor
+                };
+
+                Expr::Call(Box::new(Expr::Var("new".to_string())), vec![cons_call])
+            } else {
+                Expr::Var(name)
+            }
+        }
         Token::LBrace => {
             // Parse object literal
             let mut properties = Vec::new();
@@ -2948,4 +2998,78 @@ impl JSRuntime {
         self.atom_count += 1;
         new_atom
     }
+}
+
+fn filter_input_script(script: &str) -> String {
+    // Remove simple import lines that we've already handled via shim injection
+    let mut filtered = String::new();
+    for (i, line) in script.lines().enumerate() {
+        // Split line on semicolons only when not inside quotes/backticks
+        let mut current = String::new();
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut in_backtick = false;
+        let mut escape = false;
+        // track parts along with whether they were followed by a semicolon
+        let mut parts: Vec<(String, bool)> = Vec::new();
+        for ch in line.chars() {
+            if escape {
+                current.push(ch);
+                escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                escape = true;
+                current.push(ch);
+                continue;
+            }
+            if ch == '\'' && !in_double && !in_backtick {
+                in_single = !in_single;
+                current.push(ch);
+                continue;
+            }
+            if ch == '"' && !in_single && !in_backtick {
+                in_double = !in_double;
+                current.push(ch);
+                continue;
+            }
+            if ch == '`' && !in_single && !in_double {
+                in_backtick = !in_backtick;
+                current.push(ch);
+                continue;
+            }
+            if ch == ';' && !in_single && !in_double && !in_backtick {
+                parts.push((current.clone(), true));
+                current.clear();
+                continue;
+            }
+            current.push(ch);
+        }
+        // If there is a trailing part (possibly no trailing semicolon), add it
+        if !current.is_empty() {
+            parts.push((current, false));
+        }
+
+        for (_pi, (part, had_semicolon)) in parts.iter().enumerate() {
+            let p = part.trim();
+            if p.is_empty() {
+                continue;
+            }
+            log::trace!("script part[{i}]='{p}'");
+            if p.starts_with("import * as") && p.contains("from") {
+                log::debug!("skipping import part[{i}]: \"{p}\"");
+                continue;
+            }
+            filtered.push_str(p);
+            // Re-add semicolon if the original part was followed by a semicolon
+            if *had_semicolon {
+                filtered.push(';');
+            }
+        }
+        filtered.push('\n');
+    }
+
+    // Remove any trailing newline(s) added during filtering to avoid an extra
+    // empty statement at the end when tokenizing/parsing.
+    filtered.trim_end_matches('\n').to_string()
 }

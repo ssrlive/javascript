@@ -11,6 +11,7 @@ pub mod js_json;
 pub mod js_math;
 pub mod js_object;
 pub mod js_os;
+pub mod js_regexp;
 pub mod js_std;
 pub mod js_string;
 pub mod quickjs;

@@ -1224,4 +1224,85 @@ mod builtin_functions_tests {
             _ => panic!("Expected typeof function(){{}} to be 'function', got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_delete_operator() {
+        // Test deleting a property from an object
+        let script = "let obj = {}; obj.x = 42; delete obj.x; obj.x";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => (), // obj.x should be undefined after deletion
+            _ => panic!("Expected obj.x to be undefined after deletion, got {:?}", result),
+        }
+
+        // Test deleting a non-existent property
+        let script = "let obj = {}; delete obj.nonexistent";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true), // Should return true even for non-existent properties
+            _ => panic!("Expected delete on non-existent property to return true, got {:?}", result),
+        }
+
+        // Test deleting a variable (should return false)
+        let script = "let x = 42; delete x";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false), // Cannot delete local variables
+            _ => panic!("Expected delete on local variable to return false, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_void_operator() {
+        // Test void with a number
+        let script = "void 42";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => (),
+            _ => panic!("Expected void 42 to return undefined, got {:?}", result),
+        }
+
+        // Test void with an expression
+        let script = "void (1 + 2 + 3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => (),
+            _ => panic!("Expected void (1 + 2 + 3) to return undefined, got {:?}", result),
+        }
+
+        // Test void with a string
+        let script = "void 'hello'";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => (),
+            _ => panic!("Expected void 'hello' to return undefined, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_in_operator() {
+        // Test property exists
+        let script = "let obj = {}; obj.x = 42; 'x' in obj";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected 'x' in obj to return true, got {:?}", result),
+        }
+
+        // Test property doesn't exist
+        let script = "let obj = {}; 'nonexistent' in obj";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            _ => panic!("Expected 'nonexistent' in obj to return false, got {:?}", result),
+        }
+
+        // Test inherited property
+        let script = "let proto = {}; proto.inherited = 'yes'; let obj = {}; obj.__proto__ = proto; 'inherited' in obj";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            _ => panic!("Expected 'inherited' in obj to return true for inherited property, got {result:?}"),
+        }
+    }
 }

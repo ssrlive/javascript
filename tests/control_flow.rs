@@ -77,4 +77,34 @@ mod control_flow_tests {
             _ => panic!("Expected InfiniteLoopError, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_for_of_loop() {
+        let script = "let arr = []; arr.push(1); arr.push(2); arr.push(3); let sum = 0; for (let x of arr) { sum = sum + x; } sum";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0), // 1+2+3 = 6
+            _ => panic!("Expected number 6.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_of_loop_empty_array() {
+        let script = "let arr = []; let count = 0; for (let x of arr) { count = count + 1; } count";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 0.0),
+            _ => panic!("Expected number 0.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_of_loop_single_element() {
+        let script = "let arr = []; arr.push(42); let result = 0; for (let x of arr) { result = x; } result";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected number 42.0, got {:?}", result),
+        }
+    }
 }

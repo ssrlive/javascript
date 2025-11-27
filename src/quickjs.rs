@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::error::JSError;
+use crate::js_array::get_array_length;
 use crate::js_array::is_array;
 use crate::js_array::set_array_length;
 use crate::js_class::{
@@ -1078,7 +1079,43 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
         tokens.remove(0); // consume (
 
-        // Parse initialization
+        // Check if this is a for-of loop
+        if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
+            let saved_declaration_token = tokens[0].clone();
+            tokens.remove(0); // consume let/var/const
+            if let Some(Token::Identifier(var_name)) = tokens.get(0).cloned() {
+                let saved_identifier_token = tokens[0].clone();
+                tokens.remove(0);
+                if tokens.len() >= 1 && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                    // This is a for-of loop
+                    tokens.remove(0); // consume of
+                    let iterable = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume {
+                    let body = parse_statements(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume }
+                    return Ok(Statement::ForOf(var_name, iterable, body));
+                } else {
+                    // This is a regular for loop with variable declaration, put tokens back
+                    tokens.insert(0, saved_identifier_token);
+                    tokens.insert(0, saved_declaration_token);
+                }
+            } else {
+                // Not an identifier, put back the declaration token
+                tokens.insert(0, saved_declaration_token);
+            }
+        }
+
+        // Parse initialization (regular for loop)
         let init = if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
             Some(Box::new(parse_statement(tokens)?))
         } else if !matches!(tokens[0], Token::Semicolon) {
@@ -1454,6 +1491,44 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     iterations += 1;
                 }
             }
+            Statement::ForOf(var, iterable, body) => {
+                let iterable_val = evaluate_expr(env, iterable)?;
+                match iterable_val {
+                    Value::Object(obj_map) => {
+                        if is_array(&obj_map) {
+                            let len = get_array_length(&obj_map).unwrap_or(0);
+                            let mut iterations = 0;
+                            for i in 0..len {
+                                if iterations >= MAX_LOOP_ITERATIONS {
+                                    return Err(JSError::InfiniteLoopError {
+                                        iterations: MAX_LOOP_ITERATIONS,
+                                    });
+                                }
+                                let key = i.to_string();
+                                if let Some(element_rc) = obj_get(&obj_map, &key) {
+                                    let element = element_rc.borrow().clone();
+                                    env_set(env, var.as_str(), element)?;
+                                    let result = evaluate_statements(env, body);
+                                    match result {
+                                        Ok(val) => last_value = val,
+                                        Err(err) => return Err(err),
+                                    }
+                                }
+                                iterations += 1;
+                            }
+                        } else {
+                            return Err(JSError::EvaluationError {
+                                message: "for-of loop requires an iterable".to_string(),
+                            });
+                        }
+                    }
+                    _ => {
+                        return Err(JSError::EvaluationError {
+                            message: "for-of loop requires an iterable".to_string(),
+                        });
+                    }
+                }
+            }
         }
     }
     Ok(last_value)
@@ -1468,6 +1543,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Assign(_target, value) => evaluate_assign(env, value),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
         Expr::TypeOf(expr) => evaluate_typeof(env, expr),
+        Expr::Delete(expr) => evaluate_delete(env, expr),
+        Expr::Void(expr) => evaluate_void(env, expr),
         Expr::Binary(left, op, right) => evaluate_binary(env, left, op, right),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
@@ -1578,6 +1655,54 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::ClassDefinition(_) => "function",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
+}
+
+fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    match expr {
+        Expr::Var(_) => {
+            // Cannot delete local variables
+            Ok(Value::Boolean(false))
+        }
+        Expr::Property(obj, prop) => {
+            // Delete property from object
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    let deleted = obj_delete(&obj_map, prop);
+                    Ok(Value::Boolean(deleted))
+                }
+                _ => Ok(Value::Boolean(false)),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            // Delete indexed property
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    let deleted = obj_delete(&obj_map, &key);
+                    Ok(Value::Boolean(deleted))
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    let deleted = obj_delete(&obj_map, &key);
+                    Ok(Value::Boolean(deleted))
+                }
+                _ => Ok(Value::Boolean(false)),
+            }
+        }
+        _ => {
+            // Cannot delete other types of expressions
+            Ok(Value::Boolean(false))
+        }
+    }
+}
+
+fn evaluate_void(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    // Evaluate the expression but always return undefined
+    evaluate_expr(env, expr)?;
+    Ok(Value::Undefined)
 }
 
 fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
@@ -1697,6 +1822,16 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             // Check if left is an instance of right (constructor)
             match (l, r) {
                 (Value::Object(obj), Value::Object(constructor)) => Ok(Value::Boolean(is_instance_of(&obj, &constructor))),
+                _ => Ok(Value::Boolean(false)),
+            }
+        }
+        BinaryOp::In => {
+            // Check if property exists in object
+            match (l, r) {
+                (Value::String(prop), Value::Object(obj)) => {
+                    let prop_str = String::from_utf16_lossy(&prop);
+                    Ok(Value::Boolean(obj_get(&obj, &prop_str).is_some()))
+                }
                 _ => Ok(Value::Boolean(false)),
             }
         }
@@ -2095,6 +2230,11 @@ pub fn obj_set_rc(map: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) 
     map.borrow_mut().insert(key.to_string(), val_rc);
 }
 
+pub fn obj_delete(map: &JSObjectDataPtr, key: &str) -> bool {
+    map.borrow_mut().remove(key);
+    true // In JavaScript, delete always returns true
+}
+
 pub fn env_get(env: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
     env.borrow().get(key)
 }
@@ -2194,6 +2334,7 @@ pub enum Statement {
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
+    ForOf(String, Expr, Vec<Statement>),              // variable, iterable, body
     TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
     Throw(Expr),                                      // throw expression
 }
@@ -2214,6 +2355,9 @@ impl std::fmt::Debug for Statement {
             Statement::For(init, cond, incr, body) => {
                 write!(f, "For({:?}, {:?}, {:?}, {:?})", init, cond, incr, body)
             }
+            Statement::ForOf(var, iterable, body) => {
+                write!(f, "ForOf({}, {:?}, {:?})", var, iterable, body)
+            }
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
                 write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
             }
@@ -2233,6 +2377,8 @@ pub enum Expr {
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
     TypeOf(Box<Expr>),
+    Delete(Box<Expr>),
+    Void(Box<Expr>),
     Assign(Box<Expr>, Box<Expr>), // target, value
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
@@ -2262,6 +2408,7 @@ pub enum BinaryOp {
     LessEqual,
     GreaterEqual,
     InstanceOf,
+    In,
 }
 
 fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
@@ -2508,6 +2655,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "new" => tokens.push(Token::New),
                     "instanceof" => tokens.push(Token::InstanceOf),
                     "typeof" => tokens.push(Token::TypeOf),
+                    "delete" => tokens.push(Token::Delete),
+                    "void" => tokens.push(Token::Void),
+                    "in" => tokens.push(Token::In),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
@@ -2573,6 +2723,9 @@ pub enum Token {
     New,
     InstanceOf,
     TypeOf,
+    In,
+    Delete,
+    Void,
     Function,
     Return,
     If,
@@ -2704,6 +2857,11 @@ fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let right = parse_comparison(tokens)?;
             Ok(Expr::Binary(Box::new(left), BinaryOp::InstanceOf, Box::new(right)))
         }
+        Token::In => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::In, Box::new(right)))
+        }
         _ => Ok(left),
     }
 }
@@ -2765,6 +2923,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::TypeOf => {
             let inner = parse_primary(tokens)?;
             Expr::TypeOf(Box::new(inner))
+        }
+        Token::Delete => {
+            let inner = parse_primary(tokens)?;
+            Expr::Delete(Box::new(inner))
+        }
+        Token::Void => {
+            let inner = parse_primary(tokens)?;
+            Expr::Void(Box::new(inner))
         }
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression

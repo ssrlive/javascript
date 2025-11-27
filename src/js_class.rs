@@ -144,6 +144,18 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 "RegExp" => {
                     return crate::js_regexp::handle_regexp_constructor(args, env);
                 }
+                "Object" => {
+                    return handle_object_constructor(args, env);
+                }
+                "Number" => {
+                    return handle_number_constructor(args, env);
+                }
+                "Boolean" => {
+                    return handle_boolean_constructor(args, env);
+                }
+                "String" => {
+                    return handle_string_constructor(args, env);
+                }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);
                 }
@@ -475,4 +487,146 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
     Err(JSError::EvaluationError {
         message: format!("Method '{}' not found in parent class", method),
     })
+}
+
+/// Handle Object constructor calls
+pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        // Object() - create empty object
+        let obj = Rc::new(RefCell::new(JSObjectData::new()));
+        return Ok(Value::Object(obj));
+    }
+    // Object(value) - convert value to object
+    let arg_val = evaluate_expr(env, &args[0])?;
+    match arg_val {
+        Value::Undefined => {
+            // Object(undefined) creates empty object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            Ok(Value::Object(obj))
+        }
+        Value::Object(obj) => {
+            // Object(object) returns the object itself
+            Ok(Value::Object(obj))
+        }
+        Value::Number(n) => {
+            // Object(number) creates Number object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_val(&obj, "valueOf", Value::Function("Number_valueOf".to_string()));
+            obj_set_val(&obj, "toString", Value::Function("Number_toString".to_string()));
+            obj_set_val(&obj, "__value__", Value::Number(n));
+            Ok(Value::Object(obj))
+        }
+        Value::Boolean(b) => {
+            // Object(boolean) creates Boolean object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_val(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()));
+            obj_set_val(&obj, "toString", Value::Function("Boolean_toString".to_string()));
+            obj_set_val(&obj, "__value__", Value::Boolean(b));
+            Ok(Value::Object(obj))
+        }
+        Value::String(s) => {
+            // Object(string) creates String object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_val(&obj, "valueOf", Value::Function("String_valueOf".to_string()));
+            obj_set_val(&obj, "toString", Value::Function("String_toString".to_string()));
+            obj_set_val(&obj, "length", Value::Number(s.len() as f64));
+            obj_set_val(&obj, "__value__", Value::String(s));
+            Ok(Value::Object(obj))
+        }
+        _ => {
+            // For other types, return empty object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            Ok(Value::Object(obj))
+        }
+    }
+}
+
+/// Handle Number constructor calls
+pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let num_val = if args.is_empty() {
+        // Number() - returns 0
+        0.0
+    } else {
+        // Number(value) - convert value to number
+        let arg_val = evaluate_expr(env, &args[0])?;
+        match arg_val {
+            Value::Number(n) => n,
+            Value::String(s) => {
+                let str_val = String::from_utf16_lossy(&s);
+                str_val.trim().parse::<f64>().unwrap_or(f64::NAN)
+            }
+            Value::Boolean(b) => {
+                if b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Value::Undefined => f64::NAN,
+            Value::Object(_) => f64::NAN,
+            _ => f64::NAN,
+        }
+    };
+
+    // Create Number object
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&obj, "valueOf", Value::Function("Number_valueOf".to_string()));
+    obj_set_val(&obj, "toString", Value::Function("Number_toString".to_string()));
+    obj_set_val(&obj, "__value__", Value::Number(num_val));
+    Ok(Value::Object(obj))
+}
+
+/// Handle Boolean constructor calls
+pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let bool_val = if args.is_empty() {
+        // Boolean() - returns false
+        false
+    } else {
+        // Boolean(value) - convert value to boolean
+        let arg_val = evaluate_expr(env, &args[0])?;
+        match arg_val {
+            Value::Boolean(b) => b,
+            Value::Number(n) => n != 0.0 && !n.is_nan(),
+            Value::String(s) => !s.is_empty(),
+            Value::Undefined => false,
+            Value::Object(_) => true,
+            _ => false,
+        }
+    };
+
+    // Create Boolean object
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()));
+    obj_set_val(&obj, "toString", Value::Function("Boolean_toString".to_string()));
+    obj_set_val(&obj, "__value__", Value::Boolean(bool_val));
+    Ok(Value::Object(obj))
+}
+
+/// Handle String constructor calls
+pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let str_val = if args.is_empty() {
+        // String() - returns empty string
+        Vec::new()
+    } else {
+        // String(value) - convert value to string
+        let arg_val = evaluate_expr(env, &args[0])?;
+        match arg_val {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => utf8_to_utf16(&n.to_string()),
+            Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+            Value::Undefined => utf8_to_utf16("undefined"),
+            Value::Object(_) => utf8_to_utf16("[object Object]"),
+            Value::Function(name) => utf8_to_utf16(&format!("[Function: {}]", name)),
+            Value::Closure(_, _, _) => utf8_to_utf16("[Function]"),
+            Value::ClassDefinition(_) => utf8_to_utf16("[Class]"),
+        }
+    };
+
+    // Create String object
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_val(&obj, "valueOf", Value::Function("String_valueOf".to_string()));
+    obj_set_val(&obj, "toString", Value::Function("String_toString".to_string()));
+    obj_set_val(&obj, "length", Value::Number(str_val.len() as f64));
+    obj_set_val(&obj, "__value__", Value::String(str_val));
+    Ok(Value::Object(obj))
 }

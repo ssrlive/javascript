@@ -160,7 +160,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 }
 
 /// Handle Date instance method calls
-pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr]) -> Result<Value, JSError> {
     match method {
         "toString" => {
             if !args.is_empty() {
@@ -168,7 +168,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.toString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     // Convert timestamp to DateTime
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
@@ -195,7 +195,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getTime() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
@@ -215,7 +215,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.valueOf() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
@@ -235,7 +235,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getFullYear() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.year() as f64))
@@ -259,7 +259,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getMonth() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         // JavaScript months are 0-based
@@ -284,7 +284,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getDate() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.day() as f64))
@@ -308,7 +308,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getHours() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.hour() as f64))
@@ -332,7 +332,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getMinutes() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.minute() as f64))
@@ -356,7 +356,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getSeconds() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.second() as f64))
@@ -380,7 +380,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectData, method: &str, args: &[E
                     message: "Date.getMilliseconds() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.timestamp_subsec_millis() as f64))

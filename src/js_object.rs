@@ -127,9 +127,18 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             });
         }
         Value::Object(ref obj_map) => {
+            // Check if this is a wrapped primitive object
+            if let Some(wrapped_val) = obj_get(obj_map, "__value__") {
+                match &*wrapped_val.borrow() {
+                    Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                    Value::Boolean(b) => return Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                    Value::String(s) => return Ok(Value::String(s.clone())),
+                    _ => {}
+                }
+            }
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if obj_map.borrow().contains_key("__timestamp") {
-                return crate::js_date::handle_date_method(&*obj_map.borrow(), "toString", args);
+                return crate::js_date::handle_date_method(obj_map, "toString", args);
             }
             // If this object looks like an array, join elements with comma
             if is_array(obj_map) {
@@ -155,5 +164,51 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
         Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
         Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
+    }
+}
+
+pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+    if !args.is_empty() {
+        return Err(JSError::TypeError {
+            message: format!(
+                "{}.valueOf() takes no arguments, but {} were provided",
+                match obj_val {
+                    Value::Number(_) => "Number",
+                    Value::String(_) => "String",
+                    Value::Boolean(_) => "Boolean",
+                    Value::Object(_) => "Object",
+                    Value::Function(_) => "Function",
+                    Value::Closure(_, _, _) => "Function",
+                    Value::Undefined => "undefined",
+                    Value::ClassDefinition(_) => "Class",
+                },
+                args.len()
+            ),
+        });
+    }
+    match obj_val {
+        Value::Number(n) => Ok(Value::Number(*n)),
+        Value::String(s) => Ok(Value::String(s.clone())),
+        Value::Boolean(b) => Ok(Value::Boolean(*b)),
+        Value::Undefined => {
+            return Err(JSError::TypeError {
+                message: "Cannot convert undefined to object".to_string(),
+            });
+        }
+        Value::Object(ref obj_map) => {
+            // Check if this is a wrapped primitive object
+            if let Some(wrapped_val) = obj_get(obj_map, "__value__") {
+                return Ok(wrapped_val.borrow().clone());
+            }
+            // If this object looks like a Date (has __timestamp), call Date.valueOf()
+            if obj_map.borrow().contains_key("__timestamp") {
+                return crate::js_date::handle_date_method(obj_map, "valueOf", args);
+            }
+            // For regular objects, return the object itself
+            Ok(Value::Object(obj_map.clone()))
+        }
+        Value::Function(name) => Ok(Value::Function(name.clone())),
+        Value::Closure(params, body, env) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
     }
 }

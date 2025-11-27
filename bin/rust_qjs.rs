@@ -10,12 +10,22 @@ fn main() {
     #[cfg(feature = "env_logger")]
     env_logger::init();
 
-    if args.len() < 3 || args[1] != "-e" {
-        eprintln!("Usage: {} -e script", args[0]);
+    let script: String;
+    if args.len() >= 3 && args[1] == "-e" {
+        script = args[2].clone();
+    } else if args.len() >= 2 && args[1] != "-h" {
+        // Read from file
+        match std::fs::read_to_string(&args[1]) {
+            Ok(content) => script = content,
+            Err(e) => {
+                eprintln!("Error reading file {}: {}", args[1], e);
+                process::exit(1);
+            }
+        }
+    } else {
+        eprintln!("Usage: {} [file.js | -e script]", args[0]);
         process::exit(1);
     }
-
-    let script = &args[2];
 
     // Evaluate using the script evaluator that handles imports
     let result = match evaluate_script(script) {

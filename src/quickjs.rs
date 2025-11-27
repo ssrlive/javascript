@@ -834,7 +834,8 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
     }
 }
 
-pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
+pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
+    let script = script.as_ref();
     log::debug!("evaluate_script called with script len {}", script.len());
     let filtered = filter_input_script(script);
     log::trace!("filtered script:\n{}", filtered);
@@ -889,6 +890,9 @@ pub fn evaluate_script(script: &str) -> Result<Value, JSError> {
             }
         }
     }
+
+    // Initialize global built-in constructors
+    initialize_global_constructors(&env);
 
     match evaluate_statements(&env, &statements) {
         Ok(v) => Ok(v),
@@ -1506,10 +1510,8 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         obj_set_val(&json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
         Ok(Value::Object(json_obj))
     } else if name == "Object" {
-        let object_obj = Rc::new(RefCell::new(JSObjectData::new()));
-        obj_set_val(&object_obj, "keys", Value::Function("Object.keys".to_string()));
-        obj_set_val(&object_obj, "values", Value::Function("Object.values".to_string()));
-        Ok(Value::Object(object_obj))
+        // Return Object constructor function, not an object with methods
+        Ok(Value::Function("Object".to_string()))
     } else if name == "parseInt" {
         Ok(Value::Function("parseInt".to_string()))
     } else if name == "parseFloat" {
@@ -1757,6 +1759,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 return js_console::handle_console_method(method_name, args, env);
             }
             (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
+            (obj_val, "valueOf") => crate::js_object::handle_value_of_method(&obj_val, args),
             (Value::Object(obj_map), method) => {
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
                 if obj_map.borrow().contains_key("sprintf") {
@@ -1795,7 +1798,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     return crate::js_object::handle_object_method(method, args, env);
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
-                    return crate::js_date::handle_date_method(&*obj_map.borrow(), method, args);
+                    return crate::js_date::handle_date_method(&obj_map, method, args);
                 } else if obj_map.borrow().contains_key("__regex") {
                     // RegExp instance methods
                     return crate::js_regexp::handle_regexp_method(&obj_map, method, args, env);
@@ -1811,6 +1814,16 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     Err(JSError::EvaluationError {
                         message: format!("Method {method} not found on object"),
                     })
+                }
+            }
+            (Value::Function(func_name), method) => {
+                // Handle constructor static methods
+                match func_name.as_str() {
+                    "Object" => crate::js_object::handle_object_method(method, args, env),
+                    "Array" => crate::js_array::handle_array_static_method(method, args, env),
+                    _ => Err(JSError::EvaluationError {
+                        message: format!("{} has no static method '{}'", func_name, method),
+                    }),
                 }
             }
             (Value::String(s), method) => crate::js_string::handle_string_method(&s, method, args, env),
@@ -3367,4 +3380,30 @@ fn filter_input_script(script: &str) -> String {
     // Remove any trailing newline(s) added during filtering to avoid an extra
     // empty statement at the end when tokenizing/parsing.
     filtered.trim_end_matches('\n').to_string()
+}
+
+/// Initialize global built-in constructors in the environment
+fn initialize_global_constructors(env: &JSObjectDataPtr) {
+    let mut env_borrow = env.borrow_mut();
+
+    // Object constructor
+    env_borrow.insert("Object".to_string(), Rc::new(RefCell::new(Value::Function("Object".to_string()))));
+
+    // Number constructor
+    env_borrow.insert("Number".to_string(), Rc::new(RefCell::new(Value::Function("Number".to_string()))));
+
+    // Boolean constructor
+    env_borrow.insert("Boolean".to_string(), Rc::new(RefCell::new(Value::Function("Boolean".to_string()))));
+
+    // String constructor
+    env_borrow.insert("String".to_string(), Rc::new(RefCell::new(Value::Function("String".to_string()))));
+
+    // Array constructor (already handled by js_array module)
+    env_borrow.insert("Array".to_string(), Rc::new(RefCell::new(Value::Function("Array".to_string()))));
+
+    // Date constructor (already handled by js_date module)
+    env_borrow.insert("Date".to_string(), Rc::new(RefCell::new(Value::Function("Date".to_string()))));
+
+    // RegExp constructor (already handled by js_regexp module)
+    env_borrow.insert("RegExp".to_string(), Rc::new(RefCell::new(Value::Function("RegExp".to_string()))));
 }

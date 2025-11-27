@@ -56,10 +56,10 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                         Value::Closure(params, body, captured_env) => {
                                             let func_env = captured_env.clone();
                                             if params.len() >= 1 {
-                                                env_set(&func_env, params[0].as_str(), element);
+                                                env_set(&func_env, params[0].as_str(), element)?;
                                             }
                                             if params.len() >= 2 {
-                                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64));
+                                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                                             }
                                             let mapped = evaluate_statements(&func_env, &body)?;
                                             result.push(mapped);
@@ -320,13 +320,13 @@ pub(crate) fn handle_array_instance_method(
                                 let func_env = captured_env.clone();
                                 // Map params: (element, index, array)
                                 if params.len() >= 1 {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone());
+                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64));
+                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                                 }
                                 if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
                                 let _ = evaluate_statements(&func_env, &body)?;
                             }
@@ -359,13 +359,13 @@ pub(crate) fn handle_array_instance_method(
                                 // Prepare function environment
                                 let func_env = captured_env.clone();
                                 if params.len() >= 1 {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone());
+                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64));
+                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                                 }
                                 if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
                                 let res = evaluate_statements(&func_env, &body)?;
                                 obj_set_val(&new_array, &idx.to_string(), res);
@@ -400,13 +400,13 @@ pub(crate) fn handle_array_instance_method(
                             Value::Closure(params, body, captured_env) => {
                                 let func_env = captured_env.clone();
                                 if params.len() >= 1 {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone());
+                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64));
+                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                                 }
                                 if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
                                 let res = evaluate_statements(&func_env, &body)?;
                                 // truthy check
@@ -472,16 +472,16 @@ pub(crate) fn handle_array_instance_method(
                                 let func_env = captured_env.clone();
                                 // build args for callback: first acc, then current element
                                 if params.len() >= 1 {
-                                    env_set(&func_env, params[0].as_str(), accumulator.clone());
+                                    env_set(&func_env, params[0].as_str(), accumulator.clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), val.borrow().clone());
+                                    env_set(&func_env, params[1].as_str(), val.borrow().clone())?;
                                 }
                                 if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Number(i as f64));
+                                    env_set(&func_env, params[2].as_str(), Value::Number(i as f64))?;
                                 }
                                 if params.len() >= 4 {
-                                    env_set(&func_env, params[3].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[3].as_str(), Value::Object(obj_map.clone()))?;
                                 }
                                 let res = evaluate_statements(&func_env, &body)?;
                                 accumulator = res;
@@ -516,13 +516,13 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback
                                 let func_env = captured_env.clone();
                                 if params.len() > 0 {
-                                    env_set(&func_env, params[0].as_str(), element.clone());
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val);
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
                                 }
                                 if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
 
                                 let res = evaluate_statements(&func_env, &body)?;
@@ -567,13 +567,13 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback
                                 let func_env = captured_env.clone();
                                 if params.len() > 0 {
-                                    env_set(&func_env, params[0].as_str(), element.clone());
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val);
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
                                 }
                                 if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
 
                                 let res = evaluate_statements(&func_env, &body)?;
@@ -618,13 +618,13 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback
                                 let func_env = captured_env.clone();
                                 if params.len() > 0 {
-                                    env_set(&func_env, params[0].as_str(), element.clone());
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val);
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
                                 }
                                 if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
 
                                 let res = evaluate_statements(&func_env, &body)?;
@@ -669,13 +669,13 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback
                                 let func_env = captured_env.clone();
                                 if params.len() > 0 {
-                                    env_set(&func_env, params[0].as_str(), element.clone());
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
                                 if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val);
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
                                 }
                                 if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
 
                                 let res = evaluate_statements(&func_env, &body)?;
@@ -840,11 +840,20 @@ pub(crate) fn handle_array_instance_method(
                     elements.sort_by(|a, b| {
                         // Create function environment for comparison
                         let func_env = captured_env.clone();
+                        let mut param_set = true;
                         if params.len() >= 1 {
-                            env_set(&func_env, params[0].as_str(), a.1.clone());
+                            if env_set(&func_env, params[0].as_str(), a.1.clone()).is_err() {
+                                param_set = false;
+                            }
                         }
-                        if params.len() >= 2 {
-                            env_set(&func_env, params[1].as_str(), b.1.clone());
+                        if params.len() >= 2 && param_set {
+                            if env_set(&func_env, params[1].as_str(), b.1.clone()).is_err() {
+                                param_set = false;
+                            }
+                        }
+
+                        if !param_set {
+                            return std::cmp::Ordering::Equal;
                         }
 
                         match evaluate_statements(&func_env, &body) {
@@ -1221,13 +1230,13 @@ pub(crate) fn handle_array_instance_method(
                         Value::Closure(params, body, captured_env) => {
                             let func_env = captured_env.clone();
                             if params.len() >= 1 {
-                                env_set(&func_env, params[0].as_str(), val.borrow().clone());
+                                env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                             }
                             if params.len() >= 2 {
-                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64));
+                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                             }
                             if params.len() >= 3 {
-                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()));
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                             }
                             let mapped_val = evaluate_statements(&func_env, &body)?;
                             flatten_single_value(mapped_val, &mut result, 1);

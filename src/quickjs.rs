@@ -1129,14 +1129,19 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         let expr = parse_expression(tokens)?;
         return Ok(Statement::Return(Some(expr)));
     }
-    if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
-        tokens.remove(0); // consume let/var
+    if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
+        let is_const = matches!(tokens[0], Token::Const);
+        tokens.remove(0); // consume let/var/const
         if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
             tokens.remove(0);
             if tokens.len() >= 1 && matches!(tokens[0], Token::Assign) {
                 tokens.remove(0);
                 let expr = parse_expression(tokens)?;
-                return Ok(Statement::Let(name, expr));
+                if is_const {
+                    return Ok(Statement::Const(name, expr));
+                } else {
+                    return Ok(Statement::Let(name, expr));
+                }
             }
         }
     }
@@ -1152,16 +1157,22 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
     let mut last_value = Value::Number(0.0);
-    for stmt in statements {
+    for (i, stmt) in statements.iter().enumerate() {
+        log::trace!("Evaluating statement {i}: {stmt:?}");
         match stmt {
             Statement::Let(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
-                env_set(env, name.as_str(), val.clone());
+                env_set(env, name.as_str(), val.clone())?;
+                last_value = val;
+            }
+            Statement::Const(name, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                env_set_const(env, name.as_str(), val.clone());
                 last_value = val;
             }
             Statement::Assign(name, expr) => {
                 let val = evaluate_expr(env, expr)?;
-                env_set(env, name.as_str(), val.clone());
+                env_set(env, name.as_str(), val.clone())?;
                 last_value = val;
             }
             Statement::Expr(expr) => {
@@ -1174,7 +1185,7 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     match target.as_ref() {
                         Expr::Var(name) => {
                             let v = evaluate_expr(env, value_expr)?;
-                            env_set(env, name.as_str(), v.clone());
+                            env_set(env, name.as_str(), v.clone())?;
                             last_value = v;
                         }
                         Expr::Property(obj_expr, prop_name) => {
@@ -1250,8 +1261,8 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                             env_set(
                                 &mut catch_env,
                                 catch_param.as_str(),
-                                Value::String(utf8_to_utf16(&format!("{:?}", err))),
-                            );
+                                Value::String(utf8_to_utf16(&format!("{err:?}"))),
+                            )?;
                             last_value = evaluate_statements(&mut catch_env, catch_body)?;
                         }
                     }
@@ -1267,7 +1278,7 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                     match init_stmt.as_ref() {
                         Statement::Let(name, expr) => {
                             let val = evaluate_expr(env, expr)?;
-                            env_set(env, name.as_str(), val);
+                            env_set(env, name.as_str(), val)?;
                         }
                         Statement::Expr(expr) => {
                             evaluate_expr(env, expr)?;
@@ -1315,7 +1326,7 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
                                 Expr::Assign(target, value) => {
                                     if let Expr::Var(name) = target.as_ref() {
                                         let val = evaluate_expr(env, value)?;
-                                        env_set(env, name.as_str(), val);
+                                        env_set(env, name.as_str(), val)?;
                                     }
                                 }
                                 _ => {
@@ -1689,7 +1700,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Add parameters
                 for (param, arg) in params.iter().zip(args.iter()) {
                     let arg_val = evaluate_expr(env, arg)?;
-                    env_set(&func_env, param.as_str(), arg_val);
+                    env_set(&func_env, param.as_str(), arg_val)?;
                 }
                 // Execute function body
                 evaluate_statements(&func_env, &body)
@@ -1726,6 +1737,7 @@ pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 #[derive(Clone)]
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    pub constants: std::collections::HashSet<String>,
     pub prototype: Option<Rc<RefCell<JSObjectData>>>,
 }
 
@@ -1733,6 +1745,7 @@ impl JSObjectData {
     pub fn new() -> Self {
         JSObjectData {
             properties: std::collections::HashMap::new(),
+            constants: std::collections::HashSet::new(),
             prototype: None,
         }
     }
@@ -1755,6 +1768,14 @@ impl JSObjectData {
 
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, String, Rc<RefCell<Value>>> {
         self.properties.keys()
+    }
+
+    pub fn is_const(&self, key: &str) -> bool {
+        self.constants.contains(key)
+    }
+
+    pub fn set_const(&mut self, key: String) {
+        self.constants.insert(key);
     }
 }
 
@@ -1913,8 +1934,20 @@ pub fn env_get(env: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
     env.borrow().get(key)
 }
 
-pub fn env_set(env: &JSObjectDataPtr, key: &str, val: Value) {
+pub fn env_set(env: &JSObjectDataPtr, key: &str, val: Value) -> Result<(), JSError> {
+    if env.borrow().is_const(key) {
+        return Err(JSError::TypeError {
+            message: format!("Assignment to constant variable '{key}'"),
+        });
+    }
     env.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+    Ok(())
+}
+
+pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
+    let mut env_mut = env.borrow_mut();
+    env_mut.insert(key.to_string(), Rc::new(RefCell::new(val)));
+    env_mut.set_const(key.to_string());
 }
 
 pub fn env_set_rc(env: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
@@ -1989,6 +2022,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
 #[derive(Clone)]
 pub enum Statement {
     Let(String, Expr),
+    Const(String, Expr),
     Assign(String, Expr), // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
@@ -2002,6 +2036,7 @@ impl std::fmt::Debug for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
+            Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
             Statement::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
             Statement::Expr(expr) => write!(f, "Expr({:?})", expr),
             Statement::Return(Some(expr)) => write!(f, "Return({:?})", expr),
@@ -2289,6 +2324,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 match ident.as_str() {
                     "let" => tokens.push(Token::Let),
                     "var" => tokens.push(Token::Var),
+                    "const" => tokens.push(Token::Const),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
@@ -2345,6 +2381,7 @@ pub enum Token {
     Comma,
     Let,
     Var,
+    Const,
     Function,
     Return,
     If,

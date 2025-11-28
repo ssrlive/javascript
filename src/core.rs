@@ -2221,6 +2221,15 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::LogicalAndAssign(target, value) => evaluate_logical_and_assign(env, target, value),
         Expr::LogicalOrAssign(target, value) => evaluate_logical_or_assign(env, target, value),
         Expr::NullishAssign(target, value) => evaluate_nullish_assign(env, target, value),
+        Expr::AddAssign(target, value) => evaluate_add_assign(env, target, value),
+        Expr::SubAssign(target, value) => evaluate_sub_assign(env, target, value),
+        Expr::MulAssign(target, value) => evaluate_mul_assign(env, target, value),
+        Expr::DivAssign(target, value) => evaluate_div_assign(env, target, value),
+        Expr::ModAssign(target, value) => evaluate_mod_assign(env, target, value),
+        Expr::Increment(expr) => evaluate_increment(env, expr),
+        Expr::Decrement(expr) => evaluate_decrement(env, expr),
+        Expr::PostIncrement(expr) => evaluate_post_increment(env, expr),
+        Expr::PostDecrement(expr) => evaluate_post_decrement(env, expr),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
         Expr::TypeOf(expr) => evaluate_typeof(env, expr),
         Expr::Delete(expr) => evaluate_delete(env, expr),
@@ -2312,6 +2321,8 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("new".to_string()))
     } else if name == "NaN" {
         Ok(Value::Number(f64::NAN))
+    } else if name == "Infinity" {
+        Ok(Value::Number(f64::INFINITY))
     } else {
         Ok(Value::Undefined)
     }
@@ -2361,6 +2372,124 @@ fn evaluate_nullish_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -
     }
 }
 
+fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a += b is equivalent to a = a + b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
+        (Value::String(ls), Value::String(rs)) => {
+            let mut result = ls.clone();
+            result.extend_from_slice(&rs);
+            Value::String(result)
+        }
+        (Value::Number(ln), Value::String(rs)) => {
+            let mut result = utf8_to_utf16(&ln.to_string());
+            result.extend_from_slice(&rs);
+            Value::String(result)
+        }
+        (Value::String(ls), Value::Number(rn)) => {
+            let mut result = ls.clone();
+            result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
+            Value::String(result)
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for +=".to_string(),
+            })
+        }
+    };
+    let assignment_expr = match &result {
+        Value::Number(n) => Expr::Number(*n),
+        Value::String(s) => Expr::StringLit(s.clone()),
+        _ => unreachable!(),
+    };
+    evaluate_assignment_expr(env, target, &assignment_expr)?;
+    Ok(result)
+}
+
+fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a -= b is equivalent to a = a - b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => Value::Number(ln - rn),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for -=".to_string(),
+            })
+        }
+    };
+    let Value::Number(n) = result else { unreachable!() };
+    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    Ok(result)
+}
+
+fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a *= b is equivalent to a = a * b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => Value::Number(ln * rn),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for *=".to_string(),
+            })
+        }
+    };
+    let Value::Number(n) = result else { unreachable!() };
+    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    Ok(result)
+}
+
+fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a /= b is equivalent to a = a / b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            if rn == 0.0 {
+                return Err(JSError::EvaluationError {
+                    message: "Division by zero".to_string(),
+                });
+            }
+            Value::Number(ln / rn)
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for /=".to_string(),
+            })
+        }
+    };
+    let Value::Number(n) = result else { unreachable!() };
+    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    Ok(result)
+}
+
+fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a %= b is equivalent to a = a % b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            if rn == 0.0 {
+                return Err(JSError::EvaluationError {
+                    message: "Division by zero".to_string(),
+                });
+            }
+            Value::Number(ln % rn)
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for %=".to_string(),
+            })
+        }
+    };
+    let Value::Number(n) = result else { unreachable!() };
+    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    Ok(result)
+}
+
 fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
     let val = evaluate_expr(env, value)?;
     match target {
@@ -2401,6 +2530,224 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
         }
         _ => Err(JSError::EvaluationError {
             message: "Invalid assignment target".to_string(),
+        }),
+    }
+}
+
+fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    // Prefix increment: ++expr
+    let current_val = evaluate_expr(env, expr)?;
+    let new_val = match current_val {
+        Value::Number(n) => Value::Number(n + 1.0),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Increment operand must be a number".to_string(),
+            })
+        }
+    };
+    // Assign back
+    match expr {
+        Expr::Var(name) => {
+            env_set(env, name, new_val.clone())?;
+            Ok(new_val)
+        }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    obj_set_value(&obj_map, prop, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Cannot increment property of non-object".to_string(),
+                }),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Invalid index increment".to_string(),
+                }),
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid increment target".to_string(),
+        }),
+    }
+}
+
+fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    // Prefix decrement: --expr
+    let current_val = evaluate_expr(env, expr)?;
+    let new_val = match current_val {
+        Value::Number(n) => Value::Number(n - 1.0),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Decrement operand must be a number".to_string(),
+            })
+        }
+    };
+    // Assign back
+    match expr {
+        Expr::Var(name) => {
+            env_set(env, name, new_val.clone())?;
+            Ok(new_val)
+        }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    obj_set_value(&obj_map, prop, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Cannot decrement property of non-object".to_string(),
+                }),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Invalid index decrement".to_string(),
+                }),
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid decrement target".to_string(),
+        }),
+    }
+}
+
+fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    // Postfix increment: expr++
+    let current_val = evaluate_expr(env, expr)?;
+    let old_val = current_val.clone();
+    let new_val = match current_val {
+        Value::Number(n) => Value::Number(n + 1.0),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Increment operand must be a number".to_string(),
+            })
+        }
+    };
+    // Assign back
+    match expr {
+        Expr::Var(name) => {
+            env_set(env, name, new_val)?;
+            Ok(old_val)
+        }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    obj_set_value(&obj_map, prop, new_val)?;
+                    Ok(old_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Cannot increment property of non-object".to_string(),
+                }),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Invalid index increment".to_string(),
+                }),
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid increment target".to_string(),
+        }),
+    }
+}
+
+fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    // Postfix decrement: expr--
+    let current_val = evaluate_expr(env, expr)?;
+    let old_val = current_val.clone();
+    let new_val = match current_val {
+        Value::Number(n) => Value::Number(n - 1.0),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Decrement operand must be a number".to_string(),
+            })
+        }
+    };
+    // Assign back
+    match expr {
+        Expr::Var(name) => {
+            env_set(env, name, new_val)?;
+            Ok(old_val)
+        }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    obj_set_value(&obj_map, prop, new_val)?;
+                    Ok(old_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Cannot decrement property of non-object".to_string(),
+                }),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Invalid index decrement".to_string(),
+                }),
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid decrement target".to_string(),
         }),
     }
 }
@@ -3617,6 +3964,15 @@ pub enum Expr {
     LogicalAndAssign(Box<Expr>, Box<Expr>), // target, value
     LogicalOrAssign(Box<Expr>, Box<Expr>),  // target, value
     NullishAssign(Box<Expr>, Box<Expr>),    // target, value
+    AddAssign(Box<Expr>, Box<Expr>),        // target, value
+    SubAssign(Box<Expr>, Box<Expr>),        // target, value
+    MulAssign(Box<Expr>, Box<Expr>),        // target, value
+    DivAssign(Box<Expr>, Box<Expr>),        // target, value
+    ModAssign(Box<Expr>, Box<Expr>),        // target, value
+    Increment(Box<Expr>),
+    Decrement(Box<Expr>),
+    PostIncrement(Box<Expr>),
+    PostDecrement(Box<Expr>),
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
@@ -3744,24 +4100,55 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
         match chars[i] {
             ' ' | '\t' | '\n' => i += 1,
             '+' => {
-                tokens.push(Token::Plus);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '+' {
+                    tokens.push(Token::Increment);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::AddAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Plus);
+                    i += 1;
+                }
             }
             '-' => {
-                tokens.push(Token::Minus);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '-' {
+                    tokens.push(Token::Decrement);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::SubAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Minus);
+                    i += 1;
+                }
             }
             '*' => {
-                tokens.push(Token::Multiply);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::MulAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Multiply);
+                    i += 1;
+                }
             }
             '/' => {
-                tokens.push(Token::Divide);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::DivAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Divide);
+                    i += 1;
+                }
             }
             '%' => {
-                tokens.push(Token::Mod);
-                i += 1;
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::ModAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Mod);
+                    i += 1;
+                }
             }
             '(' => {
                 tokens.push(Token::LParen);
@@ -3827,6 +4214,21 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 } else if i + 1 < chars.len() && chars[i + 1] == '>' {
                     tokens.push(Token::Arrow);
                     i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '+' {
+                    tokens.push(Token::AddAssign);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '-' {
+                    tokens.push(Token::SubAssign);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    tokens.push(Token::MulAssign);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '/' {
+                    tokens.push(Token::DivAssign);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '%' {
+                    tokens.push(Token::ModAssign);
+                    i += 2;
                 } else {
                     tokens.push(Token::Assign);
                     i += 1;
@@ -3876,8 +4278,26 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '0'..='9' => {
                 let start = i;
+                // integer and fractional part
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
+                }
+                // optional exponent part
+                if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
+                    let mut j = i + 1;
+                    // optional sign after e/E
+                    if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
+                        j += 1;
+                    }
+                    // require at least one digit in exponent
+                    if j >= chars.len() || !chars[j].is_ascii_digit() {
+                        return Err(JSError::TokenizationError);
+                    }
+                    // consume exponent digits
+                    while j < chars.len() && chars[j].is_ascii_digit() {
+                        j += 1;
+                    }
+                    i = j;
                 }
                 let num_str: String = chars[start..i].iter().collect();
                 let num = num_str.parse::<f64>().map_err(|_| JSError::TokenizationError)?;
@@ -4076,6 +4496,13 @@ pub enum Token {
     LogicalAndAssign,
     LogicalOrAssign,
     NullishAssign,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    ModAssign,
+    Increment,
+    Decrement,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -4161,6 +4588,31 @@ fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             tokens.remove(0);
             let right = parse_assignment(tokens)?;
             Ok(Expr::NullishAssign(Box::new(left), Box::new(right)))
+        }
+        Token::AddAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::AddAssign(Box::new(left), Box::new(right)))
+        }
+        Token::SubAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::SubAssign(Box::new(left), Box::new(right)))
+        }
+        Token::MulAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::MulAssign(Box::new(left), Box::new(right)))
+        }
+        Token::DivAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::DivAssign(Box::new(left), Box::new(right)))
+        }
+        Token::ModAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::ModAssign(Box::new(left), Box::new(right)))
         }
         _ => Ok(left),
     }
@@ -4336,6 +4788,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::Minus => {
             let inner = parse_primary(tokens)?;
             Expr::UnaryNeg(Box::new(inner))
+        }
+        Token::Increment => {
+            let inner = parse_primary(tokens)?;
+            Expr::Increment(Box::new(inner))
+        }
+        Token::Decrement => {
+            let inner = parse_primary(tokens)?;
+            Expr::Decrement(Box::new(inner))
         }
         Token::Spread => {
             let inner = parse_primary(tokens)?;
@@ -4794,6 +5254,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
                 tokens.remove(0); // consume ')'
                 expr = Expr::Call(Box::new(expr), args);
+            }
+            Token::Increment => {
+                tokens.remove(0);
+                expr = Expr::PostIncrement(Box::new(expr));
+            }
+            Token::Decrement => {
+                tokens.remove(0);
+                expr = Expr::PostDecrement(Box::new(expr));
             }
             _ => break,
         }

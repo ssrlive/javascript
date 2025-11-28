@@ -1,4 +1,6 @@
 use javascript::core::evaluate_script;
+use javascript::core::evaluate_script_async;
+use javascript::core::Value;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -10,23 +12,6 @@ fn __init_test_logger() {
 #[cfg(test)]
 mod promise_tests {
     use super::*;
-
-    #[test]
-    fn test_promise_constructor_basic() {
-        let code = r#"
-            let resolved = false;
-            let value = null;
-            let p = new Promise(function(resolve, reject) {
-                resolve(42);
-            });
-            resolved = true;
-            value = 42;
-            resolved
-        "#;
-        let result = evaluate_script(code);
-        assert!(result.is_ok());
-        // For now, just check that it doesn't crash
-    }
 
     #[test]
     fn test_promise_then_basic() {
@@ -107,5 +92,56 @@ mod promise_tests {
         let result = evaluate_script(code);
         assert!(result.is_ok());
         // For now, just check that it doesn't crash - full functionality requires async execution
+    }
+
+    #[test]
+    fn test_promise_async_execution_order() {
+        // Test that Promise then callbacks execute asynchronously after synchronous code
+        let code = r#"
+            let executionOrder = [];
+            new Promise((resolve, reject) => {
+                let p = new Promise((res, rej) => res("async result"));
+                p.then((value) => {
+                    executionOrder.push(value);
+                    resolve(executionOrder);
+                });
+            });
+            executionOrder.push("sync");
+        "#;
+
+        let result = evaluate_script_async(code);
+        match result {
+            Ok(Value::Object(arr)) => {
+                // Check that we have an array with 2 elements
+                if let Ok(Some(length_val)) = javascript::core::obj_get_value(&arr, "length") {
+                    if let Value::Number(len) = *length_val.borrow() {
+                        assert_eq!(len, 2.0, "Array should have 2 elements");
+
+                        // Check first element is "sync"
+                        if let Ok(Some(first_val)) = javascript::core::obj_get_value(&arr, "0") {
+                            if let Value::String(first) = &*first_val.borrow() {
+                                assert_eq!(String::from_utf16_lossy(first), "sync");
+                            } else {
+                                panic!("First element should be string 'sync'");
+                            }
+                        }
+
+                        // Check second element is "async result"
+                        if let Ok(Some(second_val)) = javascript::core::obj_get_value(&arr, "1") {
+                            if let Value::String(second) = &*second_val.borrow() {
+                                assert_eq!(String::from_utf16_lossy(second), "async result");
+                            } else {
+                                panic!("Second element should be string 'async result'");
+                            }
+                        }
+                    } else {
+                        panic!("Array length should be a number");
+                    }
+                } else {
+                    panic!("Array should have length property");
+                }
+            }
+            _ => panic!("Expected array result, got {:?}", result),
+        }
     }
 }

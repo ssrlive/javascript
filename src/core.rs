@@ -1141,7 +1141,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     return Err(JSError::ParseError);
                 }
                 tokens.remove(0); // consume }
-                return Ok(Statement::Let(name, Expr::Function(params, body)));
+                return Ok(Statement::Let(name, Some(Expr::Function(params, body))));
             }
         }
     }
@@ -1391,8 +1391,10 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     if is_const {
                         return Ok(Statement::Const(name, expr));
                     } else {
-                        return Ok(Statement::Let(name, expr));
+                        return Ok(Statement::Let(name, Some(expr)));
                     }
+                } else if !is_const {
+                    return Ok(Statement::Let(name, None));
                 }
             }
         }
@@ -1572,8 +1574,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
         match stmt {
-            Statement::Let(name, expr) => {
-                let val = evaluate_expr(env, expr)?;
+            Statement::Let(name, expr_opt) => {
+                let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
                 env_set(env, name.as_str(), val.clone())?;
                 last_value = val;
             }
@@ -1636,6 +1638,130 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         _ => {
                             // Fallback: evaluate the expression normally
                             last_value = evaluate_expr(env, expr)?;
+                        }
+                    }
+                } else if let Expr::LogicalAndAssign(target, value_expr) = expr {
+                    // Handle logical AND assignment: a &&= b
+                    let left_val = evaluate_expr(env, target)?;
+                    if is_truthy(&left_val) {
+                        match target.as_ref() {
+                            Expr::Var(name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                env_set(env, name.as_str(), v.clone())?;
+                                last_value = v;
+                            }
+                            Expr::Property(obj_expr, prop_name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            Expr::Index(obj_expr, idx_expr) => {
+                                let idx_val = evaluate_expr(env, idx_expr)?;
+                                let key = match idx_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::String(s) => String::from_utf16_lossy(&s),
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Invalid index type".to_string(),
+                                        });
+                                    }
+                                };
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            _ => {
+                                last_value = evaluate_expr(env, expr)?;
+                            }
+                        }
+                    } else {
+                        last_value = left_val;
+                    }
+                } else if let Expr::LogicalOrAssign(target, value_expr) = expr {
+                    // Handle logical OR assignment: a ||= b
+                    let left_val = evaluate_expr(env, target)?;
+                    if !is_truthy(&left_val) {
+                        match target.as_ref() {
+                            Expr::Var(name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                env_set(env, name.as_str(), v.clone())?;
+                                last_value = v;
+                            }
+                            Expr::Property(obj_expr, prop_name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            Expr::Index(obj_expr, idx_expr) => {
+                                let idx_val = evaluate_expr(env, idx_expr)?;
+                                let key = match idx_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::String(s) => String::from_utf16_lossy(&s),
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Invalid index type".to_string(),
+                                        });
+                                    }
+                                };
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            _ => {
+                                last_value = evaluate_expr(env, expr)?;
+                            }
+                        }
+                    } else {
+                        last_value = left_val;
+                    }
+                } else if let Expr::NullishAssign(target, value_expr) = expr {
+                    // Handle nullish coalescing assignment: a ??= b
+                    let left_val = evaluate_expr(env, target)?;
+                    match left_val {
+                        Value::Undefined => match target.as_ref() {
+                            Expr::Var(name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                env_set(env, name.as_str(), v.clone())?;
+                                last_value = v;
+                            }
+                            Expr::Property(obj_expr, prop_name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            Expr::Index(obj_expr, idx_expr) => {
+                                let idx_val = evaluate_expr(env, idx_expr)?;
+                                let key = match idx_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::String(s) => String::from_utf16_lossy(&s),
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Invalid index type".to_string(),
+                                        });
+                                    }
+                                };
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            _ => {
+                                last_value = evaluate_expr(env, expr)?;
+                            }
+                        },
+                        _ => {
+                            last_value = left_val;
                         }
                     }
                 } else {
@@ -1717,8 +1843,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 // Execute initialization
                 if let Some(init_stmt) = init {
                     match init_stmt.as_ref() {
-                        Statement::Let(name, expr) => {
-                            let val = evaluate_expr(env, expr)?;
+                        Statement::Let(name, expr_opt) => {
+                            let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
                             env_set(env, name.as_str(), val)?;
                         }
                         Statement::Expr(expr) => {
@@ -2092,6 +2218,9 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Boolean(b) => evaluate_boolean(*b),
         Expr::Var(name) => evaluate_var(env, name),
         Expr::Assign(_target, value) => evaluate_assign(env, value),
+        Expr::LogicalAndAssign(target, value) => evaluate_logical_and_assign(env, target, value),
+        Expr::LogicalOrAssign(target, value) => evaluate_logical_or_assign(env, target, value),
+        Expr::NullishAssign(target, value) => evaluate_nullish_assign(env, target, value),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
         Expr::TypeOf(expr) => evaluate_typeof(env, expr),
         Expr::Delete(expr) => evaluate_delete(env, expr),
@@ -2191,6 +2320,89 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
 fn evaluate_assign(env: &JSObjectDataPtr, value: &Expr) -> Result<Value, JSError> {
     // Assignment is handled at statement level, just evaluate the value
     evaluate_expr(env, value)
+}
+
+fn evaluate_logical_and_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a &&= b is equivalent to a && (a = b)
+    let left_val = evaluate_expr(env, target)?;
+    if is_truthy(&left_val) {
+        // Evaluate the assignment
+        evaluate_assignment_expr(env, target, value)
+    } else {
+        // Return the left value without assignment
+        Ok(left_val)
+    }
+}
+
+fn evaluate_logical_or_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a ||= b is equivalent to a || (a = b)
+    let left_val = evaluate_expr(env, target)?;
+    if !is_truthy(&left_val) {
+        // Evaluate the assignment
+        evaluate_assignment_expr(env, target, value)
+    } else {
+        // Return the left value without assignment
+        Ok(left_val)
+    }
+}
+
+fn evaluate_nullish_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a ??= b is equivalent to a ?? (a = b)
+    let left_val = evaluate_expr(env, target)?;
+    match left_val {
+        Value::Undefined => {
+            // Evaluate the assignment
+            evaluate_assignment_expr(env, target, value)
+        }
+        _ => {
+            // Return the left value without assignment
+            Ok(left_val)
+        }
+    }
+}
+
+fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, value)?;
+    match target {
+        Expr::Var(name) => {
+            env_set(env, name, val.clone())?;
+            Ok(val)
+        }
+        Expr::Property(obj, prop) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            match obj_val {
+                Value::Object(obj_map) => {
+                    obj_set_value(&obj_map, prop, val.clone())?;
+                    Ok(val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Cannot assign to property of non-object".to_string(),
+                }),
+            }
+        }
+        Expr::Index(obj, idx) => {
+            let obj_val = evaluate_expr(env, obj)?;
+            let idx_val = evaluate_expr(env, idx)?;
+            match (obj_val, idx_val) {
+                (Value::Object(obj_map), Value::String(s)) => {
+                    let key = String::from_utf16_lossy(&s);
+                    obj_set_value(&obj_map, &key, val.clone())?;
+                    Ok(val)
+                }
+                (Value::Object(obj_map), Value::Number(n)) => {
+                    let key = n.to_string();
+                    obj_set_value(&obj_map, &key, val.clone())?;
+                    Ok(val)
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "Invalid index assignment".to_string(),
+                }),
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid assignment target".to_string(),
+        }),
+    }
 }
 
 fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
@@ -3324,7 +3536,7 @@ pub enum SwitchCase {
 
 #[derive(Clone)]
 pub enum Statement {
-    Let(String, Expr),
+    Let(String, Option<Expr>),
     Const(String, Expr),
     LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
     ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
@@ -3401,7 +3613,10 @@ pub enum Expr {
     TypeOf(Box<Expr>),
     Delete(Box<Expr>),
     Void(Box<Expr>),
-    Assign(Box<Expr>, Box<Expr>), // target, value
+    Assign(Box<Expr>, Box<Expr>),           // target, value
+    LogicalAndAssign(Box<Expr>, Box<Expr>), // target, value
+    LogicalOrAssign(Box<Expr>, Box<Expr>),  // target, value
+    NullishAssign(Box<Expr>, Box<Expr>),    // target, value
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
@@ -3586,7 +3801,11 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 }
             }
             '?' => {
-                if i + 1 < chars.len() && chars[i + 1] == '?' {
+                // Recognize '??=' (nullish coalescing assignment), '??' (nullish coalescing), and '?.' (optional chaining)
+                if i + 2 < chars.len() && chars[i + 1] == '?' && chars[i + 2] == '=' {
+                    tokens.push(Token::NullishAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '?' {
                     tokens.push(Token::NullishCoalescing);
                     i += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '.' {
@@ -3629,6 +3848,30 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 } else {
                     tokens.push(Token::GreaterThan);
                     i += 1;
+                }
+            }
+            '&' => {
+                // Recognize '&&=' (logical AND assignment) and '&&' (logical AND)
+                if i + 2 < chars.len() && chars[i + 1] == '&' && chars[i + 2] == '=' {
+                    tokens.push(Token::LogicalAndAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '&' {
+                    tokens.push(Token::LogicalAnd);
+                    i += 2;
+                } else {
+                    return Err(JSError::TokenizationError);
+                }
+            }
+            '|' => {
+                // Recognize '||=' (logical OR assignment) and '||' (logical OR)
+                if i + 2 < chars.len() && chars[i + 1] == '|' && chars[i + 2] == '=' {
+                    tokens.push(Token::LogicalOrAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '|' {
+                    tokens.push(Token::LogicalOr);
+                    i += 2;
+                } else {
+                    return Err(JSError::TokenizationError);
                 }
             }
             '0'..='9' => {
@@ -3828,6 +4071,11 @@ pub enum Token {
     Spread,
     OptionalChain,
     NullishCoalescing,
+    LogicalAnd,
+    LogicalOr,
+    LogicalAndAssign,
+    LogicalOrAssign,
+    NullishAssign,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -3893,12 +4141,28 @@ fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     if tokens.is_empty() {
         return Ok(left);
     }
-    if matches!(tokens[0], Token::Assign) {
-        tokens.remove(0);
-        let right = parse_assignment(tokens)?;
-        Ok(Expr::Assign(Box::new(left), Box::new(right)))
-    } else {
-        Ok(left)
+    match &tokens[0] {
+        Token::Assign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::Assign(Box::new(left), Box::new(right)))
+        }
+        Token::LogicalAndAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::LogicalAndAssign(Box::new(left), Box::new(right)))
+        }
+        Token::LogicalOrAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::LogicalOrAssign(Box::new(left), Box::new(right)))
+        }
+        Token::NullishAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::NullishAssign(Box::new(left), Box::new(right)))
+        }
+        _ => Ok(left),
     }
 }
 

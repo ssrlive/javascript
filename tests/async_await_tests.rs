@@ -47,14 +47,19 @@ fn test_async_promise_resolution() {
     let result = evaluate_script(script);
     match result {
         Ok(value) => {
-            // Should be an array with ["sync"] since the then callback executes asynchronously
+            // Should be an array with ["sync", "async"] since the then callback executes asynchronously
             if let Value::Object(obj) = &value {
                 if let Some(length_val) = obj_get_value(obj, "length").unwrap() {
                     if let Value::Number(len) = *length_val.borrow() {
-                        assert_eq!(len, 1.0);
+                        assert_eq!(len, 2.0);
                         if let Some(first_val) = obj_get_value(obj, "0").unwrap() {
                             if let Value::String(first) = &*first_val.borrow() {
                                 assert_eq!(String::from_utf16_lossy(first), "sync");
+                            }
+                        }
+                        if let Some(second_val) = obj_get_value(obj, "1").unwrap() {
+                            if let Value::String(second) = &*second_val.borrow() {
+                                assert_eq!(String::from_utf16_lossy(second), "async");
                             }
                         }
                     }

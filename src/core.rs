@@ -21,6 +21,14 @@ use std::rc::Rc;
 // Task queue for asynchronous operations
 #[derive(Clone)]
 pub enum Task {
+    PromiseResolve {
+        promise: Rc<RefCell<JSPromise>>,
+        value: Value,
+    },
+    PromiseReject {
+        promise: Rc<RefCell<JSPromise>>,
+        reason: Value,
+    },
     PromiseResolution {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
@@ -35,7 +43,7 @@ pub type TaskQueue = VecDeque<Task>;
 
 // Global task queue for the runtime
 thread_local! {
-    pub static GLOBAL_TASK_QUEUE: RefCell<TaskQueue> = RefCell::new(VecDeque::new());
+    pub static GLOBAL_TASK_QUEUE: RefCell<TaskQueue> = const { RefCell::new(VecDeque::new()) };
 }
 
 // Function to queue a task
@@ -1018,6 +1026,97 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     }
 }
 
+// New function to evaluate script and wait for Promise result
+pub fn evaluate_script_async<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
+    let script = script.as_ref();
+    log::debug!("evaluate_script_async called with script len {}", script.len());
+    let filtered = filter_input_script(script);
+    log::trace!("filtered script:\n{}", filtered);
+    let mut tokens = match tokenize(&filtered) {
+        Ok(t) => t,
+        Err(e) => {
+            log::debug!("tokenize error: {e:?}");
+            return Err(e);
+        }
+    };
+    let statements = match parse_statements(&mut tokens) {
+        Ok(s) => s,
+        Err(e) => {
+            log::debug!("parse_statements error: {e:?}");
+            return Err(e);
+        }
+    };
+    log::debug!("parsed {} statements", statements.len());
+    for (i, stmt) in statements.iter().enumerate() {
+        log::trace!("stmt[{i}] = {stmt:?}");
+    }
+    let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
+
+    // Inject simple host `std` / `os` shims when importing with the pattern:
+    //   import * as NAME from "std";
+    for line in script.lines() {
+        let l = line.trim();
+        if l.starts_with("import * as") && l.contains("from") {
+            if let Some(as_idx) = l.find("as") {
+                if let Some(from_idx) = l.find("from") {
+                    let name_part = &l[as_idx + 2..from_idx].trim();
+                    let name = name_part.trim();
+                    if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
+                        let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
+                        let rest = &l[from_idx + start_quote + 1..];
+                        if let Some(end_quote) = rest.find(quote_char) {
+                            let module = &rest[..end_quote];
+                            if module == "std" {
+                                obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
+                            } else if module == "os" {
+                                obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Initialize global built-in constructors
+    initialize_global_constructors(&env);
+
+    match evaluate_statements(&env, &statements) {
+        Ok(v) => {
+            // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
+            if let Value::Object(obj) = &v {
+                if let Some(promise_val_rc) = obj_get_value(obj, "__promise")? {
+                    if let Value::Promise(promise) = &*promise_val_rc.borrow() {
+                        // Run the event loop until the promise is resolved
+                        loop {
+                            run_event_loop()?;
+                            let promise_borrow = promise.borrow();
+                            match &promise_borrow.state {
+                                PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                                PromiseState::Rejected(reason) => {
+                                    return Err(JSError::EvaluationError {
+                                        message: format!("Promise rejected: {:?}", reason),
+                                    });
+                                }
+                                PromiseState::Pending => {
+                                    // Continue running the event loop
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Run the event loop to process any queued asynchronous tasks
+            run_event_loop()?;
+            Ok(v)
+        }
+        Err(e) => {
+            log::debug!("evaluate_statements error: {e:?}");
+            Err(e)
+        }
+    }
+}
+
 pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
     while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
@@ -1169,6 +1268,54 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
         tokens.remove(0); // consume ;
         return Ok(Statement::Throw(expr));
+    }
+    if !tokens.is_empty() && matches!(tokens[0], Token::Async) {
+        tokens.remove(0); // consume async
+        if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
+            tokens.remove(0); // consume function
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                    tokens.remove(0); // consume (
+                    let mut params = Vec::new();
+                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                        loop {
+                            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
+                                tokens.remove(0);
+                                params.push(param);
+                                if tokens.is_empty() {
+                                    return Err(JSError::ParseError);
+                                }
+                                if matches!(tokens[0], Token::RParen) {
+                                    break;
+                                }
+                                if !matches!(tokens[0], Token::Comma) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume ,
+                            } else {
+                                return Err(JSError::ParseError);
+                            }
+                        }
+                    }
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume {
+                    let body = parse_statements(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume }
+                    return Ok(Statement::Let(name, Some(Expr::AsyncFunction(params, body))));
+                }
+            }
+        }
+        return Err(JSError::ParseError);
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
@@ -2331,18 +2478,48 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             let promise_val = evaluate_expr(env, expr)?;
             match promise_val {
                 Value::Promise(promise) => {
-                    // For now, synchronously resolve the promise
-                    // In a real async implementation, this would be handled by an event loop
-                    let promise_borrow = promise.borrow();
-                    match &promise_borrow.state {
-                        PromiseState::Fulfilled(val) => Ok(val.clone()),
-                        PromiseState::Rejected(reason) => Err(JSError::EvaluationError {
-                            message: format!("Promise rejected: {:?}", reason),
-                        }),
-                        PromiseState::Pending => Err(JSError::EvaluationError {
-                            message: "Cannot await pending promise in synchronous execution".to_string(),
-                        }),
+                    // Wait for the promise to resolve by running the event loop
+                    loop {
+                        run_event_loop()?;
+                        let promise_borrow = promise.borrow();
+                        match &promise_borrow.state {
+                            PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                            PromiseState::Rejected(reason) => {
+                                return Err(JSError::EvaluationError {
+                                    message: format!("Promise rejected: {:?}", reason),
+                                });
+                            }
+                            PromiseState::Pending => {
+                                // Continue running the event loop
+                            }
+                        }
                     }
+                }
+                Value::Object(obj) => {
+                    // Check if this is a Promise object with __promise property
+                    if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
+                        if let Value::Promise(promise) = promise_rc.borrow().clone() {
+                            // Wait for the promise to resolve by running the event loop
+                            loop {
+                                run_event_loop()?;
+                                let promise_borrow = promise.borrow();
+                                match &promise_borrow.state {
+                                    PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                                    PromiseState::Rejected(reason) => {
+                                        return Err(JSError::EvaluationError {
+                                            message: format!("Promise rejected: {:?}", reason),
+                                        });
+                                    }
+                                    PromiseState::Pending => {
+                                        // Continue running the event loop
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(JSError::EvaluationError {
+                        message: "await can only be used with promises".to_string(),
+                    })
                 }
                 _ => Err(JSError::EvaluationError {
                     message: "await can only be used with promises".to_string(),
@@ -2414,6 +2591,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("Promise".to_string()))
     } else if name == "new" {
         Ok(Value::Function("new".to_string()))
+    } else if name == "__resolve_promise_internal" {
+        Ok(Value::Function("__resolve_promise_internal".to_string()))
+    } else if name == "__reject_promise_internal" {
+        Ok(Value::Function("__reject_promise_internal".to_string()))
     } else if name == "NaN" {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {
@@ -3612,7 +3793,7 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
@@ -3621,11 +3802,7 @@ pub struct JSObjectData {
 
 impl JSObjectData {
     pub fn new() -> Self {
-        JSObjectData {
-            properties: std::collections::HashMap::new(),
-            constants: std::collections::HashSet::new(),
-            prototype: None,
-        }
+        JSObjectData::default()
     }
 
     pub fn insert(&mut self, key: String, val: Rc<RefCell<Value>>) {
@@ -3657,20 +3834,15 @@ impl JSObjectData {
     }
 }
 
-impl Default for JSObjectData {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum PromiseState {
+    #[default]
     Pending,
     Fulfilled(Value),
     Rejected(Value),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct JSPromise {
     pub state: PromiseState,
     pub value: Option<Value>,                               // The resolved value or rejection reason
@@ -6285,6 +6457,40 @@ pub fn run_event_loop() -> Result<(), JSError> {
         let task = GLOBAL_TASK_QUEUE.with(|queue| queue.borrow_mut().pop_front());
 
         match task {
+            Some(Task::PromiseResolve { promise, value }) => {
+                let mut promise_mut = promise.borrow_mut();
+                if let PromiseState::Pending = promise_mut.state {
+                    promise_mut.state = PromiseState::Fulfilled(value.clone());
+                    promise_mut.value = Some(value);
+
+                    // Queue task to execute fulfilled callbacks asynchronously
+                    let callbacks = promise_mut.on_fulfilled.clone();
+                    promise_mut.on_fulfilled.clear();
+                    if !callbacks.is_empty() {
+                        queue_task(Task::PromiseResolution {
+                            promise: promise.clone(),
+                            callbacks,
+                        });
+                    }
+                }
+            }
+            Some(Task::PromiseReject { promise, reason }) => {
+                let mut promise_mut = promise.borrow_mut();
+                if let PromiseState::Pending = promise_mut.state {
+                    promise_mut.state = PromiseState::Rejected(reason.clone());
+                    promise_mut.value = Some(reason);
+
+                    // Queue task to execute rejected callbacks asynchronously
+                    let callbacks = promise_mut.on_rejected.clone();
+                    promise_mut.on_rejected.clear();
+                    if !callbacks.is_empty() {
+                        queue_task(Task::PromiseRejection {
+                            promise: promise.clone(),
+                            callbacks,
+                        });
+                    }
+                }
+            }
             Some(Task::PromiseResolution { promise, callbacks }) => {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result

@@ -357,7 +357,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "__resolve_promise_internal" => {
-            // Internal function to resolve a promise by ID
+            // Internal function to resolve a promise by ID asynchronously
             if args.len() < 2 {
                 return Err(JSError::TypeError {
                     message: "__resolve_promise_internal requires promise ID and value".to_string(),
@@ -373,19 +373,11 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
                     if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
                         if let Value::Promise(promise_rc) = &*promise_val.borrow() {
-                            let mut promise = promise_rc.borrow_mut();
-                            if let PromiseState::Pending = promise.state {
-                                promise.state = PromiseState::Fulfilled(value.clone());
-                                promise.value = Some(value.clone());
-
-                                // Queue task to execute fulfilled callbacks asynchronously
-                                let callbacks = promise.on_fulfilled.clone();
-                                promise.on_fulfilled.clear(); // Clear to avoid double execution
-                                crate::core::queue_task(crate::core::Task::PromiseResolution {
-                                    promise: promise_rc.clone(),
-                                    callbacks,
-                                });
-                            }
+                            // Queue asynchronous resolution task
+                            crate::core::queue_task(crate::core::Task::PromiseResolve {
+                                promise: promise_rc.clone(),
+                                value,
+                            });
                         }
                     }
                     Ok(Value::Undefined)
@@ -396,7 +388,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "__reject_promise_internal" => {
-            // Internal function to reject a promise by ID
+            // Internal function to reject a promise by ID asynchronously
             if args.len() < 2 {
                 return Err(JSError::TypeError {
                     message: "__reject_promise_internal requires promise ID and reason".to_string(),
@@ -412,19 +404,11 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
                     if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
                         if let Value::Promise(promise_rc) = &*promise_val.borrow() {
-                            let mut promise = promise_rc.borrow_mut();
-                            if let PromiseState::Pending = promise.state {
-                                promise.state = PromiseState::Rejected(reason.clone());
-                                promise.value = Some(reason.clone());
-
-                                // Queue task to execute rejected callbacks asynchronously
-                                let callbacks = promise.on_rejected.clone();
-                                promise.on_rejected.clear(); // Clear to avoid double execution
-                                crate::core::queue_task(crate::core::Task::PromiseRejection {
-                                    promise: promise_rc.clone(),
-                                    callbacks,
-                                });
-                            }
+                            // Queue asynchronous rejection task
+                            crate::core::queue_task(crate::core::Task::PromiseReject {
+                                promise: promise_rc.clone(),
+                                reason,
+                            });
                         }
                     }
                     Ok(Value::Undefined)
@@ -464,35 +448,39 @@ pub fn handle_promise_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resul
             // Set the __promise marker
             crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
 
-            // Create resolve function as a closure that captures the promise
-            let _resolve_promise = promise.clone();
-            let resolve_func = Value::Closure(
-                vec!["value".to_string()],
-                vec![Statement::Return(Some(Expr::Call(
-                    Box::new(Expr::Var("__resolve_promise_internal".to_string())),
-                    vec![Expr::Var("__promise_id".to_string()), Expr::Var("value".to_string())],
-                )))],
-                env.clone(),
-            );
-
-            // Create reject function as a closure that captures the promise
-            let _reject_promise = promise.clone();
-            let reject_func = Value::Closure(
-                vec!["reason".to_string()],
-                vec![Statement::Return(Some(Expr::Call(
-                    Box::new(Expr::Var("__reject_promise_internal".to_string())),
-                    vec![Expr::Var("__promise_id".to_string()), Expr::Var("reason".to_string())],
-                )))],
-                env.clone(),
-            );
-
             // Generate a unique ID for this promise
             use std::time::{SystemTime, UNIX_EPOCH};
             let promise_id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_string();
 
             // Store the promise in a global registry (simplified - in real implementation use a proper registry)
             // For now, we'll use the environment to store promises by ID
-            crate::core::env_set(env, &format!("__promise_{}", promise_id), Value::Promise(promise.clone()))?;
+            crate::core::env_set(env, format!("__promise_{}", promise_id), Value::Promise(promise.clone()))?;
+
+            // Create resolve function as a closure that captures the promise
+            let resolve_func = Value::Closure(
+                vec!["value".to_string()],
+                vec![Statement::Return(Some(Expr::Call(
+                    Box::new(Expr::Var("__resolve_promise_internal".to_string())),
+                    vec![
+                        Expr::Value(Value::String(crate::core::utf8_to_utf16(&promise_id))),
+                        Expr::Var("value".to_string()),
+                    ],
+                )))],
+                env.clone(),
+            );
+
+            // Create reject function as a closure that captures the promise
+            let reject_func = Value::Closure(
+                vec!["reason".to_string()],
+                vec![Statement::Return(Some(Expr::Call(
+                    Box::new(Expr::Var("__reject_promise_internal".to_string())),
+                    vec![
+                        Expr::Value(Value::String(crate::core::utf8_to_utf16(&promise_id))),
+                        Expr::Var("reason".to_string()),
+                    ],
+                )))],
+                env.clone(),
+            );
 
             // Execute the executor function synchronously for now
             let func_env = captured_env.clone();
@@ -559,7 +547,7 @@ pub fn handle_promise_static_method(method: &str, args: &[Expr], env: &JSObjectD
             for promise_val in promises {
                 match &*promise_val.borrow() {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = obj_get_value(obj, "__promise")? {
                             if let Value::Promise(p) = &*promise_rc.borrow() {
                                 match &p.borrow().state {
                                     PromiseState::Fulfilled(value) => {
@@ -595,7 +583,7 @@ pub fn handle_promise_static_method(method: &str, args: &[Expr], env: &JSObjectD
                     // Create result array
                     let result_arr = Rc::new(RefCell::new(JSObjectData::new()));
                     for (idx, val) in results.iter().enumerate() {
-                        obj_set_value(&result_arr, &idx.to_string(), val.clone())?;
+                        obj_set_value(&result_arr, idx.to_string(), val.clone())?;
                     }
                     result_promise.borrow_mut().state = PromiseState::Fulfilled(Value::Object(result_arr));
                 }
@@ -646,7 +634,7 @@ pub fn handle_promise_static_method(method: &str, args: &[Expr], env: &JSObjectD
             for promise_val in promises {
                 match &*promise_val.borrow() {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = obj_get_value(obj, "__promise")? {
                             if let Value::Promise(p) = &*promise_rc.borrow() {
                                 match &p.borrow().state {
                                     PromiseState::Fulfilled(value) => {

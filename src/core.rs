@@ -1847,6 +1847,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Spread(_expr) => Err(JSError::EvaluationError {
             message: "Spread operator must be used in array, object, or function call context".to_string(),
         }),
+        Expr::OptionalProperty(obj, prop) => evaluate_optional_property(env, obj, prop),
+        Expr::OptionalCall(func_expr, args) => evaluate_optional_call(env, func_expr, args),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => evaluate_new(env, constructor, args),
         Expr::Super => evaluate_super(env),
@@ -2190,6 +2192,25 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
     }
 }
 
+fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Value, JSError> {
+    let obj_val = evaluate_expr(env, obj)?;
+    log::trace!("OptionalProperty: obj_val={obj_val:?}, prop={prop}");
+    match obj_val {
+        Value::Undefined => Ok(Value::Undefined),
+        Value::Object(obj_map) => {
+            if let Some(val) = obj_get_value(&obj_map, prop)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
+        _ => Err(JSError::EvaluationError {
+            message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
+        }),
+    }
+}
+
 fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
     // Check if it's a method call first
@@ -2260,9 +2281,36 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if is_class_instance(&obj_map)? {
                     return call_class_method(&obj_map, method, args, env);
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: format!("Method {method} not found on object"),
-                    })
+                    // Check for user-defined method
+                    if let Some(prop_val) = obj_get_value(&obj_map, method)? {
+                        match prop_val.borrow().clone() {
+                            Value::Closure(params, body, captured_env) => {
+                                // Function call
+                                // Collect all arguments, expanding spreads
+                                let mut evaluated_args = Vec::new();
+                                expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                                if params.len() != evaluated_args.len() {
+                                    return Err(JSError::ParseError);
+                                }
+                                // Create new environment starting with captured environment
+                                let func_env = captured_env.clone();
+                                // Add parameters
+                                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
+                                    env_set(&func_env, param.as_str(), arg_val.clone())?;
+                                }
+                                // Execute function body
+                                evaluate_statements(&func_env, &body)
+                            }
+                            Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
+                            _ => Err(JSError::EvaluationError {
+                                message: format!("Property '{}' is not a function", method),
+                            }),
+                        }
+                    } else {
+                        Err(JSError::EvaluationError {
+                            message: format!("Method {method} not found on object"),
+                        })
+                    }
                 }
             }
             (Value::Function(func_name), method) => {
@@ -2280,6 +2328,27 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 message: "error".to_string(),
             }),
         }
+    } else if let Expr::OptionalProperty(obj_expr, method_name) = func_expr {
+        // Optional method call
+        let obj_val = evaluate_expr(env, obj_expr)?;
+        match obj_val {
+            Value::Undefined => Ok(Value::Undefined),
+            Value::Object(obj_map) => handle_optional_method_call(&obj_map, method_name, args, env, obj_expr),
+            Value::Function(func_name) => {
+                // Handle constructor static methods
+                match func_name.as_str() {
+                    "Object" => crate::js_object::handle_object_method(method_name, args, env),
+                    "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
+                    _ => Err(JSError::EvaluationError {
+                        message: format!("{} has no static method '{}'", func_name, method_name),
+                    }),
+                }
+            }
+            Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        }
     } else {
         // Regular function call
         let func_val = evaluate_expr(env, func_expr)?;
@@ -2289,32 +2358,123 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
-                for arg_expr in args {
-                    if let Expr::Spread(spread_expr) = arg_expr {
-                        // Spread operator: evaluate the expression and expand its elements
-                        let spread_val = evaluate_expr(env, spread_expr)?;
-                        if let Value::Object(spread_obj) = spread_val {
-                            // Assume it's an array-like object
-                            let mut i = 0;
-                            loop {
-                                let key = i.to_string();
-                                if let Some(val) = obj_get_value(&spread_obj, &key)? {
-                                    evaluated_args.push(val.borrow().clone());
-                                    i += 1;
-                                } else {
-                                    break;
-                                }
-                            }
-                        } else {
-                            return Err(JSError::EvaluationError {
-                                message: "Spread operator can only be applied to arrays in function calls".to_string(),
-                            });
+                expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                if params.len() != evaluated_args.len() {
+                    return Err(JSError::ParseError);
+                }
+                // Create new environment starting with captured environment
+                let func_env = captured_env.clone();
+                // Add parameters
+                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
+                    env_set(&func_env, param.as_str(), arg_val.clone())?;
+                }
+                // Execute function body
+                evaluate_statements(&func_env, &body)
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        }
+    }
+}
+
+fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
+    log::trace!("evaluate_optional_call entry: args_len={} func_expr=...", args.len());
+    // Check if it's a method call first
+    if let Expr::Property(obj_expr, method_name) = func_expr {
+        // Special case for Array static methods
+        if let Expr::Var(var_name) = &**obj_expr {
+            if var_name == "Array" {
+                return crate::js_array::handle_array_static_method(method_name, args, env);
+            }
+        }
+
+        let obj_val = evaluate_expr(env, &**obj_expr)?;
+        log::trace!("evaluate_optional_call - object eval result: {obj_val:?}");
+        match obj_val {
+            Value::Undefined => Ok(Value::Undefined),
+            Value::Object(obj_map) => {
+                // If this object looks like the `std` module (we used 'sprintf' as marker)
+                if obj_map.borrow().contains_key("sprintf") {
+                    match method_name.as_str() {
+                        "sprintf" => {
+                            log::trace!("js dispatch calling sprintf with {} args", args.len());
+                            return sprintf::handle_sprintf_call(env, args);
                         }
-                    } else {
-                        let arg_val = evaluate_expr(env, arg_expr)?;
-                        evaluated_args.push(arg_val);
+                        "tmpfile" => {
+                            return tmpfile::create_tmpfile();
+                        }
+                        _ => {}
                     }
                 }
+
+                // If this object looks like the `os` module (we used 'open' as marker)
+                if obj_map.borrow().contains_key("open") {
+                    return crate::js_os::handle_os_method(&obj_map, method_name, args, env);
+                }
+
+                // If this object looks like the `os.path` module
+                if obj_map.borrow().contains_key("join") {
+                    return crate::js_os::handle_os_method(&obj_map, method_name, args, env);
+                }
+
+                // If this object is a file-like object (we use '__file_id' as marker)
+                if obj_map.borrow().contains_key("__file_id") {
+                    return tmpfile::handle_file_method(&obj_map, method_name, args, env);
+                }
+                // Check if this is the Math object
+                if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
+                    return js_math::handle_math_method(method_name, args, env);
+                } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
+                    return crate::js_json::handle_json_method(method_name, args, env);
+                } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
+                    return crate::js_object::handle_object_method(method_name, args, env);
+                } else if obj_map.borrow().contains_key("__timestamp") {
+                    // Date instance methods
+                    return crate::js_date::handle_date_method(&obj_map, method_name, args);
+                } else if obj_map.borrow().contains_key("__regex") {
+                    // RegExp instance methods
+                    return crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env);
+                } else if is_array(&obj_map) {
+                    // Array instance methods
+                    return crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, &**obj_expr);
+                } else if obj_map.borrow().contains_key("__class_def__") {
+                    // Class static methods
+                    return call_static_method(&obj_map, method_name, args, env);
+                } else if is_class_instance(&obj_map)? {
+                    return call_class_method(&obj_map, method_name, args, env);
+                } else {
+                    Err(JSError::EvaluationError {
+                        message: format!("Method {method_name} not found on object"),
+                    })
+                }
+            }
+            Value::Function(func_name) => {
+                // Handle constructor static methods
+                match func_name.as_str() {
+                    "Object" => crate::js_object::handle_object_method(method_name, args, env),
+                    "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
+                    _ => Err(JSError::EvaluationError {
+                        message: format!("{} has no static method '{}'", func_name, method_name),
+                    }),
+                }
+            }
+            Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        }
+    } else {
+        // Regular function call - check if base is null/undefined
+        let func_val = evaluate_expr(env, func_expr)?;
+        match func_val {
+            Value::Undefined => Ok(Value::Undefined),
+            Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
+            Value::Closure(params, body, captured_env) => {
+                // Function call
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                expand_spread_in_call_args(env, &args, &mut evaluated_args)?;
                 if params.len() != evaluated_args.len() {
                     return Err(JSError::ParseError);
                 }
@@ -2970,6 +3130,8 @@ pub enum Expr {
     Getter(Box<Expr>),                          // getter function
     Setter(Box<Expr>),                          // setter function
     Spread(Box<Expr>),                          // spread operator: ...expr
+    OptionalProperty(Box<Expr>, String),        // optional property access: obj?.prop
+    OptionalCall(Box<Expr>, Vec<Expr>),         // optional call: obj?.method(args)
     This,                                       // this keyword
     New(Box<Expr>, Vec<Expr>),                  // new expression: new Constructor(args)
     Super,                                      // super keyword
@@ -3121,6 +3283,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 } else {
                     tokens.push(Token::Dot);
                     i += 1;
+                }
+            }
+            '?' => {
+                if i + 1 < chars.len() && chars[i + 1] == '.' {
+                    tokens.push(Token::OptionalChain);
+                    i += 2;
+                } else {
+                    return Err(JSError::TokenizationError);
                 }
             }
             '=' => {
@@ -3353,6 +3523,7 @@ pub enum Token {
     False,
     Arrow,
     Spread,
+    OptionalChain,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -3976,6 +4147,47 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     return Err(JSError::ParseError);
                 }
             }
+            Token::OptionalChain => {
+                tokens.remove(0); // consume '?.'
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
+                if matches!(tokens[0], Token::LParen) {
+                    // Optional call: obj?.method(args)
+                    tokens.remove(0); // consume '('
+                    let mut args = Vec::new();
+                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                        loop {
+                            let arg = parse_expression(tokens)?;
+                            args.push(arg);
+                            if tokens.is_empty() {
+                                return Err(JSError::ParseError);
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
+                            if !matches!(tokens[0], Token::Comma) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume ','
+                        }
+                    }
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume ')'
+                    expr = Expr::OptionalCall(Box::new(expr), args);
+                } else if matches!(tokens[0], Token::Identifier(_)) {
+                    // Optional property access: obj?.prop
+                    if let Token::Identifier(prop) = tokens.remove(0) {
+                        expr = Expr::OptionalProperty(Box::new(expr), prop);
+                    } else {
+                        return Err(JSError::ParseError);
+                    }
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            }
             Token::LParen => {
                 tokens.remove(0); // consume '('
                 let mut args = Vec::new();
@@ -4356,4 +4568,121 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
 
     // RegExp constructor (already handled by js_regexp module)
     env_borrow.insert("RegExp".to_string(), Rc::new(RefCell::new(Value::Function("RegExp".to_string()))));
+}
+
+/// Expand spread operator in function call arguments
+fn expand_spread_in_call_args(env: &JSObjectDataPtr, args: &[Expr], evaluated_args: &mut Vec<Value>) -> Result<(), JSError> {
+    for arg_expr in args {
+        if let Expr::Spread(spread_expr) = arg_expr {
+            let spread_val = evaluate_expr(env, spread_expr)?;
+            if let Value::Object(spread_obj) = spread_val {
+                // Assume it's an array-like object
+                let mut i = 0;
+                loop {
+                    let key = i.to_string();
+                    if let Some(val) = obj_get_value(&spread_obj, &key)? {
+                        evaluated_args.push(val.borrow().clone());
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                return Err(JSError::EvaluationError {
+                    message: "Spread operator can only be applied to arrays in function calls".to_string(),
+                });
+            }
+        } else {
+            let arg_val = evaluate_expr(env, arg_expr)?;
+            evaluated_args.push(arg_val);
+        }
+    }
+    Ok(())
+}
+
+/// Handle optional method call on an object, Similar logic to regular method call but for optional
+fn handle_optional_method_call(
+    obj_map: &JSObjectDataPtr,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+    obj_expr: &Expr,
+) -> Result<Value, JSError> {
+    match method {
+        "log" if obj_map.borrow().contains_key("log") => js_console::handle_console_method(method, args, env),
+        "toString" => crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args),
+        "valueOf" => crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args),
+        method => {
+            // If this object looks like the `std` module (we used 'sprintf' as marker)
+            if obj_map.borrow().contains_key("sprintf") {
+                match method {
+                    "sprintf" => {
+                        log::trace!("js dispatch calling sprintf with {} args", args.len());
+                        sprintf::handle_sprintf_call(env, args)
+                    }
+                    "tmpfile" => tmpfile::create_tmpfile(),
+                    _ => Ok(Value::Undefined),
+                }
+            } else if obj_map.borrow().contains_key("open") {
+                // If this object looks like the `os` module (we used 'open' as marker)
+                crate::js_os::handle_os_method(&obj_map, method, args, env)
+            } else if obj_map.borrow().contains_key("join") {
+                // If this object looks like the `os.path` module
+                crate::js_os::handle_os_method(&obj_map, method, args, env)
+            } else if obj_map.borrow().contains_key("__file_id") {
+                // If this object is a file-like object (we use '__file_id' as marker)
+                tmpfile::handle_file_method(&obj_map, method, args, env)
+            } else if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
+                // Check if this is the Math object
+                js_math::handle_math_method(method, args, env)
+            } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
+                crate::js_json::handle_json_method(method, args, env)
+            } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
+                crate::js_object::handle_object_method(method, args, env)
+            } else if obj_map.borrow().contains_key("__timestamp") {
+                // Date instance methods
+                crate::js_date::handle_date_method(&obj_map, method, args)
+            } else if obj_map.borrow().contains_key("__regex") {
+                // RegExp instance methods
+                crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
+            } else if is_array(&obj_map) {
+                // Array instance methods
+                crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
+            } else if obj_map.borrow().contains_key("__class_def__") {
+                // Class static methods
+                call_static_method(&obj_map, method, args, env)
+            } else if is_class_instance(&obj_map)? {
+                call_class_method(&obj_map, method, args, env)
+            } else {
+                // Check for user-defined method
+                if let Some(prop_val) = obj_get_value(&obj_map, method)? {
+                    match prop_val.borrow().clone() {
+                        Value::Closure(params, body, captured_env) => {
+                            // Function call
+                            // Collect all arguments, expanding spreads
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            if params.len() != evaluated_args.len() {
+                                return Err(JSError::ParseError);
+                            }
+                            // Create new environment starting with captured environment
+                            let func_env = captured_env.clone();
+                            // Add parameters
+                            for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
+                                env_set(&func_env, param.as_str(), arg_val.clone())?;
+                            }
+                            // Execute function body
+                            evaluate_statements(&func_env, &body)
+                        }
+                        Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
+                        _ => Err(JSError::EvaluationError {
+                            message: format!("Property '{}' is not a function", method),
+                        }),
+                    }
+                } else {
+                    Ok(Value::Undefined)
+                }
+            }
+        }
+    }
 }

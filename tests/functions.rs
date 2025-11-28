@@ -84,4 +84,44 @@ mod function_tests {
             _ => panic!("Expected number 7.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_arrow_function_single_param() {
+        let script = "let square = x => x * x; square(5)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 25.0),
+            _ => panic!("Expected number 25.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_arrow_function_multiple_params() {
+        let script = "let add = (a, b) => a + b; add(3, 4)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 7.0),
+            _ => panic!("Expected number 7.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_arrow_function_no_params() {
+        let script = "let get_five = () => 5; get_five()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 5.0),
+            _ => panic!("Expected number 5.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_arrow_function_block_body() {
+        let script = "let test = x => { let y = x + 1; return y * 2; }; test(3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 8.0), // (3+1)*2 = 8
+            _ => panic!("Expected number 8.0, got {:?}", result),
+        }
+    }
 }

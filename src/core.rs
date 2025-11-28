@@ -1839,6 +1839,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
         Expr::Call(func_expr, args) => evaluate_call(env, func_expr, args),
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
@@ -2890,17 +2891,18 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
-    Function(Vec<String>, Vec<Statement>), // parameters, body
-    Object(Vec<(String, Expr)>),           // object literal: key-value pairs
-    Array(Vec<Expr>),                      // array literal: [elem1, elem2, ...]
-    Getter(Box<Expr>),                     // getter function
-    Setter(Box<Expr>),                     // setter function
-    This,                                  // this keyword
-    New(Box<Expr>, Vec<Expr>),             // new expression: new Constructor(args)
-    Super,                                 // super keyword
-    SuperCall(Vec<Expr>),                  // super() call in constructor
-    SuperProperty(String),                 // super.property access
-    SuperMethod(String, Vec<Expr>),        // super.method() call
+    Function(Vec<String>, Vec<Statement>),      // parameters, body
+    ArrowFunction(Vec<String>, Vec<Statement>), // parameters, body
+    Object(Vec<(String, Expr)>),                // object literal: key-value pairs
+    Array(Vec<Expr>),                           // array literal: [elem1, elem2, ...]
+    Getter(Box<Expr>),                          // getter function
+    Setter(Box<Expr>),                          // setter function
+    This,                                       // this keyword
+    New(Box<Expr>, Vec<Expr>),                  // new expression: new Constructor(args)
+    Super,                                      // super keyword
+    SuperCall(Vec<Expr>),                       // super() call in constructor
+    SuperProperty(String),                      // super.property access
+    SuperMethod(String, Vec<Expr>),             // super.method() call
 }
 
 #[derive(Debug, Clone)]
@@ -3052,6 +3054,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         tokens.push(Token::Equal);
                         i += 2;
                     }
+                } else if i + 1 < chars.len() && chars[i + 1] == '>' {
+                    tokens.push(Token::Arrow);
+                    i += 2;
                 } else {
                     tokens.push(Token::Assign);
                     i += 1;
@@ -3268,6 +3273,7 @@ pub enum Token {
     GreaterEqual,
     True,
     False,
+    Arrow,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -3532,7 +3538,15 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 expr
             }
         }
-        Token::Identifier(name) => Expr::Var(name),
+        Token::Identifier(name) => {
+            let mut expr = Expr::Var(name.clone());
+            if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                tokens.remove(0);
+                let body = parse_arrow_body(tokens)?;
+                expr = Expr::ArrowFunction(vec![name], body);
+            }
+            expr
+        }
         Token::This => Expr::This,
         Token::Super => {
             // Check if followed by ( for super() call
@@ -3772,12 +3786,75 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
         }
         Token::LParen => {
-            let expr = parse_expression(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                return Err(JSError::ParseError);
+            // Check if it's arrow function
+            let mut params = Vec::new();
+            let mut is_arrow = false;
+            let mut result_expr = None;
+            if matches!(tokens.get(0), Some(Token::RParen)) {
+                tokens.remove(0);
+                if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                    tokens.remove(0);
+                    is_arrow = true;
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            } else {
+                // Try to parse params
+                let mut param_names = Vec::new();
+                let mut local_consumed = Vec::new();
+                let mut valid = true;
+                loop {
+                    if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                        tokens.remove(0);
+                        local_consumed.push(Token::Identifier(name.clone()));
+                        param_names.push(name);
+                        if tokens.is_empty() {
+                            valid = false;
+                            break;
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            tokens.remove(0);
+                            local_consumed.push(Token::RParen);
+                            if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                                tokens.remove(0);
+                                is_arrow = true;
+                            } else {
+                                valid = false;
+                            }
+                            break;
+                        } else if matches!(tokens[0], Token::Comma) {
+                            tokens.remove(0);
+                            local_consumed.push(Token::Comma);
+                        } else {
+                            valid = false;
+                            break;
+                        }
+                    } else {
+                        valid = false;
+                        break;
+                    }
+                }
+                if valid && is_arrow {
+                    params = param_names;
+                } else {
+                    // Put back local_consumed
+                    for t in local_consumed.into_iter().rev() {
+                        tokens.insert(0, t);
+                    }
+                    // Parse as expression
+                    let expr_inner = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0);
+                    result_expr = Some(expr_inner);
+                }
             }
-            tokens.remove(0);
-            expr
+            if is_arrow {
+                Expr::ArrowFunction(params, parse_arrow_body(tokens)?)
+            } else {
+                result_expr.unwrap()
+            }
         }
         _ => {
             return Err(JSError::EvaluationError {
@@ -3839,6 +3916,21 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     }
 
     Ok(expr)
+}
+
+fn parse_arrow_body(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
+    if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        tokens.remove(0);
+        let body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0);
+        Ok(body)
+    } else {
+        let expr = parse_expression(tokens)?;
+        Ok(vec![Statement::Return(Some(expr))])
+    }
 }
 
 pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom) -> JSValue {

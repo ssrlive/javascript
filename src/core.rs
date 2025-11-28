@@ -11,6 +11,7 @@ use crate::js_class::{
 };
 use crate::js_console;
 use crate::js_math;
+use crate::js_number;
 use crate::sprintf;
 use crate::tmpfile;
 use std::cell::RefCell;
@@ -2580,7 +2581,7 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     } else if name == "Array" {
         Ok(Value::Function("Array".to_string()))
     } else if name == "Number" {
-        Ok(Value::Function("Number".to_string()))
+        Ok(Value::Object(js_number::make_number_object()?))
     } else if name == "Boolean" {
         Ok(Value::Function("Boolean".to_string()))
     } else if name == "Date" {
@@ -3373,6 +3374,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_json::handle_json_method(method, args, env)
                 } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
                     crate::js_object::handle_object_method(method, args, env)
+                } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                    crate::js_number::handle_number_method(method, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method, args)
@@ -3483,6 +3486,17 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Execute function body
                 evaluate_statements(&func_env, &body)
             }
+            Value::Object(obj_map) => {
+                // Check if this is a built-in constructor object
+                if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                    // Number constructor call
+                    crate::js_function::handle_global_function("Number", args, env)
+                } else {
+                    Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    })
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -3541,6 +3555,8 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     crate::js_json::handle_json_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
                     crate::js_object::handle_object_method(method_name, args, env)
+                } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                    crate::js_number::handle_number_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method_name, args)
@@ -6191,8 +6207,8 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
     // Object constructor
     env_borrow.insert("Object".to_string(), Rc::new(RefCell::new(Value::Function("Object".to_string()))));
 
-    // Number constructor
-    env_borrow.insert("Number".to_string(), Rc::new(RefCell::new(Value::Function("Number".to_string()))));
+    // Number constructor - handled by evaluate_var
+    // env_borrow.insert("Number".to_string(), Rc::new(RefCell::new(Value::Function("Number".to_string()))));
 
     // Boolean constructor
     env_borrow.insert("Boolean".to_string(), Rc::new(RefCell::new(Value::Function("Boolean".to_string()))));

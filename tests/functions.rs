@@ -124,4 +124,35 @@ mod function_tests {
             _ => panic!("Expected number 8.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_array_spread() {
+        let script = "let arr1 = [1, 2, 3]; let arr2 = [4, 5, 6]; let combined = [...arr1, ...arr2]; combined[0] + combined[1] + combined[2] + combined[3] + combined[4] + combined[5]";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 21.0), // 1+2+3+4+5+6 = 21
+            _ => panic!("Expected number 21.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_spread() {
+        let script =
+            "let obj1 = {a: 1, b: 2}; let obj2 = {c: 3, d: 4}; let merged = {...obj1, ...obj2}; merged.a + merged.b + merged.c + merged.d";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 10.0), // 1+2+3+4 = 10
+            _ => panic!("Expected number 10.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_function_call_spread() {
+        let script = "function sum(a, b, c) { return a + b + c; } let nums = [1, 2, 3]; sum(...nums)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0), // 1+2+3 = 6
+            _ => panic!("Expected number 6.0, got {:?}", result),
+        }
+    }
 }

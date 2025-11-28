@@ -1844,6 +1844,9 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
         Expr::Setter(func_expr) => evaluate_expr(env, func_expr),
+        Expr::Spread(_expr) => Err(JSError::EvaluationError {
+            message: "Spread operator must be used in array, object, or function call context".to_string(),
+        }),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => evaluate_new(env, constructor, args),
         Expr::Super => evaluate_super(env),
@@ -2284,15 +2287,42 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
             Value::Closure(params, body, captured_env) => {
                 // Function call
-                if params.len() != args.len() {
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                for arg_expr in args {
+                    if let Expr::Spread(spread_expr) = arg_expr {
+                        // Spread operator: evaluate the expression and expand its elements
+                        let spread_val = evaluate_expr(env, spread_expr)?;
+                        if let Value::Object(spread_obj) = spread_val {
+                            // Assume it's an array-like object
+                            let mut i = 0;
+                            loop {
+                                let key = i.to_string();
+                                if let Some(val) = obj_get_value(&spread_obj, &key)? {
+                                    evaluated_args.push(val.borrow().clone());
+                                    i += 1;
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else {
+                            return Err(JSError::EvaluationError {
+                                message: "Spread operator can only be applied to arrays in function calls".to_string(),
+                            });
+                        }
+                    } else {
+                        let arg_val = evaluate_expr(env, arg_expr)?;
+                        evaluated_args.push(arg_val);
+                    }
+                }
+                if params.len() != evaluated_args.len() {
                     return Err(JSError::ParseError);
                 }
                 // Create new environment starting with captured environment
                 let func_env = captured_env.clone();
                 // Add parameters
-                for (param, arg) in params.iter().zip(args.iter()) {
-                    let arg_val = evaluate_expr(env, arg)?;
-                    env_set(&func_env, param.as_str(), arg_val)?;
+                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
+                    env_set(&func_env, param.as_str(), arg_val.clone())?;
                 }
                 // Execute function body
                 evaluate_statements(&func_env, &body)
@@ -2307,120 +2337,137 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
 fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
     for (key, value_expr) in properties {
-        match value_expr {
-            Expr::Getter(func_expr) => {
-                if let Expr::Function(_params, body) = func_expr.as_ref() {
-                    // Check if property already exists
-                    let existing_opt = {
-                        let borrowed = obj.borrow();
-                        borrowed.get(key).map(|v| v.clone())
-                    };
-                    if let Some(existing) = existing_opt {
-                        let mut val = existing.borrow().clone();
-                        if let Value::Property {
-                            value: _,
-                            getter,
-                            setter: _,
-                        } = &mut val
-                        {
-                            // Update getter
-                            let _ = getter.replace((body.clone(), env.clone()));
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+        if key.is_empty() && matches!(value_expr, Expr::Spread(_)) {
+            // Spread operator: evaluate the expression and spread its properties
+            if let Expr::Spread(expr) = value_expr {
+                let spread_val = evaluate_expr(env, expr)?;
+                if let Value::Object(spread_obj) = spread_val {
+                    // Copy all properties from spread_obj to obj
+                    for (prop_key, prop_val) in spread_obj.borrow().properties.iter() {
+                        obj.borrow_mut().insert(prop_key.clone(), prop_val.clone());
+                    }
+                } else {
+                    return Err(JSError::EvaluationError {
+                        message: "Spread operator can only be applied to objects".to_string(),
+                    });
+                }
+            }
+        } else {
+            match value_expr {
+                Expr::Getter(func_expr) => {
+                    if let Expr::Function(_params, body) = func_expr.as_ref() {
+                        // Check if property already exists
+                        let existing_opt = {
+                            let borrowed = obj.borrow();
+                            borrowed.get(key).map(|v| v.clone())
+                        };
+                        if let Some(existing) = existing_opt {
+                            let mut val = existing.borrow().clone();
+                            if let Value::Property {
+                                value: _,
+                                getter,
+                                setter: _,
+                            } = &mut val
+                            {
+                                // Update getter
+                                let _ = getter.replace((body.clone(), env.clone()));
+                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                            } else {
+                                // Create new property descriptor
+                                let prop = Value::Property {
+                                    value: Some(existing.clone()),
+                                    getter: Some((body.clone(), env.clone())),
+                                    setter: None,
+                                };
+                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                            }
                         } else {
-                            // Create new property descriptor
+                            // Create new property descriptor with getter
                             let prop = Value::Property {
-                                value: Some(existing.clone()),
+                                value: None,
                                 getter: Some((body.clone(), env.clone())),
                                 setter: None,
                             };
                             obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        // Create new property descriptor with getter
-                        let prop = Value::Property {
-                            value: None,
-                            getter: Some((body.clone(), env.clone())),
-                            setter: None,
-                        };
-                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        return Err(JSError::EvaluationError {
+                            message: "Getter must be a function".to_string(),
+                        });
                     }
-                } else {
-                    return Err(JSError::EvaluationError {
-                        message: "Getter must be a function".to_string(),
-                    });
                 }
-            }
-            Expr::Setter(func_expr) => {
-                if let Expr::Function(params, body) = func_expr.as_ref() {
-                    // Check if property already exists
-                    let existing_opt = {
-                        let borrowed = obj.borrow();
-                        borrowed.get(key).map(|v| v.clone())
-                    };
-                    if let Some(existing) = existing_opt {
-                        let mut val = existing.borrow().clone();
-                        if let Value::Property {
-                            value: _,
-                            getter: _,
-                            setter,
-                        } = &mut val
-                        {
-                            // Update setter
-                            let _ = setter.replace((params.clone(), body.clone(), env.clone()));
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                Expr::Setter(func_expr) => {
+                    if let Expr::Function(params, body) = func_expr.as_ref() {
+                        // Check if property already exists
+                        let existing_opt = {
+                            let borrowed = obj.borrow();
+                            borrowed.get(key).map(|v| v.clone())
+                        };
+                        if let Some(existing) = existing_opt {
+                            let mut val = existing.borrow().clone();
+                            if let Value::Property {
+                                value: _,
+                                getter: _,
+                                setter,
+                            } = &mut val
+                            {
+                                // Update setter
+                                let _ = setter.replace((params.clone(), body.clone(), env.clone()));
+                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                            } else {
+                                // Create new property descriptor
+                                let prop = Value::Property {
+                                    value: Some(existing.clone()),
+                                    getter: None,
+                                    setter: Some((params.clone(), body.clone(), env.clone())),
+                                };
+                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                            }
                         } else {
-                            // Create new property descriptor
+                            // Create new property descriptor with setter
                             let prop = Value::Property {
-                                value: Some(existing.clone()),
+                                value: None,
                                 getter: None,
                                 setter: Some((params.clone(), body.clone(), env.clone())),
                             };
                             obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        // Create new property descriptor with setter
-                        let prop = Value::Property {
-                            value: None,
-                            getter: None,
-                            setter: Some((params.clone(), body.clone(), env.clone())),
-                        };
-                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        return Err(JSError::EvaluationError {
+                            message: "Setter must be a function".to_string(),
+                        });
                     }
-                } else {
-                    return Err(JSError::EvaluationError {
-                        message: "Setter must be a function".to_string(),
-                    });
                 }
-            }
-            _ => {
-                let value = evaluate_expr(env, value_expr)?;
-                // Check if property already exists
-                let existing_rc = {
-                    let borrowed = obj.borrow();
-                    borrowed.get(key).map(|v| v.clone())
-                };
-                if let Some(existing) = existing_rc {
-                    let mut existing_val = existing.borrow().clone();
-                    if let Value::Property {
-                        value: prop_value,
-                        getter: _,
-                        setter: _,
-                    } = &mut existing_val
-                    {
-                        // Update value
-                        let _ = prop_value.replace(Rc::new(RefCell::new(value)));
-                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(existing_val)));
+                _ => {
+                    let value = evaluate_expr(env, value_expr)?;
+                    // Check if property already exists
+                    let existing_rc = {
+                        let borrowed = obj.borrow();
+                        borrowed.get(key).map(|v| v.clone())
+                    };
+                    if let Some(existing) = existing_rc {
+                        let mut existing_val = existing.borrow().clone();
+                        if let Value::Property {
+                            value: prop_value,
+                            getter: _,
+                            setter: _,
+                        } = &mut existing_val
+                        {
+                            // Update value
+                            let _ = prop_value.replace(Rc::new(RefCell::new(value)));
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(existing_val)));
+                        } else {
+                            // Create new property descriptor
+                            let prop = Value::Property {
+                                value: Some(Rc::new(RefCell::new(value))),
+                                getter: None,
+                                setter: None,
+                            };
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        }
                     } else {
-                        // Create new property descriptor
-                        let prop = Value::Property {
-                            value: Some(Rc::new(RefCell::new(value))),
-                            getter: None,
-                            setter: None,
-                        };
-                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        obj_set_value(&obj, key.as_str(), value)?;
                     }
-                } else {
-                    obj_set_value(&obj, key.as_str(), value)?;
                 }
             }
         }
@@ -2430,12 +2477,37 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
 
 fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
     let mut arr = Rc::new(RefCell::new(JSObjectData::new()));
-    for (i, elem_expr) in elements.iter().enumerate() {
-        let value = evaluate_expr(env, elem_expr)?;
-        obj_set_value(&mut arr, &i.to_string(), value)?;
+    let mut index = 0;
+    for elem_expr in elements {
+        if let Expr::Spread(spread_expr) = elem_expr {
+            // Spread operator: evaluate the expression and spread its elements
+            let spread_val = evaluate_expr(env, spread_expr)?;
+            if let Value::Object(spread_obj) = spread_val {
+                // Assume it's an array-like object
+                let mut i = 0;
+                loop {
+                    let key = i.to_string();
+                    if let Some(val) = obj_get_value(&spread_obj, &key)? {
+                        obj_set_value(&mut arr, &index.to_string(), val.borrow().clone())?;
+                        index += 1;
+                        i += 1;
+                    } else {
+                        break;
+                    }
+                }
+            } else {
+                return Err(JSError::EvaluationError {
+                    message: "Spread operator can only be applied to arrays".to_string(),
+                });
+            }
+        } else {
+            let value = evaluate_expr(env, elem_expr)?;
+            obj_set_value(&mut arr, &index.to_string(), value)?;
+            index += 1;
+        }
     }
     // Set length property
-    set_array_length(&mut arr, elements.len())?;
+    set_array_length(&mut arr, index)?;
     Ok(Value::Object(arr))
 }
 
@@ -2897,6 +2969,7 @@ pub enum Expr {
     Array(Vec<Expr>),                           // array literal: [elem1, elem2, ...]
     Getter(Box<Expr>),                          // getter function
     Setter(Box<Expr>),                          // setter function
+    Spread(Box<Expr>),                          // spread operator: ...expr
     This,                                       // this keyword
     New(Box<Expr>, Vec<Expr>),                  // new expression: new Constructor(args)
     Super,                                      // super keyword
@@ -3042,8 +3115,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 i += 1;
             }
             '.' => {
-                tokens.push(Token::Dot);
-                i += 1;
+                if i + 2 < chars.len() && chars[i + 1] == '.' && chars[i + 2] == '.' {
+                    tokens.push(Token::Spread);
+                    i += 3;
+                } else {
+                    tokens.push(Token::Dot);
+                    i += 1;
+                }
             }
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
@@ -3274,6 +3352,7 @@ pub enum Token {
     True,
     False,
     Arrow,
+    Spread,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -3505,6 +3584,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let inner = parse_primary(tokens)?;
             Expr::UnaryNeg(Box::new(inner))
         }
+        Token::Spread => {
+            let inner = parse_primary(tokens)?;
+            Expr::Spread(Box::new(inner))
+        }
         Token::TemplateString(parts) => {
             if parts.is_empty() {
                 Expr::StringLit(Vec::new())
@@ -3625,78 +3708,85 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Object(properties));
             }
             loop {
-                // Check for getter/setter
-                let is_getter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "get");
-                let is_setter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "set");
-
-                if is_getter || is_setter {
-                    tokens.remove(0); // consume get/set
-                }
-
-                // Parse key
-                let key = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
-                    tokens.remove(0);
-                    name
-                } else if let Some(Token::StringLit(s)) = tokens.get(0).cloned() {
-                    tokens.remove(0);
-                    String::from_utf16_lossy(&s)
+                // Check for spread
+                if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
+                    tokens.remove(0); // consume ...
+                    let expr = parse_expression(tokens)?;
+                    properties.push(("".to_string(), Expr::Spread(Box::new(expr))));
                 } else {
-                    return Err(JSError::ParseError);
-                };
+                    // Check for getter/setter
+                    let is_getter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "get");
+                    let is_setter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "set");
 
-                // Expect colon or parentheses for getter/setter
-                if is_getter || is_setter {
-                    // Parse function for getter/setter
-                    if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                        return Err(JSError::ParseError);
+                    if is_getter || is_setter {
+                        tokens.remove(0); // consume get/set
                     }
-                    tokens.remove(0); // consume (
 
-                    let mut params = Vec::new();
-                    if is_setter {
-                        // Setter should have exactly one parameter
-                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
-                            tokens.remove(0);
-                            params.push(param);
-                        } else {
+                    // Parse key
+                    let key = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                        tokens.remove(0);
+                        name
+                    } else if let Some(Token::StringLit(s)) = tokens.get(0).cloned() {
+                        tokens.remove(0);
+                        String::from_utf16_lossy(&s)
+                    } else {
+                        return Err(JSError::ParseError);
+                    };
+
+                    // Expect colon or parentheses for getter/setter
+                    if is_getter || is_setter {
+                        // Parse function for getter/setter
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
                             return Err(JSError::ParseError);
                         }
-                    } else if is_getter {
-                        // Getter should have no parameters
-                    }
+                        tokens.remove(0); // consume (
 
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume )
+                        let mut params = Vec::new();
+                        if is_setter {
+                            // Setter should have exactly one parameter
+                            if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                                tokens.remove(0);
+                                params.push(param);
+                            } else {
+                                return Err(JSError::ParseError);
+                            }
+                        } else if is_getter {
+                            // Getter should have no parameters
+                        }
 
-                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume {
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume )
 
-                    let body = parse_statements(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume {
 
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume }
+                        let body = parse_statements(tokens)?;
 
-                    if is_getter {
-                        properties.push((key, Expr::Getter(Box::new(Expr::Function(params, body)))));
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume }
+
+                        if is_getter {
+                            properties.push((key, Expr::Getter(Box::new(Expr::Function(params, body)))));
+                        } else {
+                            properties.push((key, Expr::Setter(Box::new(Expr::Function(params, body)))));
+                        }
                     } else {
-                        properties.push((key, Expr::Setter(Box::new(Expr::Function(params, body)))));
-                    }
-                } else {
-                    // Regular property
-                    if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume :
+                        // Regular property
+                        if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume :
 
-                    // Parse value
-                    let value = parse_expression(tokens)?;
-                    properties.push((key, value));
+                        // Parse value
+                        let value = parse_expression(tokens)?;
+                        properties.push((key, value));
+                    }
                 }
 
                 // Check for comma or end

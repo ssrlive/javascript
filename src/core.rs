@@ -1353,15 +1353,46 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
         let is_const = matches!(tokens[0], Token::Const);
         tokens.remove(0); // consume let/var/const
-        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
-            tokens.remove(0);
-            if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+
+        // Check for destructuring
+        if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
+            // Array destructuring
+            let pattern = parse_array_destructuring_pattern(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume =
+            let expr = parse_expression(tokens)?;
+            if is_const {
+                return Ok(Statement::ConstDestructuringArray(pattern, expr));
+            } else {
+                return Ok(Statement::LetDestructuringArray(pattern, expr));
+            }
+        } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            // Object destructuring
+            let pattern = parse_object_destructuring_pattern(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume =
+            let expr = parse_expression(tokens)?;
+            if is_const {
+                return Ok(Statement::ConstDestructuringObject(pattern, expr));
+            } else {
+                return Ok(Statement::LetDestructuringObject(pattern, expr));
+            }
+        } else {
+            // Regular variable declaration
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                 tokens.remove(0);
-                let expr = parse_expression(tokens)?;
-                if is_const {
-                    return Ok(Statement::Const(name, expr));
-                } else {
-                    return Ok(Statement::Let(name, expr));
+                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                    tokens.remove(0);
+                    let expr = parse_expression(tokens)?;
+                    if is_const {
+                        return Ok(Statement::Const(name, expr));
+                    } else {
+                        return Ok(Statement::Let(name, expr));
+                    }
                 }
             }
         }
@@ -1524,7 +1555,7 @@ pub enum ControlFlow {
 }
 
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
-    match evaluate_statements_with_context(env, statements, false, false)? {
+    match evaluate_statements_with_context(env, statements)? {
         ControlFlow::Normal(val) => Ok(val),
         ControlFlow::Break => Err(JSError::EvaluationError {
             message: "break statement not in loop or switch".to_string(),
@@ -1536,12 +1567,7 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
     }
 }
 
-fn evaluate_statements_with_context(
-    env: &JSObjectDataPtr,
-    statements: &[Statement],
-    _in_loop: bool,
-    _in_switch: bool,
-) -> Result<ControlFlow, JSError> {
+fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
@@ -1632,12 +1658,12 @@ fn evaluate_statements_with_context(
             Statement::If(condition, then_body, else_body) => {
                 let cond_val = evaluate_expr(env, condition)?;
                 if is_truthy(&cond_val) {
-                    match evaluate_statements_with_context(env, then_body, _in_loop, _in_switch)? {
+                    match evaluate_statements_with_context(env, then_body)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
                 } else if let Some(else_stmts) = else_body {
-                    match evaluate_statements_with_context(env, else_stmts, _in_loop, _in_switch)? {
+                    match evaluate_statements_with_context(env, else_stmts)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
@@ -1645,7 +1671,7 @@ fn evaluate_statements_with_context(
             }
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
                 // Execute try block and handle catch/finally semantics
-                match evaluate_statements_with_context(env, try_body, _in_loop, _in_switch) {
+                match evaluate_statements_with_context(env, try_body) {
                     Ok(ControlFlow::Normal(v)) => last_value = v,
                     Ok(cf) => {
                         // Handle control flow in try block
@@ -1660,18 +1686,18 @@ fn evaluate_statements_with_context(
                         if catch_param.is_empty() {
                             // No catch: run finally if present then propagate error
                             if let Some(finally_body) = finally_body_opt {
-                                evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)?;
+                                evaluate_statements_with_context(env, finally_body)?;
                             }
                             return Err(err);
                         } else {
                             let catch_env = env.clone();
                             env_set(&catch_env, catch_param.as_str(), Value::String(utf8_to_utf16(&format!("{err:?}"))))?;
-                            match evaluate_statements_with_context(&catch_env, catch_body, _in_loop, _in_switch)? {
+                            match evaluate_statements_with_context(&catch_env, catch_body)? {
                                 ControlFlow::Normal(val) => last_value = val,
                                 cf => {
                                     // Finally block executes after try/catch
                                     if let Some(finally_body) = finally_body_opt {
-                                        evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)?;
+                                        evaluate_statements_with_context(env, finally_body)?;
                                     }
                                     return Ok(cf);
                                 }
@@ -1681,7 +1707,7 @@ fn evaluate_statements_with_context(
                 }
                 // Finally block executes after try/catch
                 if let Some(finally_body) = finally_body_opt {
-                    match evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)? {
+                    match evaluate_statements_with_context(env, finally_body)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
@@ -1720,7 +1746,7 @@ fn evaluate_statements_with_context(
                     }
 
                     // Execute body
-                    match evaluate_statements_with_context(env, body, true, false)? {
+                    match evaluate_statements_with_context(env, body)? {
                         ControlFlow::Normal(val) => last_value = val,
                         ControlFlow::Break => break,
                         ControlFlow::Continue => {}
@@ -1761,7 +1787,7 @@ fn evaluate_statements_with_context(
                                 if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                                     let element = element_rc.borrow().clone();
                                     env_set(env, var.as_str(), element)?;
-                                    match evaluate_statements_with_context(env, body, true, false)? {
+                                    match evaluate_statements_with_context(env, body)? {
                                         ControlFlow::Normal(val) => last_value = val,
                                         ControlFlow::Break => break,
                                         ControlFlow::Continue => {}
@@ -1791,7 +1817,7 @@ fn evaluate_statements_with_context(
                     }
 
                     // Execute body
-                    match evaluate_statements_with_context(env, body, true, false)? {
+                    match evaluate_statements_with_context(env, body)? {
                         ControlFlow::Normal(val) => last_value = val,
                         ControlFlow::Break => break,
                         ControlFlow::Continue => {}
@@ -1802,7 +1828,7 @@ fn evaluate_statements_with_context(
             Statement::DoWhile(body, condition) => {
                 loop {
                     // Execute body first
-                    match evaluate_statements_with_context(env, body, true, false)? {
+                    match evaluate_statements_with_context(env, body)? {
                         ControlFlow::Normal(val) => last_value = val,
                         ControlFlow::Break => break,
                         ControlFlow::Continue => {}
@@ -1832,7 +1858,7 @@ fn evaluate_statements_with_context(
                                 }
                             }
                             if found_match {
-                                match evaluate_statements_with_context(env, case_stmts, false, true)? {
+                                match evaluate_statements_with_context(env, case_stmts)? {
                                     ControlFlow::Normal(val) => last_value = val,
                                     ControlFlow::Break => break,
                                     cf => return Ok(cf),
@@ -1842,14 +1868,14 @@ fn evaluate_statements_with_context(
                         SwitchCase::Default(default_stmts) => {
                             if !found_match && !executed_default {
                                 executed_default = true;
-                                match evaluate_statements_with_context(env, default_stmts, false, true)? {
+                                match evaluate_statements_with_context(env, default_stmts)? {
                                     ControlFlow::Normal(val) => last_value = val,
                                     ControlFlow::Break => break,
                                     cf => return Ok(cf),
                                 }
                             } else if found_match {
                                 // Default case also falls through if a match was found before it
-                                match evaluate_statements_with_context(env, default_stmts, false, true)? {
+                                match evaluate_statements_with_context(env, default_stmts)? {
                                     ControlFlow::Normal(val) => last_value = val,
                                     ControlFlow::Break => break,
                                     cf => return Ok(cf),
@@ -1865,9 +1891,198 @@ fn evaluate_statements_with_context(
             Statement::Continue => {
                 return Ok(ControlFlow::Continue);
             }
+            Statement::LetDestructuringArray(pattern, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                perform_array_destructuring(env, pattern, &val, false)?;
+                last_value = val;
+            }
+            Statement::ConstDestructuringArray(pattern, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                perform_array_destructuring(env, pattern, &val, true)?;
+                last_value = val;
+            }
+            Statement::LetDestructuringObject(pattern, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                perform_object_destructuring(env, pattern, &val, false)?;
+                last_value = val;
+            }
+            Statement::ConstDestructuringObject(pattern, expr) => {
+                let val = evaluate_expr(env, expr)?;
+                perform_object_destructuring(env, pattern, &val, true)?;
+                last_value = val;
+            }
         }
     }
     Ok(ControlFlow::Normal(last_value))
+}
+
+fn perform_array_destructuring(
+    env: &JSObjectDataPtr,
+    pattern: &Vec<DestructuringElement>,
+    value: &Value,
+    is_const: bool,
+) -> Result<(), JSError> {
+    match value {
+        Value::Object(arr) if is_array(arr) => {
+            let mut index = 0;
+            let mut rest_index = None;
+            let mut rest_var = None;
+
+            for element in pattern {
+                match element {
+                    DestructuringElement::Variable(var) => {
+                        let key = index.to_string();
+                        let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        if is_const {
+                            env_set_const(env, var, val);
+                        } else {
+                            env_set(env, var, val)?;
+                        }
+                        index += 1;
+                    }
+                    DestructuringElement::NestedArray(nested_pattern) => {
+                        let key = index.to_string();
+                        let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        perform_array_destructuring(env, nested_pattern, &val, is_const)?;
+                        index += 1;
+                    }
+                    DestructuringElement::NestedObject(nested_pattern) => {
+                        let key = index.to_string();
+                        let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        perform_object_destructuring(env, nested_pattern, &val, is_const)?;
+                        index += 1;
+                    }
+                    DestructuringElement::Rest(var) => {
+                        rest_index = Some(index);
+                        rest_var = Some(var.clone());
+                        break;
+                    }
+                    DestructuringElement::Empty => {
+                        index += 1;
+                    }
+                }
+            }
+
+            // Handle rest element
+            if let (Some(rest_start), Some(var)) = (rest_index, rest_var) {
+                let mut rest_elements: Vec<Value> = Vec::new();
+                let len = get_array_length(arr).unwrap_or(0);
+                for i in rest_start..len {
+                    let key = i.to_string();
+                    if let Some(val_rc) = obj_get_value(arr, &key)? {
+                        rest_elements.push(val_rc.borrow().clone());
+                    }
+                }
+                let rest_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                let mut rest_index = 0;
+                for elem in rest_elements {
+                    obj_set_value(&rest_obj, rest_index.to_string(), elem)?;
+                    rest_index += 1;
+                }
+                set_array_length(&rest_obj, rest_index)?;
+                let rest_value = Value::Object(rest_obj);
+                if is_const {
+                    env_set_const(env, &var, rest_value);
+                } else {
+                    env_set(env, &var, rest_value)?;
+                }
+            }
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Cannot destructure non-array value".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn perform_object_destructuring(
+    env: &JSObjectDataPtr,
+    pattern: &Vec<ObjectDestructuringElement>,
+    value: &Value,
+    is_const: bool,
+) -> Result<(), JSError> {
+    match value {
+        Value::Object(obj) => {
+            for element in pattern {
+                match element {
+                    ObjectDestructuringElement::Property { key, value: dest } => {
+                        let prop_val = if let Some(val_rc) = obj_get_value(obj, key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        match dest {
+                            DestructuringElement::Variable(var) => {
+                                if is_const {
+                                    env_set_const(env, var, prop_val);
+                                } else {
+                                    env_set(env, var, prop_val)?;
+                                }
+                            }
+                            DestructuringElement::NestedArray(nested_pattern) => {
+                                perform_array_destructuring(env, nested_pattern, &prop_val, is_const)?;
+                            }
+                            DestructuringElement::NestedObject(nested_pattern) => {
+                                perform_object_destructuring(env, nested_pattern, &prop_val, is_const)?;
+                            }
+                            _ => {
+                                // Rest in property value not supported in object destructuring
+                                return Err(JSError::EvaluationError {
+                                    message: "Invalid destructuring pattern".to_string(),
+                                });
+                            }
+                        }
+                    }
+                    ObjectDestructuringElement::Rest(var) => {
+                        // Collect remaining properties
+                        let rest_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                        let mut assigned_keys = std::collections::HashSet::new();
+
+                        // Collect keys that were already assigned
+                        for element in pattern {
+                            if let ObjectDestructuringElement::Property { key, .. } = element {
+                                assigned_keys.insert(key.clone());
+                            }
+                        }
+
+                        // Add remaining properties to rest object
+                        for (key, val_rc) in obj.borrow().properties.iter() {
+                            if !assigned_keys.contains(key) {
+                                rest_obj.borrow_mut().insert(key.clone(), val_rc.clone());
+                            }
+                        }
+
+                        let rest_value = Value::Object(rest_obj);
+                        if is_const {
+                            env_set_const(env, var, rest_value);
+                        } else {
+                            env_set(env, var, rest_value)?;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Cannot destructure non-object value".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
@@ -1902,6 +2117,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::SuperCall(args) => evaluate_super_call(env, args),
         Expr::SuperProperty(prop) => evaluate_super_property(env, prop),
         Expr::SuperMethod(method, args) => evaluate_super_method(env, method, args),
+        Expr::ArrayDestructuring(pattern) => evaluate_array_destructuring(env, pattern),
+        Expr::ObjectDestructuring(pattern) => evaluate_object_destructuring(env, pattern),
     }
 }
 
@@ -2716,6 +2933,20 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
     Ok(Value::Object(arr))
 }
 
+fn evaluate_array_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<DestructuringElement>) -> Result<Value, JSError> {
+    // Array destructuring is handled at the statement level, not as an expression
+    Err(JSError::EvaluationError {
+        message: "Array destructuring should not be evaluated as an expression".to_string(),
+    })
+}
+
+fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDestructuringElement>) -> Result<Value, JSError> {
+    // Object destructuring is handled at the statement level, not as an expression
+    Err(JSError::EvaluationError {
+        message: "Object destructuring should not be evaluated as an expression".to_string(),
+    })
+}
+
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
 #[derive(Clone)]
@@ -3095,8 +3326,12 @@ pub enum SwitchCase {
 pub enum Statement {
     Let(String, Expr),
     Const(String, Expr),
-    Class(String, Option<String>, Vec<ClassMember>), // name, extends, members
-    Assign(String, Expr),                            // variable assignment
+    LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
+    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
+    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
+    Class(String, Option<String>, Vec<ClassMember>),        // name, extends, members
+    Assign(String, Expr),                                   // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
@@ -3116,6 +3351,10 @@ impl std::fmt::Debug for Statement {
         match self {
             Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
             Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
+            Statement::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
+            Statement::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),
+            Statement::LetDestructuringObject(pattern, expr) => write!(f, "LetDestructuringObject({:?}, {:?})", pattern, expr),
+            Statement::ConstDestructuringObject(pattern, expr) => write!(f, "ConstDestructuringObject({:?}, {:?})", pattern, expr),
             Statement::Class(name, extends, members) => write!(f, "Class({name}, {extends:?}, {members:?})"),
             Statement::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
             Statement::Expr(expr) => write!(f, "Expr({:?})", expr),
@@ -3166,21 +3405,23 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
-    Function(Vec<String>, Vec<Statement>),      // parameters, body
-    ArrowFunction(Vec<String>, Vec<Statement>), // parameters, body
-    Object(Vec<(String, Expr)>),                // object literal: key-value pairs
-    Array(Vec<Expr>),                           // array literal: [elem1, elem2, ...]
-    Getter(Box<Expr>),                          // getter function
-    Setter(Box<Expr>),                          // setter function
-    Spread(Box<Expr>),                          // spread operator: ...expr
-    OptionalProperty(Box<Expr>, String),        // optional property access: obj?.prop
-    OptionalCall(Box<Expr>, Vec<Expr>),         // optional call: obj?.method(args)
-    This,                                       // this keyword
-    New(Box<Expr>, Vec<Expr>),                  // new expression: new Constructor(args)
-    Super,                                      // super keyword
-    SuperCall(Vec<Expr>),                       // super() call in constructor
-    SuperProperty(String),                      // super.property access
-    SuperMethod(String, Vec<Expr>),             // super.method() call
+    Function(Vec<String>, Vec<Statement>),                // parameters, body
+    ArrowFunction(Vec<String>, Vec<Statement>),           // parameters, body
+    Object(Vec<(String, Expr)>),                          // object literal: key-value pairs
+    Array(Vec<Expr>),                                     // array literal: [elem1, elem2, ...]
+    Getter(Box<Expr>),                                    // getter function
+    Setter(Box<Expr>),                                    // setter function
+    Spread(Box<Expr>),                                    // spread operator: ...expr
+    OptionalProperty(Box<Expr>, String),                  // optional property access: obj?.prop
+    OptionalCall(Box<Expr>, Vec<Expr>),                   // optional call: obj?.method(args)
+    This,                                                 // this keyword
+    New(Box<Expr>, Vec<Expr>),                            // new expression: new Constructor(args)
+    Super,                                                // super keyword
+    SuperCall(Vec<Expr>),                                 // super() call in constructor
+    SuperProperty(String),                                // super.property access
+    SuperMethod(String, Vec<Expr>),                       // super.method() call
+    ArrayDestructuring(Vec<DestructuringElement>),        // array destructuring: [a, b, ...rest]
+    ObjectDestructuring(Vec<ObjectDestructuringElement>), // object destructuring: {a, b: c, ...rest}
 }
 
 #[derive(Debug, Clone)]
@@ -3199,6 +3440,21 @@ pub enum BinaryOp {
     InstanceOf,
     In,
     NullishCoalescing,
+}
+
+#[derive(Debug, Clone)]
+pub enum DestructuringElement {
+    Variable(String),                              // a
+    NestedArray(Vec<DestructuringElement>),        // [a, b]
+    NestedObject(Vec<ObjectDestructuringElement>), // {a, b}
+    Rest(String),                                  // ...rest
+    Empty,                                         // for skipped elements: [, b] = [1, 2]
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectDestructuringElement {
+    Property { key: String, value: DestructuringElement }, // a: b or a
+    Rest(String),                                          // ...rest
 }
 
 fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
@@ -4295,6 +4551,140 @@ fn parse_arrow_body(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> 
         let expr = parse_expression(tokens)?;
         Ok(vec![Statement::Return(Some(expr))])
     }
+}
+
+fn parse_array_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<DestructuringElement>, JSError> {
+    if tokens.is_empty() || !matches!(tokens[0], Token::LBracket) {
+        return Err(JSError::ParseError);
+    }
+    tokens.remove(0); // consume [
+
+    let mut pattern = Vec::new();
+    if !tokens.is_empty() && matches!(tokens[0], Token::RBracket) {
+        tokens.remove(0); // consume ]
+        return Ok(pattern);
+    }
+
+    loop {
+        if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
+            tokens.remove(0); // consume ...
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                pattern.push(DestructuringElement::Rest(name));
+            } else {
+                return Err(JSError::ParseError);
+            }
+            // Rest must be the last element
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBracket) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume ]
+            break;
+        } else if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+            tokens.remove(0); // consume ,
+            pattern.push(DestructuringElement::Empty);
+        } else if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
+            // Nested array destructuring
+            let nested_pattern = parse_array_destructuring_pattern(tokens)?;
+            pattern.push(DestructuringElement::NestedArray(nested_pattern));
+        } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            // Nested object destructuring
+            let nested_pattern = parse_object_destructuring_pattern(tokens)?;
+            pattern.push(DestructuringElement::NestedObject(nested_pattern));
+        } else if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            tokens.remove(0);
+            pattern.push(DestructuringElement::Variable(name));
+        } else {
+            return Err(JSError::ParseError);
+        }
+
+        if tokens.is_empty() {
+            return Err(JSError::ParseError);
+        }
+        if matches!(tokens[0], Token::RBracket) {
+            tokens.remove(0); // consume ]
+            break;
+        } else if matches!(tokens[0], Token::Comma) {
+            tokens.remove(0); // consume ,
+        } else {
+            return Err(JSError::ParseError);
+        }
+    }
+
+    Ok(pattern)
+}
+
+fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<ObjectDestructuringElement>, JSError> {
+    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+        return Err(JSError::ParseError);
+    }
+    tokens.remove(0); // consume {
+
+    let mut pattern = Vec::new();
+    if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
+        tokens.remove(0); // consume }
+        return Ok(pattern);
+    }
+
+    loop {
+        if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
+            tokens.remove(0); // consume ...
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                pattern.push(ObjectDestructuringElement::Rest(name));
+            } else {
+                return Err(JSError::ParseError);
+            }
+            // Rest must be the last element
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+            break;
+        } else {
+            // Parse property
+            let key = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                name
+            } else {
+                return Err(JSError::ParseError);
+            };
+
+            let value = if !tokens.is_empty() && matches!(tokens[0], Token::Colon) {
+                tokens.remove(0); // consume :
+                                  // Parse the value pattern
+                if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
+                    DestructuringElement::NestedArray(parse_array_destructuring_pattern(tokens)?)
+                } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                    DestructuringElement::NestedObject(parse_object_destructuring_pattern(tokens)?)
+                } else if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                    tokens.remove(0);
+                    DestructuringElement::Variable(name)
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            } else {
+                // Shorthand: key is the same as variable name
+                DestructuringElement::Variable(key.clone())
+            };
+
+            pattern.push(ObjectDestructuringElement::Property { key, value });
+        }
+
+        if tokens.is_empty() {
+            return Err(JSError::ParseError);
+        }
+        if matches!(tokens[0], Token::RBrace) {
+            tokens.remove(0); // consume }
+            break;
+        } else if matches!(tokens[0], Token::Comma) {
+            tokens.remove(0); // consume ,
+        } else {
+            return Err(JSError::ParseError);
+        }
+    }
+
+    Ok(pattern)
 }
 
 /// # Safety

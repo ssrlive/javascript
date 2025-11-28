@@ -2182,6 +2182,13 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(Value::Boolean(false)),
             }
         }
+        BinaryOp::NullishCoalescing => {
+            // Nullish coalescing: return right if left is null or undefined, otherwise left
+            match l {
+                Value::Undefined => Ok(r),
+                _ => Ok(l),
+            }
+        }
     }
 }
 
@@ -3191,6 +3198,7 @@ pub enum BinaryOp {
     GreaterEqual,
     InstanceOf,
     In,
+    NullishCoalescing,
 }
 
 fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
@@ -3322,7 +3330,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 }
             }
             '?' => {
-                if i + 1 < chars.len() && chars[i + 1] == '.' {
+                if i + 1 < chars.len() && chars[i + 1] == '?' {
+                    tokens.push(Token::NullishCoalescing);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '.' {
                     tokens.push(Token::OptionalChain);
                     i += 2;
                 } else {
@@ -3560,6 +3571,7 @@ pub enum Token {
     Arrow,
     Spread,
     OptionalChain,
+    NullishCoalescing,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -3621,7 +3633,7 @@ fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_comparison(tokens)?;
+    let left = parse_nullish(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
@@ -3629,6 +3641,20 @@ fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         tokens.remove(0);
         let right = parse_assignment(tokens)?;
         Ok(Expr::Assign(Box::new(left), Box::new(right)))
+    } else {
+        Ok(left)
+    }
+}
+
+fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    let left = parse_comparison(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::NullishCoalescing) {
+        tokens.remove(0);
+        let right = parse_nullish(tokens)?;
+        Ok(Expr::Binary(Box::new(left), BinaryOp::NullishCoalescing, Box::new(right)))
     } else {
         Ok(left)
     }

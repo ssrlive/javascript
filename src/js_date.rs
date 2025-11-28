@@ -68,7 +68,7 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
     let chrono_month = month + 1;
 
     // Handle year conversion (JavaScript allows 2-digit years)
-    let full_year = if year >= 0 && year < 100 {
+    let full_year = if (0..100).contains(&year) {
         if year < 50 {
             2000 + year
         } else {
@@ -79,7 +79,7 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
     };
 
     // Validate ranges
-    if chrono_month < 1 || chrono_month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59 || millisecond > 999 {
+    if !(1..=12).contains(&chrono_month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 || millisecond > 999 {
         return None;
     }
 

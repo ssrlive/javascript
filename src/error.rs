@@ -1,6 +1,4 @@
-use thiserror::Error;
-
-#[derive(Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug)]
 pub enum JSError {
     #[error("Tokenization failed")]
     TokenizationError,
@@ -25,4 +23,16 @@ pub enum JSError {
 
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
+
+    #[error("std::io error: {0}")]
+    IoError(#[from] std::io::Error),
+}
+
+impl From<JSError> for std::io::Error {
+    fn from(err: JSError) -> std::io::Error {
+        match err {
+            JSError::IoError(io_err) => io_err,
+            _ => std::io::Error::other(err.to_string()),
+        }
+    }
 }

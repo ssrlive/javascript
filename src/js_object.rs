@@ -30,17 +30,15 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     // Create a simple array-like object for keys
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, key) in keys.into_iter().enumerate() {
-                        obj_set_value(&result_obj, &i.to_string(), key)?;
+                        obj_set_value(&result_obj, i.to_string(), key)?;
                     }
                     let len = result_obj.borrow().properties.len();
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
-                Value::Undefined => {
-                    return Err(JSError::TypeError {
-                        message: "Object.keys called on undefined".to_string(),
-                    });
-                }
+                Value::Undefined => Err(JSError::TypeError {
+                    message: "Object.keys called on undefined".to_string(),
+                }),
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -73,17 +71,15 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     // Create a simple array-like object for values
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, value) in values.into_iter().enumerate() {
-                        obj_set_value(&result_obj, &i.to_string(), value)?;
+                        obj_set_value(&result_obj, i.to_string(), value)?;
                     }
                     let len = result_obj.borrow().properties.len();
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
-                Value::Undefined => {
-                    return Err(JSError::TypeError {
-                        message: "Object.values called on undefined".to_string(),
-                    });
-                }
+                Value::Undefined => Err(JSError::TypeError {
+                    message: "Object.values called on undefined".to_string(),
+                }),
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -124,11 +120,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-        Value::Undefined => {
-            return Err(JSError::TypeError {
-                message: "Cannot convert undefined to object".to_string(),
-            });
-        }
+        Value::Undefined => Err(JSError::TypeError {
+            message: "Cannot convert undefined to object".to_string(),
+        }),
         Value::Object(ref obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {
@@ -148,7 +142,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 let current_len = get_array_length(obj_map).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get_value(&obj_map, &i.to_string())? {
+                    if let Some(val_rc) = obj_get_value(obj_map, i.to_string())? {
                         match &*val_rc.borrow() {
                             Value::String(s) => parts.push(String::from_utf16_lossy(s)),
                             Value::Number(n) => parts.push(n.to_string()),
@@ -199,11 +193,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::Number(n) => Ok(Value::Number(*n)),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
-        Value::Undefined => {
-            return Err(JSError::TypeError {
-                message: "Cannot convert undefined to object".to_string(),
-            });
-        }
+        Value::Undefined => Err(JSError::TypeError {
+            message: "Cannot convert undefined to object".to_string(),
+        }),
         Value::Object(ref obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {

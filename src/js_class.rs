@@ -78,7 +78,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
                     // Set prototype
                     if let Some(prototype_val) = obj_get_value(&class_obj, "prototype")? {
-                        let _ = obj_set_value(&instance, "__proto__", prototype_val.borrow().clone());
+                        obj_set_value(&instance, "__proto__", prototype_val.borrow().clone())?;
                     }
 
                     // Set instance properties
@@ -107,7 +107,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                             }
 
                             // Execute constructor body
-                            evaluate_statements(&func_env, &body)?;
+                            evaluate_statements(&func_env, body)?;
                             break;
                         }
                     }
@@ -200,7 +200,7 @@ pub(crate) fn create_class_object(
                 if let Some(parent_proto_val) = obj_get_value(parent_class_obj, "prototype")? {
                     if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                         // Set the child class prototype's __proto__ to parent prototype
-                        let _ = obj_set_value(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()));
+                        obj_set_value(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()))?;
                     }
                 }
             }
@@ -258,8 +258,8 @@ pub(crate) fn create_class_object(
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
                 // Add static property to class object
-                let value = evaluate_expr(env, &value_expr)?;
-                obj_set_value(&class_obj, &prop_name, value)?;
+                let value = evaluate_expr(env, value_expr)?;
+                obj_set_value(&class_obj, prop_name, value)?;
             }
             ClassMember::StaticGetter(getter_name, body) => {
                 // Create a static getter for the class object
@@ -318,7 +318,7 @@ pub(crate) fn call_static_method(
 }
 
 pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    let proto_obj = get_class_proto_obj(&obj_map)?;
+    let proto_obj = get_class_proto_obj(obj_map)?;
     // Look for method in prototype
     if let Some(method_val) = obj_get_value(&proto_obj, method)? {
         log::trace!("Found method {method} in prototype");
@@ -357,10 +357,10 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
 
 pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Get the prototype of the constructor
-    if let Some(constructor_proto) = obj_get_value(&constructor, "prototype")? {
+    if let Some(constructor_proto) = obj_get_value(constructor, "prototype")? {
         if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
             // Check if obj's prototype chain contains constructor's prototype
-            let mut current_proto = obj_get_value(&obj, "__proto__")?;
+            let mut current_proto = obj_get_value(obj, "__proto__")?;
             while let Some(proto_val) = current_proto {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     if Rc::ptr_eq(proto_obj, constructor_proto_obj) {
@@ -426,7 +426,7 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                                             }
 
                                             // Execute parent constructor body
-                                            return evaluate_statements(&func_env, &body);
+                                            return evaluate_statements(&func_env, body);
                                         }
                                     }
                                 }

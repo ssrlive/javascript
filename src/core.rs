@@ -87,7 +87,7 @@ impl JSValue {
 
     pub fn has_ref_count(&self) -> bool {
         let t = self.tag as i32;
-        (t >= JS_TAG_FIRST) && (t <= JS_TAG_OBJECT)
+        (JS_TAG_FIRST..=JS_TAG_OBJECT).contains(&t)
     }
 
     pub fn get_ptr(&self) -> *mut c_void {
@@ -136,11 +136,16 @@ pub struct list_head {
 }
 
 impl list_head {
+    /// # Safety
+    /// The caller must ensure that the list_head is properly initialized and not concurrently accessed.
     pub unsafe fn init(&mut self) {
         self.prev = self;
         self.next = self;
     }
 
+    /// # Safety
+    /// The caller must ensure that `new_entry` is a valid pointer to an uninitialized list_head,
+    /// and that the list is not concurrently modified.
     pub unsafe fn add_tail(&mut self, new_entry: *mut list_head) {
         let prev = self.prev;
         (*new_entry).next = self;
@@ -149,6 +154,8 @@ impl list_head {
         self.prev = new_entry;
     }
 
+    /// # Safety
+    /// The caller must ensure that the list_head is part of a valid linked list and not concurrently accessed.
     pub unsafe fn del(&mut self) {
         let next = self.next;
         let prev = self.prev;
@@ -387,9 +394,11 @@ pub struct JSClassDef {
 }
 
 impl JSShape {
+    /// # Safety
+    /// The caller must ensure that the JSShape and its property arrays are valid and not concurrently modified.
     pub unsafe fn find_own_property(&self, atom: JSAtom) -> Option<(i32, *mut JSShapeProperty)> {
         if self.is_hashed != 0 {
-            let h = (atom as u32) & self.prop_hash_mask;
+            let h = atom & self.prop_hash_mask;
             let mut prop_idx = *self.prop_hash.offset(h as isize);
             while prop_idx != 0 {
                 let idx = (prop_idx - 1) as i32;
@@ -413,6 +422,9 @@ impl JSShape {
 }
 
 impl JSRuntime {
+    /// # Safety
+    /// The caller must ensure that `sh` is a valid pointer to a JSShape that is not concurrently accessed,
+    /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn resize_shape(&mut self, sh: *mut JSShape, new_size: i32) -> i32 {
         let new_prop = self.js_realloc_rt(
             (*sh).prop as *mut c_void,
@@ -427,6 +439,9 @@ impl JSRuntime {
         0
     }
 
+    /// # Safety
+    /// The caller must ensure that `sh` is a valid pointer to a JSShape that is not concurrently accessed,
+    /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn add_property(&mut self, sh: *mut JSShape, atom: JSAtom, flags: u8) -> i32 {
         // Check if property already exists
         if let Some((idx, _)) = (*sh).find_own_property(atom) {
@@ -451,25 +466,25 @@ impl JSRuntime {
                 return -1;
             }
             for i in 0..hash_size {
-                *(*sh).prop_hash.offset(i as isize) = 0;
+                *(*sh).prop_hash.add(i) = 0;
             }
             // Fill hash table with existing properties
             for i in 0..(*sh).prop_count {
-                let pr = (*sh).prop.offset(i as isize);
-                let h = ((*pr).atom as u32) & (*sh).prop_hash_mask;
-                (*pr).hash_next = *(*sh).prop_hash.offset(h as isize);
-                *(*sh).prop_hash.offset(h as isize) = (i + 1) as u32;
+                let pr = (*sh).prop.add(i as usize);
+                let h = ((*pr).atom) & (*sh).prop_hash_mask;
+                (*pr).hash_next = *(*sh).prop_hash.add(h as usize);
+                *(*sh).prop_hash.add(h as usize) = (i + 1) as u32;
             }
         }
 
         let idx = (*sh).prop_count;
-        let pr = (*sh).prop.offset(idx as isize);
+        let pr = (*sh).prop.add(idx as usize);
         (*pr).atom = atom;
         (*pr).flags = flags;
         if (*sh).is_hashed != 0 {
-            let h = (atom as u32) & (*sh).prop_hash_mask;
-            (*pr).hash_next = *(*sh).prop_hash.offset(h as isize);
-            *(*sh).prop_hash.offset(h as isize) = (idx + 1) as u32;
+            let h = (atom) & (*sh).prop_hash_mask;
+            (*pr).hash_next = *(*sh).prop_hash.add(h as usize);
+            *(*sh).prop_hash.add(h as usize) = (idx + 1) as u32;
         } else {
             (*pr).hash_next = 0;
         }
@@ -478,6 +493,9 @@ impl JSRuntime {
         idx
     }
 
+    /// # Safety
+    /// The caller must ensure that the runtime's memory allocation functions are properly set up,
+    /// and that `ptr` is either null or a valid pointer previously returned by the allocator.
     pub unsafe fn js_realloc_rt(&mut self, ptr: *mut c_void, size: usize) -> *mut c_void {
         if let Some(realloc_func) = self.mf.js_realloc {
             realloc_func(&mut self.malloc_state, ptr, size)
@@ -486,6 +504,8 @@ impl JSRuntime {
         }
     }
 
+    /// # Safety
+    /// The caller must ensure that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_malloc_rt(&mut self, size: usize) -> *mut c_void {
         if let Some(malloc_func) = self.mf.js_malloc {
             malloc_func(&mut self.malloc_state, size)
@@ -494,12 +514,18 @@ impl JSRuntime {
         }
     }
 
+    /// # Safety
+    /// The caller must ensure that `ptr` is either null or a valid pointer previously returned by the allocator,
+    /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_free_rt(&mut self, ptr: *mut c_void) {
         if let Some(free_func) = self.mf.js_free {
             free_func(&mut self.malloc_state, ptr);
         }
     }
 
+    /// # Safety
+    /// The caller must ensure that the runtime's memory allocation functions are properly set up
+    /// and that the runtime is not concurrently accessed.
     pub unsafe fn init_atoms(&mut self) {
         self.atom_hash_size = 16;
         self.atom_count = 0;
@@ -524,6 +550,9 @@ impl JSRuntime {
         self.atom_free_index = 0;
     }
 
+    /// # Safety
+    /// The caller must ensure that `proto` is either null or a valid pointer to a JSObject,
+    /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_new_shape(&mut self, proto: *mut JSObject) -> *mut JSShape {
         let sh = self.js_malloc_rt(std::mem::size_of::<JSShape>()) as *mut JSShape;
         if sh.is_null() {
@@ -548,6 +577,9 @@ impl JSRuntime {
         sh
     }
 
+    /// # Safety
+    /// The caller must ensure that `sh` is either null or a valid pointer to a JSShape previously allocated by this runtime,
+    /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_free_shape(&mut self, sh: *mut JSShape) {
         if !sh.is_null() {
             if !(*sh).prop.is_null() {
@@ -561,6 +593,8 @@ impl JSRuntime {
     }
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` and `this_obj` are valid pointers, and that the runtime is properly initialized.
 pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue, flags: i32) -> i32 {
     if this_obj.tag != JS_TAG_OBJECT as i64 {
         return -1; // TypeError
@@ -634,6 +668,9 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     1
 }
 
+/// # Safety
+/// This function initializes a new JavaScript runtime with default memory allocation functions.
+/// The caller must ensure that the returned runtime is properly freed with JS_FreeRuntime.
 pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
     unsafe extern "C" fn my_malloc(_state: *mut JSMallocState, size: usize) -> *mut c_void {
         libc::malloc(size)
@@ -697,6 +734,9 @@ pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
     rt
 }
 
+/// # Safety
+/// The caller must ensure that `rt` is either null or a valid pointer to a JSRuntime previously created by JS_NewRuntime,
+/// and that no contexts or objects from this runtime are still in use.
 pub unsafe fn JS_FreeRuntime(rt: *mut JSRuntime) {
     if !rt.is_null() {
         // Free allocated resources
@@ -705,6 +745,8 @@ pub unsafe fn JS_FreeRuntime(rt: *mut JSRuntime) {
     }
 }
 
+/// # Safety
+/// The caller must ensure that `rt` is a valid pointer to a JSRuntime, and that the context is properly freed with JS_FreeContext.
 pub unsafe fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext {
     let ctx = (*rt).js_malloc_rt(std::mem::size_of::<JSContext>()) as *mut JSContext;
     if ctx.is_null() {
@@ -753,12 +795,17 @@ pub unsafe fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext {
     ctx
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` is either null or a valid pointer to a JSContext previously created by JS_NewContext,
+/// and that no objects from this context are still in use.
 pub unsafe fn JS_FreeContext(ctx: *mut JSContext) {
     if !ctx.is_null() {
         (*(*ctx).rt).js_free_rt(ctx as *mut c_void);
     }
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` is a valid pointer to a JSContext.
 pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
     let obj = (*(*ctx).rt).js_malloc_rt(std::mem::size_of::<JSObject>()) as *mut JSObject;
     if obj.is_null() {
@@ -781,6 +828,8 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
     JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` is a valid pointer to a JSContext.
 pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &[u16]) -> JSValue {
     let utf8_str = utf16_to_utf8(s);
     let len = utf8_str.len();
@@ -798,13 +847,15 @@ pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &[u16]) -> JSValue {
     (*p).hash = 0; // TODO: compute hash
     (*p).hash_next = 0;
     // Copy string data
-    let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+    let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
     for (i, &byte) in utf8_str.as_bytes().iter().enumerate() {
-        *str_data.offset(i as isize) = byte;
+        *str_data.add(i) = byte;
     }
     JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` is a valid pointer to a JSContext, and that `input` points to valid UTF-8 data of length `input_len`.
 pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, _filename: *const i8, _eval_flags: i32) -> JSValue {
     if input_len == 0 {
         return JS_UNDEFINED;
@@ -869,7 +920,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
                 if let Some(from_idx) = l.find("from") {
                     let name_part = &l[as_idx + 2..from_idx].trim();
                     let name = name_part.trim();
-                    if let Some(start_quote) = l[from_idx..].find(|c: char| c == '"' || c == '\'') {
+                    if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
                         let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
                         let rest = &l[from_idx + start_quote + 1..];
                         if let Some(end_quote) = rest.find(quote_char) {
@@ -911,7 +962,7 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
 }
 
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Break) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Break) {
         tokens.remove(0); // consume break
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
             return Err(JSError::ParseError);
@@ -919,7 +970,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume ;
         return Ok(Statement::Break);
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Continue) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Continue) {
         tokens.remove(0); // consume continue
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
             return Err(JSError::ParseError);
@@ -927,7 +978,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume ;
         return Ok(Statement::Continue);
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::While) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::While) {
         tokens.remove(0); // consume while
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
             return Err(JSError::ParseError);
@@ -949,7 +1000,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume }
         return Ok(Statement::While(condition, body));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Do) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Do) {
         tokens.remove(0); // consume do
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
             return Err(JSError::ParseError);
@@ -979,7 +1030,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume ;
         return Ok(Statement::DoWhile(body, condition));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Switch) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Switch) {
         tokens.remove(0); // consume switch
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
             return Err(JSError::ParseError);
@@ -1041,7 +1092,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume }
         return Ok(Statement::Switch(expr, cases));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Throw) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Throw) {
         tokens.remove(0); // consume throw
         let expr = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
@@ -1050,16 +1101,16 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume ;
         return Ok(Statement::Throw(expr));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Function) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
-        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
             tokens.remove(0);
-            if tokens.len() >= 1 && matches!(tokens[0], Token::LParen) {
+            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                 tokens.remove(0); // consume (
                 let mut params = Vec::new();
                 if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                     loop {
-                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                             tokens.remove(0);
                             params.push(param);
                             if tokens.is_empty() {
@@ -1094,7 +1145,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             }
         }
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::If) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::If) {
         tokens.remove(0); // consume if
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
             return Err(JSError::ParseError);
@@ -1133,7 +1184,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         return Ok(Statement::If(condition, then_body, else_body));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Try) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Try) {
         tokens.remove(0); // consume try
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
             return Err(JSError::ParseError);
@@ -1196,7 +1247,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         return Ok(Statement::TryCatch(try_body, catch_param, catch_body, finally_body));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::For) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::For) {
         tokens.remove(0); // consume for
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
             return Err(JSError::ParseError);
@@ -1204,13 +1255,13 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume (
 
         // Check if this is a for-of loop
-        if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
+        if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
             let saved_declaration_token = tokens[0].clone();
             tokens.remove(0); // consume let/var/const
-            if let Some(Token::Identifier(var_name)) = tokens.get(0).cloned() {
+            if let Some(Token::Identifier(var_name)) = tokens.first().cloned() {
                 let saved_identifier_token = tokens[0].clone();
                 tokens.remove(0);
-                if tokens.len() >= 1 && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
                     // This is a for-of loop
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
@@ -1240,7 +1291,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
 
         // Parse initialization (regular for loop)
-        let init = if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
+        let init = if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
             Some(Box::new(parse_statement(tokens)?))
         } else if !matches!(tokens[0], Token::Semicolon) {
             Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
@@ -1291,7 +1342,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         return Ok(Statement::For(init, condition, increment, body));
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Return) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Return) {
         tokens.remove(0); // consume return
         if tokens.is_empty() || matches!(tokens[0], Token::Semicolon) {
             return Ok(Statement::Return(None));
@@ -1299,12 +1350,12 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         let expr = parse_expression(tokens)?;
         return Ok(Statement::Return(Some(expr)));
     }
-    if tokens.len() >= 1 && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
+    if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
         let is_const = matches!(tokens[0], Token::Const);
         tokens.remove(0); // consume let/var/const
-        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
             tokens.remove(0);
-            if tokens.len() >= 1 && matches!(tokens[0], Token::Assign) {
+            if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
                 tokens.remove(0);
                 let expr = parse_expression(tokens)?;
                 if is_const {
@@ -1315,13 +1366,13 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             }
         }
     }
-    if tokens.len() >= 1 && matches!(tokens[0], Token::Class) {
+    if !tokens.is_empty() && matches!(tokens[0], Token::Class) {
         tokens.remove(0); // consume class
-        if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
             tokens.remove(0);
-            let extends = if tokens.len() >= 1 && matches!(tokens[0], Token::Extends) {
+            let extends = if !tokens.is_empty() && matches!(tokens[0], Token::Extends) {
                 tokens.remove(0); // consume extends
-                if let Some(Token::Identifier(parent_name)) = tokens.get(0).cloned() {
+                if let Some(Token::Identifier(parent_name)) = tokens.first().cloned() {
                     tokens.remove(0);
                     Some(parent_name)
                 } else {
@@ -1339,14 +1390,14 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
             let mut members = Vec::new();
             while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
-                let is_static = if tokens.len() >= 1 && matches!(tokens[0], Token::Static) {
+                let is_static = if !tokens.is_empty() && matches!(tokens[0], Token::Static) {
                     tokens.remove(0);
                     true
                 } else {
                     false
                 };
 
-                if let Some(Token::Identifier(ref method_name)) = tokens.get(0) {
+                if let Some(Token::Identifier(ref method_name)) = tokens.first() {
                     let method_name = method_name.clone();
                     if method_name == "constructor" {
                         tokens.remove(0);
@@ -1488,8 +1539,8 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
 fn evaluate_statements_with_context(
     env: &JSObjectDataPtr,
     statements: &[Statement],
-    in_loop: bool,
-    in_switch: bool,
+    _in_loop: bool,
+    _in_switch: bool,
 ) -> Result<ControlFlow, JSError> {
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
@@ -1581,12 +1632,12 @@ fn evaluate_statements_with_context(
             Statement::If(condition, then_body, else_body) => {
                 let cond_val = evaluate_expr(env, condition)?;
                 if is_truthy(&cond_val) {
-                    match evaluate_statements_with_context(env, then_body, in_loop, in_switch)? {
+                    match evaluate_statements_with_context(env, then_body, _in_loop, _in_switch)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
                 } else if let Some(else_stmts) = else_body {
-                    match evaluate_statements_with_context(env, else_stmts, in_loop, in_switch)? {
+                    match evaluate_statements_with_context(env, else_stmts, _in_loop, _in_switch)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
@@ -1594,7 +1645,7 @@ fn evaluate_statements_with_context(
             }
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
                 // Execute try block and handle catch/finally semantics
-                match evaluate_statements_with_context(env, try_body, in_loop, in_switch) {
+                match evaluate_statements_with_context(env, try_body, _in_loop, _in_switch) {
                     Ok(ControlFlow::Normal(v)) => last_value = v,
                     Ok(cf) => {
                         // Handle control flow in try block
@@ -1609,22 +1660,18 @@ fn evaluate_statements_with_context(
                         if catch_param.is_empty() {
                             // No catch: run finally if present then propagate error
                             if let Some(finally_body) = finally_body_opt {
-                                let _ = evaluate_statements_with_context(env, finally_body, in_loop, in_switch);
+                                evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)?;
                             }
                             return Err(err);
                         } else {
-                            let mut catch_env = env.clone();
-                            env_set(
-                                &mut catch_env,
-                                catch_param.as_str(),
-                                Value::String(utf8_to_utf16(&format!("{err:?}"))),
-                            )?;
-                            match evaluate_statements_with_context(&mut catch_env, catch_body, in_loop, in_switch)? {
+                            let catch_env = env.clone();
+                            env_set(&catch_env, catch_param.as_str(), Value::String(utf8_to_utf16(&format!("{err:?}"))))?;
+                            match evaluate_statements_with_context(&catch_env, catch_body, _in_loop, _in_switch)? {
                                 ControlFlow::Normal(val) => last_value = val,
                                 cf => {
                                     // Finally block executes after try/catch
                                     if let Some(finally_body) = finally_body_opt {
-                                        let _ = evaluate_statements_with_context(env, finally_body, in_loop, in_switch);
+                                        evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)?;
                                     }
                                     return Ok(cf);
                                 }
@@ -1634,7 +1681,7 @@ fn evaluate_statements_with_context(
                 }
                 // Finally block executes after try/catch
                 if let Some(finally_body) = finally_body_opt {
-                    match evaluate_statements_with_context(env, finally_body, in_loop, in_switch)? {
+                    match evaluate_statements_with_context(env, finally_body, _in_loop, _in_switch)? {
                         ControlFlow::Normal(val) => last_value = val,
                         cf => return Ok(cf),
                     }
@@ -1862,8 +1909,8 @@ fn evaluate_number(n: f64) -> Result<Value, JSError> {
     Ok(Value::Number(n))
 }
 
-fn evaluate_string_lit(s: &Vec<u16>) -> Result<Value, JSError> {
-    Ok(Value::String(s.clone()))
+fn evaluate_string_lit(s: &[u16]) -> Result<Value, JSError> {
+    Ok(Value::String(s.to_vec()))
 }
 
 fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
@@ -2222,11 +2269,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             }
         }
 
-        let obj_val = evaluate_expr(env, &**obj_expr)?;
+        let obj_val = evaluate_expr(env, obj_expr)?;
         log::trace!("evaluate_call - object eval result: {obj_val:?}");
         match (obj_val, method_name.as_str()) {
             (Value::Object(obj_map), "log") if obj_map.borrow().contains_key("log") => {
-                return js_console::handle_console_method(method_name, args, env);
+                js_console::handle_console_method(method_name, args, env)
             }
             (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
             (obj_val, "valueOf") => crate::js_object::handle_value_of_method(&obj_val, args),
@@ -2261,25 +2308,25 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 }
                 // Check if this is the Math object
                 if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
-                    return js_math::handle_math_method(method, args, env);
+                    js_math::handle_math_method(method, args, env)
                 } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
-                    return crate::js_json::handle_json_method(method, args, env);
+                    crate::js_json::handle_json_method(method, args, env)
                 } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
-                    return crate::js_object::handle_object_method(method, args, env);
+                    crate::js_object::handle_object_method(method, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
-                    return crate::js_date::handle_date_method(&obj_map, method, args);
+                    crate::js_date::handle_date_method(&obj_map, method, args)
                 } else if obj_map.borrow().contains_key("__regex") {
                     // RegExp instance methods
-                    return crate::js_regexp::handle_regexp_method(&obj_map, method, args, env);
+                    crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
-                    return crate::js_array::handle_array_instance_method(&obj_map, method, args, env, &**obj_expr);
+                    crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
                 } else if obj_map.borrow().contains_key("__class_def__") {
                     // Class static methods
-                    return call_static_method(&obj_map, method, args, env);
+                    call_static_method(&obj_map, method, args, env)
                 } else if is_class_instance(&obj_map)? {
-                    return call_class_method(&obj_map, method, args, env);
+                    call_class_method(&obj_map, method, args, env)
                 } else {
                     // Check for user-defined method
                     if let Some(prop_val) = obj_get_value(&obj_map, method)? {
@@ -2389,7 +2436,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
             }
         }
 
-        let obj_val = evaluate_expr(env, &**obj_expr)?;
+        let obj_val = evaluate_expr(env, obj_expr)?;
         log::trace!("evaluate_optional_call - object eval result: {obj_val:?}");
         match obj_val {
             Value::Undefined => Ok(Value::Undefined),
@@ -2424,25 +2471,25 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 }
                 // Check if this is the Math object
                 if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
-                    return js_math::handle_math_method(method_name, args, env);
+                    js_math::handle_math_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
-                    return crate::js_json::handle_json_method(method_name, args, env);
+                    crate::js_json::handle_json_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
-                    return crate::js_object::handle_object_method(method_name, args, env);
+                    crate::js_object::handle_object_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
-                    return crate::js_date::handle_date_method(&obj_map, method_name, args);
+                    crate::js_date::handle_date_method(&obj_map, method_name, args)
                 } else if obj_map.borrow().contains_key("__regex") {
                     // RegExp instance methods
-                    return crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env);
+                    crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
-                    return crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, &**obj_expr);
+                    crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, obj_expr)
                 } else if obj_map.borrow().contains_key("__class_def__") {
                     // Class static methods
-                    return call_static_method(&obj_map, method_name, args, env);
+                    call_static_method(&obj_map, method_name, args, env)
                 } else if is_class_instance(&obj_map)? {
-                    return call_class_method(&obj_map, method_name, args, env);
+                    call_class_method(&obj_map, method_name, args, env)
                 } else {
                     Err(JSError::EvaluationError {
                         message: format!("Method {method_name} not found on object"),
@@ -2474,7 +2521,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
-                expand_spread_in_call_args(env, &args, &mut evaluated_args)?;
+                expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                 if params.len() != evaluated_args.len() {
                     return Err(JSError::ParseError);
                 }
@@ -2517,10 +2564,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Getter(func_expr) => {
                     if let Expr::Function(_params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = {
-                            let borrowed = obj.borrow();
-                            borrowed.get(key).map(|v| v.clone())
-                        };
+                        let existing_opt = obj.borrow().get(key);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -2530,7 +2574,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             } = &mut val
                             {
                                 // Update getter
-                                let _ = getter.replace((body.clone(), env.clone()));
+                                getter.replace((body.clone(), env.clone()));
                                 obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
@@ -2559,10 +2603,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Setter(func_expr) => {
                     if let Expr::Function(params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = {
-                            let borrowed = obj.borrow();
-                            borrowed.get(key).map(|v| v.clone())
-                        };
+                        let existing_opt = obj.borrow().get(key);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -2572,7 +2613,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             } = &mut val
                             {
                                 // Update setter
-                                let _ = setter.replace((params.clone(), body.clone(), env.clone()));
+                                setter.replace((params.clone(), body.clone(), env.clone()));
                                 obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
@@ -2601,10 +2642,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 _ => {
                     let value = evaluate_expr(env, value_expr)?;
                     // Check if property already exists
-                    let existing_rc = {
-                        let borrowed = obj.borrow();
-                        borrowed.get(key).map(|v| v.clone())
-                    };
+                    let existing_rc = obj.borrow().get(key);
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
                         if let Value::Property {
@@ -2614,7 +2652,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                         } = &mut existing_val
                         {
                             // Update value
-                            let _ = prop_value.replace(Rc::new(RefCell::new(value)));
+                            prop_value.replace(Rc::new(RefCell::new(value)));
                             obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(existing_val)));
                         } else {
                             // Create new property descriptor
@@ -2636,7 +2674,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
 }
 
 fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
-    let mut arr = Rc::new(RefCell::new(JSObjectData::new()));
+    let arr = Rc::new(RefCell::new(JSObjectData::new()));
     let mut index = 0;
     for elem_expr in elements {
         if let Expr::Spread(spread_expr) = elem_expr {
@@ -2648,7 +2686,7 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
                 loop {
                     let key = i.to_string();
                     if let Some(val) = obj_get_value(&spread_obj, &key)? {
-                        obj_set_value(&mut arr, &index.to_string(), val.borrow().clone())?;
+                        obj_set_value(&arr, index.to_string(), val.borrow().clone())?;
                         index += 1;
                         i += 1;
                     } else {
@@ -2662,12 +2700,12 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
             }
         } else {
             let value = evaluate_expr(env, elem_expr)?;
-            obj_set_value(&mut arr, &index.to_string(), value)?;
+            obj_set_value(&arr, index.to_string(), value)?;
             index += 1;
         }
     }
     // Set length property
-    set_array_length(&mut arr, index)?;
+    set_array_length(&arr, index)?;
     Ok(Value::Object(arr))
 }
 
@@ -2715,6 +2753,12 @@ impl JSObjectData {
 
     pub fn set_const(&mut self, key: String) {
         self.constants.insert(key);
+    }
+}
+
+impl Default for JSObjectData {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2796,24 +2840,16 @@ pub fn utf16_find(v: &[u16], pattern: &[u16]) -> Option<usize> {
     if pattern.is_empty() {
         return Some(0);
     }
-    for i in 0..=v.len().saturating_sub(pattern.len()) {
-        if v[i..i + pattern.len()] == *pattern {
-            return Some(i);
-        }
-    }
-    None
+    (0..=v.len().saturating_sub(pattern.len())).find(|&i| v[i..i + pattern.len()] == *pattern)
 }
 
 pub fn utf16_rfind(v: &[u16], pattern: &[u16]) -> Option<usize> {
     if pattern.is_empty() {
         return Some(v.len());
     }
-    for i in (0..=v.len().saturating_sub(pattern.len())).rev() {
-        if v[i..i + pattern.len()] == *pattern {
-            return Some(i);
-        }
-    }
-    None
+    (0..=v.len().saturating_sub(pattern.len()))
+        .rev()
+        .find(|&i| v[i..i + pattern.len()] == *pattern)
 }
 
 pub fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {
@@ -2880,11 +2916,11 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                     getter_env.borrow_mut().prototype = Some(env);
                     env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                     let result = evaluate_statements(&getter_env, &body)?;
-                    return Ok(Some(Rc::new(RefCell::new(result))));
+                    Ok(Some(Rc::new(RefCell::new(result))))
                 } else if let Some(val_rc) = value {
-                    return Ok(Some(val_rc));
+                    Ok(Some(val_rc))
                 } else {
-                    return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
+                    Ok(Some(Rc::new(RefCell::new(Value::Undefined))))
                 }
             }
             Value::Getter(body, env) => {
@@ -2893,7 +2929,7 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                 getter_env.borrow_mut().prototype = Some(env);
                 env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                 let result = evaluate_statements(&getter_env, &body)?;
-                return Ok(Some(Rc::new(RefCell::new(result))));
+                Ok(Some(Rc::new(RefCell::new(result))))
             }
             _ => Ok(Some(val.clone())),
         }
@@ -2932,7 +2968,7 @@ pub fn obj_set_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T, val: Value
                 setter_env.borrow_mut().prototype = Some(env);
                 env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                 env_set(&setter_env, &param[0], val)?;
-                let _ = evaluate_statements(&setter_env, &body)?;
+                evaluate_statements(&setter_env, &body)?;
                 return Ok(());
             }
             _ => {}
@@ -3019,7 +3055,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
     }
 
     // Fall back: evaluate the object expression and return an updated object value
-    let obj_val = evaluate_expr(&*env, obj_expr)?;
+    let obj_val = evaluate_expr(env, obj_expr)?;
     match obj_val {
         Value::Object(obj) => {
             // Special-case `__proto__` assignment: set the object's prototype
@@ -3330,7 +3366,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '0'..='9' => {
                 let start = i;
-                while i < chars.len() && (chars[i].is_digit(10) || chars[i] == '.') {
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
                     i += 1;
                 }
                 let num_str: String = chars[start..i].iter().collect();
@@ -3546,7 +3582,7 @@ fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<String>, JSError> {
     let mut params = Vec::new();
     if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
         loop {
-            if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                 tokens.remove(0);
                 params.push(param);
                 if tokens.is_empty() {
@@ -3716,7 +3752,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression
-            let constructor = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+            let constructor = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                 tokens.remove(0);
                 Expr::Var(name)
             } else {
@@ -3894,10 +3930,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     }
 
                     // Parse key
-                    let key = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                    let key = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                         tokens.remove(0);
                         name
-                    } else if let Some(Token::StringLit(s)) = tokens.get(0).cloned() {
+                    } else if let Some(Token::StringLit(s)) = tokens.first().cloned() {
                         tokens.remove(0);
                         String::from_utf16_lossy(&s)
                     } else {
@@ -3915,7 +3951,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         let mut params = Vec::new();
                         if is_setter {
                             // Setter should have exactly one parameter
-                            if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                                 tokens.remove(0);
                                 params.push(param);
                             } else {
@@ -4005,12 +4041,12 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
         Token::Function => {
             // Parse function expression
-            if tokens.len() >= 1 && matches!(tokens[0], Token::LParen) {
+            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                 tokens.remove(0); // consume (
                 let mut params = Vec::new();
                 if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                     loop {
-                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                             tokens.remove(0);
                             params.push(param);
                             if tokens.is_empty() {
@@ -4051,7 +4087,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let mut params = Vec::new();
             let mut is_arrow = false;
             let mut result_expr = None;
-            if matches!(tokens.get(0), Some(Token::RParen)) {
+            if matches!(tokens.first(), Some(&Token::RParen)) {
                 tokens.remove(0);
                 if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
                     tokens.remove(0);
@@ -4065,7 +4101,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 let mut local_consumed = Vec::new();
                 let mut valid = true;
                 loop {
-                    if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
+                    if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                         tokens.remove(0);
                         local_consumed.push(Token::Identifier(name.clone()));
                         param_names.push(name);
@@ -4235,6 +4271,8 @@ fn parse_arrow_body(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> 
     }
 }
 
+/// # Safety
+/// The caller must ensure that `_ctx` is a valid pointer to a JSContext and `this_obj` is a valid JSValue.
 pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom) -> JSValue {
     if this_obj.tag != JS_TAG_OBJECT as i64 {
         return JS_UNDEFINED;
@@ -4256,6 +4294,8 @@ pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAt
 // Reference-count helpers: basic dup/free on objects/strings that store a ref_count
 // NOTE: This is a minimal implementation. Proper finalizers and nested frees
 // are not implemented here and should be added per object type.
+/// # Safety
+/// The caller must ensure that `v` is a valid JSValue and `_rt` is a valid JSRuntime pointer.
 pub unsafe fn JS_DupValue(_rt: *mut JSRuntime, v: JSValue) {
     if v.has_ref_count() {
         let p = v.get_ptr();
@@ -4266,6 +4306,8 @@ pub unsafe fn JS_DupValue(_rt: *mut JSRuntime, v: JSValue) {
     }
 }
 
+/// # Safety
+/// The caller must ensure that `rt` is a valid JSRuntime pointer and `v` is a valid JSValue.
 pub unsafe fn JS_FreeValue(rt: *mut JSRuntime, v: JSValue) {
     if v.has_ref_count() {
         let p = v.get_ptr();
@@ -4299,7 +4341,7 @@ pub unsafe fn JS_FreeValue(rt: *mut JSRuntime, v: JSValue) {
             }
             // For other heap types, do a default free of the pointer
             _ => {
-                (*rt).js_free_rt(p as *mut c_void);
+                (*rt).js_free_rt(p);
             }
         }
     }
@@ -4375,7 +4417,7 @@ unsafe fn js_free_symbol(rt: *mut JSRuntime, v: JSValue) {
     }
     // Symbols typically store their name as a JSString or internal struct
     // For now, free the pointer directly. Add type-aware finalizer later.
-    (*rt).js_free_rt(p as *mut c_void);
+    (*rt).js_free_rt(p);
 }
 
 unsafe fn js_free_bigint(rt: *mut JSRuntime, v: JSValue) {
@@ -4384,7 +4426,7 @@ unsafe fn js_free_bigint(rt: *mut JSRuntime, v: JSValue) {
         return;
     }
     // BigInt representation may be inline or heap-allocated. Here we free pointer.
-    (*rt).js_free_rt(p as *mut c_void);
+    (*rt).js_free_rt(p);
 }
 
 unsafe fn js_free_module(rt: *mut JSRuntime, v: JSValue) {
@@ -4393,14 +4435,18 @@ unsafe fn js_free_module(rt: *mut JSRuntime, v: JSValue) {
         return;
     }
     // Module structure not modelled here; free pointer for now.
-    (*rt).js_free_rt(p as *mut c_void);
+    (*rt).js_free_rt(p);
 }
 
+/// # Safety
+/// The caller must ensure that `ctx` is a valid JSContext pointer, `this_obj` is a valid JSValue, and `prop` is a valid JSAtom.
 pub unsafe fn JS_SetProperty(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue) -> i32 {
     JS_DefinePropertyValue(ctx, this_obj, prop, val, 0)
 }
 
 impl JSRuntime {
+    /// # Safety
+    /// The caller must ensure that `name` points to a valid buffer of at least `len` bytes.
     pub unsafe fn js_new_atom_len(&mut self, name: *const u8, len: usize) -> JSAtom {
         if len == 0 {
             return 0; // invalid
@@ -4408,7 +4454,7 @@ impl JSRuntime {
         // Compute hash
         let mut h = 0u32;
         for i in 0..len {
-            h = h.wrapping_mul(31).wrapping_add(*name.offset(i as isize) as u32);
+            h = h.wrapping_mul(31).wrapping_add(*name.add(i) as u32);
         }
         // Find in hash table
         let hash_index = (h % self.atom_hash_size as u32) as i32;
@@ -4417,10 +4463,10 @@ impl JSRuntime {
             let p = *self.atom_array.offset((atom - 1) as isize);
             if (*p).len == len as u32 && (*p).hash == h {
                 // Check string
-                let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+                let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
                 let mut equal = true;
                 for i in 0..len {
-                    if *str_data.offset(i as isize) != *name.offset(i as isize) {
+                    if *str_data.add(i) != *name.add(i) {
                         equal = false;
                         break;
                     }
@@ -4458,9 +4504,9 @@ impl JSRuntime {
         (*p).hash = h;
         (*p).hash_next = *self.atom_hash.offset(hash_index as isize);
         // Copy string
-        let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+        let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
         for i in 0..len {
-            *str_data.offset(i as isize) = *name.offset(i as isize);
+            *str_data.add(i) = *name.add(i);
         }
         let new_atom = (self.atom_count + 1) as u32;
         *self.atom_array.offset(self.atom_count as isize) = p;
@@ -4493,20 +4539,23 @@ fn filter_input_script(script: &str) -> String {
                 current.push(ch);
                 continue;
             }
-            if ch == '\'' && !in_double && !in_backtick {
-                in_single = !in_single;
-                current.push(ch);
-                continue;
-            }
-            if ch == '"' && !in_single && !in_backtick {
-                in_double = !in_double;
-                current.push(ch);
-                continue;
-            }
-            if ch == '`' && !in_single && !in_double {
-                in_backtick = !in_backtick;
-                current.push(ch);
-                continue;
+            match ch {
+                '\'' if !in_double && !in_backtick => {
+                    in_single = !in_single;
+                    current.push(ch);
+                    continue;
+                }
+                '"' if !in_single && !in_backtick => {
+                    in_double = !in_double;
+                    current.push(ch);
+                    continue;
+                }
+                '`' if !in_single && !in_double => {
+                    in_backtick = !in_backtick;
+                    current.push(ch);
+                    continue;
+                }
+                _ => {}
             }
             if ch == ';' && !in_single && !in_double && !in_backtick {
                 parts.push((current.clone(), true));
@@ -4520,7 +4569,7 @@ fn filter_input_script(script: &str) -> String {
             parts.push((current, false));
         }
 
-        for (_pi, (part, had_semicolon)) in parts.iter().enumerate() {
+        for (part, had_semicolon) in parts.iter() {
             let p = part.trim();
             if p.is_empty() {
                 continue;
@@ -4625,13 +4674,13 @@ fn handle_optional_method_call(
                 }
             } else if obj_map.borrow().contains_key("open") {
                 // If this object looks like the `os` module (we used 'open' as marker)
-                crate::js_os::handle_os_method(&obj_map, method, args, env)
+                crate::js_os::handle_os_method(obj_map, method, args, env)
             } else if obj_map.borrow().contains_key("join") {
                 // If this object looks like the `os.path` module
-                crate::js_os::handle_os_method(&obj_map, method, args, env)
+                crate::js_os::handle_os_method(obj_map, method, args, env)
             } else if obj_map.borrow().contains_key("__file_id") {
                 // If this object is a file-like object (we use '__file_id' as marker)
-                tmpfile::handle_file_method(&obj_map, method, args, env)
+                tmpfile::handle_file_method(obj_map, method, args, env)
             } else if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
                 // Check if this is the Math object
                 js_math::handle_math_method(method, args, env)
@@ -4641,21 +4690,21 @@ fn handle_optional_method_call(
                 crate::js_object::handle_object_method(method, args, env)
             } else if obj_map.borrow().contains_key("__timestamp") {
                 // Date instance methods
-                crate::js_date::handle_date_method(&obj_map, method, args)
+                crate::js_date::handle_date_method(obj_map, method, args)
             } else if obj_map.borrow().contains_key("__regex") {
                 // RegExp instance methods
-                crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
-            } else if is_array(&obj_map) {
+                crate::js_regexp::handle_regexp_method(obj_map, method, args, env)
+            } else if is_array(obj_map) {
                 // Array instance methods
-                crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
+                crate::js_array::handle_array_instance_method(obj_map, method, args, env, obj_expr)
             } else if obj_map.borrow().contains_key("__class_def__") {
                 // Class static methods
-                call_static_method(&obj_map, method, args, env)
-            } else if is_class_instance(&obj_map)? {
-                call_class_method(&obj_map, method, args, env)
+                call_static_method(obj_map, method, args, env)
+            } else if is_class_instance(obj_map)? {
+                call_class_method(obj_map, method, args, env)
             } else {
                 // Check for user-defined method
-                if let Some(prop_val) = obj_get_value(&obj_map, method)? {
+                if let Some(prop_val) = obj_get_value(obj_map, method)? {
                     match prop_val.borrow().clone() {
                         Value::Closure(params, body, captured_env) => {
                             // Function call

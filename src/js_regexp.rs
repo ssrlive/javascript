@@ -219,11 +219,11 @@ pub(crate) fn handle_regexp_method(
                     if let Some(capture_match) = capture {
                         obj_set_value(
                             &result_array,
-                            &group_index.to_string(),
+                            group_index.to_string(),
                             Value::String(utf8_to_utf16(capture_match.as_str())),
                         )?;
                     } else {
-                        obj_set_value(&result_array, &group_index.to_string(), Value::Undefined)?;
+                        obj_set_value(&result_array, group_index.to_string(), Value::Undefined)?;
                     }
                     group_index += 1;
                 }

@@ -170,7 +170,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
             }
         }
         "random" => {
-            if args.len() == 0 {
+            if args.is_empty() {
                 use std::time::{SystemTime, UNIX_EPOCH};
                 let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
                 let seed = duration.as_nanos() as u64;

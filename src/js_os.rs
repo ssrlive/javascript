@@ -62,7 +62,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
     if obj_map.borrow().contains_key("open") {
         match method {
             "open" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let filename_val = evaluate_expr(env, &args[0])?;
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -117,7 +117,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Number(-1.0));
             }
             "close" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let fd_val = evaluate_expr(env, &args[0])?;
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
@@ -187,7 +187,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     if let Some(file) = store.get_mut(&fd) {
                         match file.write_all(data.as_bytes()) {
                             Ok(_) => {
-                                let _ = file.flush();
+                                file.flush()?;
                                 return Ok(Value::Number(data.len() as f64));
                             }
                             Err(_) => return Ok(Value::Number(-1.0)),
@@ -234,7 +234,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Number(-1.0));
             }
             "remove" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let filename_val = evaluate_expr(env, &args[0])?;
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -252,7 +252,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Number(-1.0));
             }
             "mkdir" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let dirname_val = evaluate_expr(env, &args[0])?;
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -270,7 +270,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Number(-1.0));
             }
             "readdir" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let dirname_val = evaluate_expr(env, &args[0])?;
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -284,12 +284,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         Ok(entries) => {
                             let obj = Rc::new(RefCell::new(JSObjectData::new()));
                             let mut i = 0;
-                            for entry in entries {
-                                if let Ok(entry) = entry {
-                                    if let Some(name) = entry.file_name().to_str() {
-                                        obj_set_value(&obj, &i.to_string(), Value::String(utf8_to_utf16(name)))?;
-                                        i += 1;
-                                    }
+                            for entry in entries.flatten() {
+                                if let Some(name) = entry.file_name().to_str() {
+                                    obj_set_value(&obj, i.to_string(), Value::String(utf8_to_utf16(name)))?;
+                                    i += 1;
                                 }
                             }
                             set_array_length(&obj, i)?;
@@ -307,13 +305,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {
-                match std::env::current_dir() {
-                    Ok(path) => {
-                        if let Some(path_str) = path.to_str() {
-                            return Ok(Value::String(utf8_to_utf16(path_str)));
-                        }
+                if let Ok(path) = std::env::current_dir() {
+                    if let Some(path_str) = path.to_str() {
+                        return Ok(Value::String(utf8_to_utf16(path_str)));
                     }
-                    _ => {}
                 }
                 return Ok(Value::String(utf8_to_utf16("")));
             }
@@ -352,14 +347,14 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => "".to_string(),
                     };
                     if i > 0 {
-                        result.push('\\'); // Windows path separator
+                        result.push(std::path::MAIN_SEPARATOR); // Platform-specific path separator
                     }
                     result.push_str(&part);
                 }
                 return Ok(Value::String(utf8_to_utf16(&result)));
             }
             "dirname" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -376,7 +371,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::String(utf8_to_utf16(".")));
             }
             "basename" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -393,7 +388,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "extname" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -410,26 +405,23 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "resolve" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
                     };
-                    match std::fs::canonicalize(&path) {
-                        Ok(canonical) => {
-                            if let Some(canonical_str) = canonical.to_str() {
-                                return Ok(Value::String(utf8_to_utf16(canonical_str)));
-                            }
+                    if let Ok(canonical) = std::fs::canonicalize(&path) {
+                        if let Some(canonical_str) = canonical.to_str() {
+                            return Ok(Value::String(utf8_to_utf16(canonical_str)));
                         }
-                        _ => {}
                     }
                     return Ok(Value::String(utf8_to_utf16(&path)));
                 }
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "normalize" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -441,7 +433,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "isAbsolute" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let val = evaluate_expr(env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -513,6 +505,6 @@ pub fn make_path_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_value(&obj, "normalize", Value::Function("os.path.normalize".to_string()))?;
     obj_set_value(&obj, "relative", Value::Function("os.path.relative".to_string()))?;
     obj_set_value(&obj, "isAbsolute", Value::Function("os.path.isAbsolute".to_string()))?;
-    obj_set_value(&obj, "sep", Value::String("\\".encode_utf16().collect()))?; // Windows path separator
+    obj_set_value(&obj, "sep", Value::String(std::path::MAIN_SEPARATOR_STR.encode_utf16().collect()))?; // Platform-specific path separator
     Ok(obj)
 }

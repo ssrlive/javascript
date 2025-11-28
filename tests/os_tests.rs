@@ -106,7 +106,8 @@ mod os_tests {
         match result.unwrap() {
             Value::String(s) => {
                 let joined = String::from_utf16_lossy(&s);
-                assert_eq!(joined, "a\\b\\c");
+                let expected = format!("a{}b{}c", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
+                assert_eq!(joined, expected);
             }
             _ => panic!("Expected string result"),
         }
@@ -116,7 +117,7 @@ mod os_tests {
     fn test_os_path_basename() {
         let script = r#"
             import * as os from "os";
-            os.path.basename("C:\\path\\to\\file.txt");
+            os.path.basename("path/to/file.txt");
         "#;
         let result = evaluate_script(script);
         assert!(result.is_ok());

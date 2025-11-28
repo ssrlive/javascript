@@ -6,9 +6,7 @@ use crate::js_regexp::handle_regexp_constructor;
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
-        "std.sprintf" => {
-            return crate::sprintf::handle_sprintf_call(env, args);
-        }
+        "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
         "String" => {
             // String() constructor
             if args.len() == 1 {
@@ -49,10 +47,10 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     let mut end_pos = 0;
                     let mut chars = trimmed.chars();
                     if let Some(first_char) = chars.next() {
-                        if first_char == '-' || first_char == '+' || first_char.is_digit(10) {
+                        if first_char == '-' || first_char == '+' || first_char.is_ascii_digit() {
                             end_pos = 1;
                             for ch in chars {
-                                if ch.is_digit(10) {
+                                if ch.is_ascii_digit() {
                                     end_pos += 1;
                                 } else {
                                     break;
@@ -167,7 +165,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "encodeURIComponent" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
@@ -198,7 +196,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "decodeURIComponent" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
@@ -228,9 +226,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 Ok(Value::String(Vec::new()))
             }
         }
-        "Array" => {
-            return handle_array_constructor(args, env);
-        }
+        "Array" => handle_array_constructor(args, env),
         "Number" => {
             // Number constructor
             if args.len() == 1 {
@@ -300,7 +296,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "eval" => {
             // eval function - execute the code
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
@@ -314,7 +310,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "encodeURI" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
@@ -337,7 +333,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "decodeURI" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {

@@ -89,7 +89,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => {
-                assert!(n >= 0.0 && n < 1.0);
+                assert!((0.0..1.0).contains(&n));
             }
             _ => panic!("Expected Math.random() to be a number between 0 and 1, got {:?}", result),
         }
@@ -113,11 +113,12 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_parse_float() {
         let script = "parseFloat('3.14')";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 3.14),
+            Ok(Value::Number(n)) => assert_eq!(n, 3.14_f64),
             _ => panic!("Expected parseFloat('3.14') to be 3.14, got {:?}", result),
         }
     }
@@ -127,14 +128,14 @@ mod builtin_functions_tests {
         let script = "isNaN(NaN)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected isNaN(NaN) to be true, got {:?}", result),
         }
 
         let script = "isNaN(42)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected isNaN(42) to be false, got {:?}", result),
         }
     }
@@ -144,14 +145,14 @@ mod builtin_functions_tests {
         let script = "isFinite(42)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected isFinite(42) to be true, got {:?}", result),
         }
 
         let script = "isFinite(Infinity)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected isFinite(Infinity) to be false, got {:?}", result),
         }
     }
@@ -213,7 +214,7 @@ mod builtin_functions_tests {
         let script4 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[2]"#;
         let result4 = evaluate_script(script4);
         match result4 {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr[2] to be true, got {:?}", result4),
         }
 
@@ -309,7 +310,7 @@ mod builtin_functions_tests {
         let script = "Boolean(1)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected Boolean(1) to be true, got {:?}", result),
         }
     }
@@ -482,7 +483,7 @@ mod builtin_functions_tests {
         let script = "'hello world'.startsWith('hello')";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected startsWith to return true, got {:?}", result),
         }
     }
@@ -492,7 +493,7 @@ mod builtin_functions_tests {
         let script = "'hello world'.endsWith('world')";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected endsWith to return true, got {:?}", result),
         }
     }
@@ -502,7 +503,7 @@ mod builtin_functions_tests {
         let script = "'hello world'.includes('lo wo')";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected includes to return true, got {:?}", result),
         }
     }
@@ -602,7 +603,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.some(function(x) { return x > 2; })";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.some to return true, got {:?}", result),
         }
 
@@ -610,7 +611,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.some(function(x) { return x > 5; })";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.some to return false, got {:?}", result),
         }
     }
@@ -620,7 +621,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(4); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.every to return true, got {:?}", result),
         }
 
@@ -628,7 +629,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(1); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.every to return false, got {:?}", result),
         }
     }
@@ -682,7 +683,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.includes(2)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.includes(2) to return true, got {:?}", result),
         }
 
@@ -690,7 +691,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.includes(5) to return false, got {:?}", result),
         }
 
@@ -698,7 +699,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.includes(2, 2)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.includes(2, 2) to return true, got {:?}", result),
         }
     }
@@ -1127,7 +1128,7 @@ mod builtin_functions_tests {
         let script = "let arr = Array(); let arr2 = arr.push(1); Array.isArray(arr2)";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected Array.isArray(array) to return true, got {:?}", result),
         }
 
@@ -1135,7 +1136,7 @@ mod builtin_functions_tests {
         let script2 = "Array.isArray(42)";
         let result2 = evaluate_script(script2);
         match result2 {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected Array.isArray(number) to return false, got {:?}", result2),
         }
     }
@@ -1239,7 +1240,7 @@ mod builtin_functions_tests {
         let script = "let obj = {}; delete obj.nonexistent";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true), // Should return true even for non-existent properties
+            Ok(Value::Boolean(b)) => assert!(b), // Should return true even for non-existent properties
             _ => panic!("Expected delete on non-existent property to return true, got {:?}", result),
         }
 
@@ -1247,7 +1248,7 @@ mod builtin_functions_tests {
         let script = "let x = 42; delete x";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false), // Cannot delete local variables
+            Ok(Value::Boolean(b)) => assert!(!b), // Cannot delete local variables
             _ => panic!("Expected delete on local variable to return false, got {:?}", result),
         }
     }
@@ -1285,7 +1286,7 @@ mod builtin_functions_tests {
         let script = "let obj = {}; obj.x = 42; 'x' in obj";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected 'x' in obj to return true, got {:?}", result),
         }
 
@@ -1293,7 +1294,7 @@ mod builtin_functions_tests {
         let script = "let obj = {}; 'nonexistent' in obj";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, false),
+            Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected 'nonexistent' in obj to return false, got {:?}", result),
         }
 
@@ -1301,7 +1302,7 @@ mod builtin_functions_tests {
         let script = "let proto = {}; proto.inherited = 'yes'; let obj = {}; obj.__proto__ = proto; 'inherited' in obj";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Boolean(b)) => assert_eq!(b, true),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected 'inherited' in obj to return true for inherited property, got {result:?}"),
         }
     }

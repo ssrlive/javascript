@@ -25,24 +25,30 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let temp_dir = std::env::temp_dir();
     let filename = temp_dir.join(format!("quickjs_tmp_{}.tmp", timestamp));
-    match std::fs::OpenOptions::new().read(true).write(true).create(true).open(&filename) {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&filename)
+    {
         Ok(file) => {
             let file_id = get_next_file_id();
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
-            let mut tmp = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_value(&mut tmp, "__file_id", Value::Number(file_id as f64))?;
-            obj_set_value(&mut tmp, "__eof", Value::Boolean(false))?;
+            let tmp = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_value(&tmp, "__file_id", Value::Number(file_id as f64))?;
+            obj_set_value(&tmp, "__eof", Value::Boolean(false))?;
             // methods
-            obj_set_value(&mut tmp, "puts", Value::Function("tmp.puts".to_string()))?;
-            obj_set_value(&mut tmp, "readAsString", Value::Function("tmp.readAsString".to_string()))?;
-            obj_set_value(&mut tmp, "seek", Value::Function("tmp.seek".to_string()))?;
-            obj_set_value(&mut tmp, "tell", Value::Function("tmp.tell".to_string()))?;
-            obj_set_value(&mut tmp, "putByte", Value::Function("tmp.putByte".to_string()))?;
-            obj_set_value(&mut tmp, "getByte", Value::Function("tmp.getByte".to_string()))?;
-            obj_set_value(&mut tmp, "getline", Value::Function("tmp.getline".to_string()))?;
-            obj_set_value(&mut tmp, "eof", Value::Function("tmp.eof".to_string()))?;
-            obj_set_value(&mut tmp, "close", Value::Function("tmp.close".to_string()))?;
+            obj_set_value(&tmp, "puts", Value::Function("tmp.puts".to_string()))?;
+            obj_set_value(&tmp, "readAsString", Value::Function("tmp.readAsString".to_string()))?;
+            obj_set_value(&tmp, "seek", Value::Function("tmp.seek".to_string()))?;
+            obj_set_value(&tmp, "tell", Value::Function("tmp.tell".to_string()))?;
+            obj_set_value(&tmp, "putByte", Value::Function("tmp.putByte".to_string()))?;
+            obj_set_value(&tmp, "getByte", Value::Function("tmp.getByte".to_string()))?;
+            obj_set_value(&tmp, "getline", Value::Function("tmp.getline".to_string()))?;
+            obj_set_value(&tmp, "eof", Value::Function("tmp.eof".to_string()))?;
+            obj_set_value(&tmp, "close", Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(JSError::EvaluationError {
@@ -93,24 +99,24 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     }
                 }
                 // write to file
-                if let Err(_) = file.write_all(to_write.as_bytes()) {
+                if file.write_all(to_write.as_bytes()).is_err() {
                     return Ok(Value::Number(-1.0));
                 }
-                if let Err(_) = file.flush() {
+                if file.flush().is_err() {
                     return Ok(Value::Number(-1.0));
                 }
                 return Ok(Value::Undefined);
             }
             "readAsString" => {
                 // flush any pending writes and seek to beginning and read entire file
-                if let Err(_) = file.flush() {
+                if file.flush().is_err() {
                     return Ok(Value::String(utf8_to_utf16("")));
                 }
-                if let Err(_) = file.seek(SeekFrom::Start(0)) {
+                if file.seek(SeekFrom::Start(0)).is_err() {
                     return Ok(Value::String(utf8_to_utf16("")));
                 }
                 let mut contents = String::new();
-                if let Err(_) = file.read_to_string(&mut contents) {
+                if file.read_to_string(&mut contents).is_err() {
                     return Ok(Value::String(utf8_to_utf16("")));
                 }
                 return Ok(Value::String(utf8_to_utf16(&contents)));
@@ -146,17 +152,17 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                 Err(_) => return Ok(Value::Number(-1.0)),
             },
             "putByte" => {
-                if args.len() >= 1 {
+                if !args.is_empty() {
                     let bv = evaluate_expr(env, &args[0])?;
                     let byte = match bv {
                         Value::Number(n) => n as u8,
                         _ => 0,
                     };
                     // write byte to file
-                    if let Err(_) = file.write_all(&[byte]) {
+                    if file.write_all(&[byte]).is_err() {
                         return Ok(Value::Number(-1.0));
                     }
-                    if let Err(_) = file.flush() {
+                    if file.flush().is_err() {
                         return Ok(Value::Number(-1.0));
                     }
                     return Ok(Value::Undefined);
@@ -197,7 +203,7 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     Ok(0) => return Ok(Value::Boolean(true)), // EOF
                     Ok(_) => {
                         // unread the byte by seeking back
-                        let _ = file.seek(SeekFrom::Current(-1));
+                        file.seek(SeekFrom::Current(-1))?;
                         return Ok(Value::Boolean(false));
                     }
                     Err(_) => return Ok(Value::Boolean(true)),

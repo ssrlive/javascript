@@ -52,7 +52,7 @@ mod regexp_tests {
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
-            Value::Boolean(b) => assert_eq!(b, true),
+            Value::Boolean(b) => assert!(b),
             _ => panic!("Expected boolean result"),
         }
     }
@@ -63,7 +63,7 @@ mod regexp_tests {
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
-            Value::Boolean(b) => assert_eq!(b, true),
+            Value::Boolean(b) => assert!(b),
             _ => panic!("Expected boolean result"),
         }
     }
@@ -92,7 +92,7 @@ mod regexp_tests {
 
         // Should return true since the text contains 'test'
         match value {
-            Value::Boolean(b) => assert_eq!(b, true),
+            Value::Boolean(b) => assert!(b),
             _ => panic!("Expected boolean result"),
         }
     }

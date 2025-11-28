@@ -12,7 +12,7 @@ unsafe fn get_js_string(val: &JSValue) -> String {
         return String::new();
     }
     let len = (*p).len as usize;
-    let str_data = (p as *mut u8).offset(std::mem::size_of::<JSString>() as isize);
+    let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
     let bytes = std::slice::from_raw_parts(str_data, len);
     String::from_utf8_lossy(bytes).to_string()
 }

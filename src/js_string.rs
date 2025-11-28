@@ -7,11 +7,11 @@ use crate::js_array::set_array_length;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "toString" => {
             if args.is_empty() {
-                Ok(Value::String(s.clone()))
+                Ok(Value::String(s.to_vec()))
             } else {
                 Err(JSError::EvaluationError {
                     message: format!("toString method expects no arguments, got {}", args.len()),
@@ -25,13 +25,13 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                 if let (Value::Number(start), Value::Number(end)) = (start_val, end_val) {
                     let start_idx = start as usize;
                     let end_idx = end as usize;
-                    if start_idx <= end_idx && end_idx <= utf16_len(&s) {
-                        Ok(Value::String(utf16_slice(&s, start_idx, end_idx)))
+                    if start_idx <= end_idx && end_idx <= utf16_len(s) {
+                        Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
                     } else {
                         Err(JSError::EvaluationError {
                             message: format!(
                                 "substring: invalid indices start={start_idx}, end={end_idx}, string length={}",
-                                utf16_len(&s)
+                                utf16_len(s)
                             ),
                         })
                     }
@@ -47,7 +47,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             }
         }
         "slice" => {
-            let start = if args.len() >= 1 {
+            let start = if !args.is_empty() {
                 match evaluate_expr(env, &args[0])? {
                     Value::Number(n) => n as isize,
                     _ => 0isize,
@@ -64,7 +64,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                 s.len() as isize
             };
 
-            let len = utf16_len(&s) as isize;
+            let len = utf16_len(s) as isize;
             let start = if start < 0 { len + start } else { start };
             let end = if end < 0 { len + end } else { end };
 
@@ -72,14 +72,14 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             let end = end.max(0).min(len) as usize;
 
             if start <= end {
-                Ok(Value::String(utf16_slice(&s, start, end)))
+                Ok(Value::String(utf16_slice(s, start, end)))
             } else {
                 Ok(Value::String(Vec::new()))
             }
         }
         "toUpperCase" => {
             if args.is_empty() {
-                Ok(Value::String(utf16_to_uppercase(&s)))
+                Ok(Value::String(utf16_to_uppercase(s)))
             } else {
                 Err(JSError::EvaluationError {
                     message: format!("toUpperCase method expects no arguments, got {}", args.len()),
@@ -88,7 +88,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
         }
         "toLowerCase" => {
             if args.is_empty() {
-                Ok(Value::String(utf16_to_lowercase(&s)))
+                Ok(Value::String(utf16_to_lowercase(s)))
             } else {
                 Err(JSError::EvaluationError {
                     message: format!("toLowerCase method expects no arguments, got {}", args.len()),
@@ -99,7 +99,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             if args.len() == 1 {
                 let search_val = evaluate_expr(env, &args[0])?;
                 if let Value::String(search) = search_val {
-                    if let Some(pos) = utf16_find(&s, &search) {
+                    if let Some(pos) = utf16_find(s, &search) {
                         Ok(Value::Number(pos as f64))
                     } else {
                         Ok(Value::Number(-1.0))
@@ -119,7 +119,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             if args.len() == 1 {
                 let search_val = evaluate_expr(env, &args[0])?;
                 if let Value::String(search) = search_val {
-                    if let Some(pos) = utf16_rfind(&s, &search) {
+                    if let Some(pos) = utf16_rfind(s, &search) {
                         Ok(Value::Number(pos as f64))
                     } else {
                         Ok(Value::Number(-1.0))
@@ -140,7 +140,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                 let search_val = evaluate_expr(env, &args[0])?;
                 let replace_val = evaluate_expr(env, &args[1])?;
                 if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
-                    Ok(Value::String(utf16_replace(&s, &search, &replace)))
+                    Ok(Value::String(utf16_replace(s, &search, &replace)))
                 } else {
                     Err(JSError::EvaluationError {
                         message: "replace: both arguments must be strings".to_string(),
@@ -160,28 +160,28 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                     let mut parts: Vec<Vec<u16>> = Vec::new();
                     if sep.is_empty() {
                         // split by empty separator => each UTF-16 code unit as string
-                        for i in 0..utf16_len(&s) {
-                            if let Some(ch) = utf16_char_at(&s, i) {
+                        for i in 0..utf16_len(s) {
+                            if let Some(ch) = utf16_char_at(s, i) {
                                 parts.push(vec![ch]);
                             }
                         }
                     } else {
                         let mut start = 0usize;
-                        while start <= utf16_len(&s) {
-                            if let Some(pos) = utf16_find(&s[start..].to_vec(), &sep) {
+                        while start <= utf16_len(s) {
+                            if let Some(pos) = utf16_find(&s[start..], &sep) {
                                 let end = start + pos;
-                                parts.push(utf16_slice(&s, start, end));
+                                parts.push(utf16_slice(s, start, end));
                                 start = end + utf16_len(&sep);
                             } else {
                                 // remainder
-                                parts.push(utf16_slice(&s, start, utf16_len(&s)));
+                                parts.push(utf16_slice(s, start, utf16_len(s)));
                                 break;
                             }
                         }
                     }
                     let arr = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, part) in parts.into_iter().enumerate() {
-                        obj_set_value(&arr, &i.to_string(), Value::String(part))?;
+                        obj_set_value(&arr, i.to_string(), Value::String(part))?;
                     }
                     let len = arr.borrow().properties.len();
                     set_array_length(&arr, len)?;
@@ -204,8 +204,8 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                     let idx = n as isize;
                     // let len = utf16_len(&s) as isize;
                     let idx = if idx < 0 { 0 } else { idx } as usize;
-                    if idx < utf16_len(&s) {
-                        if let Some(ch) = utf16_char_at(&s, idx) {
+                    if idx < utf16_len(s) {
+                        if let Some(ch) = utf16_char_at(s, idx) {
                             Ok(Value::String(vec![ch]))
                         } else {
                             Ok(Value::String(Vec::new()))
@@ -226,7 +226,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
         }
         "trim" => {
             if args.is_empty() {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = String::from_utf16_lossy(s);
                 let trimmed = str_val.trim();
                 Ok(Value::String(utf8_to_utf16(trimmed)))
             } else {
@@ -273,7 +273,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             if args.len() == 1 {
                 let search_val = evaluate_expr(env, &args[0])?;
                 if let Value::String(search) = search_val {
-                    let includes = utf16_find(&s, &search).is_some();
+                    let includes = utf16_find(s, &search).is_some();
                     Ok(Value::Boolean(includes))
                 } else {
                     Err(JSError::EvaluationError {
@@ -293,7 +293,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                     let count = n as usize;
                     let mut repeated = Vec::new();
                     for _ in 0..count {
-                        repeated.extend_from_slice(&s);
+                        repeated.extend_from_slice(s);
                     }
                     Ok(Value::String(repeated))
                 } else {
@@ -308,7 +308,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             }
         }
         "concat" => {
-            let mut result = s.clone();
+            let mut result = s.to_vec();
             for arg in args {
                 let arg_val = evaluate_expr(env, arg)?;
                 if let Value::String(arg_str) = arg_val {
@@ -327,13 +327,13 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             Ok(Value::String(result))
         }
         "padStart" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let target_len_val = evaluate_expr(env, &args[0])?;
                 if let Value::Number(target_len) = target_len_val {
                     let target_len = target_len as usize;
-                    let current_len = utf16_len(&s);
+                    let current_len = utf16_len(s);
                     if current_len >= target_len {
-                        Ok(Value::String(s.clone()))
+                        Ok(Value::String(s.to_vec()))
                     } else {
                         let pad_char = if args.len() >= 2 {
                             let pad_val = evaluate_expr(env, &args[1])?;
@@ -351,7 +351,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                         };
                         let pad_count = target_len - current_len;
                         let mut padded = vec![pad_char; pad_count];
-                        padded.extend_from_slice(&s);
+                        padded.extend_from_slice(s);
                         Ok(Value::String(padded))
                     }
                 } else {
@@ -366,13 +366,13 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
             }
         }
         "padEnd" => {
-            if args.len() >= 1 {
+            if !args.is_empty() {
                 let target_len_val = evaluate_expr(env, &args[0])?;
                 if let Value::Number(target_len) = target_len_val {
                     let target_len = target_len as usize;
-                    let current_len = utf16_len(&s);
+                    let current_len = utf16_len(s);
                     if current_len >= target_len {
-                        Ok(Value::String(s.clone()))
+                        Ok(Value::String(s.to_vec()))
                     } else {
                         let pad_char = if args.len() >= 2 {
                             let pad_val = evaluate_expr(env, &args[1])?;
@@ -389,7 +389,7 @@ pub fn handle_string_method(s: &Vec<u16>, method: &str, args: &[Expr], env: &JSO
                             ' ' as u16
                         };
                         let pad_count = target_len - current_len;
-                        let mut padded = s.clone();
+                        let mut padded = s.to_vec();
                         padded.extend(vec![pad_char; pad_count]);
                         Ok(Value::String(padded))
                     }

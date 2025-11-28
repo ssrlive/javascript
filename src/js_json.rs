@@ -68,7 +68,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
-                obj_set_value(&obj, &i.to_string(), js_val)?;
+                obj_set_value(&obj, i.to_string(), js_val)?;
             }
             set_array_length(&obj, len)?;
             Ok(Value::Object(obj))

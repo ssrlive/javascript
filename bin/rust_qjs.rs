@@ -46,5 +46,8 @@ fn main() {
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),
         Value::ClassDefinition(_) => println!("[Class]"),
+        Value::Getter(_, _) => println!("[Getter]"),
+        Value::Setter(_, _, _) => println!("[Setter]"),
+        Value::Property { .. } => println!("[Property]"),
     }
 }

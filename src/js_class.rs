@@ -1,7 +1,8 @@
 use crate::{
     error::JSError,
     quickjs::{
-        evaluate_expr, evaluate_statements, obj_get, obj_set_val, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Statement, Value,
+        evaluate_expr, evaluate_statements, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Statement,
+        Value,
     },
 };
 use std::{cell::RefCell, rc::Rc};
@@ -13,6 +14,10 @@ pub enum ClassMember {
     StaticMethod(String, Vec<String>, Vec<Statement>), // name, parameters, body
     Property(String, Expr),                            // name, value
     StaticProperty(String, Expr),                      // name, value
+    Getter(String, Vec<Statement>),                    // name, body
+    Setter(String, Vec<String>, Vec<Statement>),       // name, parameter, body
+    StaticGetter(String, Vec<Statement>),              // name, body
+    StaticSetter(String, Vec<String>, Vec<Statement>), // name, parameter, body
 }
 
 #[derive(Debug, Clone)]
@@ -22,24 +27,24 @@ pub struct ClassDefinition {
     pub members: Vec<ClassMember>,
 }
 
-pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> bool {
+pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Check if the object's prototype has a __class_def__ property
     // This means the object was created with 'new ClassName()'
-    if let Some(proto_val) = obj_get(obj, "__proto__") {
+    if let Some(proto_val) = obj_get_value(obj, "__proto__")? {
         if let Value::Object(proto_obj) = &*proto_val.borrow() {
             // Check if the prototype object has __class_def__
-            if let Some(class_def_val) = obj_get(proto_obj, "__class_def__") {
+            if let Some(class_def_val) = obj_get_value(proto_obj, "__class_def__")? {
                 if let Value::ClassDefinition(_) = *class_def_val.borrow() {
-                    return true;
+                    return Ok(true);
                 }
             }
         }
     }
-    false
+    Ok(false)
 }
 
 pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSError> {
-    if let Some(proto_val) = obj_get(class_obj, "__proto__") {
+    if let Some(proto_val) = obj_get_value(class_obj, "__proto__")? {
         if let Value::Object(proto_obj) = &*proto_val.borrow() {
             return Ok(proto_obj.clone());
         }
@@ -51,7 +56,7 @@ pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjec
 
 pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Check if 'this' is bound in the current environment
-    if let Some(this_val) = obj_get(env, "this") {
+    if let Some(this_val) = obj_get_value(env, "this")? {
         Ok(this_val.borrow().clone())
     } else {
         // Default to global object if no 'this' binding exists
@@ -66,21 +71,21 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
     match constructor_val {
         Value::Object(class_obj) => {
             // Check if this is a class object
-            if let Some(class_def_val) = obj_get(&class_obj, "__class_def__") {
+            if let Some(class_def_val) = obj_get_value(&class_obj, "__class_def__")? {
                 if let Value::ClassDefinition(ref class_def) = *class_def_val.borrow() {
                     // Create instance
                     let instance = Rc::new(RefCell::new(JSObjectData::new()));
 
                     // Set prototype
-                    if let Some(prototype_val) = obj_get(&class_obj, "prototype") {
-                        obj_set_val(&instance, "__proto__", prototype_val.borrow().clone());
+                    if let Some(prototype_val) = obj_get_value(&class_obj, "prototype")? {
+                        let _ = obj_set_value(&instance, "__proto__", prototype_val.borrow().clone());
                     }
 
                     // Set instance properties
                     for member in &class_def.members {
                         if let ClassMember::Property(prop_name, value_expr) = member {
                             let value = evaluate_expr(env, value_expr)?;
-                            obj_set_val(&instance, prop_name, value);
+                            obj_set_value(&instance, prop_name, value)?;
                         }
                     }
 
@@ -91,13 +96,13 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
                             // Bind 'this' to the instance
-                            obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+                            obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
                             // Bind parameters
                             for (i, param) in params.iter().enumerate() {
                                 if i < args.len() {
                                     let arg_val = evaluate_expr(env, &args[i])?;
-                                    obj_set_val(&func_env, param, arg_val);
+                                    obj_set_value(&func_env, param, arg_val)?;
                                 }
                             }
 
@@ -117,13 +122,13 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             let func_env = captured_env.clone();
 
             // Bind 'this' to the instance
-            obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+            obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
             // Bind parameters
             for (i, param) in params.iter().enumerate() {
                 if i < args.len() {
                     let arg_val = evaluate_expr(env, &args[i])?;
-                    obj_set_val(&func_env, param, arg_val);
+                    obj_set_value(&func_env, param, arg_val)?;
                 }
             }
 
@@ -181,7 +186,7 @@ pub(crate) fn create_class_object(
     let class_obj = Rc::new(RefCell::new(JSObjectData::new()));
 
     // Set class name
-    obj_set_val(&class_obj, "name", Value::String(utf8_to_utf16(name)));
+    obj_set_value(&class_obj, "name", Value::String(utf8_to_utf16(name)))?;
 
     // Create the prototype object first
     let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -189,13 +194,13 @@ pub(crate) fn create_class_object(
     // Handle inheritance if extends is specified
     if let Some(parent_class_name) = extends {
         // Look up the parent class in the environment
-        if let Some(parent_class_val) = obj_get(env, parent_class_name) {
+        if let Some(parent_class_val) = obj_get_value(env, parent_class_name)? {
             if let Value::Object(parent_class_obj) = &*parent_class_val.borrow() {
                 // Get the parent class's prototype
-                if let Some(parent_proto_val) = obj_get(parent_class_obj, "prototype") {
+                if let Some(parent_proto_val) = obj_get_value(parent_class_obj, "prototype")? {
                     if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                         // Set the child class prototype's __proto__ to parent prototype
-                        obj_set_val(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()));
+                        let _ = obj_set_value(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()));
                     }
                 }
             }
@@ -206,7 +211,7 @@ pub(crate) fn create_class_object(
         }
     }
 
-    obj_set_val(&class_obj, "prototype", Value::Object(prototype_obj.clone()));
+    obj_set_value(&class_obj, "prototype", Value::Object(prototype_obj.clone()))?;
 
     // Store class definition for later use
     let class_def = ClassDefinition {
@@ -217,10 +222,10 @@ pub(crate) fn create_class_object(
 
     // Store class definition in a special property
     let class_def_val = Value::ClassDefinition(Rc::new(class_def));
-    obj_set_val(&class_obj, "__class_def__", class_def_val.clone());
+    obj_set_value(&class_obj, "__class_def__", class_def_val.clone())?;
 
     // Store class definition in prototype as well for instanceof checks
-    obj_set_val(&prototype_obj, "__class_def__", class_def_val);
+    obj_set_value(&prototype_obj, "__class_def__", class_def_val)?;
 
     // Add methods to prototype
     for member in members {
@@ -228,7 +233,7 @@ pub(crate) fn create_class_object(
             ClassMember::Method(method_name, params, body) => {
                 // Create a closure for the method
                 let method_closure = Value::Closure(params.clone(), body.clone(), env.clone());
-                obj_set_val(&prototype_obj, method_name, method_closure);
+                obj_set_value(&prototype_obj, method_name, method_closure)?;
             }
             ClassMember::Constructor(_, _) => {
                 // Constructor is handled separately during instantiation
@@ -236,15 +241,35 @@ pub(crate) fn create_class_object(
             ClassMember::Property(_, _) => {
                 // Instance properties not implemented yet
             }
+            ClassMember::Getter(getter_name, body) => {
+                // Create a getter for the prototype
+                let getter = Value::Getter(body.clone(), env.clone());
+                obj_set_value(&prototype_obj, getter_name, getter)?;
+            }
+            ClassMember::Setter(setter_name, param, body) => {
+                // Create a setter for the prototype
+                let setter = Value::Setter(param.clone(), body.clone(), env.clone());
+                obj_set_value(&prototype_obj, setter_name, setter)?;
+            }
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Add static method to class object
                 let method_closure = Value::Closure(params.clone(), body.clone(), env.clone());
-                obj_set_val(&class_obj, method_name, method_closure);
+                obj_set_value(&class_obj, method_name, method_closure)?;
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
                 // Add static property to class object
                 let value = evaluate_expr(env, &value_expr)?;
-                obj_set_val(&class_obj, &prop_name, value);
+                obj_set_value(&class_obj, &prop_name, value)?;
+            }
+            ClassMember::StaticGetter(getter_name, body) => {
+                // Create a static getter for the class object
+                let getter = Value::Getter(body.clone(), env.clone());
+                obj_set_value(&class_obj, getter_name, getter)?;
+            }
+            ClassMember::StaticSetter(setter_name, param, body) => {
+                // Create a static setter for the class object
+                let setter = Value::Setter(param.clone(), body.clone(), env.clone());
+                obj_set_value(&class_obj, setter_name, setter)?;
             }
         }
     }
@@ -259,7 +284,7 @@ pub(crate) fn call_static_method(
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Look for static method directly on the class object
-    if let Some(method_val) = obj_get(class_obj, method) {
+    if let Some(method_val) = obj_get_value(class_obj, method)? {
         match &*method_val.borrow() {
             Value::Closure(params, body, _captured_env) => {
                 // Create function environment
@@ -267,13 +292,13 @@ pub(crate) fn call_static_method(
 
                 // Static methods don't have 'this' bound to an instance
                 // 'this' in static methods refers to the class itself
-                obj_set_val(&func_env, "this", Value::Object(class_obj.clone()));
+                obj_set_value(&func_env, "this", Value::Object(class_obj.clone()))?;
 
                 // Bind parameters
                 for (i, param) in params.iter().enumerate() {
                     if i < args.len() {
                         let arg_val = evaluate_expr(env, &args[i])?;
-                        obj_set_val(&func_env, param, arg_val);
+                        obj_set_value(&func_env, param, arg_val)?;
                     }
                 }
 
@@ -295,7 +320,7 @@ pub(crate) fn call_static_method(
 pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     let proto_obj = get_class_proto_obj(&obj_map)?;
     // Look for method in prototype
-    if let Some(method_val) = obj_get(&proto_obj, method) {
+    if let Some(method_val) = obj_get_value(&proto_obj, method)? {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
             Value::Closure(params, body, _captured_env) => {
@@ -304,14 +329,14 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
                 // Bind 'this' to the instance
-                obj_set_val(&func_env, "this", Value::Object(obj_map.clone()));
+                obj_set_value(&func_env, "this", Value::Object(obj_map.clone()))?;
                 log::trace!("Bound 'this' to instance");
 
                 // Bind parameters
                 for (i, param) in params.iter().enumerate() {
                     if i < args.len() {
                         let arg_val = evaluate_expr(env, &args[i])?;
-                        obj_set_val(&func_env, param, arg_val);
+                        obj_set_value(&func_env, param, arg_val)?;
                     }
                 }
 
@@ -330,36 +355,36 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
     })
 }
 
-pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> bool {
+pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Get the prototype of the constructor
-    if let Some(constructor_proto) = obj_get(&constructor, "prototype") {
+    if let Some(constructor_proto) = obj_get_value(&constructor, "prototype")? {
         if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
             // Check if obj's prototype chain contains constructor's prototype
-            let mut current_proto = obj_get(&obj, "__proto__");
+            let mut current_proto = obj_get_value(&obj, "__proto__")?;
             while let Some(proto_val) = current_proto {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     if Rc::ptr_eq(proto_obj, constructor_proto_obj) {
-                        return true;
+                        return Ok(true);
                     }
-                    current_proto = obj_get(proto_obj, "__proto__");
+                    current_proto = obj_get_value(proto_obj, "__proto__")?;
                 } else {
                     break;
                 }
             }
         }
     }
-    false
+    Ok(false)
 }
 
 pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // super refers to the parent class prototype
     // We need to find it from the current class context
-    if let Some(this_val) = obj_get(env, "this") {
+    if let Some(this_val) = obj_get_value(env, "this")? {
         if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get(instance, "__proto__") {
+            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     // Get the parent prototype from the current prototype's __proto__
-                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
                         return Ok(parent_proto_val.borrow().clone());
                     }
                 }
@@ -373,15 +398,15 @@ pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
 
 pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
     // super() calls the parent constructor
-    if let Some(this_val) = obj_get(env, "this") {
+    if let Some(this_val) = obj_get_value(env, "this")? {
         if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get(instance, "__proto__") {
+            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
                         if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                             // Find the parent class constructor
-                            if let Some(parent_class_def_val) = obj_get(parent_proto_obj, "__class_def__") {
+                            if let Some(parent_class_def_val) = obj_get_value(parent_proto_obj, "__class_def__")? {
                                 if let Value::ClassDefinition(ref parent_class_def) = *parent_class_def_val.borrow() {
                                     // Call parent constructor
                                     for member in &parent_class_def.members {
@@ -390,13 +415,13 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
                                             // Bind 'this' to the instance
-                                            obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+                                            obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
                                             // Bind parameters
                                             for (i, param) in params.iter().enumerate() {
                                                 if i < args.len() {
                                                     let arg_val = evaluate_expr(env, &args[i])?;
-                                                    obj_set_val(&func_env, param, arg_val);
+                                                    obj_set_value(&func_env, param, arg_val)?;
                                                 }
                                             }
 
@@ -419,15 +444,15 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
 
 pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Result<Value, JSError> {
     // super.property accesses parent class properties
-    if let Some(this_val) = obj_get(env, "this") {
+    if let Some(this_val) = obj_get_value(env, "this")? {
         if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get(instance, "__proto__") {
+            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
                         if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                             // Look for property in parent prototype
-                            if let Some(prop_val) = obj_get(parent_proto_obj, prop) {
+                            if let Some(prop_val) = obj_get_value(parent_proto_obj, prop)? {
                                 return Ok(prop_val.borrow().clone());
                             }
                         }
@@ -443,28 +468,28 @@ pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Resu
 
 pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &[Expr]) -> Result<Value, JSError> {
     // super.method() calls parent class methods
-    if let Some(this_val) = obj_get(env, "this") {
+    if let Some(this_val) = obj_get_value(env, "this")? {
         if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get(instance, "__proto__") {
+            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get(proto_obj, "__proto__") {
+                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
                         if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                             // Look for method in parent prototype
-                            if let Some(method_val) = obj_get(parent_proto_obj, method) {
+                            if let Some(method_val) = obj_get_value(parent_proto_obj, method)? {
                                 match &*method_val.borrow() {
                                     Value::Closure(params, body, _captured_env) => {
                                         // Create function environment with 'this' bound to instance
                                         let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
                                         // Bind 'this' to the instance
-                                        obj_set_val(&func_env, "this", Value::Object(instance.clone()));
+                                        obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
                                         // Bind parameters
                                         for (i, param) in params.iter().enumerate() {
                                             if i < args.len() {
                                                 let arg_val = evaluate_expr(env, &args[i])?;
-                                                obj_set_val(&func_env, param, arg_val);
+                                                obj_set_value(&func_env, param, arg_val)?;
                                             }
                                         }
 
@@ -511,26 +536,26 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         Value::Number(n) => {
             // Object(number) creates Number object
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_val(&obj, "valueOf", Value::Function("Number_valueOf".to_string()));
-            obj_set_val(&obj, "toString", Value::Function("Number_toString".to_string()));
-            obj_set_val(&obj, "__value__", Value::Number(n));
+            obj_set_value(&obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
+            obj_set_value(&obj, "toString", Value::Function("Number_toString".to_string()))?;
+            obj_set_value(&obj, "__value__", Value::Number(n))?;
             Ok(Value::Object(obj))
         }
         Value::Boolean(b) => {
             // Object(boolean) creates Boolean object
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_val(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()));
-            obj_set_val(&obj, "toString", Value::Function("Boolean_toString".to_string()));
-            obj_set_val(&obj, "__value__", Value::Boolean(b));
+            obj_set_value(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
+            obj_set_value(&obj, "toString", Value::Function("Boolean_toString".to_string()))?;
+            obj_set_value(&obj, "__value__", Value::Boolean(b))?;
             Ok(Value::Object(obj))
         }
         Value::String(s) => {
             // Object(string) creates String object
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_val(&obj, "valueOf", Value::Function("String_valueOf".to_string()));
-            obj_set_val(&obj, "toString", Value::Function("String_toString".to_string()));
-            obj_set_val(&obj, "length", Value::Number(s.len() as f64));
-            obj_set_val(&obj, "__value__", Value::String(s));
+            obj_set_value(&obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
+            obj_set_value(&obj, "toString", Value::Function("String_toString".to_string()))?;
+            obj_set_value(&obj, "length", Value::Number(s.len() as f64))?;
+            obj_set_value(&obj, "__value__", Value::String(s))?;
             Ok(Value::Object(obj))
         }
         _ => {
@@ -570,9 +595,9 @@ pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 
     // Create Number object
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&obj, "valueOf", Value::Function("Number_valueOf".to_string()));
-    obj_set_val(&obj, "toString", Value::Function("Number_toString".to_string()));
-    obj_set_val(&obj, "__value__", Value::Number(num_val));
+    obj_set_value(&obj, "valueOf", Value::Function("Number_valueOf".to_string()))?;
+    obj_set_value(&obj, "toString", Value::Function("Number_toString".to_string()))?;
+    obj_set_value(&obj, "__value__", Value::Number(num_val))?;
     Ok(Value::Object(obj))
 }
 
@@ -596,9 +621,9 @@ pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -
 
     // Create Boolean object
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()));
-    obj_set_val(&obj, "toString", Value::Function("Boolean_toString".to_string()));
-    obj_set_val(&obj, "__value__", Value::Boolean(bool_val));
+    obj_set_value(&obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
+    obj_set_value(&obj, "toString", Value::Function("Boolean_toString".to_string()))?;
+    obj_set_value(&obj, "__value__", Value::Boolean(bool_val))?;
     Ok(Value::Object(obj))
 }
 
@@ -619,14 +644,17 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Function(name) => utf8_to_utf16(&format!("[Function: {}]", name)),
             Value::Closure(_, _, _) => utf8_to_utf16("[Function]"),
             Value::ClassDefinition(_) => utf8_to_utf16("[Class]"),
+            Value::Getter(_, _) => utf8_to_utf16("[Getter]"),
+            Value::Setter(_, _, _) => utf8_to_utf16("[Setter]"),
+            Value::Property { .. } => utf8_to_utf16("[Property]"),
         }
     };
 
     // Create String object
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&obj, "valueOf", Value::Function("String_valueOf".to_string()));
-    obj_set_val(&obj, "toString", Value::Function("String_toString".to_string()));
-    obj_set_val(&obj, "length", Value::Number(str_val.len() as f64));
-    obj_set_val(&obj, "__value__", Value::String(str_val));
+    obj_set_value(&obj, "valueOf", Value::Function("String_valueOf".to_string()))?;
+    obj_set_value(&obj, "toString", Value::Function("String_toString".to_string()))?;
+    obj_set_value(&obj, "length", Value::Number(str_val.len() as f64))?;
+    obj_set_value(&obj, "__value__", Value::String(str_val))?;
     Ok(Value::Object(obj))
 }

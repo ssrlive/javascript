@@ -1,13 +1,13 @@
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Create the console object with logging functions
-pub fn make_console_object() -> JSObjectDataPtr {
+pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
     let console_obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&console_obj, "log", Value::Function("console.log".to_string()));
-    console_obj
+    obj_set_value(&console_obj, "log", Value::Function("console.log".to_string()))?;
+    Ok(console_obj)
 }
 
 /// Handle console object method calls
@@ -28,6 +28,9 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::Function(name) => print!("[Function: {}]", name),
                     Value::Closure(_, _, _) => print!("[Function]"),
                     Value::ClassDefinition(_) => print!("[Class]"),
+                    Value::Getter(_, _) => print!("[Getter]"),
+                    Value::Setter(_, _, _) => print!("[Setter]"),
+                    Value::Property { .. } => print!("[Property]"),
                 }
             }
             println!();

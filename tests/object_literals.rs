@@ -91,4 +91,40 @@ mod object_literal_tests {
             _ => panic!("Expected number 3.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_getter_setter_basic() {
+        let script = r#"
+            let obj = {
+                _value: 0,
+                get value() { return this._value; },
+                set value(v) { this._value = v * 2; }
+            };
+            obj.value = 5;
+            obj.value
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 10.0), // setter multiplies by 2, getter returns 10
+            _ => panic!("Expected number 10.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_getter_setter_with_computed_property() {
+        let script = r#"
+            let obj = {
+                _data: {},
+                get data() { return this._data; },
+                set data(value) { this._data = { processed: value * 10 }; }
+            };
+            obj.data = 3;
+            obj.data.processed
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 30.0), // setter processes value * 10
+            _ => panic!("Expected number 30.0, got {:?}", result),
+        }
+    }
 }

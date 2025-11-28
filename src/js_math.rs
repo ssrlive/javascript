@@ -1,24 +1,24 @@
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Create the Math object with all mathematical constants and functions
-pub fn make_math_object() -> JSObjectDataPtr {
+pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     let math_obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&math_obj, "PI", Value::Number(std::f64::consts::PI));
-    obj_set_val(&math_obj, "E", Value::Number(std::f64::consts::E));
-    obj_set_val(&math_obj, "floor", Value::Function("Math.floor".to_string()));
-    obj_set_val(&math_obj, "ceil", Value::Function("Math.ceil".to_string()));
-    obj_set_val(&math_obj, "round", Value::Function("Math.round".to_string()));
-    obj_set_val(&math_obj, "abs", Value::Function("Math.abs".to_string()));
-    obj_set_val(&math_obj, "sqrt", Value::Function("Math.sqrt".to_string()));
-    obj_set_val(&math_obj, "pow", Value::Function("Math.pow".to_string()));
-    obj_set_val(&math_obj, "sin", Value::Function("Math.sin".to_string()));
-    obj_set_val(&math_obj, "cos", Value::Function("Math.cos".to_string()));
-    obj_set_val(&math_obj, "tan", Value::Function("Math.tan".to_string()));
-    obj_set_val(&math_obj, "random", Value::Function("Math.random".to_string()));
-    math_obj
+    obj_set_value(&math_obj, "PI", Value::Number(std::f64::consts::PI))?;
+    obj_set_value(&math_obj, "E", Value::Number(std::f64::consts::E))?;
+    obj_set_value(&math_obj, "floor", Value::Function("Math.floor".to_string()))?;
+    obj_set_value(&math_obj, "ceil", Value::Function("Math.ceil".to_string()))?;
+    obj_set_value(&math_obj, "round", Value::Function("Math.round".to_string()))?;
+    obj_set_value(&math_obj, "abs", Value::Function("Math.abs".to_string()))?;
+    obj_set_value(&math_obj, "sqrt", Value::Function("Math.sqrt".to_string()))?;
+    obj_set_value(&math_obj, "pow", Value::Function("Math.pow".to_string()))?;
+    obj_set_value(&math_obj, "sin", Value::Function("Math.sin".to_string()))?;
+    obj_set_value(&math_obj, "cos", Value::Function("Math.cos".to_string()))?;
+    obj_set_value(&math_obj, "tan", Value::Function("Math.tan".to_string()))?;
+    obj_set_value(&math_obj, "random", Value::Function("Math.random".to_string()))?;
+    Ok(math_obj)
 }
 
 /// Handle Math object method calls

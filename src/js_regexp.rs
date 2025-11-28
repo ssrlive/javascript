@@ -1,5 +1,5 @@
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use regex::RegexBuilder;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -106,20 +106,20 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     let regexp_obj = Rc::new(RefCell::new(JSObjectData::new()));
 
     // Store regex and flags as properties
-    obj_set_val(&regexp_obj, "__regex", Value::String(utf8_to_utf16(&pattern)));
-    obj_set_val(&regexp_obj, "__flags", Value::String(utf8_to_utf16(&flags)));
-    obj_set_val(&regexp_obj, "__global", Value::Boolean(global));
-    obj_set_val(&regexp_obj, "__ignoreCase", Value::Boolean(ignore_case));
-    obj_set_val(&regexp_obj, "__multiline", Value::Boolean(multiline));
-    obj_set_val(&regexp_obj, "__dotAll", Value::Boolean(dot_matches_new_line));
-    obj_set_val(&regexp_obj, "__unicode", Value::Boolean(unicode));
-    obj_set_val(&regexp_obj, "__sticky", Value::Boolean(false)); // Not implemented
-    obj_set_val(&regexp_obj, "__lastIndex", Value::Number(0.0));
+    obj_set_value(&regexp_obj, "__regex", Value::String(utf8_to_utf16(&pattern)))?;
+    obj_set_value(&regexp_obj, "__flags", Value::String(utf8_to_utf16(&flags)))?;
+    obj_set_value(&regexp_obj, "__global", Value::Boolean(global))?;
+    obj_set_value(&regexp_obj, "__ignoreCase", Value::Boolean(ignore_case))?;
+    obj_set_value(&regexp_obj, "__multiline", Value::Boolean(multiline))?;
+    obj_set_value(&regexp_obj, "__dotAll", Value::Boolean(dot_matches_new_line))?;
+    obj_set_value(&regexp_obj, "__unicode", Value::Boolean(unicode))?;
+    obj_set_value(&regexp_obj, "__sticky", Value::Boolean(false))?; // Not implemented
+    obj_set_value(&regexp_obj, "__lastIndex", Value::Number(0.0))?;
 
     // Add methods
-    obj_set_val(&regexp_obj, "exec", Value::Function("RegExp.prototype.exec".to_string()));
-    obj_set_val(&regexp_obj, "test", Value::Function("RegExp.prototype.test".to_string()));
-    obj_set_val(&regexp_obj, "toString", Value::Function("RegExp.prototype.toString".to_string()));
+    obj_set_value(&regexp_obj, "exec", Value::Function("RegExp.prototype.exec".to_string()))?;
+    obj_set_value(&regexp_obj, "test", Value::Function("RegExp.prototype.test".to_string()))?;
+    obj_set_value(&regexp_obj, "toString", Value::Function("RegExp.prototype.toString".to_string()))?;
 
     Ok(Value::Object(regexp_obj))
 }
@@ -208,34 +208,34 @@ pub(crate) fn handle_regexp_method(
 
                 // Add matched string
                 if let Some(matched) = captures.get(0) {
-                    obj_set_val(&result_array, "0", Value::String(utf8_to_utf16(matched.as_str())));
-                    obj_set_val(&result_array, "index", Value::Number((last_index + matched.start()) as f64));
-                    obj_set_val(&result_array, "input", Value::String(utf8_to_utf16(&input)));
+                    obj_set_value(&result_array, "0", Value::String(utf8_to_utf16(matched.as_str())))?;
+                    obj_set_value(&result_array, "index", Value::Number((last_index + matched.start()) as f64))?;
+                    obj_set_value(&result_array, "input", Value::String(utf8_to_utf16(&input)))?;
                 }
 
                 // Add capture groups
                 let mut group_index = 1;
                 for capture in captures.iter().skip(1) {
                     if let Some(capture_match) = capture {
-                        obj_set_val(
+                        obj_set_value(
                             &result_array,
                             &group_index.to_string(),
                             Value::String(utf8_to_utf16(capture_match.as_str())),
-                        );
+                        )?;
                     } else {
-                        obj_set_val(&result_array, &group_index.to_string(), Value::Undefined);
+                        obj_set_value(&result_array, &group_index.to_string(), Value::Undefined)?;
                     }
                     group_index += 1;
                 }
 
                 // Set length
-                obj_set_val(&result_array, "length", Value::Number(group_index as f64));
+                obj_set_value(&result_array, "length", Value::Number(group_index as f64))?;
 
                 // Update lastIndex for global regex
                 if global {
                     if let Some(matched) = captures.get(0) {
                         let new_last_index = last_index + matched.end();
-                        obj_set_val(obj_map, "__lastIndex", Value::Number(new_last_index as f64));
+                        obj_set_value(obj_map, "__lastIndex", Value::Number(new_last_index as f64))?;
                     }
                 }
 
@@ -243,7 +243,7 @@ pub(crate) fn handle_regexp_method(
             } else {
                 // Reset lastIndex for global regex on no match
                 if global {
-                    obj_set_val(obj_map, "__lastIndex", Value::Number(0.0));
+                    obj_set_value(obj_map, "__lastIndex", Value::Number(0.0))?;
                 }
                 Ok(Value::Undefined) // RegExp.exec returns null on no match, but we use Undefined
             }
@@ -324,10 +324,10 @@ pub(crate) fn handle_regexp_method(
             if global && is_match {
                 if let Some(mat) = regex.find(&input[last_index..]) {
                     let new_last_index = last_index + mat.end();
-                    obj_set_val(obj_map, "__lastIndex", Value::Number(new_last_index as f64));
+                    obj_set_value(obj_map, "__lastIndex", Value::Number(new_last_index as f64))?;
                 }
             } else if global && !is_match {
-                obj_set_val(obj_map, "__lastIndex", Value::Number(0.0));
+                obj_set_value(obj_map, "__lastIndex", Value::Number(0.0))?;
             }
 
             Ok(Value::Boolean(is_match))
@@ -360,18 +360,18 @@ pub(crate) fn handle_regexp_method(
 }
 
 /// Create the RegExp constructor function
-pub fn make_regexp_constructor() -> JSObjectDataPtr {
+pub fn make_regexp_constructor() -> Result<JSObjectDataPtr, JSError> {
     let regexp_ctor = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&regexp_ctor, "prototype", Value::Object(make_regexp_prototype()));
-    regexp_ctor
+    obj_set_value(&regexp_ctor, "prototype", Value::Object(make_regexp_prototype()?))?;
+    Ok(regexp_ctor)
 }
 
 /// Create the RegExp prototype object
-pub fn make_regexp_prototype() -> JSObjectDataPtr {
+pub fn make_regexp_prototype() -> Result<JSObjectDataPtr, JSError> {
     let proto = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&proto, "constructor", Value::Function("RegExp".to_string()));
-    obj_set_val(&proto, "exec", Value::Function("RegExp.prototype.exec".to_string()));
-    obj_set_val(&proto, "test", Value::Function("RegExp.prototype.test".to_string()));
-    obj_set_val(&proto, "toString", Value::Function("RegExp.prototype.toString".to_string()));
-    proto
+    obj_set_value(&proto, "constructor", Value::Function("RegExp".to_string()))?;
+    obj_set_value(&proto, "exec", Value::Function("RegExp.prototype.exec".to_string()))?;
+    obj_set_value(&proto, "test", Value::Function("RegExp.prototype.test".to_string()))?;
+    obj_set_value(&proto, "toString", Value::Function("RegExp.prototype.toString".to_string()))?;
+    Ok(proto)
 }

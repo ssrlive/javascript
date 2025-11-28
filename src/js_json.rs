@@ -1,6 +1,6 @@
 use crate::error::JSError;
 use crate::js_array::{is_array, set_array_length};
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -68,16 +68,16 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
-                obj_set_val(&obj, &i.to_string(), js_val);
+                obj_set_value(&obj, &i.to_string(), js_val)?;
             }
-            set_array_length(&obj, len);
+            set_array_length(&obj, len)?;
             Ok(Value::Object(obj))
         }
         serde_json::Value::Object(obj) => {
             let js_obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (key, value) in obj.into_iter() {
                 let js_val = json_value_to_js_value(value)?;
-                obj_set_val(&js_obj, &key, js_val);
+                obj_set_value(&js_obj, &key, js_val)?;
             }
             Ok(Value::Object(js_obj))
         }

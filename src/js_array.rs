@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::quickjs::{
-    env_get, env_set, evaluate_expr, evaluate_statements, obj_get, obj_set_rc, obj_set_val, utf8_to_utf16, value_to_sort_string,
+    env_get, env_set, evaluate_expr, evaluate_statements, obj_get_value, obj_set_rc, obj_set_value, utf8_to_utf16, value_to_sort_string,
     values_equal, Expr, Value,
 };
 
@@ -49,7 +49,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                         let len = get_array_length(&obj_map).unwrap_or(0);
 
                         for i in 0..len {
-                            if let Some(val) = obj_get(&obj_map, &i.to_string()) {
+                            if let Some(val) = obj_get_value(&obj_map, &i.to_string())? {
                                 let element = val.borrow().clone();
                                 if let Some(ref fn_val) = map_fn {
                                     match fn_val {
@@ -89,9 +89,9 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
             }
 
             let new_array = Rc::new(RefCell::new(JSObjectData::new()));
-            set_array_length(&new_array, result.len());
+            set_array_length(&new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_val(&new_array, &i.to_string(), val);
+                obj_set_value(&new_array, &i.to_string(), val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -100,9 +100,9 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
             let new_array = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, arg) in args.iter().enumerate() {
                 let val = evaluate_expr(env, arg)?;
-                obj_set_val(&new_array, &i.to_string(), val);
+                obj_set_value(&new_array, &i.to_string(), val)?;
             }
-            set_array_length(&new_array, args.len());
+            set_array_length(&new_array, args.len())?;
             Ok(Value::Object(new_array))
         }
         _ => Err(JSError::EvaluationError {
@@ -116,7 +116,7 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
     if args.is_empty() {
         // Array() - create empty array
         let array_obj = Rc::new(RefCell::new(JSObjectData::new()));
-        set_array_length(&array_obj, 0);
+        set_array_length(&array_obj, 0)?;
         Ok(Value::Object(array_obj))
     } else if args.len() == 1 {
         // Array(length) or Array(element)
@@ -145,14 +145,14 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
                 }
                 // Array(length) - create array with specified length
                 let array_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                set_array_length(&array_obj, n as usize);
+                set_array_length(&array_obj, n as usize)?;
                 Ok(Value::Object(array_obj))
             }
             _ => {
                 // Array(element) - create array with single element
                 let array_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                obj_set_val(&array_obj, "0", arg_val);
-                set_array_length(&array_obj, 1);
+                obj_set_value(&array_obj, "0", arg_val)?;
+                set_array_length(&array_obj, 1)?;
                 Ok(Value::Object(array_obj))
             }
         }
@@ -161,9 +161,9 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
         let array_obj = Rc::new(RefCell::new(JSObjectData::new()));
         for (i, arg) in args.iter().enumerate() {
             let arg_val = evaluate_expr(env, arg)?;
-            obj_set_val(&array_obj, &i.to_string(), arg_val);
+            obj_set_value(&array_obj, &i.to_string(), arg_val)?;
         }
-        set_array_length(&array_obj, args.len());
+        set_array_length(&array_obj, args.len())?;
         Ok(Value::Object(array_obj))
     }
 }
@@ -186,10 +186,11 @@ pub(crate) fn handle_array_instance_method(
                 let mut current_len = get_array_length(obj_map).unwrap_or(0);
 
                 // Helper closure to push a value into a map
-                let mut push_into_map = |map: &JSObjectDataPtr, val: Value| {
-                    obj_set_val(map, &current_len.to_string(), val);
-                    current_len += 1;
-                };
+                fn push_into_map(map: &JSObjectDataPtr, val: Value, current_len: &mut usize) -> Result<(), JSError> {
+                    obj_set_value(map, &current_len.to_string(), val)?;
+                    *current_len += 1;
+                    Ok(())
+                }
 
                 // If obj_expr is a variable referring to an object stored in env,
                 // mutate that stored object directly so changes persist.
@@ -199,9 +200,9 @@ pub(crate) fn handle_array_instance_method(
                         if let Value::Object(ref mut map) = *borrowed {
                             for arg in args {
                                 let val = evaluate_expr(env, arg)?;
-                                push_into_map(map, val);
+                                push_into_map(map, val, &mut current_len)?;
                             }
-                            set_array_length(map, current_len);
+                            set_array_length(map, current_len)?;
 
                             // Return the original object
                             return Ok(Value::Object(map.clone()));
@@ -212,9 +213,9 @@ pub(crate) fn handle_array_instance_method(
                 // Fallback: mutate the local obj_map copy
                 for arg in args {
                     let val = evaluate_expr(env, arg)?;
-                    push_into_map(obj_map, val);
+                    push_into_map(obj_map, val, &mut current_len)?;
                 }
-                set_array_length(obj_map, current_len);
+                set_array_length(obj_map, current_len)?;
                 // Return the array object (chainable)
                 Ok(Value::Object(obj_map.clone()))
             } else {
@@ -228,7 +229,7 @@ pub(crate) fn handle_array_instance_method(
             if current_len > 0 {
                 let last_idx = (current_len - 1).to_string();
                 let val = obj_map.borrow_mut().remove(&last_idx);
-                set_array_length(obj_map, current_len - 1);
+                set_array_length(obj_map, current_len - 1)?;
                 Ok(val.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
             } else {
                 Ok(Value::Undefined)
@@ -256,7 +257,7 @@ pub(crate) fn handle_array_instance_method(
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     match &*val.borrow() {
                         Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
@@ -298,12 +299,12 @@ pub(crate) fn handle_array_instance_method(
             let new_array = Rc::new(RefCell::new(JSObjectData::new()));
             let mut idx = 0;
             for i in start..end {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
-                    obj_set_val(&new_array, &idx.to_string(), val.borrow().clone());
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
+                    obj_set_value(&new_array, &idx.to_string(), val.borrow().clone())?;
                     idx += 1;
                 }
             }
-            set_array_length(&new_array, idx);
+            set_array_length(&new_array, idx)?;
             Ok(Value::Object(new_array))
         }
         "forEach" => {
@@ -313,7 +314,7 @@ pub(crate) fn handle_array_instance_method(
                 let current_len = get_array_length(obj_map).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                    if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 // Prepare function environment
@@ -353,7 +354,7 @@ pub(crate) fn handle_array_instance_method(
                 let new_array = Rc::new(RefCell::new(JSObjectData::new()));
                 let mut idx = 0;
                 for i in 0..current_len {
-                    if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                    if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 // Prepare function environment
@@ -368,7 +369,7 @@ pub(crate) fn handle_array_instance_method(
                                     env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                                 }
                                 let res = evaluate_statements(&func_env, &body)?;
-                                obj_set_val(&new_array, &idx.to_string(), res);
+                                obj_set_value(&new_array, &idx.to_string(), res)?;
                                 idx += 1;
                             }
                             _ => {
@@ -379,7 +380,7 @@ pub(crate) fn handle_array_instance_method(
                         }
                     }
                 }
-                set_array_length(&new_array, idx);
+                set_array_length(&new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
                 Err(JSError::EvaluationError {
@@ -395,7 +396,7 @@ pub(crate) fn handle_array_instance_method(
                 let mut new_array = Rc::new(RefCell::new(JSObjectData::new()));
                 let mut idx = 0;
                 for i in 0..current_len {
-                    if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                    if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 let func_env = captured_env.clone();
@@ -419,7 +420,7 @@ pub(crate) fn handle_array_instance_method(
                                     _ => false,
                                 };
                                 if include {
-                                    obj_set_val(&new_array, &idx.to_string(), val.borrow().clone());
+                                    obj_set_value(&new_array, &idx.to_string(), val.borrow().clone())?;
                                     idx += 1;
                                 }
                             }
@@ -431,7 +432,7 @@ pub(crate) fn handle_array_instance_method(
                         }
                     }
                 }
-                set_array_length(&mut new_array, idx);
+                set_array_length(&mut new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
                 Err(JSError::EvaluationError {
@@ -458,7 +459,7 @@ pub(crate) fn handle_array_instance_method(
 
                 let mut accumulator: Value = if let Some(ref val) = initial_value {
                     val.clone()
-                } else if let Some(val) = obj_get(obj_map, &0.to_string()) {
+                } else if let Some(val) = obj_get_value(obj_map, &0.to_string())? {
                     val.borrow().clone()
                 } else {
                     Value::Undefined
@@ -466,7 +467,7 @@ pub(crate) fn handle_array_instance_method(
 
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
-                    if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                    if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 let func_env = captured_env.clone();
@@ -509,7 +510,7 @@ pub(crate) fn handle_array_instance_method(
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         for i in 0..current_len {
-                            if let Some(value) = obj_get(obj_map, &i.to_string()) {
+                            if let Some(value) = obj_get_value(obj_map, &i.to_string())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -560,7 +561,7 @@ pub(crate) fn handle_array_instance_method(
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         for i in 0..current_len {
-                            if let Some(value) = obj_get(obj_map, &i.to_string()) {
+                            if let Some(value) = obj_get_value(obj_map, &i.to_string())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -611,7 +612,7 @@ pub(crate) fn handle_array_instance_method(
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         for i in 0..current_len {
-                            if let Some(value) = obj_get(obj_map, &i.to_string()) {
+                            if let Some(value) = obj_get_value(obj_map, &i.to_string())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -662,7 +663,7 @@ pub(crate) fn handle_array_instance_method(
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         for i in 0..current_len {
-                            if let Some(value) = obj_get(obj_map, &i.to_string()) {
+                            if let Some(value) = obj_get_value(obj_map, &i.to_string())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -713,8 +714,8 @@ pub(crate) fn handle_array_instance_method(
 
             let mut new_index = 0;
             for i in 0..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
-                    obj_set_val(&result, &new_index.to_string(), val.borrow().clone());
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
+                    obj_set_value(&result, &new_index.to_string(), val.borrow().clone())?;
                     new_index += 1;
                 }
             }
@@ -727,7 +728,7 @@ pub(crate) fn handle_array_instance_method(
                         // If argument is an array-like object, copy its elements
                         let arg_len = get_array_length(&arg_obj).unwrap_or(0);
                         for i in 0..arg_len {
-                            if let Some(val) = obj_get(&arg_obj, &i.to_string()) {
+                            if let Some(val) = obj_get_value(&arg_obj, &i.to_string())? {
                                 obj_set_rc(&mut result, &new_index.to_string(), val.clone());
                                 new_index += 1;
                             }
@@ -735,13 +736,13 @@ pub(crate) fn handle_array_instance_method(
                     }
                     _ => {
                         // If argument is not an array, append it directly
-                        obj_set_val(&mut result, &new_index.to_string(), arg_val);
+                        obj_set_value(&mut result, &new_index.to_string(), arg_val)?;
                         new_index += 1;
                     }
                 }
             }
 
-            set_array_length(&mut result, new_index);
+            set_array_length(&mut result, new_index)?;
             Ok(Value::Object(result))
         }
         "indexOf" => {
@@ -770,7 +771,7 @@ pub(crate) fn handle_array_instance_method(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     if values_equal(&val.borrow(), &search_element) {
                         return Ok(Value::Number(i as f64));
                     }
@@ -805,7 +806,7 @@ pub(crate) fn handle_array_instance_method(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     if values_equal(&val.borrow(), &search_element) {
                         return Ok(Value::Boolean(true));
                     }
@@ -820,7 +821,7 @@ pub(crate) fn handle_array_instance_method(
             // Extract array elements for sorting
             let mut elements: Vec<(String, Value)> = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     elements.push((i.to_string(), val.borrow().clone()));
                 }
             }
@@ -878,7 +879,7 @@ pub(crate) fn handle_array_instance_method(
 
             // Update the array with sorted elements
             for (new_index, (_old_key, value)) in elements.into_iter().enumerate() {
-                obj_set_val(obj_map, &new_index.to_string(), value);
+                obj_set_value(obj_map, &new_index.to_string(), value)?;
             }
 
             Ok(Value::Object(obj_map.clone()))
@@ -894,17 +895,17 @@ pub(crate) fn handle_array_instance_method(
                 let left_key = left.to_string();
                 let right_key = right.to_string();
 
-                let left_val = obj_get(obj_map, &left_key).map(|v| v.borrow().clone());
-                let right_val = obj_get(obj_map, &right_key).map(|v| v.borrow().clone());
+                let left_val = obj_get_value(obj_map, &left_key)?.map(|v| v.borrow().clone());
+                let right_val = obj_get_value(obj_map, &right_key)?.map(|v| v.borrow().clone());
 
                 if let Some(val) = right_val {
-                    obj_set_val(obj_map, &left_key, val);
+                    obj_set_value(obj_map, &left_key, val)?;
                 } else {
                     obj_map.borrow_mut().remove(&left_key);
                 }
 
                 if let Some(val) = left_val {
-                    obj_set_val(obj_map, &right_key, val);
+                    obj_set_value(obj_map, &right_key, val)?;
                 } else {
                     obj_map.borrow_mut().remove(&right_key);
                 }
@@ -946,7 +947,7 @@ pub(crate) fn handle_array_instance_method(
             // Collect elements to be deleted
             let mut deleted_elements = Vec::new();
             for i in start..(start + delete_count).min(current_len) {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     deleted_elements.push(val.borrow().clone());
                 }
             }
@@ -954,9 +955,9 @@ pub(crate) fn handle_array_instance_method(
             // Create new array for deleted elements
             let deleted_array = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, val) in deleted_elements.iter().enumerate() {
-                obj_set_val(&deleted_array, &i.to_string(), val.clone());
+                obj_set_value(&deleted_array, &i.to_string(), val.clone())?;
             }
-            set_array_length(&deleted_array, deleted_elements.len());
+            set_array_length(&deleted_array, deleted_elements.len())?;
 
             // Remove deleted elements and shift remaining elements
             let mut new_len = start;
@@ -966,16 +967,16 @@ pub(crate) fn handle_array_instance_method(
             // Insert new items at start position
             for i in 2..args.len() {
                 let item = evaluate_expr(env, &args[i])?;
-                obj_set_val(obj_map, &new_len.to_string(), item);
+                obj_set_value(obj_map, &new_len.to_string(), item)?;
                 new_len += 1;
             }
 
             // Shift remaining elements after deleted section
             let shift_start = start + delete_count;
             for i in shift_start..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     let value = val.borrow().clone();
-                    obj_set_val(obj_map, &(new_len).to_string(), value);
+                    obj_set_value(obj_map, &(new_len).to_string(), value)?;
                     new_len += 1;
                 }
             }
@@ -994,7 +995,7 @@ pub(crate) fn handle_array_instance_method(
             }
 
             // Update length
-            set_array_length(obj_map, new_len);
+            set_array_length(obj_map, new_len)?;
 
             Ok(Value::Object(deleted_array))
         }
@@ -1008,10 +1009,10 @@ pub(crate) fn handle_array_instance_method(
                     if let Some(rc_val) = env_get(env, varname) {
                         let mut borrowed = rc_val.borrow_mut();
                         if let Value::Object(ref mut map) = *borrowed {
-                            let first_element = obj_get(map, &0.to_string()).map(|v| v.borrow().clone());
+                            let first_element = obj_get_value(map, &0.to_string())?.map(|v| v.borrow().clone());
                             // Shift left
                             for i in 1..current_len {
-                                let val_rc_opt = obj_get(map, &i.to_string());
+                                let val_rc_opt = obj_get_value(map, &i.to_string())?;
                                 if let Some(val_rc) = val_rc_opt {
                                     obj_set_rc(map, &(i - 1).to_string(), val_rc);
                                 } else {
@@ -1019,16 +1020,16 @@ pub(crate) fn handle_array_instance_method(
                                 }
                             }
                             map.borrow_mut().remove(&(current_len - 1).to_string());
-                            set_array_length(map, current_len - 1);
+                            set_array_length(map, current_len - 1)?;
                             return Ok(first_element.unwrap_or(Value::Undefined));
                         }
                     }
                 }
 
                 // Fallback: mutate the local obj_map copy
-                let first_element = obj_get(obj_map, &0.to_string()).map(|v| v.borrow().clone());
+                let first_element = obj_get_value(obj_map, &0.to_string())?.map(|v| v.borrow().clone());
                 for i in 1..current_len {
-                    let val_rc_opt = obj_get(obj_map, &i.to_string());
+                    let val_rc_opt = obj_get_value(obj_map, &i.to_string())?;
                     if let Some(val_rc) = val_rc_opt {
                         obj_set_rc(obj_map, &(i - 1).to_string(), val_rc);
                     } else {
@@ -1036,7 +1037,7 @@ pub(crate) fn handle_array_instance_method(
                     }
                 }
                 obj_map.borrow_mut().remove(&(current_len - 1).to_string());
-                set_array_length(obj_map, current_len - 1);
+                set_array_length(obj_map, current_len - 1)?;
                 Ok(first_element.unwrap_or(Value::Undefined))
             } else {
                 Ok(Value::Undefined)
@@ -1056,7 +1057,7 @@ pub(crate) fn handle_array_instance_method(
                         // Shift right by number of new elements
                         for i in (0..current_len).rev() {
                             let dest = (i + args.len()).to_string();
-                            let val_rc_opt = obj_get(map, &i.to_string());
+                            let val_rc_opt = obj_get_value(map, &i.to_string())?;
                             if let Some(val_rc) = val_rc_opt {
                                 obj_set_rc(map, &dest, val_rc);
                             } else {
@@ -1066,10 +1067,10 @@ pub(crate) fn handle_array_instance_method(
                         // Insert new elements
                         for (i, arg) in args.iter().enumerate() {
                             let val = evaluate_expr(env, arg)?;
-                            obj_set_val(map, &i.to_string(), val);
+                            obj_set_value(map, &i.to_string(), val)?;
                         }
                         let new_len = current_len + args.len();
-                        set_array_length(map, new_len);
+                        set_array_length(map, new_len)?;
                         return Ok(Value::Number(new_len as f64));
                     }
                 }
@@ -1078,7 +1079,7 @@ pub(crate) fn handle_array_instance_method(
             // Fallback: mutate local copy (shift right by number of new elements)
             for i in (0..current_len).rev() {
                 let dest = (i + args.len()).to_string();
-                let val_rc_opt = obj_get(obj_map, &i.to_string());
+                let val_rc_opt = obj_get_value(obj_map, &i.to_string())?;
                 if let Some(val_rc) = val_rc_opt {
                     obj_set_rc(obj_map, &dest, val_rc);
                 } else {
@@ -1087,10 +1088,10 @@ pub(crate) fn handle_array_instance_method(
             }
             for (i, arg) in args.iter().enumerate() {
                 let val = evaluate_expr(env, arg)?;
-                obj_set_val(obj_map, &i.to_string(), val);
+                obj_set_value(obj_map, &i.to_string(), val)?;
             }
             let new_len = current_len + args.len();
-            set_array_length(obj_map, new_len);
+            set_array_length(obj_map, new_len)?;
             Ok(Value::Number(new_len as f64))
         }
         "fill" => {
@@ -1165,7 +1166,7 @@ pub(crate) fn handle_array_instance_method(
 
             // Search from from_index backwards
             for i in (0..=from_index).rev() {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     if values_equal(&val.borrow(), &search_element) {
                         return Ok(Value::Number(i as f64));
                     }
@@ -1182,7 +1183,7 @@ pub(crate) fn handle_array_instance_method(
                 if i > 0 {
                     result.push(',');
                 }
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     match &*val.borrow() {
                         Value::String(ref s) => result.push_str(&String::from_utf16_lossy(s)),
                         Value::Number(ref n) => result.push_str(&n.to_string()),
@@ -1204,12 +1205,12 @@ pub(crate) fn handle_array_instance_method(
             };
 
             let mut result = Vec::new();
-            flatten_array(obj_map, &mut result, depth);
+            flatten_array(obj_map, &mut result, depth)?;
 
             let new_array = Rc::new(RefCell::new(JSObjectData::new()));
-            set_array_length(&new_array, result.len());
+            set_array_length(&new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_val(&new_array, &i.to_string(), val);
+                obj_set_value(&new_array, &i.to_string(), val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -1225,7 +1226,7 @@ pub(crate) fn handle_array_instance_method(
 
             let mut result = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     match &callback_val {
                         Value::Closure(params, body, captured_env) => {
                             let func_env = captured_env.clone();
@@ -1239,7 +1240,7 @@ pub(crate) fn handle_array_instance_method(
                                 env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
                             }
                             let mapped_val = evaluate_statements(&func_env, &body)?;
-                            flatten_single_value(mapped_val, &mut result, 1);
+                            flatten_single_value(mapped_val, &mut result, 1)?;
                         }
                         _ => {
                             return Err(JSError::EvaluationError {
@@ -1251,9 +1252,9 @@ pub(crate) fn handle_array_instance_method(
             }
 
             let mut new_array = Rc::new(RefCell::new(JSObjectData::new()));
-            set_array_length(&mut new_array, result.len());
+            set_array_length(&mut new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_val(&new_array, &i.to_string(), val);
+                obj_set_value(&new_array, &i.to_string(), val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -1311,7 +1312,7 @@ pub(crate) fn handle_array_instance_method(
 
             let mut temp_values = Vec::new();
             for i in start..end.min(current_len) {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     temp_values.push(val.borrow().clone());
                 }
             }
@@ -1319,7 +1320,7 @@ pub(crate) fn handle_array_instance_method(
             for (i, val) in temp_values.into_iter().enumerate() {
                 let dest_idx = target + i;
                 if dest_idx < current_len {
-                    obj_set_val(obj_map, &dest_idx.to_string(), val);
+                    obj_set_value(obj_map, &dest_idx.to_string(), val)?;
                 }
             }
 
@@ -1330,20 +1331,20 @@ pub(crate) fn handle_array_instance_method(
 
             let mut entries = Vec::new();
             for i in 0..length {
-                if let Some(val) = obj_get(obj_map, &i.to_string()) {
+                if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
                     let entry = vec![Value::Number(i as f64), val.borrow().clone()];
                     let entry_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                    obj_set_val(&entry_obj, &0.to_string(), entry[0].clone());
-                    obj_set_val(&entry_obj, &1.to_string(), entry[1].clone());
-                    set_array_length(&entry_obj, 2);
+                    obj_set_value(&entry_obj, &0.to_string(), entry[0].clone())?;
+                    obj_set_value(&entry_obj, &1.to_string(), entry[1].clone())?;
+                    set_array_length(&entry_obj, 2)?;
                     entries.push(Value::Object(entry_obj));
                 }
             }
 
             let iterator = Rc::new(RefCell::new(JSObjectData::new()));
-            set_array_length(&iterator, entries.len());
+            set_array_length(&iterator, entries.len())?;
             for (i, entry) in entries.into_iter().enumerate() {
-                obj_set_val(&iterator, &i.to_string(), entry);
+                obj_set_value(&iterator, &i.to_string(), entry)?;
             }
             Ok(Value::Object(iterator))
         }
@@ -1354,21 +1355,22 @@ pub(crate) fn handle_array_instance_method(
 }
 
 // Helper functions for array flattening
-fn flatten_array(obj_map: &JSObjectDataPtr, result: &mut Vec<Value>, depth: usize) {
+fn flatten_array(obj_map: &JSObjectDataPtr, result: &mut Vec<Value>, depth: usize) -> Result<(), JSError> {
     let current_len = get_array_length(obj_map).unwrap_or(0);
 
     for i in 0..current_len {
-        if let Some(val) = obj_get(obj_map, &i.to_string()) {
+        if let Some(val) = obj_get_value(obj_map, &i.to_string())? {
             let value = val.borrow().clone();
-            flatten_single_value(value, result, depth);
+            flatten_single_value(value, result, depth)?;
         }
     }
+    Ok(())
 }
 
-fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) {
+fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> Result<(), JSError> {
     if depth == 0 {
         result.push(value);
-        return;
+        return Ok(());
     }
 
     match value {
@@ -1376,7 +1378,7 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) {
             // Check if it's an array-like object
             let is_arr = { is_array(&obj) };
             if is_arr {
-                flatten_array(&obj, result, depth - 1);
+                flatten_array(&obj, result, depth - 1)?;
             } else {
                 result.push(Value::Object(obj));
             }
@@ -1385,6 +1387,7 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) {
             result.push(value);
         }
     }
+    Ok(())
 }
 
 /// Check if an object looks like an array (has length and consecutive numeric indices)
@@ -1426,6 +1429,7 @@ pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
     None
 }
 
-pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) {
-    obj_set_val(obj, "length", Value::Number(new_length as f64));
+pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) -> Result<(), JSError> {
+    obj_set_value(obj, "length", Value::Number(new_length as f64))?;
+    Ok(())
 }

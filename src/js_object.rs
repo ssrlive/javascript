@@ -1,6 +1,6 @@
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
-use crate::quickjs::{evaluate_expr, obj_get, obj_set_val, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -30,10 +30,10 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     // Create a simple array-like object for keys
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, key) in keys.into_iter().enumerate() {
-                        obj_set_val(&result_obj, &i.to_string(), key);
+                        obj_set_value(&result_obj, &i.to_string(), key)?;
                     }
                     let len = result_obj.borrow().properties.len();
-                    set_array_length(&result_obj, len);
+                    set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => {
@@ -44,7 +44,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                    set_array_length(&result_obj, 0);
+                    set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }
             }
@@ -73,10 +73,10 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     // Create a simple array-like object for values
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, value) in values.into_iter().enumerate() {
-                        obj_set_val(&result_obj, &i.to_string(), value);
+                        obj_set_value(&result_obj, &i.to_string(), value)?;
                     }
                     let len = result_obj.borrow().properties.len();
-                    set_array_length(&result_obj, len);
+                    set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => {
@@ -87,7 +87,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                    set_array_length(&result_obj, 0);
+                    set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }
             }
@@ -112,6 +112,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                     Value::Closure(_, _, _) => "Function",
                     Value::Undefined => "undefined",
                     Value::ClassDefinition(_) => "Class",
+                    Value::Getter(_, _) => "Getter",
+                    Value::Setter(_, _, _) => "Setter",
+                    Value::Property { .. } => "Property",
                 },
                 args.len()
             ),
@@ -128,7 +131,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         }
         Value::Object(ref obj_map) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get(obj_map, "__value__") {
+            if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                     Value::Boolean(b) => return Ok(Value::String(utf8_to_utf16(&b.to_string()))),
@@ -145,7 +148,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 let current_len = get_array_length(obj_map).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get(&obj_map, &i.to_string()) {
+                    if let Some(val_rc) = obj_get_value(&obj_map, &i.to_string())? {
                         match &*val_rc.borrow() {
                             Value::String(s) => parts.push(String::from_utf16_lossy(s)),
                             Value::Number(n) => parts.push(n.to_string()),
@@ -164,6 +167,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
         Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
         Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
+        Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
+        Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
+        Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
     }
 }
 
@@ -181,6 +187,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                     Value::Closure(_, _, _) => "Function",
                     Value::Undefined => "undefined",
                     Value::ClassDefinition(_) => "Class",
+                    &Value::Getter(_, _) => "Getter",
+                    &Value::Setter(_, _, _) => "Setter",
+                    &Value::Property { .. } => "Property",
                 },
                 args.len()
             ),
@@ -197,7 +206,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         }
         Value::Object(ref obj_map) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get(obj_map, "__value__") {
+            if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {
                 return Ok(wrapped_val.borrow().clone());
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
@@ -210,5 +219,12 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::Function(name) => Ok(Value::Function(name.clone())),
         Value::Closure(params, body, env) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
+        Value::Getter(body, env) => Ok(Value::Getter(body.clone(), env.clone())),
+        Value::Setter(param, body, env) => Ok(Value::Setter(param.clone(), body.clone(), env.clone())),
+        Value::Property { value, getter, setter } => Ok(Value::Property {
+            value: value.clone(),
+            getter: getter.clone(),
+            setter: setter.clone(),
+        }),
     }
 }

@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 
 static FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -31,18 +31,18 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
             let mut tmp = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_val(&mut tmp, "__file_id", Value::Number(file_id as f64));
-            obj_set_val(&mut tmp, "__eof", Value::Boolean(false));
+            obj_set_value(&mut tmp, "__file_id", Value::Number(file_id as f64))?;
+            obj_set_value(&mut tmp, "__eof", Value::Boolean(false))?;
             // methods
-            obj_set_val(&mut tmp, "puts", Value::Function("tmp.puts".to_string()));
-            obj_set_val(&mut tmp, "readAsString", Value::Function("tmp.readAsString".to_string()));
-            obj_set_val(&mut tmp, "seek", Value::Function("tmp.seek".to_string()));
-            obj_set_val(&mut tmp, "tell", Value::Function("tmp.tell".to_string()));
-            obj_set_val(&mut tmp, "putByte", Value::Function("tmp.putByte".to_string()));
-            obj_set_val(&mut tmp, "getByte", Value::Function("tmp.getByte".to_string()));
-            obj_set_val(&mut tmp, "getline", Value::Function("tmp.getline".to_string()));
-            obj_set_val(&mut tmp, "eof", Value::Function("tmp.eof".to_string()));
-            obj_set_val(&mut tmp, "close", Value::Function("tmp.close".to_string()));
+            obj_set_value(&mut tmp, "puts", Value::Function("tmp.puts".to_string()))?;
+            obj_set_value(&mut tmp, "readAsString", Value::Function("tmp.readAsString".to_string()))?;
+            obj_set_value(&mut tmp, "seek", Value::Function("tmp.seek".to_string()))?;
+            obj_set_value(&mut tmp, "tell", Value::Function("tmp.tell".to_string()))?;
+            obj_set_value(&mut tmp, "putByte", Value::Function("tmp.putByte".to_string()))?;
+            obj_set_value(&mut tmp, "getByte", Value::Function("tmp.getByte".to_string()))?;
+            obj_set_value(&mut tmp, "getline", Value::Function("tmp.getline".to_string()))?;
+            obj_set_value(&mut tmp, "eof", Value::Function("tmp.eof".to_string()))?;
+            obj_set_value(&mut tmp, "close", Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(JSError::EvaluationError {

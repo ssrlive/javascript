@@ -828,6 +828,9 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
         Ok(Value::Function(_)) => JS_UNDEFINED,        // For now
         Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,   // For now
         Ok(Value::ClassDefinition(_)) => JS_UNDEFINED, // For now
+        Ok(Value::Getter(_, _)) => JS_UNDEFINED,       // For now
+        Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
+        Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
         Err(_) => JS_UNDEFINED,
     }
 }
@@ -872,15 +875,9 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
                         if let Some(end_quote) = rest.find(quote_char) {
                             let module = &rest[..end_quote];
                             if module == "std" {
-                                env.borrow_mut().insert(
-                                    name.to_string(),
-                                    Rc::new(RefCell::new(Value::Object(crate::js_std::make_std_object()))),
-                                );
+                                obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
                             } else if module == "os" {
-                                env.borrow_mut().insert(
-                                    name.to_string(),
-                                    Rc::new(RefCell::new(Value::Object(crate::js_os::make_os_object()))),
-                                );
+                                obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
                             }
                         }
                     }
@@ -1370,7 +1367,50 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         if tokens.is_empty() {
                             return Err(JSError::ParseError);
                         }
-                        if matches!(tokens[0], Token::LParen) {
+                        // Check for getter/setter
+                        let is_getter = matches!(tokens[0], Token::Identifier(ref id) if id == "get");
+                        let is_setter = matches!(tokens[0], Token::Identifier(ref id) if id == "set");
+                        if is_getter || is_setter {
+                            tokens.remove(0); // consume get/set
+                            if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
+                                return Err(JSError::ParseError);
+                            }
+                            let prop_name = if let Token::Identifier(name) = tokens.remove(0) {
+                                name
+                            } else {
+                                return Err(JSError::ParseError);
+                            };
+                            if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume (
+                            let params = parse_parameters(tokens)?;
+                            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume {
+                            let body = parse_statement_block(tokens)?;
+                            if is_getter {
+                                if !params.is_empty() {
+                                    return Err(JSError::ParseError); // getters should have no parameters
+                                }
+                                if is_static {
+                                    members.push(ClassMember::StaticGetter(prop_name, body));
+                                } else {
+                                    members.push(ClassMember::Getter(prop_name, body));
+                                }
+                            } else {
+                                // setter
+                                if params.len() != 1 {
+                                    return Err(JSError::ParseError); // setters should have exactly one parameter
+                                }
+                                if is_static {
+                                    members.push(ClassMember::StaticSetter(prop_name, params, body));
+                                } else {
+                                    members.push(ClassMember::Setter(prop_name, params, body));
+                                }
+                            }
+                        } else if matches!(tokens[0], Token::LParen) {
                             // This is a method
                             tokens.remove(0); // consume (
                             let params = parse_parameters(tokens)?;
@@ -1671,7 +1711,7 @@ fn evaluate_statements_with_context(
                             let len = get_array_length(&obj_map).unwrap_or(0);
                             for i in 0..len {
                                 let key = i.to_string();
-                                if let Some(element_rc) = obj_get(&obj_map, &key) {
+                                if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                                     let element = element_rc.borrow().clone();
                                     env_set(env, var.as_str(), element)?;
                                     match evaluate_statements_with_context(env, body, true, false)? {
@@ -1801,6 +1841,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
+        Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
+        Expr::Setter(func_expr) => evaluate_expr(env, func_expr),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => evaluate_new(env, constructor, args),
         Expr::Super => evaluate_super(env),
@@ -1826,15 +1868,15 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     if let Some(val) = env_get(env, name) {
         Ok(val.borrow().clone())
     } else if name == "console" {
-        Ok(Value::Object(js_console::make_console_object()))
+        Ok(Value::Object(js_console::make_console_object()?))
     } else if name == "String" {
         Ok(Value::Function("String".to_string()))
     } else if name == "Math" {
-        Ok(Value::Object(js_math::make_math_object()))
+        Ok(Value::Object(js_math::make_math_object()?))
     } else if name == "JSON" {
         let json_obj = Rc::new(RefCell::new(JSObjectData::new()));
-        obj_set_val(&json_obj, "parse", Value::Function("JSON.parse".to_string()));
-        obj_set_val(&json_obj, "stringify", Value::Function("JSON.stringify".to_string()));
+        obj_set_value(&json_obj, "parse", Value::Function("JSON.parse".to_string()))?;
+        obj_set_value(&json_obj, "stringify", Value::Function("JSON.stringify".to_string()))?;
         Ok(Value::Object(json_obj))
     } else if name == "Object" {
         // Return Object constructor function, not an object with methods
@@ -1902,6 +1944,9 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Function(_) => "function",
         Value::Closure(_, _, _) => "function",
         Value::ClassDefinition(_) => "function",
+        Value::Getter(_, _) => "function",
+        Value::Setter(_, _, _) => "function",
+        Value::Property { .. } => "undefined",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -2070,7 +2115,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::InstanceOf => {
             // Check if left is an instance of right (constructor)
             match (l, r) {
-                (Value::Object(obj), Value::Object(constructor)) => Ok(Value::Boolean(is_instance_of(&obj, &constructor))),
+                (Value::Object(obj), Value::Object(constructor)) => Ok(Value::Boolean(is_instance_of(&obj, &constructor)?)),
                 _ => Ok(Value::Boolean(false)),
             }
         }
@@ -2079,7 +2124,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             match (l, r) {
                 (Value::String(prop), Value::Object(obj)) => {
                     let prop_str = String::from_utf16_lossy(&prop);
-                    Ok(Value::Boolean(obj_get(&obj, &prop_str).is_some()))
+                    Ok(Value::Boolean(obj_get_value(&obj, &prop_str)?.is_some()))
                 }
                 _ => Ok(Value::Boolean(false)),
             }
@@ -2102,7 +2147,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
         (Value::Object(obj_map), Value::Number(n)) => {
             // Array-like indexing
             let key = n.to_string();
-            if let Some(val) = obj_get(&obj_map, &key) {
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
                 Ok(val.borrow().clone())
             } else {
                 Ok(Value::Undefined)
@@ -2111,7 +2156,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
         (Value::Object(obj_map), Value::String(s)) => {
             // Object property access with string key
             let key = String::from_utf16_lossy(&s);
-            if let Some(val) = obj_get(&obj_map, &key) {
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
                 Ok(val.borrow().clone())
             } else {
                 Ok(Value::Undefined)
@@ -2129,7 +2174,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         Value::Object(obj_map) => {
-            if let Some(val) = obj_get(&obj_map, prop) {
+            if let Some(val) = obj_get_value(&obj_map, prop)? {
                 Ok(val.borrow().clone())
             } else {
                 Ok(Value::Undefined)
@@ -2208,7 +2253,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if obj_map.borrow().contains_key("__class_def__") {
                     // Class static methods
                     return call_static_method(&obj_map, method, args, env);
-                } else if is_class_instance(&obj_map) {
+                } else if is_class_instance(&obj_map)? {
                     return call_class_method(&obj_map, method, args, env);
                 } else {
                     Err(JSError::EvaluationError {
@@ -2259,10 +2304,125 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
 }
 
 fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
-    let mut obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
     for (key, value_expr) in properties {
-        let value = evaluate_expr(env, value_expr)?;
-        obj_set_val(&mut obj, key.as_str(), value);
+        match value_expr {
+            Expr::Getter(func_expr) => {
+                if let Expr::Function(_params, body) = func_expr.as_ref() {
+                    // Check if property already exists
+                    let existing_opt = {
+                        let borrowed = obj.borrow();
+                        borrowed.get(key).map(|v| v.clone())
+                    };
+                    if let Some(existing) = existing_opt {
+                        let mut val = existing.borrow().clone();
+                        if let Value::Property {
+                            value: _,
+                            getter,
+                            setter: _,
+                        } = &mut val
+                        {
+                            // Update getter
+                            let _ = getter.replace((body.clone(), env.clone()));
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                        } else {
+                            // Create new property descriptor
+                            let prop = Value::Property {
+                                value: Some(existing.clone()),
+                                getter: Some((body.clone(), env.clone())),
+                                setter: None,
+                            };
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        }
+                    } else {
+                        // Create new property descriptor with getter
+                        let prop = Value::Property {
+                            value: None,
+                            getter: Some((body.clone(), env.clone())),
+                            setter: None,
+                        };
+                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                    }
+                } else {
+                    return Err(JSError::EvaluationError {
+                        message: "Getter must be a function".to_string(),
+                    });
+                }
+            }
+            Expr::Setter(func_expr) => {
+                if let Expr::Function(params, body) = func_expr.as_ref() {
+                    // Check if property already exists
+                    let existing_opt = {
+                        let borrowed = obj.borrow();
+                        borrowed.get(key).map(|v| v.clone())
+                    };
+                    if let Some(existing) = existing_opt {
+                        let mut val = existing.borrow().clone();
+                        if let Value::Property {
+                            value: _,
+                            getter: _,
+                            setter,
+                        } = &mut val
+                        {
+                            // Update setter
+                            let _ = setter.replace((params.clone(), body.clone(), env.clone()));
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                        } else {
+                            // Create new property descriptor
+                            let prop = Value::Property {
+                                value: Some(existing.clone()),
+                                getter: None,
+                                setter: Some((params.clone(), body.clone(), env.clone())),
+                            };
+                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                        }
+                    } else {
+                        // Create new property descriptor with setter
+                        let prop = Value::Property {
+                            value: None,
+                            getter: None,
+                            setter: Some((params.clone(), body.clone(), env.clone())),
+                        };
+                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                    }
+                } else {
+                    return Err(JSError::EvaluationError {
+                        message: "Setter must be a function".to_string(),
+                    });
+                }
+            }
+            _ => {
+                let value = evaluate_expr(env, value_expr)?;
+                // Check if property already exists
+                let existing_rc = {
+                    let borrowed = obj.borrow();
+                    borrowed.get(key).map(|v| v.clone())
+                };
+                if let Some(existing) = existing_rc {
+                    let mut existing_val = existing.borrow().clone();
+                    if let Value::Property {
+                        value: prop_value,
+                        getter: _,
+                        setter: _,
+                    } = &mut existing_val
+                    {
+                        // Update value
+                        let _ = prop_value.replace(Rc::new(RefCell::new(value)));
+                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(existing_val)));
+                    } else {
+                        // Create new property descriptor
+                        let prop = Value::Property {
+                            value: Some(Rc::new(RefCell::new(value))),
+                            getter: None,
+                            setter: None,
+                        };
+                        obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                    }
+                } else {
+                    obj_set_value(&obj, key.as_str(), value)?;
+                }
+            }
+        }
     }
     Ok(Value::Object(obj))
 }
@@ -2271,10 +2431,10 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
     let mut arr = Rc::new(RefCell::new(JSObjectData::new()));
     for (i, elem_expr) in elements.iter().enumerate() {
         let value = evaluate_expr(env, elem_expr)?;
-        obj_set_val(&mut arr, &i.to_string(), value);
+        obj_set_value(&mut arr, &i.to_string(), value)?;
     }
     // Set length property
-    set_array_length(&mut arr, elements.len());
+    set_array_length(&mut arr, elements.len())?;
     Ok(Value::Object(arr))
 }
 
@@ -2335,6 +2495,14 @@ pub enum Value {
     Function(String),                                      // Function name
     Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
     ClassDefinition(Rc<ClassDefinition>),                  // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr),               // getter body, captured environment
+    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),  // setter parameter, body, captured environment
+    Property {
+        // Property descriptor with getter/setter/value
+        value: Option<Rc<RefCell<Value>>>,
+        getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
+        setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
+    },
 }
 
 impl std::fmt::Debug for Value {
@@ -2348,6 +2516,9 @@ impl std::fmt::Debug for Value {
             Value::Function(name) => write!(f, "Function({name})"),
             Value::Closure(_, _, _) => write!(f, "Closure(...)"),
             Value::ClassDefinition(_) => write!(f, "ClassDefinition(...)"),
+            Value::Getter(_, _) => write!(f, "Getter(...)"),
+            Value::Setter(_, _, _) => write!(f, "Setter(...)"),
+            Value::Property { .. } => write!(f, "Property(...)"),
         }
     }
 }
@@ -2456,23 +2627,87 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Function(name) => format!("[function {}]", name),
         Value::Closure(_, _, _) => "[function]".to_string(),
         Value::ClassDefinition(_) => "[class]".to_string(),
+        Value::Getter(_, _) => "[getter]".to_string(),
+        Value::Setter(_, _, _) => "[setter]".to_string(),
+        Value::Property { .. } => "[property]".to_string(),
     }
 }
 
 // Helper accessors for objects and environments
-pub fn obj_get(map: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
-    let obj = map.borrow();
-    if let Some(val) = obj.get(key) {
-        Some(val)
-    } else if let Some(ref proto) = obj.prototype {
-        obj_get(proto, key)
+pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+    let obj = js_obj.borrow().get(key.as_ref());
+    if let Some(val) = obj {
+        // Check if this is a property descriptor
+        let val_clone = val.borrow().clone();
+        match val_clone {
+            Value::Property { value, getter, .. } => {
+                if let Some((body, env)) = getter {
+                    // Create a new environment with this bound to the object
+                    let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    getter_env.borrow_mut().prototype = Some(env);
+                    env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
+                    let result = evaluate_statements(&getter_env, &body)?;
+                    return Ok(Some(Rc::new(RefCell::new(result))));
+                } else if let Some(val_rc) = value {
+                    return Ok(Some(val_rc));
+                } else {
+                    return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
+                }
+            }
+            Value::Getter(body, env) => {
+                // Create a new environment with this bound to the object
+                let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                getter_env.borrow_mut().prototype = Some(env);
+                env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
+                let result = evaluate_statements(&getter_env, &body)?;
+                return Ok(Some(Rc::new(RefCell::new(result))));
+            }
+            _ => Ok(Some(val.clone())),
+        }
+    } else if let Some(ref proto) = js_obj.borrow().prototype {
+        obj_get_value(proto, key)
     } else {
-        None
+        Ok(None)
     }
 }
 
-pub fn obj_set_val(map: &JSObjectDataPtr, key: &str, val: Value) {
-    map.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+pub fn obj_set_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
+    let key = key.as_ref().to_string();
+    // Check if there's a setter for this property
+    let existing_opt = js_obj.borrow().get(&key);
+    if let Some(existing) = existing_opt {
+        match existing.borrow().clone() {
+            Value::Property { value: _, getter, setter } => {
+                if let Some((param, body, env)) = setter {
+                    // Create a new environment with this bound to the object and the parameter
+                    let setter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    setter_env.borrow_mut().prototype = Some(env);
+                    env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
+                    env_set(&setter_env, &param[0], val)?;
+                    let _v = evaluate_statements(&setter_env, &body)?;
+                } else {
+                    // No setter, update value
+                    let value = Some(Rc::new(RefCell::new(val)));
+                    let new_prop = Value::Property { value, getter, setter };
+                    js_obj.borrow_mut().insert(key, Rc::new(RefCell::new(new_prop)));
+                }
+                return Ok(());
+            }
+            Value::Setter(param, body, env) => {
+                // Create a new environment with this bound to the object and the parameter
+                let setter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                setter_env.borrow_mut().prototype = Some(env);
+                env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
+                env_set(&setter_env, &param[0], val)?;
+                let _ = evaluate_statements(&setter_env, &body)?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    // No setter, just set the value normally
+    js_obj.borrow_mut().insert(key, Rc::new(RefCell::new(val)));
+    Ok(())
 }
 
 pub fn obj_set_rc(map: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
@@ -2484,11 +2719,12 @@ pub fn obj_delete(map: &JSObjectDataPtr, key: &str) -> bool {
     true // In JavaScript, delete always returns true
 }
 
-pub fn env_get(env: &JSObjectDataPtr, key: &str) -> Option<Rc<RefCell<Value>>> {
-    env.borrow().get(key)
+pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {
+    env.borrow().get(key.as_ref())
 }
 
-pub fn env_set(env: &JSObjectDataPtr, key: &str, val: Value) -> Result<(), JSError> {
+pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
+    let key = key.as_ref();
     if env.borrow().is_const(key) {
         return Err(JSError::TypeError {
             message: format!("Assignment to constant variable '{key}'"),
@@ -2513,7 +2749,7 @@ pub fn env_set_rc(env: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) 
 pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     let obj_val = evaluate_expr(env, obj_expr)?;
     match obj_val {
-        Value::Object(map) => Ok(obj_get(&map, prop)),
+        Value::Object(map) => obj_get_value(&map, prop),
         _ => Ok(None),
     }
 }
@@ -2543,7 +2779,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
                     }
                 }
 
-                map.borrow_mut().insert(prop.to_string(), Rc::new(RefCell::new(val)));
+                obj_set_value(map, prop, val)?;
                 return Ok(None);
             }
         }
@@ -2564,7 +2800,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
                 }
             }
 
-            obj_set_val(&obj, prop, val);
+            obj_set_value(&obj, prop, val)?;
             Ok(Some(Value::Object(obj)))
         }
         _ => Err(JSError::EvaluationError {
@@ -2657,6 +2893,8 @@ pub enum Expr {
     Function(Vec<String>, Vec<Statement>), // parameters, body
     Object(Vec<(String, Expr)>),           // object literal: key-value pairs
     Array(Vec<Expr>),                      // array literal: [elem1, elem2, ...]
+    Getter(Box<Expr>),                     // getter function
+    Setter(Box<Expr>),                     // setter function
     This,                                  // this keyword
     New(Box<Expr>, Vec<Expr>),             // new expression: new Constructor(args)
     Super,                                 // super keyword
@@ -3042,6 +3280,9 @@ fn is_truthy(val: &Value) -> bool {
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
         Value::ClassDefinition(_) => true,
+        Value::Getter(_, _) => true,
+        Value::Setter(_, _, _) => true,
+        Value::Property { .. } => true,
     }
 }
 
@@ -3370,6 +3611,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Object(properties));
             }
             loop {
+                // Check for getter/setter
+                let is_getter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "get");
+                let is_setter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "set");
+
+                if is_getter || is_setter {
+                    tokens.remove(0); // consume get/set
+                }
+
                 // Parse key
                 let key = if let Some(Token::Identifier(name)) = tokens.get(0).cloned() {
                     tokens.remove(0);
@@ -3381,15 +3630,60 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     return Err(JSError::ParseError);
                 };
 
-                // Expect colon
-                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                    return Err(JSError::ParseError);
-                }
-                tokens.remove(0); // consume :
+                // Expect colon or parentheses for getter/setter
+                if is_getter || is_setter {
+                    // Parse function for getter/setter
+                    if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume (
 
-                // Parse value
-                let value = parse_expression(tokens)?;
-                properties.push((key, value));
+                    let mut params = Vec::new();
+                    if is_setter {
+                        // Setter should have exactly one parameter
+                        if let Some(Token::Identifier(param)) = tokens.get(0).cloned() {
+                            tokens.remove(0);
+                            params.push(param);
+                        } else {
+                            return Err(JSError::ParseError);
+                        }
+                    } else if is_getter {
+                        // Getter should have no parameters
+                    }
+
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+
+                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume {
+
+                    let body = parse_statements(tokens)?;
+
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume }
+
+                    if is_getter {
+                        properties.push((key, Expr::Getter(Box::new(Expr::Function(params, body)))));
+                    } else {
+                        properties.push((key, Expr::Setter(Box::new(Expr::Function(params, body)))));
+                    }
+                } else {
+                    // Regular property
+                    if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume :
+
+                    // Parse value
+                    let value = parse_expression(tokens)?;
+                    properties.push((key, value));
+                }
 
                 // Check for comma or end
                 if tokens.is_empty() {

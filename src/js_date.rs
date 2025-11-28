@@ -1,5 +1,5 @@
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_val, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::quickjs::{evaluate_expr, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -153,7 +153,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Create a Date object with timestamp
     let date_obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_val(&date_obj, "__timestamp", Value::Number(timestamp));
+    obj_set_value(&date_obj, "__timestamp", Value::Number(timestamp))?;
 
     // Add toString method
     Ok(Value::Object(date_obj))

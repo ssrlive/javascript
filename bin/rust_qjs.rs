@@ -49,5 +49,6 @@ fn main() {
         Value::Getter(_, _) => println!("[Getter]"),
         Value::Setter(_, _, _) => println!("[Setter]"),
         Value::Property { .. } => println!("[Property]"),
+        Value::Promise(_) => println!("[object Promise]"),
     }
 }

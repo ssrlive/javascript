@@ -99,6 +99,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         }
                         print!("]");
                     }
+                    Value::Promise(_) => print!("[object Promise]"),
                 }
             }
             println!();

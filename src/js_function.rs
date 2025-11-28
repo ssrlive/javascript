@@ -1,8 +1,11 @@
-use crate::core::{evaluate_expr, utf8_to_utf16, Expr, JSObjectDataPtr, Value};
+use crate::core::{
+    evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, PromiseState, Statement, Value,
+};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
-use crate::js_regexp::handle_regexp_constructor;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
@@ -23,6 +26,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
                     Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
                     Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
+                    Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
@@ -277,6 +281,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             "RegExp" => return crate::js_regexp::handle_regexp_constructor(constructor_args, env),
                             "Array" => return crate::js_array::handle_array_constructor(constructor_args, env),
                             "Date" => return crate::js_date::handle_date_constructor(constructor_args, env),
+                            "Promise" => return handle_promise_constructor(constructor_args, env),
                             _ => {
                                 return Err(JSError::EvaluationError {
                                     message: format!("Constructor {constructor_name} not implemented"),
@@ -289,10 +294,6 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             Err(JSError::EvaluationError {
                 message: "Invalid new expression".to_string(),
             })
-        }
-        "RegExp" => {
-            // RegExp constructor - create a RegExp object
-            handle_regexp_constructor(args, env)
         }
         "eval" => {
             // eval function - execute the code
@@ -355,8 +356,327 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 Ok(Value::String(Vec::new()))
             }
         }
+        "__resolve_promise_internal" => {
+            // Internal function to resolve a promise by ID
+            if args.len() < 2 {
+                return Err(JSError::TypeError {
+                    message: "__resolve_promise_internal requires promise ID and value".to_string(),
+                });
+            }
+            let id_val = evaluate_expr(env, &args[0])?;
+            let value = evaluate_expr(env, &args[1])?;
+
+            match id_val {
+                Value::String(id_utf16) => {
+                    let promise_id = String::from_utf16_lossy(&id_utf16);
+                    let promise_key = format!("__promise_{}", promise_id);
+
+                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
+                        if let Value::Promise(promise_rc) = &*promise_val.borrow() {
+                            let mut promise = promise_rc.borrow_mut();
+                            if let PromiseState::Pending = promise.state {
+                                promise.state = PromiseState::Fulfilled(value.clone());
+                                promise.value = Some(value.clone());
+
+                                // Queue task to execute fulfilled callbacks asynchronously
+                                let callbacks = promise.on_fulfilled.clone();
+                                promise.on_fulfilled.clear(); // Clear to avoid double execution
+                                crate::core::queue_task(crate::core::Task::PromiseResolution {
+                                    promise: promise_rc.clone(),
+                                    callbacks,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Value::Undefined)
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Invalid promise ID".to_string(),
+                }),
+            }
+        }
+        "__reject_promise_internal" => {
+            // Internal function to reject a promise by ID
+            if args.len() < 2 {
+                return Err(JSError::TypeError {
+                    message: "__reject_promise_internal requires promise ID and reason".to_string(),
+                });
+            }
+            let id_val = evaluate_expr(env, &args[0])?;
+            let reason = evaluate_expr(env, &args[1])?;
+
+            match id_val {
+                Value::String(id_utf16) => {
+                    let promise_id = String::from_utf16_lossy(&id_utf16);
+                    let promise_key = format!("__promise_{}", promise_id);
+
+                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
+                        if let Value::Promise(promise_rc) = &*promise_val.borrow() {
+                            let mut promise = promise_rc.borrow_mut();
+                            if let PromiseState::Pending = promise.state {
+                                promise.state = PromiseState::Rejected(reason.clone());
+                                promise.value = Some(reason.clone());
+
+                                // Queue task to execute rejected callbacks asynchronously
+                                let callbacks = promise.on_rejected.clone();
+                                promise.on_rejected.clear(); // Clear to avoid double execution
+                                crate::core::queue_task(crate::core::Task::PromiseRejection {
+                                    promise: promise_rc.clone(),
+                                    callbacks,
+                                });
+                            }
+                        }
+                    }
+                    Ok(Value::Undefined)
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Invalid promise ID".to_string(),
+                }),
+            }
+        }
         _ => Err(JSError::EvaluationError {
-            message: format!("Unknown global function: {func_name}"),
+            message: format!("Global function {} is not implemented", func_name),
+        }),
+    }
+}
+
+pub fn handle_promise_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Promise constructor
+    if args.len() != 1 {
+        return Err(JSError::TypeError {
+            message: "Promise constructor requires exactly one argument".to_string(),
+        });
+    }
+
+    let executor = evaluate_expr(env, &args[0])?;
+    match executor {
+        Value::Closure(params, body, captured_env) => {
+            if params.len() != 2 {
+                return Err(JSError::TypeError {
+                    message: "Promise executor function must accept exactly 2 parameters (resolve, reject)".to_string(),
+                });
+            }
+
+            // Create a new Promise object
+            let promise = Rc::new(RefCell::new(crate::core::JSPromise::new()));
+            let promise_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+
+            // Set the __promise marker
+            crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
+
+            // Create resolve function as a closure that captures the promise
+            let _resolve_promise = promise.clone();
+            let resolve_func = Value::Closure(
+                vec!["value".to_string()],
+                vec![Statement::Return(Some(Expr::Call(
+                    Box::new(Expr::Var("__resolve_promise_internal".to_string())),
+                    vec![Expr::Var("__promise_id".to_string()), Expr::Var("value".to_string())],
+                )))],
+                env.clone(),
+            );
+
+            // Create reject function as a closure that captures the promise
+            let _reject_promise = promise.clone();
+            let reject_func = Value::Closure(
+                vec!["reason".to_string()],
+                vec![Statement::Return(Some(Expr::Call(
+                    Box::new(Expr::Var("__reject_promise_internal".to_string())),
+                    vec![Expr::Var("__promise_id".to_string()), Expr::Var("reason".to_string())],
+                )))],
+                env.clone(),
+            );
+
+            // Generate a unique ID for this promise
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let promise_id = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_string();
+
+            // Store the promise in a global registry (simplified - in real implementation use a proper registry)
+            // For now, we'll use the environment to store promises by ID
+            crate::core::env_set(env, &format!("__promise_{}", promise_id), Value::Promise(promise.clone()))?;
+
+            // Execute the executor function synchronously for now
+            let func_env = captured_env.clone();
+            crate::core::env_set(&func_env, &params[0], resolve_func)?;
+            crate::core::env_set(&func_env, &params[1], reject_func)?;
+            crate::core::env_set(&func_env, "__promise_id", Value::String(crate::core::utf8_to_utf16(&promise_id)))?;
+
+            // Execute the executor
+            let _ = crate::core::evaluate_statements(&func_env, &body);
+
+            Ok(Value::Object(promise_obj))
+        }
+        _ => Err(JSError::TypeError {
+            message: "Promise constructor requires a function as argument".to_string(),
+        }),
+    }
+}
+
+pub fn handle_promise_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    match method {
+        "all" => {
+            // Promise.all(iterable) - simplified synchronous implementation
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Promise.all requires at least one argument".to_string(),
+                });
+            }
+
+            // Evaluate the iterable argument
+            let iterable = evaluate_expr(env, &args[0])?;
+            let promises = match iterable {
+                Value::Object(arr) => {
+                    // Assume it's an array-like object
+                    let mut promises = Vec::new();
+                    let mut i = 0;
+                    loop {
+                        let key = i.to_string();
+                        if let Some(val) = obj_get_value(&arr, &key)? {
+                            promises.push((*val).clone());
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    promises
+                }
+                _ => {
+                    return Err(JSError::TypeError {
+                        message: "Promise.all argument must be iterable".to_string(),
+                    });
+                }
+            };
+
+            // Create a new promise that resolves when all promises resolve
+            let result_promise = Rc::new(RefCell::new(crate::core::JSPromise::new()));
+            let result_promise_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+            obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+
+            // For now, check if all values are already resolved (synchronous implementation)
+            let mut all_resolved = true;
+            let mut results = Vec::new();
+            let mut rejection_reason = None;
+
+            for promise_val in promises {
+                match &*promise_val.borrow() {
+                    Value::Object(obj) => {
+                        if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
+                            if let Value::Promise(p) = &*promise_rc.borrow() {
+                                match &p.borrow().state {
+                                    PromiseState::Fulfilled(value) => {
+                                        results.push(value.clone());
+                                    }
+                                    PromiseState::Rejected(reason) => {
+                                        rejection_reason = Some(reason.clone());
+                                        all_resolved = false;
+                                        break;
+                                    }
+                                    PromiseState::Pending => {
+                                        all_resolved = false;
+                                        break;
+                                    }
+                                }
+                            } else {
+                                results.push(Value::Object(obj.clone()));
+                            }
+                        } else {
+                            results.push(Value::Object(obj.clone()));
+                        }
+                    }
+                    val => {
+                        results.push(val.clone());
+                    }
+                }
+            }
+
+            if all_resolved {
+                if let Some(reason) = rejection_reason {
+                    result_promise.borrow_mut().state = PromiseState::Rejected(reason);
+                } else {
+                    // Create result array
+                    let result_arr = Rc::new(RefCell::new(JSObjectData::new()));
+                    for (idx, val) in results.iter().enumerate() {
+                        obj_set_value(&result_arr, &idx.to_string(), val.clone())?;
+                    }
+                    result_promise.borrow_mut().state = PromiseState::Fulfilled(Value::Object(result_arr));
+                }
+            }
+            // If not all resolved, the promise remains pending
+
+            Ok(Value::Object(result_promise_obj))
+        }
+        "race" => {
+            // Promise.race(iterable) - simplified synchronous implementation
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Promise.race requires at least one argument".to_string(),
+                });
+            }
+
+            // Evaluate the iterable argument
+            let iterable = evaluate_expr(env, &args[0])?;
+            let promises = match iterable {
+                Value::Object(arr) => {
+                    // Assume it's an array-like object
+                    let mut promises = Vec::new();
+                    let mut i = 0;
+                    loop {
+                        let key = i.to_string();
+                        if let Some(val) = obj_get_value(&arr, &key)? {
+                            promises.push((*val).clone());
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    promises
+                }
+                _ => {
+                    return Err(JSError::TypeError {
+                        message: "Promise.race argument must be iterable".to_string(),
+                    });
+                }
+            };
+
+            // Create a new promise that resolves/rejects when the first promise settles
+            let result_promise = Rc::new(RefCell::new(crate::core::JSPromise::new()));
+            let result_promise_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+            obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+
+            // For now, check if any value is already settled (synchronous implementation)
+            for promise_val in promises {
+                match &*promise_val.borrow() {
+                    Value::Object(obj) => {
+                        if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
+                            if let Value::Promise(p) = &*promise_rc.borrow() {
+                                match &p.borrow().state {
+                                    PromiseState::Fulfilled(value) => {
+                                        result_promise.borrow_mut().state = PromiseState::Fulfilled(value.clone());
+                                        return Ok(Value::Object(result_promise_obj));
+                                    }
+                                    PromiseState::Rejected(reason) => {
+                                        result_promise.borrow_mut().state = PromiseState::Rejected(reason.clone());
+                                        return Ok(Value::Object(result_promise_obj));
+                                    }
+                                    PromiseState::Pending => {
+                                        // Continue checking other promises
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    val => {
+                        // Non-promise values resolve immediately
+                        result_promise.borrow_mut().state = PromiseState::Fulfilled(val.clone());
+                        return Ok(Value::Object(result_promise_obj));
+                    }
+                }
+            }
+
+            // If no promises were settled, return the pending promise
+            Ok(Value::Object(result_promise_obj))
+        }
+        _ => Err(JSError::EvaluationError {
+            message: format!("Promise has no static method '{}'", method),
         }),
     }
 }

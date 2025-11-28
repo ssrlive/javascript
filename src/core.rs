@@ -14,8 +14,72 @@ use crate::js_math;
 use crate::sprintf;
 use crate::tmpfile;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::rc::Rc;
+
+// Task queue for asynchronous operations
+#[derive(Clone)]
+pub enum Task {
+    PromiseResolution {
+        promise: Rc<RefCell<JSPromise>>,
+        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
+    },
+    PromiseRejection {
+        promise: Rc<RefCell<JSPromise>>,
+        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
+    },
+}
+
+pub type TaskQueue = VecDeque<Task>;
+
+// Global task queue for the runtime
+thread_local! {
+    pub static GLOBAL_TASK_QUEUE: RefCell<TaskQueue> = RefCell::new(VecDeque::new());
+}
+
+// Function to queue a task
+pub fn queue_task(task: Task) {
+    GLOBAL_TASK_QUEUE.with(|queue| {
+        queue.borrow_mut().push_back(task);
+    });
+}
+
+// Function to resolve a promise
+pub fn resolve_promise(promise: Rc<RefCell<JSPromise>>, value: Value) -> Result<(), JSError> {
+    let mut p = promise.borrow_mut();
+    if let PromiseState::Pending = p.state {
+        p.state = PromiseState::Fulfilled(value.clone());
+        p.value = Some(value);
+        let callbacks = p.on_fulfilled.clone();
+        p.on_fulfilled.clear();
+        if !callbacks.is_empty() {
+            queue_task(Task::PromiseResolution {
+                promise: promise.clone(),
+                callbacks,
+            });
+        }
+    }
+    Ok(())
+}
+
+// Function to reject a promise
+pub fn reject_promise(promise: Rc<RefCell<JSPromise>>, reason: Value) -> Result<(), JSError> {
+    let mut p = promise.borrow_mut();
+    if let PromiseState::Pending = p.state {
+        p.state = PromiseState::Rejected(reason.clone());
+        p.value = Some(reason);
+        let callbacks = p.on_rejected.clone();
+        p.on_rejected.clear();
+        if !callbacks.is_empty() {
+            queue_task(Task::PromiseRejection {
+                promise: promise.clone(),
+                callbacks,
+            });
+        }
+    }
+    Ok(())
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -882,6 +946,7 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
         Ok(Value::Getter(_, _)) => JS_UNDEFINED,       // For now
         Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
         Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
+        Ok(Value::Promise(_)) => JS_UNDEFINED,         // For now
         Err(_) => JS_UNDEFINED,
     }
 }
@@ -941,7 +1006,11 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     initialize_global_constructors(&env);
 
     match evaluate_statements(&env, &statements) {
-        Ok(v) => Ok(v),
+        Ok(v) => {
+            // Run the event loop to process any queued asynchronous tasks
+            run_event_loop()?;
+            Ok(v)
+        }
         Err(e) => {
             log::debug!("evaluate_statements error: {e:?}");
             Err(e)
@@ -2257,6 +2326,30 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::SuperMethod(method, args) => evaluate_super_method(env, method, args),
         Expr::ArrayDestructuring(pattern) => evaluate_array_destructuring(env, pattern),
         Expr::ObjectDestructuring(pattern) => evaluate_object_destructuring(env, pattern),
+        Expr::AsyncFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::Await(expr) => {
+            let promise_val = evaluate_expr(env, expr)?;
+            match promise_val {
+                Value::Promise(promise) => {
+                    // For now, synchronously resolve the promise
+                    // In a real async implementation, this would be handled by an event loop
+                    let promise_borrow = promise.borrow();
+                    match &promise_borrow.state {
+                        PromiseState::Fulfilled(val) => Ok(val.clone()),
+                        PromiseState::Rejected(reason) => Err(JSError::EvaluationError {
+                            message: format!("Promise rejected: {:?}", reason),
+                        }),
+                        PromiseState::Pending => Err(JSError::EvaluationError {
+                            message: "Cannot await pending promise in synchronous execution".to_string(),
+                        }),
+                    }
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "await can only be used with promises".to_string(),
+                }),
+            }
+        }
+        Expr::Value(value) => Ok(value.clone()),
     }
 }
 
@@ -2317,6 +2410,8 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("Date".to_string()))
     } else if name == "RegExp" {
         Ok(Value::Function("RegExp".to_string()))
+    } else if name == "Promise" {
+        Ok(Value::Function("Promise".to_string()))
     } else if name == "new" {
         Ok(Value::Function("new".to_string()))
     } else if name == "NaN" {
@@ -2776,6 +2871,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Getter(_, _) => "function",
         Value::Setter(_, _, _) => "function",
         Value::Property { .. } => "undefined",
+        Value::Promise(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -3105,6 +3201,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
+                } else if obj_map.borrow().contains_key("__promise") {
+                    // Promise instance methods
+                    handle_promise_method(&obj_map, method, args, env)
                 } else if obj_map.borrow().contains_key("__class_def__") {
                     // Class static methods
                     call_static_method(&obj_map, method, args, env)
@@ -3148,6 +3247,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 match func_name.as_str() {
                     "Object" => crate::js_object::handle_object_method(method, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
+                    "Promise" => crate::js_function::handle_promise_static_method(method, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method),
                     }),
@@ -3169,6 +3269,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 match func_name.as_str() {
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
+                    "Promise" => crate::js_function::handle_promise_static_method(method_name, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method_name),
                     }),
@@ -3268,6 +3369,9 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, obj_expr)
+                } else if obj_map.borrow().contains_key("__promise") {
+                    // Promise instance methods
+                    handle_promise_method(&obj_map, method_name, args, env)
                 } else if obj_map.borrow().contains_key("__class_def__") {
                     // Class static methods
                     call_static_method(&obj_map, method_name, args, env)
@@ -3559,6 +3663,44 @@ impl Default for JSObjectData {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum PromiseState {
+    Pending,
+    Fulfilled(Value),
+    Rejected(Value),
+}
+
+#[derive(Clone)]
+pub struct JSPromise {
+    pub state: PromiseState,
+    pub value: Option<Value>,                               // The resolved value or rejection reason
+    pub on_fulfilled: Vec<(Value, Rc<RefCell<JSPromise>>)>, // Callbacks and their chaining promises
+    pub on_rejected: Vec<(Value, Rc<RefCell<JSPromise>>)>,  // Callbacks and their chaining promises
+}
+
+impl JSPromise {
+    pub fn new() -> Self {
+        JSPromise {
+            state: PromiseState::Pending,
+            value: None,
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for JSPromise {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "JSPromise {{ state: {:?}, on_fulfilled: {}, on_rejected: {} }}",
+            self.state,
+            self.on_fulfilled.len(),
+            self.on_rejected.len()
+        )
+    }
+}
+
 #[derive(Clone)]
 pub enum Value {
     Number(f64),
@@ -3577,6 +3719,7 @@ pub enum Value {
         getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
+    Promise(Rc<RefCell<JSPromise>>), // Promise object
 }
 
 impl std::fmt::Debug for Value {
@@ -3593,6 +3736,7 @@ impl std::fmt::Debug for Value {
             Value::Getter(_, _) => write!(f, "Getter(...)"),
             Value::Setter(_, _, _) => write!(f, "Setter(...)"),
             Value::Property { .. } => write!(f, "Property(...)"),
+            Value::Promise(_) => write!(f, "Promise(...)"),
         }
     }
 }
@@ -3696,6 +3840,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Getter(_, _) => "[getter]".to_string(),
         Value::Setter(_, _, _) => "[setter]".to_string(),
         Value::Property { .. } => "[property]".to_string(),
+        Value::Promise(_) => "[object Promise]".to_string(),
     }
 }
 
@@ -3977,6 +4122,7 @@ pub enum Expr {
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
     Function(Vec<String>, Vec<Statement>),                // parameters, body
+    AsyncFunction(Vec<String>, Vec<Statement>),           // parameters, body for async functions
     ArrowFunction(Vec<String>, Vec<Statement>),           // parameters, body
     Object(Vec<(String, Expr)>),                          // object literal: key-value pairs
     Array(Vec<Expr>),                                     // array literal: [elem1, elem2, ...]
@@ -3985,6 +4131,7 @@ pub enum Expr {
     Spread(Box<Expr>),                                    // spread operator: ...expr
     OptionalProperty(Box<Expr>, String),                  // optional property access: obj?.prop
     OptionalCall(Box<Expr>, Vec<Expr>),                   // optional call: obj?.method(args)
+    Await(Box<Expr>),                                     // await expression
     This,                                                 // this keyword
     New(Box<Expr>, Vec<Expr>),                            // new expression: new Constructor(args)
     Super,                                                // super keyword
@@ -3993,6 +4140,7 @@ pub enum Expr {
     SuperMethod(String, Vec<Expr>),                       // super.method() call
     ArrayDestructuring(Vec<DestructuringElement>),        // array destructuring: [a, b, ...rest]
     ObjectDestructuring(Vec<ObjectDestructuringElement>), // object destructuring: {a, b: c, ...rest}
+    Value(Value),                                         // literal value
 }
 
 #[derive(Debug, Clone)]
@@ -4404,6 +4552,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "continue" => tokens.push(Token::Continue),
                     "true" => tokens.push(Token::True),
                     "false" => tokens.push(Token::False),
+                    "async" => tokens.push(Token::Async),
+                    "await" => tokens.push(Token::Await),
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }
@@ -4503,6 +4653,8 @@ pub enum Token {
     ModAssign,
     Increment,
     Decrement,
+    Async,
+    Await,
 }
 
 fn is_truthy(val: &Value) -> bool {
@@ -4518,6 +4670,7 @@ fn is_truthy(val: &Value) -> bool {
         Value::Getter(_, _) => true,
         Value::Setter(_, _, _) => true,
         Value::Property { .. } => true,
+        Value::Promise(_) => true,
     }
 }
 
@@ -4747,6 +4900,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::Void => {
             let inner = parse_primary(tokens)?;
             Expr::Void(Box::new(inner))
+        }
+        Token::Await => {
+            let inner = parse_primary(tokens)?;
+            Expr::Await(Box::new(inner))
         }
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression
@@ -5084,6 +5241,120 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
                 tokens.remove(0); // consume }
                 Expr::Function(params, body)
+            } else {
+                return Err(JSError::ParseError);
+            }
+        }
+        Token::Async => {
+            // Check if followed by function or arrow function parameters
+            if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
+                tokens.remove(0); // consume function
+                if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                    tokens.remove(0); // consume (
+                    let mut params = Vec::new();
+                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                        loop {
+                            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
+                                tokens.remove(0);
+                                params.push(param);
+                                if tokens.is_empty() {
+                                    return Err(JSError::ParseError);
+                                }
+                                if matches!(tokens[0], Token::RParen) {
+                                    break;
+                                }
+                                if !matches!(tokens[0], Token::Comma) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume ,
+                            } else {
+                                return Err(JSError::ParseError);
+                            }
+                        }
+                    }
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume {
+                    let body = parse_statements(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume }
+                    Expr::AsyncFunction(params, body)
+                } else {
+                    return Err(JSError::ParseError);
+                }
+            } else if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                // Async arrow function
+                tokens.remove(0); // consume (
+                let mut params = Vec::new();
+                let mut is_arrow = false;
+                if matches!(tokens.first(), Some(&Token::RParen)) {
+                    tokens.remove(0);
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                        tokens.remove(0);
+                        is_arrow = true;
+                    } else {
+                        return Err(JSError::ParseError);
+                    }
+                } else {
+                    // Try to parse params
+                    let mut param_names = Vec::new();
+                    let mut local_consumed = Vec::new();
+                    let mut valid = true;
+                    loop {
+                        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                            tokens.remove(0);
+                            local_consumed.push(Token::Identifier(name.clone()));
+                            param_names.push(name);
+                            if tokens.is_empty() {
+                                valid = false;
+                                break;
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                tokens.remove(0);
+                                local_consumed.push(Token::RParen);
+                                if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                                    tokens.remove(0);
+                                    is_arrow = true;
+                                } else {
+                                    valid = false;
+                                }
+                                break;
+                            } else if matches!(tokens[0], Token::Comma) {
+                                tokens.remove(0);
+                                local_consumed.push(Token::Comma);
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        } else {
+                            valid = false;
+                            break;
+                        }
+                    }
+                    if !valid || !is_arrow {
+                        // Put back local_consumed
+                        for t in local_consumed.into_iter().rev() {
+                            tokens.insert(0, t);
+                        }
+                        return Err(JSError::ParseError);
+                    }
+                    params = param_names;
+                }
+                if is_arrow {
+                    // For async arrow functions, we need to create a special async closure
+                    // For now, we'll treat them as regular arrow functions but mark them as async
+                    // This will need to be handled in evaluation
+                    Expr::ArrowFunction(params, parse_arrow_body(tokens)?)
+                } else {
+                    return Err(JSError::ParseError);
+                }
             } else {
                 return Err(JSError::ParseError);
             }
@@ -5882,4 +6153,178 @@ fn handle_optional_method_call(
             }
         }
     }
+}
+
+/// Handle Promise instance method calls
+pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Get the promise from the object
+    let promise_val = obj_get_value(obj_map, "__promise")?;
+    let promise_rc = match promise_val {
+        Some(rc) => rc,
+        None => {
+            return Err(JSError::EvaluationError {
+                message: "Promise object missing internal promise".to_string(),
+            })
+        }
+    };
+
+    let promise = match promise_rc.borrow().clone() {
+        Value::Promise(p) => p,
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid promise object".to_string(),
+            })
+        }
+    };
+
+    match method {
+        "then" => {
+            let on_fulfilled = if !args.is_empty() {
+                Some(evaluate_expr(env, &args[0])?)
+            } else {
+                None
+            };
+            let on_rejected = if args.len() > 1 {
+                Some(evaluate_expr(env, &args[1])?)
+            } else {
+                None
+            };
+
+            // Create a new promise for chaining
+            let new_promise = Rc::new(RefCell::new(JSPromise::new()));
+            let new_promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
+
+            // Check current state and handle accordingly
+            let mut promise_mut = promise.borrow_mut();
+            match &promise_mut.state {
+                PromiseState::Pending => {
+                    // Store callbacks to be executed when promise settles
+                    if let Some(fulfilled_callback) = on_fulfilled {
+                        promise_mut.on_fulfilled.push((fulfilled_callback, new_promise.clone()));
+                    }
+                    if let Some(rejected_callback) = on_rejected {
+                        promise_mut.on_rejected.push((rejected_callback, new_promise.clone()));
+                    }
+                }
+                PromiseState::Fulfilled(_) => {
+                    // Queue task to execute on_fulfilled callback asynchronously
+                    if let Some(fulfilled_callback) = on_fulfilled {
+                        queue_task(Task::PromiseResolution {
+                            promise: promise.clone(),
+                            callbacks: vec![(fulfilled_callback, new_promise.clone())],
+                        });
+                    } else {
+                        // No callback, resolve new promise with the same value
+                        let value = promise_mut.value.clone().unwrap();
+                        resolve_promise(new_promise, value)?;
+                    }
+                }
+                PromiseState::Rejected(_) => {
+                    // Queue task to execute on_rejected callback asynchronously
+                    if let Some(rejected_callback) = on_rejected {
+                        queue_task(Task::PromiseRejection {
+                            promise: promise.clone(),
+                            callbacks: vec![(rejected_callback, new_promise.clone())],
+                        });
+                    } else {
+                        // No rejection callback, reject new promise
+                        let reason = promise_mut.value.clone().unwrap();
+                        reject_promise(new_promise, reason)?;
+                    }
+                }
+            }
+
+            Ok(Value::Object(new_promise_obj))
+        }
+        "catch" => {
+            if args.is_empty() {
+                return Err(JSError::EvaluationError {
+                    message: "Promise.catch requires at least one argument".to_string(),
+                });
+            }
+
+            let on_rejected = evaluate_expr(env, &args[0])?;
+
+            // Create a new promise for chaining
+            let new_promise = Rc::new(RefCell::new(JSPromise::new()));
+            let new_promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
+
+            // Check current state and handle accordingly
+            let mut promise_mut = promise.borrow_mut();
+            match &promise_mut.state {
+                PromiseState::Pending => {
+                    // Add reject callback to be executed when promise rejects
+                    promise_mut.on_rejected.push((on_rejected, new_promise.clone()));
+                }
+                PromiseState::Fulfilled(value) => {
+                    // Keep the fulfilled state
+                    new_promise.borrow_mut().state = PromiseState::Fulfilled(value.clone());
+                }
+                PromiseState::Rejected(_) => {
+                    // Queue task to execute on_rejected callback asynchronously
+                    queue_task(Task::PromiseRejection {
+                        promise: promise.clone(),
+                        callbacks: vec![(on_rejected, new_promise.clone())],
+                    });
+                }
+            }
+
+            Ok(Value::Object(new_promise_obj))
+        }
+        _ => Err(JSError::EvaluationError {
+            message: format!("Promise has no method '{}'", method),
+        }),
+    }
+}
+
+// Function to run the event loop and process asynchronous tasks
+pub fn run_event_loop() -> Result<(), JSError> {
+    loop {
+        let task = GLOBAL_TASK_QUEUE.with(|queue| queue.borrow_mut().pop_front());
+
+        match task {
+            Some(Task::PromiseResolution { promise, callbacks }) => {
+                for (callback, new_promise) in callbacks {
+                    // Call the callback and resolve the new promise with the result
+                    match evaluate_expr(
+                        &Rc::new(RefCell::new(JSObjectData::new())),
+                        &Expr::Call(
+                            Box::new(Expr::Value(callback)),
+                            vec![Expr::Value(promise.borrow().value.clone().unwrap_or(Value::Undefined))],
+                        ),
+                    ) {
+                        Ok(result) => {
+                            resolve_promise(new_promise, result)?;
+                        }
+                        Err(e) => {
+                            reject_promise(new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))))?;
+                        }
+                    }
+                }
+            }
+            Some(Task::PromiseRejection { promise, callbacks }) => {
+                for (callback, new_promise) in callbacks {
+                    // Call the callback and resolve the new promise with the result
+                    match evaluate_expr(
+                        &Rc::new(RefCell::new(JSObjectData::new())),
+                        &Expr::Call(
+                            Box::new(Expr::Value(callback)),
+                            vec![Expr::Value(promise.borrow().value.clone().unwrap_or(Value::Undefined))],
+                        ),
+                    ) {
+                        Ok(result) => {
+                            resolve_promise(new_promise, result)?;
+                        }
+                        Err(e) => {
+                            reject_promise(new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))))?;
+                        }
+                    }
+                }
+            }
+            None => break, // No more tasks
+        }
+    }
+    Ok(())
 }

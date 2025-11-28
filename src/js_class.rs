@@ -161,6 +161,9 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 "String" => {
                     return handle_string_constructor(args, env);
                 }
+                "Promise" => {
+                    return crate::js_function::handle_promise_constructor(args, env);
+                }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);
                 }
@@ -647,6 +650,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Getter(_, _) => utf8_to_utf16("[Getter]"),
             Value::Setter(_, _, _) => utf8_to_utf16("[Setter]"),
             Value::Property { .. } => utf8_to_utf16("[Property]"),
+            Value::Promise(_) => utf8_to_utf16("[object Promise]"),
         }
     };
 

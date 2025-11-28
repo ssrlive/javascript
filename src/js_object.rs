@@ -111,6 +111,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                     Value::Getter(_, _) => "Getter",
                     Value::Setter(_, _, _) => "Setter",
                     Value::Property { .. } => "Property",
+                    Value::Promise(_) => "Promise",
                 },
                 args.len()
             ),
@@ -164,6 +165,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
         Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
         Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
+        Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
     }
 }
 
@@ -184,6 +186,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                     &Value::Getter(_, _) => "Getter",
                     &Value::Setter(_, _, _) => "Setter",
                     &Value::Property { .. } => "Property",
+                    &Value::Promise(_) => "Promise",
                 },
                 args.len()
             ),
@@ -218,5 +221,6 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
             getter: getter.clone(),
             setter: setter.clone(),
         }),
+        Value::Promise(promise) => Ok(Value::Promise(promise.clone())),
     }
 }

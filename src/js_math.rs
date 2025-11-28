@@ -1,5 +1,5 @@
+use crate::core::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 

@@ -1,9 +1,9 @@
-use crate::error::JSError;
-use crate::js_array::set_array_length;
-use crate::quickjs::{
+use crate::core::{
     evaluate_expr, obj_set_value, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase,
     utf16_to_uppercase, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value,
 };
+use crate::error::JSError;
+use crate::js_array::set_array_length;
 use std::cell::RefCell;
 use std::rc::Rc;
 

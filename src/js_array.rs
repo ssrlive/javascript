@@ -1,8 +1,8 @@
-use crate::{error::JSError, quickjs::JSObjectData, quickjs::JSObjectDataPtr};
+use crate::{core::JSObjectData, core::JSObjectDataPtr, error::JSError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::quickjs::{
+use super::core::{
     env_get, env_set, evaluate_expr, evaluate_statements, obj_get_value, obj_set_rc, obj_set_value, utf8_to_utf16, value_to_sort_string,
     values_equal, Expr, Value,
 };

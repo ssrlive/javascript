@@ -1,7 +1,7 @@
 use std::env;
 use std::process;
 
-use rust_quickjs::quickjs::*;
+use javascript::core::*;
 
 fn main() {
     let args: Vec<String> = env::args().collect();

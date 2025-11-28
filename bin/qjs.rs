@@ -1,4 +1,4 @@
-use rust_quickjs::quickjs::*;
+use javascript::core::*;
 use std::env;
 use std::fs;
 use std::process;

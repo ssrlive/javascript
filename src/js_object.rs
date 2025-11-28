@@ -1,6 +1,6 @@
+use crate::core::{evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
-use crate::quickjs::{evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 

@@ -2,6 +2,7 @@
 // pub mod libregexp;
 // pub mod libunicode;
 // pub mod libunicode_table;
+pub mod core;
 pub mod error;
 pub mod js_array;
 pub mod js_class;
@@ -15,6 +16,5 @@ pub mod js_os;
 pub mod js_regexp;
 pub mod js_std;
 pub mod js_string;
-pub mod quickjs;
 pub mod sprintf;
 pub mod tmpfile;

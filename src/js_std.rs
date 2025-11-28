@@ -1,6 +1,6 @@
+use crate::core::JSObjectData;
+use crate::core::{obj_set_value, JSObjectDataPtr, Value};
 use crate::error::JSError;
-use crate::quickjs::JSObjectData;
-use crate::quickjs::{obj_set_value, JSObjectDataPtr, Value};
 use std::cell::RefCell;
 use std::rc::Rc;
 

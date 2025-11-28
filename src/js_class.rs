@@ -1,9 +1,9 @@
 use crate::{
-    error::JSError,
-    quickjs::{
+    core::{
         evaluate_expr, evaluate_statements, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Statement,
         Value,
     },
+    error::JSError,
 };
 use std::{cell::RefCell, rc::Rc};
 

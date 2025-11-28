@@ -1,8 +1,8 @@
+use crate::core::{evaluate_expr, utf8_to_utf16, Expr, JSObjectDataPtr, Value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
 use crate::js_regexp::handle_regexp_constructor;
-use crate::quickjs::{evaluate_expr, utf8_to_utf16, Expr, JSObjectDataPtr, Value};
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
@@ -305,7 +305,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 match arg_val {
                     Value::String(s) => {
                         let code = String::from_utf16_lossy(&s);
-                        crate::quickjs::evaluate_script(&code)
+                        crate::core::evaluate_script(&code)
                     }
                     _ => Ok(arg_val),
                 }

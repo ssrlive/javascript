@@ -1,4 +1,4 @@
-use rust_quickjs::quickjs::{evaluate_script, Value};
+use javascript::core::{evaluate_script, Value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.

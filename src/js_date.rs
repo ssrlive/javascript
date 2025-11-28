@@ -1,5 +1,5 @@
+use crate::core::{evaluate_expr, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use crate::error::JSError;
-use crate::quickjs::{evaluate_expr, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use std::cell::RefCell;
 use std::rc::Rc;

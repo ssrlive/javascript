@@ -1,4 +1,4 @@
-use rust_quickjs::quickjs::{evaluate_script, Value};
+use javascript::core::{evaluate_script, Value};
 
 #[test]
 fn test_prototype_assignment() {

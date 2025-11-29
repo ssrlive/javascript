@@ -391,6 +391,44 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 }),
             }
         }
+        "__internal_promise_allsettled_resolve" => {
+            if args.len() < 3 {
+                return Err(JSError::TypeError {
+                    message: "__internal_promise_allsettled_resolve requires 3 arguments".to_string(),
+                });
+            }
+            let idx = evaluate_expr(env, &args[0])?;
+            let value = evaluate_expr(env, &args[1])?;
+            let shared_state = evaluate_expr(env, &args[2])?;
+
+            if let Value::Number(idx_val) = idx {
+                crate::js_promise::__internal_promise_allsettled_resolve(idx_val, value, shared_state);
+                Ok(Value::Undefined)
+            } else {
+                Err(JSError::TypeError {
+                    message: "First argument must be a number".to_string(),
+                })
+            }
+        }
+        "__internal_promise_allsettled_reject" => {
+            if args.len() < 3 {
+                return Err(JSError::TypeError {
+                    message: "__internal_promise_allsettled_reject requires 3 arguments".to_string(),
+                });
+            }
+            let idx = evaluate_expr(env, &args[0])?;
+            let reason = evaluate_expr(env, &args[1])?;
+            let shared_state = evaluate_expr(env, &args[2])?;
+
+            if let Value::Number(idx_val) = idx {
+                crate::js_promise::__internal_promise_allsettled_reject(idx_val, reason, shared_state);
+                Ok(Value::Undefined)
+            } else {
+                Err(JSError::TypeError {
+                    message: "First argument must be a number".to_string(),
+                })
+            }
+        }
 
         _ => Err(JSError::EvaluationError {
             message: format!("Global function {} is not implemented", func_name),

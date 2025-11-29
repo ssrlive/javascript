@@ -2491,6 +2491,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("__internal_resolve_promise".to_string()))
     } else if name == "__internal_reject_promise" {
         Ok(Value::Function("__internal_reject_promise".to_string()))
+    } else if name == "__internal_promise_allsettled_resolve" {
+        Ok(Value::Function("__internal_promise_allsettled_resolve".to_string()))
+    } else if name == "__internal_promise_allsettled_reject" {
+        Ok(Value::Function("__internal_promise_allsettled_reject".to_string()))
     } else if name == "NaN" {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {

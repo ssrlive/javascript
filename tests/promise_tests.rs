@@ -156,4 +156,89 @@ mod promise_tests {
             _ => panic!("Test failed: {:?}", result),
         }
     }
+
+    #[test]
+    fn test_promise_allsettled_mixed() {
+        let code = r#"
+            let p1 = new Promise(function(resolve, reject) {
+                console.log("Resolving p1");
+                resolve(1);
+            });
+            let p2 = new Promise(function(resolve, reject) {
+                console.log("Rejecting p2");
+                reject("error");
+            });
+            let p3 = new Promise(function(resolve, reject) {
+                console.log("Resolving p3");
+                resolve(3);
+            });
+            Promise.allSettled([p1, p2, p3])
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // The result should be the resolved array from allSettled
+        match result {
+            Ok(Value::Object(arr)) => {
+                // Check that we have an array with 3 elements
+                if let Ok(Some(length_val)) = obj_get_value(&arr, "length") {
+                    if let Value::Number(len) = *length_val.borrow() {
+                        assert_eq!(len, 3.0, "Array should have 3 elements");
+
+                        // Check first element (fulfilled with value 1)
+                        if let Ok(Some(first_val)) = obj_get_value(&arr, "0")
+                            && let Value::Object(settled) = &*first_val.borrow()
+                        {
+                            if let Ok(Some(status_val)) = obj_get_value(settled, "status")
+                                && let Value::String(status) = &*status_val.borrow()
+                            {
+                                assert_eq!(String::from_utf16_lossy(status), "fulfilled");
+                            }
+                            if let Ok(Some(value_val)) = obj_get_value(settled, "value")
+                                && let Value::Number(val) = *value_val.borrow()
+                            {
+                                assert_eq!(val, 1.0);
+                            }
+                        }
+
+                        // Check second element (rejected with reason "error")
+                        if let Ok(Some(second_val)) = obj_get_value(&arr, "1")
+                            && let Value::Object(settled) = &*second_val.borrow()
+                        {
+                            if let Ok(Some(status_val)) = obj_get_value(settled, "status")
+                                && let Value::String(status) = &*status_val.borrow()
+                            {
+                                assert_eq!(String::from_utf16_lossy(status), "rejected");
+                            }
+                            if let Ok(Some(reason_val)) = obj_get_value(settled, "reason")
+                                && let Value::String(reason) = &*reason_val.borrow()
+                            {
+                                assert_eq!(String::from_utf16_lossy(reason), "error");
+                            }
+                        }
+
+                        // Check third element (fulfilled with value 3)
+                        if let Ok(Some(third_val)) = obj_get_value(&arr, "2")
+                            && let Value::Object(settled) = &*third_val.borrow()
+                        {
+                            if let Ok(Some(status_val)) = obj_get_value(settled, "status")
+                                && let Value::String(status) = &*status_val.borrow()
+                            {
+                                assert_eq!(String::from_utf16_lossy(status), "fulfilled");
+                            }
+                            if let Ok(Some(value_val)) = obj_get_value(settled, "value")
+                                && let Value::Number(val) = *value_val.borrow()
+                            {
+                                assert_eq!(val, 3.0);
+                            }
+                        }
+                    } else {
+                        panic!("Array length should be a number");
+                    }
+                } else {
+                    panic!("Array should have length property");
+                }
+            }
+            _ => panic!("Expected array result, got {:?}", result),
+        }
+    }
 }

@@ -2,6 +2,14 @@
 name = "javascript"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A JavaScript engine implementation in Rust"
+repository = "https://github.com/ssrlive/javascript"
+homepage = "https://github.com/ssrlive/javascript"
+documentation = "https://docs.rs/javascript"
+readme = "README.md"
+keywords = ["javascript", "engine", "interpreter", "runtime"]
+categories = ["development-tools", "parsing"]
 
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }

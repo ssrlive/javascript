@@ -3,6 +3,48 @@ use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
 
+/// Helper function to extract and validate arguments for internal functions
+/// Returns a vector of evaluated arguments or an error
+fn extract_internal_args(args: &[Expr], env: &JSObjectDataPtr, expected_count: usize) -> Result<Vec<Value>, JSError> {
+    if args.len() != expected_count {
+        return Err(JSError::TypeError {
+            message: format!(
+                "Internal function requires exactly {} arguments, got {}",
+                expected_count,
+                args.len()
+            ),
+        });
+    }
+
+    let mut evaluated_args = Vec::with_capacity(expected_count);
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
+    }
+    Ok(evaluated_args)
+}
+
+/// Helper function to validate that first N arguments are numbers
+fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSError> {
+    if args.len() < count {
+        return Err(JSError::TypeError {
+            message: format!("Expected at least {} arguments", count),
+        });
+    }
+
+    let mut numbers = Vec::with_capacity(count);
+    for i in 0..count {
+        match args[i] {
+            Value::Number(n) => numbers.push(n),
+            _ => {
+                return Err(JSError::TypeError {
+                    message: format!("Argument {} must be a number", i),
+                });
+            }
+        }
+    }
+    Ok(numbers)
+}
+
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
@@ -352,21 +394,13 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "__internal_resolve_promise" => {
-            // Internal function to resolve a promise
-            log::trace!("__internal_resolve_promise called");
-            if args.len() < 2 {
-                return Err(JSError::TypeError {
-                    message: "__internal_resolve_promise requires promise and value".to_string(),
-                });
-            }
-            let promise_val = evaluate_expr(env, &args[0])?;
-            let value = evaluate_expr(env, &args[1])?;
+            // Internal function to resolve a promise - requires 2 args: (promise, value)
+            let args = extract_internal_args(args, env, 2)?;
+            log::trace!("__internal_resolve_promise called with value: {:?}", args[1]);
 
-            log::trace!("__internal_resolve_promise called with value: {:?}", value);
-
-            match promise_val {
+            match &args[0] {
                 Value::Promise(promise) => {
-                    crate::js_promise::resolve_promise(&promise, value);
+                    crate::js_promise::resolve_promise(promise, args[1].clone());
                     Ok(Value::Undefined)
                 }
                 _ => Err(JSError::TypeError {
@@ -375,21 +409,13 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "__internal_reject_promise" => {
-            // Internal function to reject a promise
-            log::trace!("__internal_reject_promise called");
-            if args.len() < 2 {
-                return Err(JSError::TypeError {
-                    message: "__internal_reject_promise requires promise and reason".to_string(),
-                });
-            }
-            let promise_val = evaluate_expr(env, &args[0])?;
-            let reason = evaluate_expr(env, &args[1])?;
+            // Internal function to reject a promise - requires 2 args: (promise, reason)
+            let args = extract_internal_args(args, env, 2)?;
+            log::trace!("__internal_reject_promise called with reason: {:?}", args[1]);
 
-            log::trace!("__internal_reject_promise called with reason: {:?}", reason);
-
-            match promise_val {
+            match &args[0] {
                 Value::Promise(promise) => {
-                    crate::js_promise::reject_promise(&promise, reason);
+                    crate::js_promise::reject_promise(promise, args[1].clone());
                     Ok(Value::Undefined)
                 }
                 _ => Err(JSError::TypeError {
@@ -398,93 +424,90 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "__internal_promise_allsettled_resolve" => {
-            if args.len() < 3 {
-                return Err(JSError::TypeError {
-                    message: "__internal_promise_allsettled_resolve requires 3 arguments".to_string(),
-                });
-            }
-            let idx = evaluate_expr(env, &args[0])?;
-            let value = evaluate_expr(env, &args[1])?;
-            let shared_state = evaluate_expr(env, &args[2])?;
-
-            if let Value::Number(idx_val) = idx {
-                crate::js_promise::__internal_promise_allsettled_resolve(idx_val, value, shared_state);
-                Ok(Value::Undefined)
-            } else {
-                Err(JSError::TypeError {
-                    message: "First argument must be a number".to_string(),
-                })
-            }
+            // Internal function for legacy allSettled - requires 3 args: (idx, value, shared_state)
+            let args = extract_internal_args(args, env, 3)?;
+            let numbers = validate_number_args(&args, 1)?;
+            crate::js_promise::__internal_promise_allsettled_resolve(numbers[0], args[1].clone(), args[2].clone());
+            Ok(Value::Undefined)
         }
         "__internal_promise_allsettled_reject" => {
-            if args.len() < 3 {
-                return Err(JSError::TypeError {
-                    message: "__internal_promise_allsettled_reject requires 3 arguments".to_string(),
-                });
-            }
-            let idx = evaluate_expr(env, &args[0])?;
-            let reason = evaluate_expr(env, &args[1])?;
-            let shared_state = evaluate_expr(env, &args[2])?;
-
-            if let Value::Number(idx_val) = idx {
-                crate::js_promise::__internal_promise_allsettled_reject(idx_val, reason, shared_state);
-                Ok(Value::Undefined)
-            } else {
-                Err(JSError::TypeError {
-                    message: "First argument must be a number".to_string(),
-                })
-            }
+            // Internal function for legacy allSettled - requires 3 args: (idx, reason, shared_state)
+            let args = extract_internal_args(args, env, 3)?;
+            let numbers = validate_number_args(&args, 1)?;
+            crate::js_promise::__internal_promise_allsettled_reject(numbers[0], args[1].clone(), args[2].clone());
+            Ok(Value::Undefined)
         }
         "__internal_allsettled_state_record_fulfilled" => {
-            if args.len() < 3 {
-                return Err(JSError::TypeError {
-                    message: "__internal_allsettled_state_record_fulfilled requires 3 arguments".to_string(),
-                });
-            }
-            let state_id = evaluate_expr(env, &args[0])?;
-            let index = evaluate_expr(env, &args[1])?;
-            let value = evaluate_expr(env, &args[2])?;
-
+            // Internal function for new allSettled - requires 3 args: (state_index, index, value)
+            let args = extract_internal_args(args, env, 3)?;
+            let numbers = validate_number_args(&args, 2)?;
             log::trace!(
-                "__internal_allsettled_state_record_fulfilled called: state_id={:?}, index={:?}, value={:?}",
-                state_id,
-                index,
-                value
+                "__internal_allsettled_state_record_fulfilled called: state_id={}, index={}, value={:?}",
+                numbers[0],
+                numbers[1],
+                args[2]
             );
-
-            if let (Value::Number(state_id_val), Value::Number(index_val)) = (state_id, index) {
-                crate::js_promise::__internal_allsettled_state_record_fulfilled(state_id_val, index_val, value);
-                Ok(Value::Undefined)
-            } else {
-                Err(JSError::TypeError {
-                    message: "First two arguments must be numbers".to_string(),
-                })
-            }
+            crate::js_promise::__internal_allsettled_state_record_fulfilled(numbers[0], numbers[1], args[2].clone());
+            Ok(Value::Undefined)
         }
         "__internal_allsettled_state_record_rejected" => {
-            if args.len() < 3 {
-                return Err(JSError::TypeError {
-                    message: "__internal_allsettled_state_record_rejected requires 3 arguments".to_string(),
-                });
-            }
-            let state_id = evaluate_expr(env, &args[0])?;
-            let index = evaluate_expr(env, &args[1])?;
-            let reason = evaluate_expr(env, &args[2])?;
-
+            // Internal function for new allSettled - requires 3 args: (state_index, index, reason)
+            let args = extract_internal_args(args, env, 3)?;
+            let numbers = validate_number_args(&args, 2)?;
             log::trace!(
-                "__internal_allsettled_state_record_rejected called: state_id={:?}, index={:?}, reason={:?}",
-                state_id,
-                index,
-                reason
+                "__internal_allsettled_state_record_rejected called: state_id={}, index={}, reason={:?}",
+                numbers[0],
+                numbers[1],
+                args[2]
             );
-
-            if let (Value::Number(state_id_val), Value::Number(index_val)) = (state_id, index) {
-                crate::js_promise::__internal_allsettled_state_record_rejected(state_id_val, index_val, reason);
-                Ok(Value::Undefined)
-            } else {
-                Err(JSError::TypeError {
-                    message: "First two arguments must be numbers".to_string(),
-                })
+            crate::js_promise::__internal_allsettled_state_record_rejected(numbers[0], numbers[1], args[2].clone());
+            Ok(Value::Undefined)
+        }
+        "__internal_promise_any_resolve" => {
+            // Internal function for Promise.any resolve - requires 2 args: (value, result_promise)
+            let args = extract_internal_args(args, env, 2)?;
+            match &args[1] {
+                Value::Promise(result_promise) => {
+                    crate::js_promise::__internal_promise_any_resolve(args[0].clone(), result_promise.clone());
+                    Ok(Value::Undefined)
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Second argument must be a promise".to_string(),
+                }),
+            }
+        }
+        "__internal_promise_any_reject" => {
+            // Internal function for Promise.any reject - requires 6 args: (idx, reason, rejections, rejected_count, total, result_promise)
+            // Note: This function has complex Rc<RefCell<>> parameters that cannot be easily reconstructed from JS values
+            // It should only be called from within closures, not directly
+            Err(JSError::TypeError {
+                message: "__internal_promise_any_reject cannot be called directly - use Promise.any instead".to_string(),
+            })
+        }
+        "__internal_promise_race_resolve" => {
+            // Internal function for Promise.race resolve - requires 2 args: (value, result_promise)
+            let args = extract_internal_args(args, env, 2)?;
+            match &args[1] {
+                Value::Promise(result_promise) => {
+                    crate::js_promise::__internal_promise_race_resolve(args[0].clone(), result_promise.clone());
+                    Ok(Value::Undefined)
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Second argument must be a promise".to_string(),
+                }),
+            }
+        }
+        "__internal_promise_race_reject" => {
+            // Internal function for Promise.race reject - requires 2 args: (reason, result_promise)
+            let args = extract_internal_args(args, env, 2)?;
+            match &args[1] {
+                Value::Promise(result_promise) => {
+                    crate::js_promise::__internal_promise_race_reject(args[0].clone(), result_promise.clone());
+                    Ok(Value::Undefined)
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Second argument must be a promise".to_string(),
+                }),
             }
         }
 

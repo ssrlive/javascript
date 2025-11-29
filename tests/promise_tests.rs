@@ -1,6 +1,7 @@
-use javascript::core::evaluate_script;
-use javascript::core::evaluate_script_async;
-use javascript::core::Value;
+use javascript::evaluate_script;
+use javascript::evaluate_script_async;
+use javascript::obj_get_value;
+use javascript::Value;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -113,12 +114,12 @@ mod promise_tests {
         match result {
             Ok(Value::Object(arr)) => {
                 // Check that we have an array with 2 elements
-                if let Ok(Some(length_val)) = javascript::core::obj_get_value(&arr, "length") {
+                if let Ok(Some(length_val)) = obj_get_value(&arr, "length") {
                     if let Value::Number(len) = *length_val.borrow() {
                         assert_eq!(len, 2.0, "Array should have 2 elements");
 
                         // Check first element is "sync"
-                        if let Ok(Some(first_val)) = javascript::core::obj_get_value(&arr, "0") {
+                        if let Ok(Some(first_val)) = obj_get_value(&arr, "0") {
                             if let Value::String(first) = &*first_val.borrow() {
                                 assert_eq!(String::from_utf16_lossy(first), "sync");
                             } else {
@@ -127,7 +128,7 @@ mod promise_tests {
                         }
 
                         // Check second element is "async result"
-                        if let Ok(Some(second_val)) = javascript::core::obj_get_value(&arr, "1") {
+                        if let Ok(Some(second_val)) = obj_get_value(&arr, "1") {
                             if let Value::String(second) = &*second_val.borrow() {
                                 assert_eq!(String::from_utf16_lossy(second), "async result");
                             } else {

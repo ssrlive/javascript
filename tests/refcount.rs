@@ -1,4 +1,4 @@
-use javascript::core::*;
+use javascript::*;
 use std::ffi::CString;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.

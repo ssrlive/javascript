@@ -358,20 +358,3 @@ pub(crate) fn handle_regexp_method(
         }),
     }
 }
-
-/// Create the RegExp constructor function
-pub fn make_regexp_constructor() -> Result<JSObjectDataPtr, JSError> {
-    let regexp_ctor = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&regexp_ctor, "prototype", Value::Object(make_regexp_prototype()?))?;
-    Ok(regexp_ctor)
-}
-
-/// Create the RegExp prototype object
-pub fn make_regexp_prototype() -> Result<JSObjectDataPtr, JSError> {
-    let proto = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&proto, "constructor", Value::Function("RegExp".to_string()))?;
-    obj_set_value(&proto, "exec", Value::Function("RegExp.prototype.exec".to_string()))?;
-    obj_set_value(&proto, "test", Value::Function("RegExp.prototype.test".to_string()))?;
-    obj_set_value(&proto, "toString", Value::Function("RegExp.prototype.toString".to_string()))?;
-    Ok(proto)
-}

@@ -1,5 +1,4 @@
-use javascript::core::*;
-use javascript::error::JSError;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.

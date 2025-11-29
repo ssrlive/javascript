@@ -374,7 +374,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
                         if let Value::Promise(promise_rc) = &*promise_val.borrow() {
                             // Queue asynchronous resolution task
-                            crate::core::queue_task(crate::core::Task::PromiseResolve {
+                            crate::core::queue_task(crate::core::Task::Resolve {
                                 promise: promise_rc.clone(),
                                 value,
                             });
@@ -405,7 +405,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
                         if let Value::Promise(promise_rc) = &*promise_val.borrow() {
                             // Queue asynchronous rejection task
-                            crate::core::queue_task(crate::core::Task::PromiseReject {
+                            crate::core::queue_task(crate::core::Task::Reject {
                                 promise: promise_rc.clone(),
                                 reason,
                             });

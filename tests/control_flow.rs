@@ -1,5 +1,5 @@
-use javascript::core::evaluate_script;
-use javascript::core::Value;
+use javascript::evaluate_script;
+use javascript::Value;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -10,7 +10,7 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod control_flow_tests {
-    use javascript::error::JSError;
+    use javascript::JSError;
 
     use super::*;
 

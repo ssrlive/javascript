@@ -1,4 +1,4 @@
-use javascript::core::{evaluate_script_async, Value};
+use javascript::{evaluate_script_async, Value};
 
 #[test]
 fn test_promise_async_resolution() {

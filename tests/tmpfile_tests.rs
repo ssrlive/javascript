@@ -1,4 +1,4 @@
-use javascript::core::*;
+use javascript::*;
 use std::ffi::CString;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -66,7 +66,7 @@ fn test_eval_numeric() {
 fn test_tmpfile_puts_tell() {
     // use evaluate_script to inspect Value-level results
     let src = "import * as std from \"std\";\nlet f = std.tmpfile();\nf.puts(\"hello\");\nf.puts(\"\\n\");\nf.puts(\"world\");\nlet s = f.readAsString();\ns";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -82,7 +82,7 @@ fn test_tmpfile_puts_tell() {
 #[test]
 fn test_tmpfile_getline() {
     let src = "import * as std from \"std\";\nlet f = std.tmpfile();\nf.puts(\"a\\n\");\nf.puts(\"b\\n\");\nf.seek(0, std.SEEK_SET);\nlet l1 = f.getline();\nl1";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -98,7 +98,7 @@ fn test_tmpfile_getline() {
 #[test]
 fn test_sprintf_basic() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"a=%d s=%s\", 123, \"abc\")";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -114,7 +114,7 @@ fn test_sprintf_basic() {
 #[test]
 fn test_sprintf_zero_pad() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%010d\", 123)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -130,7 +130,7 @@ fn test_sprintf_zero_pad() {
 #[test]
 fn test_sprintf_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%x\", -2)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -146,7 +146,7 @@ fn test_sprintf_hex() {
 #[test]
 fn test_sprintf_float() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%10.1f\", 2.1)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -162,7 +162,7 @@ fn test_sprintf_float() {
 #[test]
 fn test_sprintf_dynamic_width() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%*.*f\", 10, 2, -2.13)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -178,7 +178,7 @@ fn test_sprintf_dynamic_width() {
 #[test]
 fn test_sprintf_long_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%lx\", -2)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -194,7 +194,7 @@ fn test_sprintf_long_hex() {
 #[test]
 fn test_sprintf_hex_with_prefix() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%#lx\", 123)";
-    match javascript::core::evaluate_script(src) {
+    match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);

@@ -1,29 +1,36 @@
-use std::env;
+use javascript::*;
 use std::process;
 
-use javascript::core::*;
+#[derive(clap::Parser)]
+#[command(name = "rust_js", version, about = "JavaScript Rust Interpreter with imports")]
+struct Cli {
+    /// Execute script
+    #[arg(short, long)]
+    eval: Option<String>,
+
+    /// JavaScript file to execute
+    file: Option<std::path::PathBuf>,
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = <Cli as clap::Parser>::parse();
 
     // Initialize logger (controlled by RUST_LOG)
-    #[cfg(feature = "env_logger")]
     env_logger::init();
 
     let script: String;
-    if args.len() >= 3 && args[1] == "-e" {
-        script = args[2].clone();
-    } else if args.len() >= 2 && args[1] != "-h" {
-        // Read from file
-        match std::fs::read_to_string(&args[1]) {
+    if let Some(s) = cli.eval {
+        script = s;
+    } else if let Some(file) = cli.file {
+        match std::fs::read_to_string(&file) {
             Ok(content) => script = content,
             Err(e) => {
-                eprintln!("Error reading file {}: {}", args[1], e);
+                eprintln!("Error reading file {}: {}", file.display(), e);
                 process::exit(1);
             }
         }
     } else {
-        eprintln!("Usage: {} [file.js | -e script]", args[0]);
+        eprintln!("Error: Must provide either --eval or a file");
         process::exit(1);
     }
 

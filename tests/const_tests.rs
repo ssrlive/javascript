@@ -1,6 +1,5 @@
-use javascript::core::evaluate_script;
-use javascript::core::Value;
-use javascript::error::JSError;
+use javascript::JSError;
+use javascript::{evaluate_script, Value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.

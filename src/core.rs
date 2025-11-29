@@ -2,9 +2,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::error::JSError;
-use crate::js_array::get_array_length;
-use crate::js_array::is_array;
-use crate::js_array::set_array_length;
+use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_class::{
     call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call, evaluate_super_method,
     evaluate_super_property, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
@@ -22,19 +20,19 @@ use std::rc::Rc;
 // Task queue for asynchronous operations
 #[derive(Clone)]
 pub enum Task {
-    PromiseResolve {
+    Resolve {
         promise: Rc<RefCell<JSPromise>>,
         value: Value,
     },
-    PromiseReject {
+    Reject {
         promise: Rc<RefCell<JSPromise>>,
         reason: Value,
     },
-    PromiseResolution {
+    Resolution {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
     },
-    PromiseRejection {
+    Rejection {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
     },
@@ -63,7 +61,7 @@ pub fn resolve_promise(promise: Rc<RefCell<JSPromise>>, value: Value) -> Result<
         let callbacks = p.on_fulfilled.clone();
         p.on_fulfilled.clear();
         if !callbacks.is_empty() {
-            queue_task(Task::PromiseResolution {
+            queue_task(Task::Resolution {
                 promise: promise.clone(),
                 callbacks,
             });
@@ -81,7 +79,7 @@ pub fn reject_promise(promise: Rc<RefCell<JSPromise>>, reason: Value) -> Result<
         let callbacks = p.on_rejected.clone();
         p.on_rejected.clear();
         if !callbacks.is_empty() {
-            queue_task(Task::PromiseRejection {
+            queue_task(Task::Rejection {
                 promise: promise.clone(),
                 callbacks,
             });
@@ -4139,10 +4137,6 @@ pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
     env_mut.set_const(key.to_string());
 }
 
-pub fn env_set_rc(env: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
-    env.borrow_mut().insert(key.to_string(), val_rc);
-}
-
 // Higher-level property API that operates on expressions + environment.
 // `get_prop_env` evaluates `obj_expr` in `env` and returns the property's Rc if present.
 pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
@@ -6398,7 +6392,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
                 PromiseState::Fulfilled(_) => {
                     // Queue task to execute on_fulfilled callback asynchronously
                     if let Some(fulfilled_callback) = on_fulfilled {
-                        queue_task(Task::PromiseResolution {
+                        queue_task(Task::Resolution {
                             promise: promise.clone(),
                             callbacks: vec![(fulfilled_callback, new_promise.clone())],
                         });
@@ -6411,7 +6405,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
                 PromiseState::Rejected(_) => {
                     // Queue task to execute on_rejected callback asynchronously
                     if let Some(rejected_callback) = on_rejected {
-                        queue_task(Task::PromiseRejection {
+                        queue_task(Task::Rejection {
                             promise: promise.clone(),
                             callbacks: vec![(rejected_callback, new_promise.clone())],
                         });
@@ -6452,7 +6446,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
                 }
                 PromiseState::Rejected(_) => {
                     // Queue task to execute on_rejected callback asynchronously
-                    queue_task(Task::PromiseRejection {
+                    queue_task(Task::Rejection {
                         promise: promise.clone(),
                         callbacks: vec![(on_rejected, new_promise.clone())],
                     });
@@ -6473,7 +6467,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
         let task = GLOBAL_TASK_QUEUE.with(|queue| queue.borrow_mut().pop_front());
 
         match task {
-            Some(Task::PromiseResolve { promise, value }) => {
+            Some(Task::Resolve { promise, value }) => {
                 let mut promise_mut = promise.borrow_mut();
                 if let PromiseState::Pending = promise_mut.state {
                     promise_mut.state = PromiseState::Fulfilled(value.clone());
@@ -6483,14 +6477,14 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     let callbacks = promise_mut.on_fulfilled.clone();
                     promise_mut.on_fulfilled.clear();
                     if !callbacks.is_empty() {
-                        queue_task(Task::PromiseResolution {
+                        queue_task(Task::Resolution {
                             promise: promise.clone(),
                             callbacks,
                         });
                     }
                 }
             }
-            Some(Task::PromiseReject { promise, reason }) => {
+            Some(Task::Reject { promise, reason }) => {
                 let mut promise_mut = promise.borrow_mut();
                 if let PromiseState::Pending = promise_mut.state {
                     promise_mut.state = PromiseState::Rejected(reason.clone());
@@ -6500,14 +6494,14 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     let callbacks = promise_mut.on_rejected.clone();
                     promise_mut.on_rejected.clear();
                     if !callbacks.is_empty() {
-                        queue_task(Task::PromiseRejection {
+                        queue_task(Task::Rejection {
                             promise: promise.clone(),
                             callbacks,
                         });
                     }
                 }
             }
-            Some(Task::PromiseResolution { promise, callbacks }) => {
+            Some(Task::Resolution { promise, callbacks }) => {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match evaluate_expr(
@@ -6526,7 +6520,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     }
                 }
             }
-            Some(Task::PromiseRejection { promise, callbacks }) => {
+            Some(Task::Rejection { promise, callbacks }) => {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match evaluate_expr(

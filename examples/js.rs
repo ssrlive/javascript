@@ -1,7 +1,16 @@
-use javascript::core::*;
-use std::env;
-use std::fs;
+use javascript::*;
 use std::process;
+
+#[derive(clap::Parser)]
+#[command(name = "js", version, about = "JavaScript Rust Interpreter")]
+struct Cli {
+    /// Execute script
+    #[arg(short, long)]
+    eval: Option<String>,
+
+    /// JavaScript file to execute
+    file: Option<std::path::PathBuf>,
+}
 
 unsafe fn get_js_string(val: &JSValue) -> String {
     if val.get_tag() != JS_TAG_STRING {
@@ -18,43 +27,28 @@ unsafe fn get_js_string(val: &JSValue) -> String {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let cli = <Cli as clap::Parser>::parse();
 
     // Initialize logger (controlled by RUST_LOG)
-    #[cfg(feature = "env_logger")]
     env_logger::init();
-
-    if args.len() < 2 {
-        eprintln!("Usage: {} [options] [file.js | -e script]", args[0]);
-        eprintln!("Options:");
-        eprintln!("  -e script    Execute script");
-        eprintln!("  -h           Show this help");
-        process::exit(1);
-    }
 
     let script_content: String;
     let mut filename = "<eval>".to_string();
 
-    if args[1] == "-h" {
-        println!("QuickJS Rust Interpreter");
-        println!("Usage: {} [options] [file.js | -e script]", args[0]);
-        return;
-    } else if args[1] == "-e" {
-        if args.len() < 3 {
-            eprintln!("Error: -e requires a script argument");
-            process::exit(1);
-        }
-        script_content = args[2].clone();
-    } else {
-        // Read from file
-        filename = args[1].clone();
-        match fs::read_to_string(&filename) {
+    if let Some(script) = cli.eval {
+        script_content = script;
+    } else if let Some(file) = cli.file {
+        filename = file.to_string_lossy().to_string();
+        match std::fs::read_to_string(&file) {
             Ok(content) => script_content = content,
             Err(e) => {
-                eprintln!("Error reading file {}: {}", filename, e);
+                eprintln!("Error reading file {}: {}", file.display(), e);
                 process::exit(1);
             }
         }
+    } else {
+        eprintln!("Error: Must provide either --eval or a file");
+        process::exit(1);
     }
 
     unsafe {

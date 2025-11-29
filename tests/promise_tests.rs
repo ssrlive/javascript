@@ -1,6 +1,5 @@
 use javascript::Value;
 use javascript::evaluate_script;
-use javascript::evaluate_script_async;
 use javascript::obj_get_value;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -110,7 +109,7 @@ mod promise_tests {
             executionOrder.push("sync");
         "#;
 
-        let result = evaluate_script_async(code);
+        let result = evaluate_script(code);
         match result {
             Ok(Value::Object(arr)) => {
                 // Check that we have an array with 2 elements
@@ -143,6 +142,18 @@ mod promise_tests {
                 }
             }
             _ => panic!("Expected array result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_promise_finally() {
+        let code = r#"new Promise(function(resolve, reject) { resolve(42); }).finally(function() { console.log('finally executed'); })"#;
+        let result = evaluate_script(code);
+        match result {
+            Ok(Value::Number(42.0)) => {
+                // Test passed - basic promise works
+            }
+            _ => panic!("Test failed: {:?}", result),
         }
     }
 }

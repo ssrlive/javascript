@@ -10,83 +10,12 @@ use crate::js_class::{
 use crate::js_console;
 use crate::js_math;
 use crate::js_number;
+use crate::js_promise::{JSPromise, PromiseState, handle_promise_method, run_event_loop};
 use crate::sprintf;
 use crate::tmpfile;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::rc::Rc;
-
-// Task queue for asynchronous operations
-#[derive(Clone)]
-pub enum Task {
-    Resolve {
-        promise: Rc<RefCell<JSPromise>>,
-        value: Value,
-    },
-    Reject {
-        promise: Rc<RefCell<JSPromise>>,
-        reason: Value,
-    },
-    Resolution {
-        promise: Rc<RefCell<JSPromise>>,
-        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
-    },
-    Rejection {
-        promise: Rc<RefCell<JSPromise>>,
-        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
-    },
-}
-
-pub type TaskQueue = VecDeque<Task>;
-
-// Global task queue for the runtime
-thread_local! {
-    pub static GLOBAL_TASK_QUEUE: RefCell<TaskQueue> = const { RefCell::new(VecDeque::new()) };
-}
-
-// Function to queue a task
-pub fn queue_task(task: Task) {
-    GLOBAL_TASK_QUEUE.with(|queue| {
-        queue.borrow_mut().push_back(task);
-    });
-}
-
-// Function to resolve a promise
-pub fn resolve_promise(promise: Rc<RefCell<JSPromise>>, value: Value) -> Result<(), JSError> {
-    let mut p = promise.borrow_mut();
-    if let PromiseState::Pending = p.state {
-        p.state = PromiseState::Fulfilled(value.clone());
-        p.value = Some(value);
-        let callbacks = p.on_fulfilled.clone();
-        p.on_fulfilled.clear();
-        if !callbacks.is_empty() {
-            queue_task(Task::Resolution {
-                promise: promise.clone(),
-                callbacks,
-            });
-        }
-    }
-    Ok(())
-}
-
-// Function to reject a promise
-pub fn reject_promise(promise: Rc<RefCell<JSPromise>>, reason: Value) -> Result<(), JSError> {
-    let mut p = promise.borrow_mut();
-    if let PromiseState::Pending = p.state {
-        p.state = PromiseState::Rejected(reason.clone());
-        p.value = Some(reason);
-        let callbacks = p.on_rejected.clone();
-        p.on_rejected.clear();
-        if !callbacks.is_empty() {
-            queue_task(Task::Rejection {
-                promise: promise.clone(),
-                callbacks,
-            });
-        }
-    }
-    Ok(())
-}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -996,75 +925,7 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
 
 pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     let script = script.as_ref();
-    log::debug!("evaluate_script called with script len {}", script.len());
-    let filtered = filter_input_script(script);
-    log::trace!("filtered script:\n{}", filtered);
-    let mut tokens = match tokenize(&filtered) {
-        Ok(t) => t,
-        Err(e) => {
-            log::debug!("tokenize error: {e:?}");
-            return Err(e);
-        }
-    };
-    let statements = match parse_statements(&mut tokens) {
-        Ok(s) => s,
-        Err(e) => {
-            log::debug!("parse_statements error: {e:?}");
-            return Err(e);
-        }
-    };
-    log::debug!("parsed {} statements", statements.len());
-    for (i, stmt) in statements.iter().enumerate() {
-        log::trace!("stmt[{i}] = {stmt:?}");
-    }
-    let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
-
-    // Inject simple host `std` / `os` shims when importing with the pattern:
-    //   import * as NAME from "std";
-    for line in script.lines() {
-        let l = line.trim();
-        if l.starts_with("import * as")
-            && l.contains("from")
-            && let Some(as_idx) = l.find("as")
-            && let Some(from_idx) = l.find("from")
-        {
-            let name_part = &l[as_idx + 2..from_idx].trim();
-            let name = name_part.trim();
-            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                let rest = &l[from_idx + start_quote + 1..];
-                if let Some(end_quote) = rest.find(quote_char) {
-                    let module = &rest[..end_quote];
-                    if module == "std" {
-                        obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
-                    } else if module == "os" {
-                        obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
-                    }
-                }
-            }
-        }
-    }
-
-    // Initialize global built-in constructors
-    initialize_global_constructors(&env);
-
-    match evaluate_statements(&env, &statements) {
-        Ok(v) => {
-            // Run the event loop to process any queued asynchronous tasks
-            run_event_loop()?;
-            Ok(v)
-        }
-        Err(e) => {
-            log::debug!("evaluate_statements error: {e:?}");
-            Err(e)
-        }
-    }
-}
-
-// New function to evaluate script and wait for Promise result
-pub fn evaluate_script_async<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
-    let script = script.as_ref();
-    log::debug!("evaluate_script_async called with script len {}", script.len());
+    log::debug!("evaluate_script async called with script len {}", script.len());
     let filtered = filter_input_script(script);
     log::trace!("filtered script:\n{}", filtered);
     let mut tokens = match tokenize(&filtered) {
@@ -1130,7 +991,7 @@ pub fn evaluate_script_async<T: AsRef<str>>(script: T) -> Result<Value, JSError>
                         PromiseState::Fulfilled(val) => return Ok(val.clone()),
                         PromiseState::Rejected(reason) => {
                             return Err(JSError::EvaluationError {
-                                message: format!("Promise rejected: {:?}", reason),
+                                message: format!("Promise rejected: {}", value_to_string(reason)),
                             });
                         }
                         PromiseState::Pending => {
@@ -2026,9 +1887,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
             }
             Statement::Throw(expr) => {
                 let throw_val = evaluate_expr(env, expr)?;
-                return Err(JSError::EvaluationError {
-                    message: format!("{:?}", throw_val),
-                });
+                return Err(JSError::Throw { value: throw_val });
             }
             Statement::If(condition, then_body, else_body) => {
                 let cond_val = evaluate_expr(env, condition)?;
@@ -2066,7 +1925,11 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             return Err(err);
                         } else {
                             let catch_env = env.clone();
-                            env_set(&catch_env, catch_param.as_str(), Value::String(utf8_to_utf16(&format!("{err:?}"))))?;
+                            let catch_value = match &err {
+                                JSError::Throw { value } => value.clone(),
+                                _ => Value::String(utf8_to_utf16(&err.to_string())),
+                            };
+                            env_set(&catch_env, catch_param.as_str(), catch_value)?;
                             match evaluate_statements_with_context(&catch_env, catch_body)? {
                                 ControlFlow::Normal(val) => last_value = val,
                                 cf => {
@@ -2519,7 +2382,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                             PromiseState::Fulfilled(val) => return Ok(val.clone()),
                             PromiseState::Rejected(reason) => {
                                 return Err(JSError::EvaluationError {
-                                    message: format!("Promise rejected: {:?}", reason),
+                                    message: format!("Promise rejected: {}", value_to_string(reason)),
                                 });
                             }
                             PromiseState::Pending => {
@@ -2541,7 +2404,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                                 PromiseState::Fulfilled(val) => return Ok(val.clone()),
                                 PromiseState::Rejected(reason) => {
                                     return Err(JSError::EvaluationError {
-                                        message: format!("Promise rejected: {:?}", reason),
+                                        message: format!("Promise rejected: {}", value_to_string(reason)),
                                     });
                                 }
                                 PromiseState::Pending => {
@@ -2624,10 +2487,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Function("Promise".to_string()))
     } else if name == "new" {
         Ok(Value::Function("new".to_string()))
-    } else if name == "__resolve_promise_internal" {
-        Ok(Value::Function("__resolve_promise_internal".to_string()))
-    } else if name == "__reject_promise_internal" {
-        Ok(Value::Function("__reject_promise_internal".to_string()))
+    } else if name == "__internal_resolve_promise" {
+        Ok(Value::Function("__internal_resolve_promise".to_string()))
+    } else if name == "__internal_reject_promise" {
+        Ok(Value::Function("__internal_reject_promise".to_string()))
     } else if name == "NaN" {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {
@@ -3463,7 +3326,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 match func_name.as_str() {
                     "Object" => crate::js_object::handle_object_method(method, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
-                    "Promise" => crate::js_function::handle_promise_static_method(method, args, env),
+                    "Promise" => crate::js_promise::handle_promise_static_method(method, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method),
                     }),
@@ -3485,7 +3348,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 match func_name.as_str() {
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
-                    "Promise" => crate::js_function::handle_promise_static_method(method_name, args, env),
+                    "Promise" => crate::js_promise::handle_promise_static_method(method_name, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method_name),
                     }),
@@ -3841,7 +3704,7 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
@@ -3882,46 +3745,7 @@ impl JSObjectData {
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub enum PromiseState {
-    #[default]
-    Pending,
-    Fulfilled(Value),
-    Rejected(Value),
-}
-
-#[derive(Clone, Default)]
-pub struct JSPromise {
-    pub state: PromiseState,
-    pub value: Option<Value>,                               // The resolved value or rejection reason
-    pub on_fulfilled: Vec<(Value, Rc<RefCell<JSPromise>>)>, // Callbacks and their chaining promises
-    pub on_rejected: Vec<(Value, Rc<RefCell<JSPromise>>)>,  // Callbacks and their chaining promises
-}
-
-impl JSPromise {
-    pub fn new() -> Self {
-        JSPromise {
-            state: PromiseState::Pending,
-            value: None,
-            on_fulfilled: Vec::new(),
-            on_rejected: Vec::new(),
-        }
-    }
-}
-
-impl std::fmt::Debug for JSPromise {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "JSPromise {{ state: {:?}, on_fulfilled: {}, on_rejected: {} }}",
-            self.state,
-            self.on_fulfilled.len(),
-            self.on_rejected.len()
-        )
-    }
-}
-
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
@@ -3940,25 +3764,6 @@ pub enum Value {
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
     Promise(Rc<RefCell<JSPromise>>), // Promise object
-}
-
-impl std::fmt::Debug for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Number(n) => write!(f, "Number({n})"),
-            Value::String(s) => write!(f, "String({})", String::from_utf16_lossy(s)),
-            Value::Boolean(b) => write!(f, "Boolean({b})"),
-            Value::Undefined => write!(f, "Undefined"),
-            Value::Object(_) => write!(f, "Object(...)"),
-            Value::Function(name) => write!(f, "Function({name})"),
-            Value::Closure(_, _, _) => write!(f, "Closure(...)"),
-            Value::ClassDefinition(_) => write!(f, "ClassDefinition(...)"),
-            Value::Getter(_, _) => write!(f, "Getter(...)"),
-            Value::Setter(_, _, _) => write!(f, "Setter(...)"),
-            Value::Property { .. } => write!(f, "Property(...)"),
-            Value::Promise(_) => write!(f, "Promise(...)"),
-        }
-    }
 }
 
 // Helper functions for UTF-16 string operations
@@ -4033,6 +3838,24 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Undefined, Value::Undefined) => true,
         (Value::Object(_), Value::Object(_)) => false, // Objects are not equal unless same reference
         _ => false,                                    // Different types are not equal
+    }
+}
+
+// Helper function to convert value to string for display
+pub fn value_to_string(val: &Value) -> String {
+    match val {
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => String::from_utf16_lossy(s),
+        Value::Boolean(b) => b.to_string(),
+        Value::Undefined => "undefined".to_string(),
+        Value::Object(_) => "[object Object]".to_string(),
+        Value::Function(name) => format!("function {}", name),
+        Value::Closure(_, _, _) => "function".to_string(),
+        Value::ClassDefinition(_) => "class".to_string(),
+        Value::Getter(_, _) => "getter".to_string(),
+        Value::Setter(_, _, _) => "setter".to_string(),
+        Value::Property { .. } => "[property]".to_string(),
+        Value::Promise(_) => "[object Promise]".to_string(),
     }
 }
 
@@ -4873,6 +4696,50 @@ pub enum Token {
     Await,
 }
 
+impl Token {
+    /// Get the string representation of a token that can be used as an identifier/property name
+    pub fn as_identifier_string(&self) -> Option<String> {
+        match self {
+            Token::Identifier(s) => Some(s.clone()),
+            Token::Let => Some("let".to_string()),
+            Token::Var => Some("var".to_string()),
+            Token::Const => Some("const".to_string()),
+            Token::Class => Some("class".to_string()),
+            Token::Extends => Some("extends".to_string()),
+            Token::Super => Some("super".to_string()),
+            Token::This => Some("this".to_string()),
+            Token::Static => Some("static".to_string()),
+            Token::New => Some("new".to_string()),
+            Token::InstanceOf => Some("instanceof".to_string()),
+            Token::TypeOf => Some("typeof".to_string()),
+            Token::In => Some("in".to_string()),
+            Token::Delete => Some("delete".to_string()),
+            Token::Void => Some("void".to_string()),
+            Token::Function => Some("function".to_string()),
+            Token::Return => Some("return".to_string()),
+            Token::If => Some("if".to_string()),
+            Token::Else => Some("else".to_string()),
+            Token::For => Some("for".to_string()),
+            Token::While => Some("while".to_string()),
+            Token::Do => Some("do".to_string()),
+            Token::Switch => Some("switch".to_string()),
+            Token::Case => Some("case".to_string()),
+            Token::Default => Some("default".to_string()),
+            Token::Break => Some("break".to_string()),
+            Token::Continue => Some("continue".to_string()),
+            Token::Try => Some("try".to_string()),
+            Token::Catch => Some("catch".to_string()),
+            Token::Finally => Some("finally".to_string()),
+            Token::Throw => Some("throw".to_string()),
+            Token::True => Some("true".to_string()),
+            Token::False => Some("false".to_string()),
+            Token::Async => Some("async".to_string()),
+            Token::Await => Some("await".to_string()),
+            _ => None,
+        }
+    }
+}
+
 fn is_truthy(val: &Value) -> bool {
     match val {
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
@@ -5667,10 +5534,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
             Token::Dot => {
                 tokens.remove(0); // consume '.'
-                if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
+                if tokens.is_empty() {
                     return Err(JSError::ParseError);
                 }
-                if let Token::Identifier(prop) = tokens.remove(0) {
+                if let Some(prop) = tokens[0].as_identifier_string() {
+                    tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);
                 } else {
                     return Err(JSError::ParseError);
@@ -5708,7 +5576,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     expr = Expr::OptionalCall(Box::new(expr), args);
                 } else if matches!(tokens[0], Token::Identifier(_)) {
                     // Optional property access: obj?.prop
-                    if let Token::Identifier(prop) = tokens.remove(0) {
+                    if let Some(prop) = tokens[0].as_identifier_string() {
+                        tokens.remove(0);
                         expr = Expr::OptionalProperty(Box::new(expr), prop);
                     } else {
                         return Err(JSError::ParseError);
@@ -6383,212 +6252,4 @@ fn handle_optional_method_call(
             }
         }
     }
-}
-
-/// Handle Promise instance method calls
-pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    // Get the promise from the object
-    let promise_val = obj_get_value(obj_map, "__promise")?;
-    let promise_rc = match promise_val {
-        Some(rc) => rc,
-        None => {
-            return Err(JSError::EvaluationError {
-                message: "Promise object missing internal promise".to_string(),
-            });
-        }
-    };
-
-    let promise = match promise_rc.borrow().clone() {
-        Value::Promise(p) => p,
-        _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid promise object".to_string(),
-            });
-        }
-    };
-
-    match method {
-        "then" => {
-            let on_fulfilled = if !args.is_empty() {
-                Some(evaluate_expr(env, &args[0])?)
-            } else {
-                None
-            };
-            let on_rejected = if args.len() > 1 {
-                Some(evaluate_expr(env, &args[1])?)
-            } else {
-                None
-            };
-
-            // Create a new promise for chaining
-            let new_promise = Rc::new(RefCell::new(JSPromise::new()));
-            let new_promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
-
-            // Check current state and handle accordingly
-            let mut promise_mut = promise.borrow_mut();
-            match &promise_mut.state {
-                PromiseState::Pending => {
-                    // Store callbacks to be executed when promise settles
-                    if let Some(fulfilled_callback) = on_fulfilled {
-                        promise_mut.on_fulfilled.push((fulfilled_callback, new_promise.clone()));
-                    }
-                    if let Some(rejected_callback) = on_rejected {
-                        promise_mut.on_rejected.push((rejected_callback, new_promise.clone()));
-                    }
-                }
-                PromiseState::Fulfilled(_) => {
-                    // Queue task to execute on_fulfilled callback asynchronously
-                    if let Some(fulfilled_callback) = on_fulfilled {
-                        queue_task(Task::Resolution {
-                            promise: promise.clone(),
-                            callbacks: vec![(fulfilled_callback, new_promise.clone())],
-                        });
-                    } else {
-                        // No callback, resolve new promise with the same value
-                        let value = promise_mut.value.clone().unwrap();
-                        resolve_promise(new_promise, value)?;
-                    }
-                }
-                PromiseState::Rejected(_) => {
-                    // Queue task to execute on_rejected callback asynchronously
-                    if let Some(rejected_callback) = on_rejected {
-                        queue_task(Task::Rejection {
-                            promise: promise.clone(),
-                            callbacks: vec![(rejected_callback, new_promise.clone())],
-                        });
-                    } else {
-                        // No rejection callback, reject new promise
-                        let reason = promise_mut.value.clone().unwrap();
-                        reject_promise(new_promise, reason)?;
-                    }
-                }
-            }
-
-            Ok(Value::Object(new_promise_obj))
-        }
-        "catch" => {
-            if args.is_empty() {
-                return Err(JSError::EvaluationError {
-                    message: "Promise.catch requires at least one argument".to_string(),
-                });
-            }
-
-            let on_rejected = evaluate_expr(env, &args[0])?;
-
-            // Create a new promise for chaining
-            let new_promise = Rc::new(RefCell::new(JSPromise::new()));
-            let new_promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
-
-            // Check current state and handle accordingly
-            let mut promise_mut = promise.borrow_mut();
-            match &promise_mut.state {
-                PromiseState::Pending => {
-                    // Add reject callback to be executed when promise rejects
-                    promise_mut.on_rejected.push((on_rejected, new_promise.clone()));
-                }
-                PromiseState::Fulfilled(value) => {
-                    // Keep the fulfilled state
-                    new_promise.borrow_mut().state = PromiseState::Fulfilled(value.clone());
-                }
-                PromiseState::Rejected(_) => {
-                    // Queue task to execute on_rejected callback asynchronously
-                    queue_task(Task::Rejection {
-                        promise: promise.clone(),
-                        callbacks: vec![(on_rejected, new_promise.clone())],
-                    });
-                }
-            }
-
-            Ok(Value::Object(new_promise_obj))
-        }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Promise has no method '{}'", method),
-        }),
-    }
-}
-
-// Function to run the event loop and process asynchronous tasks
-pub fn run_event_loop() -> Result<(), JSError> {
-    loop {
-        let task = GLOBAL_TASK_QUEUE.with(|queue| queue.borrow_mut().pop_front());
-
-        match task {
-            Some(Task::Resolve { promise, value }) => {
-                let mut promise_mut = promise.borrow_mut();
-                if let PromiseState::Pending = promise_mut.state {
-                    promise_mut.state = PromiseState::Fulfilled(value.clone());
-                    promise_mut.value = Some(value);
-
-                    // Queue task to execute fulfilled callbacks asynchronously
-                    let callbacks = promise_mut.on_fulfilled.clone();
-                    promise_mut.on_fulfilled.clear();
-                    if !callbacks.is_empty() {
-                        queue_task(Task::Resolution {
-                            promise: promise.clone(),
-                            callbacks,
-                        });
-                    }
-                }
-            }
-            Some(Task::Reject { promise, reason }) => {
-                let mut promise_mut = promise.borrow_mut();
-                if let PromiseState::Pending = promise_mut.state {
-                    promise_mut.state = PromiseState::Rejected(reason.clone());
-                    promise_mut.value = Some(reason);
-
-                    // Queue task to execute rejected callbacks asynchronously
-                    let callbacks = promise_mut.on_rejected.clone();
-                    promise_mut.on_rejected.clear();
-                    if !callbacks.is_empty() {
-                        queue_task(Task::Rejection {
-                            promise: promise.clone(),
-                            callbacks,
-                        });
-                    }
-                }
-            }
-            Some(Task::Resolution { promise, callbacks }) => {
-                for (callback, new_promise) in callbacks {
-                    // Call the callback and resolve the new promise with the result
-                    match evaluate_expr(
-                        &Rc::new(RefCell::new(JSObjectData::new())),
-                        &Expr::Call(
-                            Box::new(Expr::Value(callback)),
-                            vec![Expr::Value(promise.borrow().value.clone().unwrap_or(Value::Undefined))],
-                        ),
-                    ) {
-                        Ok(result) => {
-                            resolve_promise(new_promise, result)?;
-                        }
-                        Err(e) => {
-                            reject_promise(new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))))?;
-                        }
-                    }
-                }
-            }
-            Some(Task::Rejection { promise, callbacks }) => {
-                for (callback, new_promise) in callbacks {
-                    // Call the callback and resolve the new promise with the result
-                    match evaluate_expr(
-                        &Rc::new(RefCell::new(JSObjectData::new())),
-                        &Expr::Call(
-                            Box::new(Expr::Value(callback)),
-                            vec![Expr::Value(promise.borrow().value.clone().unwrap_or(Value::Undefined))],
-                        ),
-                    ) {
-                        Ok(result) => {
-                            resolve_promise(new_promise, result)?;
-                        }
-                        Err(e) => {
-                            reject_promise(new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))))?;
-                        }
-                    }
-                }
-            }
-            None => break, // No more tasks
-        }
-    }
-    Ok(())
 }

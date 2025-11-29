@@ -24,6 +24,9 @@ pub enum JSError {
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
 
+    #[error("Thrown value: {value:?}")]
+    Throw { value: crate::core::Value },
+
     #[error("std::io error: {0}")]
     IoError(#[from] std::io::Error),
 }

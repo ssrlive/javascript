@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script_async};
+use javascript::{Value, evaluate_script};
 
 #[test]
 fn test_promise_async_resolution() {
@@ -8,7 +8,7 @@ fn test_promise_async_resolution() {
             resolve("async result");
         })
     "#;
-    let result = evaluate_script_async(script);
+    let result = evaluate_script(script);
     match result {
         Ok(value) => {
             // Should get the resolved value
@@ -35,7 +35,7 @@ fn test_await_async_function() {
         }
         getResult()
     "#;
-    let result = evaluate_script_async(script);
+    let result = evaluate_script(script);
     match result {
         Ok(value) => {
             // Should get the awaited result
@@ -62,7 +62,7 @@ fn test_promise_chaining_async() {
             return value + 5;
         })
     "#;
-    let result = evaluate_script_async(script);
+    let result = evaluate_script(script);
     match result {
         Ok(value) => {
             // Should get the final chained result
@@ -85,7 +85,7 @@ fn test_promise_rejection_async() {
             reject("error occurred");
         })
     "#;
-    let result = evaluate_script_async(script);
+    let result = evaluate_script(script);
     match result {
         Ok(_) => panic!("Expected rejection but got success"),
         Err(e) => {

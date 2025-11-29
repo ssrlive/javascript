@@ -45,7 +45,7 @@ mod std_tests {
         match result {
             Ok(Value::String(s)) => {
                 let out = String::from_utf16_lossy(&s);
-                assert!(out.contains("EvaluationError") || out.contains("ParseError"));
+                assert!(out.contains("Evaluation failed") || out.contains("ParseError"));
             }
             _ => panic!("Expected error string in catch body, got {:?}", result),
         }
@@ -69,11 +69,10 @@ mod std_tests {
         let script = "try { throw 42; } catch(e) { e }";
         let result = evaluate_script(script);
         match result {
-            Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
-                assert!(out.contains("42"));
+            Ok(Value::Number(n)) => {
+                assert_eq!(n, 42.0);
             }
-            _ => panic!("Expected error string in catch body, got {:?}", result),
+            _ => panic!("Expected number 42 in catch body, got {:?}", result),
         }
     }
 }

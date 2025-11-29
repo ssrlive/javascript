@@ -162,7 +162,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     return handle_string_constructor(args, env);
                 }
                 "Promise" => {
-                    return crate::js_function::handle_promise_constructor(args, env);
+                    return crate::js_promise::handle_promise_constructor(args, env);
                 }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);

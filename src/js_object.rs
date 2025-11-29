@@ -1,4 +1,4 @@
-use crate::core::{evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use std::cell::RefCell;
@@ -124,7 +124,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Undefined => Err(JSError::TypeError {
             message: "Cannot convert undefined to object".to_string(),
         }),
-        Value::Object(ref obj_map) => {
+        Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {
                 match &*wrapped_val.borrow() {
@@ -199,7 +199,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::Undefined => Err(JSError::TypeError {
             message: "Cannot convert undefined to object".to_string(),
         }),
-        Value::Object(ref obj_map) => {
+        Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, "__value__")? {
                 return Ok(wrapped_val.borrow().clone());

@@ -21,9 +21,9 @@ pub(crate) mod sprintf;
 pub(crate) mod tmpfile;
 
 pub use core::{
-    evaluate_script, evaluate_script_async, get_prop_env, obj_get_value, tokenize, JSClassDef, JSObject, JSStackFrame, JSString, JSValue,
     JS_DefinePropertyValue, JS_DupValue, JS_Eval, JS_FreeContext, JS_FreeRuntime, JS_FreeValue, JS_GetProperty, JS_NewContext,
-    JS_NewObject, JS_NewRuntime, JS_NewString, JS_SetProperty, Value,
+    JS_NewObject, JS_NewRuntime, JS_NewString, JS_SetProperty, JSClassDef, JSObject, JSStackFrame, JSString, JSValue, Value,
+    evaluate_script, evaluate_script_async, get_prop_env, obj_get_value, tokenize,
 };
 pub use core::{
     JS_FLOAT64_NAN, JS_GC_OBJ_TYPE_ASYNC_FUNCTION, JS_GC_OBJ_TYPE_FUNCTION_BYTECODE, JS_GC_OBJ_TYPE_JS_CONTEXT, JS_GC_OBJ_TYPE_JS_OBJECT,

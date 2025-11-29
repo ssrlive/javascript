@@ -1,5 +1,5 @@
 use crate::core::JSObjectDataPtr;
-use crate::core::{evaluate_expr, utf16_to_utf8, utf8_to_utf16, Expr, Value};
+use crate::core::{Expr, Value, evaluate_expr, utf8_to_utf16, utf16_to_utf8};
 use crate::error::JSError;
 
 pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
@@ -13,7 +13,7 @@ pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
         _ => {
             return Err(JSError::EvaluationError {
                 message: "sprintf format must be a string".to_string(),
-            })
+            });
         }
     };
     let result = sprintf_impl(env, &format_str, &args[1..])?;
@@ -27,12 +27,12 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
 
     while let Some(ch) = chars.next() {
         if ch == '%' {
-            if let Some(next_ch) = chars.peek() {
-                if *next_ch == '%' {
-                    result.push('%');
-                    chars.next();
-                    continue;
-                }
+            if let Some(next_ch) = chars.peek()
+                && *next_ch == '%'
+            {
+                result.push('%');
+                chars.next();
+                continue;
             }
 
             // Parse format specifier
@@ -77,31 +77,31 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
             }
 
             // Parse precision
-            if let Some(&ch) = chars.peek() {
-                if ch == '.' {
-                    chars.next();
-                    if let Some(&ch) = chars.peek() {
-                        if ch == '*' {
-                            chars.next();
-                            if arg_index < args.len() {
-                                let prec_val = evaluate_expr(env, &args[arg_index])?;
-                                if let Value::Number(n) = prec_val {
-                                    precision = Some(n as usize);
-                                }
-                                arg_index += 1;
+            if let Some(&ch) = chars.peek()
+                && ch == '.'
+            {
+                chars.next();
+                if let Some(&ch) = chars.peek() {
+                    if ch == '*' {
+                        chars.next();
+                        if arg_index < args.len() {
+                            let prec_val = evaluate_expr(env, &args[arg_index])?;
+                            if let Value::Number(n) = prec_val {
+                                precision = Some(n as usize);
                             }
-                        } else if ch.is_ascii_digit() {
-                            let mut p = 0;
-                            while let Some(&ch) = chars.peek() {
-                                if ch.is_ascii_digit() {
-                                    p = p * 10 + (ch as u32 - '0' as u32) as usize;
-                                    chars.next();
-                                } else {
-                                    break;
-                                }
-                            }
-                            precision = Some(p);
+                            arg_index += 1;
                         }
+                    } else if ch.is_ascii_digit() {
+                        let mut p = 0;
+                        while let Some(&ch) = chars.peek() {
+                            if ch.is_ascii_digit() {
+                                p = p * 10 + (ch as u32 - '0' as u32) as usize;
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        precision = Some(p);
                     }
                 }
             }

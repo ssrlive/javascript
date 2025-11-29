@@ -1,4 +1,4 @@
-use crate::core::{evaluate_expr, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16};
 use crate::error::JSError;
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use std::cell::RefCell;
@@ -69,11 +69,7 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
 
     // Handle year conversion (JavaScript allows 2-digit years)
     let full_year = if (0..100).contains(&year) {
-        if year < 50 {
-            2000 + year
-        } else {
-            1900 + year
-        }
+        if year < 50 { 2000 + year } else { 1900 + year }
     } else {
         year
     };
@@ -84,12 +80,12 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
     }
 
     // Try to create the date
-    if let Some(date) = NaiveDate::from_ymd_opt(full_year, chrono_month, day) {
-        if let Some(time) = NaiveTime::from_hms_milli_opt(hour, minute, second, millisecond) {
-            let datetime = NaiveDateTime::new(date, time);
-            let utc_dt = Utc.from_utc_datetime(&datetime);
-            return Some(utc_dt.timestamp_millis() as f64);
-        }
+    if let Some(date) = NaiveDate::from_ymd_opt(full_year, chrono_month, day)
+        && let Some(time) = NaiveTime::from_hms_milli_opt(hour, minute, second, millisecond)
+    {
+        let datetime = NaiveDateTime::new(date, time);
+        let utc_dt = Utc.from_utc_datetime(&datetime);
+        return Some(utc_dt.timestamp_millis() as f64);
     }
 
     None

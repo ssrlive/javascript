@@ -1,4 +1,4 @@
-use crate::core::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -109,11 +109,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 let arg_val = evaluate_expr(env, &args[0])?;
                 let radix = if args.len() >= 2 {
                     let radix_val = evaluate_expr(env, &args[1])?;
-                    if let Value::Number(r) = radix_val {
-                        r as u32
-                    } else {
-                        10
-                    }
+                    if let Value::Number(r) = radix_val { r as u32 } else { 10 }
                 } else {
                     10
                 };

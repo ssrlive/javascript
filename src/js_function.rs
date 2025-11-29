@@ -1,5 +1,5 @@
 use crate::core::{
-    evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, PromiseState, Statement, Value,
+    Expr, JSObjectData, JSObjectDataPtr, PromiseState, Statement, Value, evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16,
 };
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
@@ -50,15 +50,15 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     }
                     let mut end_pos = 0;
                     let mut chars = trimmed.chars();
-                    if let Some(first_char) = chars.next() {
-                        if first_char == '-' || first_char == '+' || first_char.is_ascii_digit() {
-                            end_pos = 1;
-                            for ch in chars {
-                                if ch.is_ascii_digit() {
-                                    end_pos += 1;
-                                } else {
-                                    break;
-                                }
+                    if let Some(first_char) = chars.next()
+                        && (first_char == '-' || first_char == '+' || first_char.is_ascii_digit())
+                    {
+                        end_pos = 1;
+                        for ch in chars {
+                            if ch.is_ascii_digit() {
+                                end_pos += 1;
+                            } else {
+                                break;
                             }
                         }
                     }
@@ -274,20 +274,19 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "new" => {
             // Handle new expressions: new Constructor(args)
-            if args.len() == 1 {
-                if let Expr::Call(constructor_expr, constructor_args) = &args[0] {
-                    if let Expr::Var(constructor_name) = &**constructor_expr {
-                        match constructor_name.as_str() {
-                            "RegExp" => return crate::js_regexp::handle_regexp_constructor(constructor_args, env),
-                            "Array" => return crate::js_array::handle_array_constructor(constructor_args, env),
-                            "Date" => return crate::js_date::handle_date_constructor(constructor_args, env),
-                            "Promise" => return handle_promise_constructor(constructor_args, env),
-                            _ => {
-                                return Err(JSError::EvaluationError {
-                                    message: format!("Constructor {constructor_name} not implemented"),
-                                })
-                            }
-                        }
+            if args.len() == 1
+                && let Expr::Call(constructor_expr, constructor_args) = &args[0]
+                && let Expr::Var(constructor_name) = &**constructor_expr
+            {
+                match constructor_name.as_str() {
+                    "RegExp" => return crate::js_regexp::handle_regexp_constructor(constructor_args, env),
+                    "Array" => return crate::js_array::handle_array_constructor(constructor_args, env),
+                    "Date" => return crate::js_date::handle_date_constructor(constructor_args, env),
+                    "Promise" => return handle_promise_constructor(constructor_args, env),
+                    _ => {
+                        return Err(JSError::EvaluationError {
+                            message: format!("Constructor {constructor_name} not implemented"),
+                        });
                     }
                 }
             }
@@ -371,14 +370,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     let promise_id = String::from_utf16_lossy(&id_utf16);
                     let promise_key = format!("__promise_{}", promise_id);
 
-                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
-                        if let Value::Promise(promise_rc) = &*promise_val.borrow() {
-                            // Queue asynchronous resolution task
-                            crate::core::queue_task(crate::core::Task::Resolve {
-                                promise: promise_rc.clone(),
-                                value,
-                            });
-                        }
+                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)?
+                        && let Value::Promise(promise_rc) = &*promise_val.borrow()
+                    {
+                        // Queue asynchronous resolution task
+                        crate::core::queue_task(crate::core::Task::Resolve {
+                            promise: promise_rc.clone(),
+                            value,
+                        });
                     }
                     Ok(Value::Undefined)
                 }
@@ -402,14 +401,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     let promise_id = String::from_utf16_lossy(&id_utf16);
                     let promise_key = format!("__promise_{}", promise_id);
 
-                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)? {
-                        if let Value::Promise(promise_rc) = &*promise_val.borrow() {
-                            // Queue asynchronous rejection task
-                            crate::core::queue_task(crate::core::Task::Reject {
-                                promise: promise_rc.clone(),
-                                reason,
-                            });
-                        }
+                    if let Some(promise_val) = crate::core::obj_get_value(env, &promise_key)?
+                        && let Value::Promise(promise_rc) = &*promise_val.borrow()
+                    {
+                        // Queue asynchronous rejection task
+                        crate::core::queue_task(crate::core::Task::Reject {
+                            promise: promise_rc.clone(),
+                            reason,
+                        });
                     }
                     Ok(Value::Undefined)
                 }
@@ -634,20 +633,20 @@ pub fn handle_promise_static_method(method: &str, args: &[Expr], env: &JSObjectD
             for promise_val in promises {
                 match &*promise_val.borrow() {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = obj_get_value(obj, "__promise")? {
-                            if let Value::Promise(p) = &*promise_rc.borrow() {
-                                match &p.borrow().state {
-                                    PromiseState::Fulfilled(value) => {
-                                        result_promise.borrow_mut().state = PromiseState::Fulfilled(value.clone());
-                                        return Ok(Value::Object(result_promise_obj));
-                                    }
-                                    PromiseState::Rejected(reason) => {
-                                        result_promise.borrow_mut().state = PromiseState::Rejected(reason.clone());
-                                        return Ok(Value::Object(result_promise_obj));
-                                    }
-                                    PromiseState::Pending => {
-                                        // Continue checking other promises
-                                    }
+                        if let Some(promise_rc) = obj_get_value(obj, "__promise")?
+                            && let Value::Promise(p) = &*promise_rc.borrow()
+                        {
+                            match &p.borrow().state {
+                                PromiseState::Fulfilled(value) => {
+                                    result_promise.borrow_mut().state = PromiseState::Fulfilled(value.clone());
+                                    return Ok(Value::Object(result_promise_obj));
+                                }
+                                PromiseState::Rejected(reason) => {
+                                    result_promise.borrow_mut().state = PromiseState::Rejected(reason.clone());
+                                    return Ok(Value::Object(result_promise_obj));
+                                }
+                                PromiseState::Pending => {
+                                    // Continue checking other promises
                                 }
                             }
                         }

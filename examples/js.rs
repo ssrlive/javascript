@@ -13,17 +13,19 @@ struct Cli {
 }
 
 unsafe fn get_js_string(val: &JSValue) -> String {
-    if val.get_tag() != JS_TAG_STRING {
-        return String::new();
+    unsafe {
+        if val.get_tag() != JS_TAG_STRING {
+            return String::new();
+        }
+        let p = val.get_ptr() as *mut JSString;
+        if p.is_null() {
+            return String::new();
+        }
+        let len = (*p).len as usize;
+        let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
+        let bytes = std::slice::from_raw_parts(str_data, len);
+        String::from_utf8_lossy(bytes).to_string()
     }
-    let p = val.get_ptr() as *mut JSString;
-    if p.is_null() {
-        return String::new();
-    }
-    let len = (*p).len as usize;
-    let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
-    let bytes = std::slice::from_raw_parts(str_data, len);
-    String::from_utf8_lossy(bytes).to_string()
 }
 
 fn main() {

@@ -1,4 +1,4 @@
-use crate::core::{evaluate_expr, obj_set_value, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16, utf16_to_utf8};
 use crate::error::JSError;
 use regex::RegexBuilder;
 use std::cell::RefCell;
@@ -156,13 +156,13 @@ pub(crate) fn handle_regexp_method(
                     _ => {
                         return Err(JSError::TypeError {
                             message: "Invalid regex pattern".to_string(),
-                        })
+                        });
                     }
                 },
                 None => {
                     return Err(JSError::TypeError {
                         message: "Invalid regex object".to_string(),
-                    })
+                    });
                 }
             };
 
@@ -193,12 +193,11 @@ pub(crate) fn handle_regexp_method(
             // Get lastIndex for global regex
             let mut last_index = 0;
             let global = flags.contains('g');
-            if global {
-                if let Some(last_index_val) = obj_map.borrow().get("__lastIndex") {
-                    if let Value::Number(n) = &*last_index_val.borrow() {
-                        last_index = *n as usize;
-                    }
-                }
+            if global
+                && let Some(last_index_val) = obj_map.borrow().get("__lastIndex")
+                && let Value::Number(n) = &*last_index_val.borrow()
+            {
+                last_index = *n as usize;
             }
 
             // Execute regex
@@ -232,11 +231,9 @@ pub(crate) fn handle_regexp_method(
                 obj_set_value(&result_array, "length", Value::Number(group_index as f64))?;
 
                 // Update lastIndex for global regex
-                if global {
-                    if let Some(matched) = captures.get(0) {
-                        let new_last_index = last_index + matched.end();
-                        obj_set_value(obj_map, "__lastIndex", Value::Number(new_last_index as f64))?;
-                    }
+                if global && let Some(matched) = captures.get(0) {
+                    let new_last_index = last_index + matched.end();
+                    obj_set_value(obj_map, "__lastIndex", Value::Number(new_last_index as f64))?;
                 }
 
                 Ok(Value::Object(result_array))
@@ -272,13 +269,13 @@ pub(crate) fn handle_regexp_method(
                     _ => {
                         return Err(JSError::TypeError {
                             message: "Invalid regex pattern".to_string(),
-                        })
+                        });
                     }
                 },
                 None => {
                     return Err(JSError::TypeError {
                         message: "Invalid regex object".to_string(),
-                    })
+                    });
                 }
             };
 
@@ -309,12 +306,11 @@ pub(crate) fn handle_regexp_method(
             // Get lastIndex for global regex
             let mut last_index = 0;
             let global = flags.contains('g');
-            if global {
-                if let Some(last_index_val) = obj_map.borrow().get("__lastIndex") {
-                    if let Value::Number(n) = &*last_index_val.borrow() {
-                        last_index = *n as usize;
-                    }
-                }
+            if global
+                && let Some(last_index_val) = obj_map.borrow().get("__lastIndex")
+                && let Value::Number(n) = &*last_index_val.borrow()
+            {
+                last_index = *n as usize;
             }
 
             // Test regex

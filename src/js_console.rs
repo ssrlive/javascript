@@ -1,4 +1,4 @@
-use crate::core::{evaluate_expr, obj_set_value, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
 use std::cell::RefCell;
 use std::rc::Rc;

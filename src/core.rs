@@ -4,8 +4,8 @@
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_class::{
-    call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call, evaluate_super_method,
-    evaluate_super_property, evaluate_this, is_class_instance, is_instance_of, ClassDefinition, ClassMember,
+    ClassDefinition, ClassMember, call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super,
+    evaluate_super_call, evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
 };
 use crate::js_console;
 use crate::js_math;
@@ -218,22 +218,26 @@ impl list_head {
     /// The caller must ensure that `new_entry` is a valid pointer to an uninitialized list_head,
     /// and that the list is not concurrently modified.
     pub unsafe fn add_tail(&mut self, new_entry: *mut list_head) {
-        let prev = self.prev;
-        (*new_entry).next = self;
-        (*new_entry).prev = prev;
-        (*prev).next = new_entry;
-        self.prev = new_entry;
+        unsafe {
+            let prev = self.prev;
+            (*new_entry).next = self;
+            (*new_entry).prev = prev;
+            (*prev).next = new_entry;
+            self.prev = new_entry;
+        }
     }
 
     /// # Safety
     /// The caller must ensure that the list_head is part of a valid linked list and not concurrently accessed.
     pub unsafe fn del(&mut self) {
-        let next = self.next;
-        let prev = self.prev;
-        (*next).prev = prev;
-        (*prev).next = next;
-        self.next = std::ptr::null_mut();
-        self.prev = std::ptr::null_mut();
+        unsafe {
+            let next = self.next;
+            let prev = self.prev;
+            (*next).prev = prev;
+            (*prev).next = next;
+            self.next = std::ptr::null_mut();
+            self.prev = std::ptr::null_mut();
+        }
     }
 }
 
@@ -468,26 +472,28 @@ impl JSShape {
     /// # Safety
     /// The caller must ensure that the JSShape and its property arrays are valid and not concurrently modified.
     pub unsafe fn find_own_property(&self, atom: JSAtom) -> Option<(i32, *mut JSShapeProperty)> {
-        if self.is_hashed != 0 {
-            let h = atom & self.prop_hash_mask;
-            let mut prop_idx = *self.prop_hash.offset(h as isize);
-            while prop_idx != 0 {
-                let idx = (prop_idx - 1) as i32;
-                let pr = self.prop.offset(idx as isize);
-                if (*pr).atom == atom {
-                    return Some((idx, pr));
+        unsafe {
+            if self.is_hashed != 0 {
+                let h = atom & self.prop_hash_mask;
+                let mut prop_idx = *self.prop_hash.offset(h as isize);
+                while prop_idx != 0 {
+                    let idx = (prop_idx - 1) as i32;
+                    let pr = self.prop.offset(idx as isize);
+                    if (*pr).atom == atom {
+                        return Some((idx, pr));
+                    }
+                    prop_idx = (*pr).hash_next;
                 }
-                prop_idx = (*pr).hash_next;
-            }
-            None
-        } else {
-            for i in 0..self.prop_count {
-                let pr = self.prop.offset(i as isize);
-                if (*pr).atom == atom {
-                    return Some((i, pr));
+                None
+            } else {
+                for i in 0..self.prop_count {
+                    let pr = self.prop.offset(i as isize);
+                    if (*pr).atom == atom {
+                        return Some((i, pr));
+                    }
                 }
+                None
             }
-            None
         }
     }
 }
@@ -497,91 +503,99 @@ impl JSRuntime {
     /// The caller must ensure that `sh` is a valid pointer to a JSShape that is not concurrently accessed,
     /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn resize_shape(&mut self, sh: *mut JSShape, new_size: i32) -> i32 {
-        let new_prop = self.js_realloc_rt(
-            (*sh).prop as *mut c_void,
-            new_size as usize * std::mem::size_of::<JSShapeProperty>(),
-        ) as *mut JSShapeProperty;
+        unsafe {
+            let new_prop = self.js_realloc_rt(
+                (*sh).prop as *mut c_void,
+                new_size as usize * std::mem::size_of::<JSShapeProperty>(),
+            ) as *mut JSShapeProperty;
 
-        if new_prop.is_null() {
-            return -1;
+            if new_prop.is_null() {
+                return -1;
+            }
+            (*sh).prop = new_prop;
+            (*sh).prop_size = new_size;
+            0
         }
-        (*sh).prop = new_prop;
-        (*sh).prop_size = new_size;
-        0
     }
 
     /// # Safety
     /// The caller must ensure that `sh` is a valid pointer to a JSShape that is not concurrently accessed,
     /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn add_property(&mut self, sh: *mut JSShape, atom: JSAtom, flags: u8) -> i32 {
-        // Check if property already exists
-        if let Some((idx, _)) = (*sh).find_own_property(atom) {
-            // Already exists
-            return idx;
-        }
+        unsafe {
+            // Check if property already exists
+            if let Some((idx, _)) = (*sh).find_own_property(atom) {
+                // Already exists
+                return idx;
+            }
 
-        if (*sh).prop_count >= (*sh).prop_size {
-            let new_size = if (*sh).prop_size == 0 { 4 } else { (*sh).prop_size * 3 / 2 };
-            if self.resize_shape(sh, new_size) < 0 {
-                return -1;
+            if (*sh).prop_count >= (*sh).prop_size {
+                let new_size = if (*sh).prop_size == 0 { 4 } else { (*sh).prop_size * 3 / 2 };
+                if self.resize_shape(sh, new_size) < 0 {
+                    return -1;
+                }
             }
-        }
 
-        // Enable hash if needed
-        if (*sh).prop_count >= 4 && (*sh).is_hashed == 0 {
-            (*sh).is_hashed = 1;
-            (*sh).prop_hash_mask = 15; // 16 - 1
-            let hash_size = 16;
-            (*sh).prop_hash = self.js_malloc_rt(hash_size * std::mem::size_of::<u32>()) as *mut u32;
-            if (*sh).prop_hash.is_null() {
-                return -1;
+            // Enable hash if needed
+            if (*sh).prop_count >= 4 && (*sh).is_hashed == 0 {
+                (*sh).is_hashed = 1;
+                (*sh).prop_hash_mask = 15; // 16 - 1
+                let hash_size = 16;
+                (*sh).prop_hash = self.js_malloc_rt(hash_size * std::mem::size_of::<u32>()) as *mut u32;
+                if (*sh).prop_hash.is_null() {
+                    return -1;
+                }
+                for i in 0..hash_size {
+                    *(*sh).prop_hash.add(i) = 0;
+                }
+                // Fill hash table with existing properties
+                for i in 0..(*sh).prop_count {
+                    let pr = (*sh).prop.add(i as usize);
+                    let h = ((*pr).atom) & (*sh).prop_hash_mask;
+                    (*pr).hash_next = *(*sh).prop_hash.add(h as usize);
+                    *(*sh).prop_hash.add(h as usize) = (i + 1) as u32;
+                }
             }
-            for i in 0..hash_size {
-                *(*sh).prop_hash.add(i) = 0;
-            }
-            // Fill hash table with existing properties
-            for i in 0..(*sh).prop_count {
-                let pr = (*sh).prop.add(i as usize);
-                let h = ((*pr).atom) & (*sh).prop_hash_mask;
+
+            let idx = (*sh).prop_count;
+            let pr = (*sh).prop.add(idx as usize);
+            (*pr).atom = atom;
+            (*pr).flags = flags;
+            if (*sh).is_hashed != 0 {
+                let h = (atom) & (*sh).prop_hash_mask;
                 (*pr).hash_next = *(*sh).prop_hash.add(h as usize);
-                *(*sh).prop_hash.add(h as usize) = (i + 1) as u32;
+                *(*sh).prop_hash.add(h as usize) = (idx + 1) as u32;
+            } else {
+                (*pr).hash_next = 0;
             }
-        }
+            (*sh).prop_count += 1;
 
-        let idx = (*sh).prop_count;
-        let pr = (*sh).prop.add(idx as usize);
-        (*pr).atom = atom;
-        (*pr).flags = flags;
-        if (*sh).is_hashed != 0 {
-            let h = (atom) & (*sh).prop_hash_mask;
-            (*pr).hash_next = *(*sh).prop_hash.add(h as usize);
-            *(*sh).prop_hash.add(h as usize) = (idx + 1) as u32;
-        } else {
-            (*pr).hash_next = 0;
+            idx
         }
-        (*sh).prop_count += 1;
-
-        idx
     }
 
     /// # Safety
     /// The caller must ensure that the runtime's memory allocation functions are properly set up,
     /// and that `ptr` is either null or a valid pointer previously returned by the allocator.
     pub unsafe fn js_realloc_rt(&mut self, ptr: *mut c_void, size: usize) -> *mut c_void {
-        if let Some(realloc_func) = self.mf.js_realloc {
-            realloc_func(&mut self.malloc_state, ptr, size)
-        } else {
-            std::ptr::null_mut()
+        unsafe {
+            if let Some(realloc_func) = self.mf.js_realloc {
+                realloc_func(&mut self.malloc_state, ptr, size)
+            } else {
+                std::ptr::null_mut()
+            }
         }
     }
 
     /// # Safety
     /// The caller must ensure that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_malloc_rt(&mut self, size: usize) -> *mut c_void {
-        if let Some(malloc_func) = self.mf.js_malloc {
-            malloc_func(&mut self.malloc_state, size)
-        } else {
-            std::ptr::null_mut()
+        unsafe {
+            if let Some(malloc_func) = self.mf.js_malloc {
+                malloc_func(&mut self.malloc_state, size)
+            } else {
+                std::ptr::null_mut()
+            }
         }
     }
 
@@ -589,8 +603,10 @@ impl JSRuntime {
     /// The caller must ensure that `ptr` is either null or a valid pointer previously returned by the allocator,
     /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_free_rt(&mut self, ptr: *mut c_void) {
-        if let Some(free_func) = self.mf.js_free {
-            free_func(&mut self.malloc_state, ptr);
+        unsafe {
+            if let Some(free_func) = self.mf.js_free {
+                free_func(&mut self.malloc_state, ptr);
+            }
         }
     }
 
@@ -598,68 +614,76 @@ impl JSRuntime {
     /// The caller must ensure that the runtime's memory allocation functions are properly set up
     /// and that the runtime is not concurrently accessed.
     pub unsafe fn init_atoms(&mut self) {
-        self.atom_hash_size = 16;
-        self.atom_count = 0;
-        self.atom_size = 16;
-        self.atom_count_resize = 8;
-        self.atom_hash = self.js_malloc_rt((self.atom_hash_size as usize) * std::mem::size_of::<u32>()) as *mut u32;
-        if self.atom_hash.is_null() {
-            return;
+        unsafe {
+            self.atom_hash_size = 16;
+            self.atom_count = 0;
+            self.atom_size = 16;
+            self.atom_count_resize = 8;
+            self.atom_hash = self.js_malloc_rt((self.atom_hash_size as usize) * std::mem::size_of::<u32>()) as *mut u32;
+            if self.atom_hash.is_null() {
+                return;
+            }
+            for i in 0..self.atom_hash_size {
+                *self.atom_hash.offset(i as isize) = 0;
+            }
+            self.atom_array =
+                self.js_malloc_rt((self.atom_size as usize) * std::mem::size_of::<*mut JSAtomStruct>()) as *mut *mut JSAtomStruct;
+            if self.atom_array.is_null() {
+                self.js_free_rt(self.atom_hash as *mut c_void);
+                self.atom_hash = std::ptr::null_mut();
+                return;
+            }
+            for i in 0..self.atom_size {
+                *self.atom_array.offset(i as isize) = std::ptr::null_mut();
+            }
+            self.atom_free_index = 0;
         }
-        for i in 0..self.atom_hash_size {
-            *self.atom_hash.offset(i as isize) = 0;
-        }
-        self.atom_array = self.js_malloc_rt((self.atom_size as usize) * std::mem::size_of::<*mut JSAtomStruct>()) as *mut *mut JSAtomStruct;
-        if self.atom_array.is_null() {
-            self.js_free_rt(self.atom_hash as *mut c_void);
-            self.atom_hash = std::ptr::null_mut();
-            return;
-        }
-        for i in 0..self.atom_size {
-            *self.atom_array.offset(i as isize) = std::ptr::null_mut();
-        }
-        self.atom_free_index = 0;
     }
 
     /// # Safety
     /// The caller must ensure that `proto` is either null or a valid pointer to a JSObject,
     /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_new_shape(&mut self, proto: *mut JSObject) -> *mut JSShape {
-        let sh = self.js_malloc_rt(std::mem::size_of::<JSShape>()) as *mut JSShape;
-        if sh.is_null() {
-            return std::ptr::null_mut();
+        unsafe {
+            let sh = self.js_malloc_rt(std::mem::size_of::<JSShape>()) as *mut JSShape;
+            if sh.is_null() {
+                return std::ptr::null_mut();
+            }
+            (*sh).header.ref_count = 1;
+            (*sh).header.gc_obj_type = 0; // JS_GC_OBJ_TYPE_SHAPE
+            (*sh).header.mark = 0;
+            (*sh).header.dummy0 = 0;
+            (*sh).header.dummy1 = 0;
+            (*sh).header.dummy2 = 0;
+            (*sh).header.link.init();
+            (*sh).is_hashed = 0;
+            (*sh).has_small_array_index = 0;
+            (*sh).hash = 0;
+            (*sh).prop_hash_mask = 0;
+            (*sh).prop_size = 0;
+            (*sh).prop_count = 0;
+            (*sh).deleted_prop_count = 0;
+            (*sh).prop = std::ptr::null_mut();
+            (*sh).prop_hash = std::ptr::null_mut();
+            (*sh).proto = proto;
+            sh
         }
-        (*sh).header.ref_count = 1;
-        (*sh).header.gc_obj_type = 0; // JS_GC_OBJ_TYPE_SHAPE
-        (*sh).header.mark = 0;
-        (*sh).header.dummy0 = 0;
-        (*sh).header.dummy1 = 0;
-        (*sh).header.dummy2 = 0;
-        (*sh).header.link.init();
-        (*sh).is_hashed = 0;
-        (*sh).has_small_array_index = 0;
-        (*sh).hash = 0;
-        (*sh).prop_hash_mask = 0;
-        (*sh).prop_size = 0;
-        (*sh).prop_count = 0;
-        (*sh).prop = std::ptr::null_mut();
-        (*sh).prop_hash = std::ptr::null_mut();
-        (*sh).proto = proto;
-        sh
     }
 
     /// # Safety
     /// The caller must ensure that `sh` is either null or a valid pointer to a JSShape previously allocated by this runtime,
     /// and that the runtime's memory allocation functions are properly set up.
     pub unsafe fn js_free_shape(&mut self, sh: *mut JSShape) {
-        if !sh.is_null() {
-            if !(*sh).prop.is_null() {
-                self.js_free_rt((*sh).prop as *mut c_void);
+        unsafe {
+            if !sh.is_null() {
+                if !(*sh).prop.is_null() {
+                    self.js_free_rt((*sh).prop as *mut c_void);
+                }
+                if !(*sh).prop_hash.is_null() {
+                    self.js_free_rt((*sh).prop_hash as *mut c_void);
+                }
+                self.js_free_rt(sh as *mut c_void);
             }
-            if !(*sh).prop_hash.is_null() {
-                self.js_free_rt((*sh).prop_hash as *mut c_void);
-            }
-            self.js_free_rt(sh as *mut c_void);
         }
     }
 }
@@ -670,14 +694,14 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     if this_obj.tag != JS_TAG_OBJECT as i64 {
         return -1; // TypeError
     }
-    let p = this_obj.u.ptr as *mut JSObject;
-    let sh = (*p).shape;
+    let p = unsafe { this_obj.u.ptr } as *mut JSObject;
+    let sh = unsafe { (*p).shape };
 
     // Add property to shape
     // Note: In real QuickJS, we might need to clone shape if it is shared
     // For now, assume shape is unique to object or we modify it in place (dangerous if shared)
 
-    let idx = (*(*ctx).rt).add_property(sh, prop, flags as u8);
+    let idx = unsafe { (*(*ctx).rt).add_property(sh, prop, flags as u8) };
     if idx < 0 {
         return -1;
     }
@@ -706,35 +730,37 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     // It seems we assume it matches shape's prop_count or prop_size?
 
     // Let's implement a simple resize for object prop
-    let old_prop = (*p).prop;
-    let new_prop = (*(*ctx).rt).js_realloc_rt(
-        (*p).prop as *mut c_void,
-        ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>(),
-    ) as *mut JSProperty;
+    let old_prop = unsafe { (*p).prop };
+    let new_prop = unsafe {
+        (*(*ctx).rt).js_realloc_rt(
+            (*p).prop as *mut c_void,
+            ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>(),
+        ) as *mut JSProperty
+    };
 
     if new_prop.is_null() {
         return -1;
     }
-    (*p).prop = new_prop;
+    unsafe { (*p).prop = new_prop };
     // If the prop array was just created, zero-initialize it to avoid reading
     // uninitialized JSProperty values later.
     if old_prop.is_null() && !new_prop.is_null() {
-        let size_bytes = ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>();
-        std::ptr::write_bytes(new_prop as *mut u8, 0, size_bytes);
+        let size_bytes = unsafe { ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>() };
+        unsafe { std::ptr::write_bytes(new_prop as *mut u8, 0, size_bytes) };
     }
 
     // Set value
-    let pr = (*p).prop.offset(idx as isize);
+    let pr = unsafe { (*p).prop.offset(idx as isize) };
     // If replacing an existing value, free it
-    let old_val = (*pr).u.value;
+    let old_val = unsafe { (*pr).u.value };
     if old_val.has_ref_count() {
-        JS_FreeValue((*ctx).rt, old_val);
+        unsafe { JS_FreeValue((*ctx).rt, old_val) };
     }
     // Duplicate incoming value if it's ref-counted
     if val.has_ref_count() {
-        JS_DupValue((*ctx).rt, val);
+        unsafe { JS_DupValue((*ctx).rt, val) };
     }
-    (*pr).u.value = val;
+    unsafe { (*pr).u.value = val };
 
     1
 }
@@ -744,65 +770,67 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
 /// The caller must ensure that the returned runtime is properly freed with JS_FreeRuntime.
 pub unsafe fn JS_NewRuntime() -> *mut JSRuntime {
     unsafe extern "C" fn my_malloc(_state: *mut JSMallocState, size: usize) -> *mut c_void {
-        libc::malloc(size)
+        unsafe { libc::malloc(size) }
     }
     unsafe extern "C" fn my_free(_state: *mut JSMallocState, ptr: *mut c_void) {
-        libc::free(ptr);
+        unsafe { libc::free(ptr) };
     }
     unsafe extern "C" fn my_realloc(_state: *mut JSMallocState, ptr: *mut c_void, size: usize) -> *mut c_void {
-        libc::realloc(ptr, size)
+        unsafe { libc::realloc(ptr, size) }
     }
 
-    let rt = libc::malloc(std::mem::size_of::<JSRuntime>()) as *mut JSRuntime;
-    if rt.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let rt = libc::malloc(std::mem::size_of::<JSRuntime>()) as *mut JSRuntime;
+        if rt.is_null() {
+            return std::ptr::null_mut();
+        }
+
+        // Initialize malloc functions
+        (*rt).mf.js_malloc = Some(my_malloc);
+        (*rt).mf.js_free = Some(my_free);
+        (*rt).mf.js_realloc = Some(my_realloc);
+        (*rt).mf.js_malloc_usable_size = None;
+
+        (*rt).malloc_state = JSMallocState {
+            malloc_count: 0,
+            malloc_size: 0,
+            malloc_limit: 0,
+            opaque: std::ptr::null_mut(),
+        };
+
+        (*rt).rt_info = std::ptr::null();
+
+        // Initialize atoms
+        (*rt).atom_hash_size = 0;
+        (*rt).atom_count = 0;
+        (*rt).atom_size = 0;
+        (*rt).atom_count_resize = 0;
+        (*rt).atom_hash = std::ptr::null_mut();
+        (*rt).atom_array = std::ptr::null_mut();
+        (*rt).atom_free_index = 0;
+
+        (*rt).class_count = 0;
+        (*rt).class_array = std::ptr::null_mut();
+
+        (*rt).context_list.init();
+        (*rt).gc_obj_list.init();
+        (*rt).gc_zero_ref_count_list.init();
+        (*rt).tmp_obj_list.init();
+        (*rt).gc_phase = 0;
+        (*rt).malloc_gc_threshold = 0;
+        (*rt).weakref_list.init();
+
+        (*rt).shape_hash_bits = 0;
+        (*rt).shape_hash_size = 0;
+        (*rt).shape_hash_count = 0;
+        (*rt).shape_hash = std::ptr::null_mut();
+
+        (*rt).user_opaque = std::ptr::null_mut();
+
+        (*rt).init_atoms();
+
+        rt
     }
-
-    // Initialize malloc functions
-    (*rt).mf.js_malloc = Some(my_malloc);
-    (*rt).mf.js_free = Some(my_free);
-    (*rt).mf.js_realloc = Some(my_realloc);
-    (*rt).mf.js_malloc_usable_size = None;
-
-    (*rt).malloc_state = JSMallocState {
-        malloc_count: 0,
-        malloc_size: 0,
-        malloc_limit: 0,
-        opaque: std::ptr::null_mut(),
-    };
-
-    (*rt).rt_info = std::ptr::null();
-
-    // Initialize atoms
-    (*rt).atom_hash_size = 0;
-    (*rt).atom_count = 0;
-    (*rt).atom_size = 0;
-    (*rt).atom_count_resize = 0;
-    (*rt).atom_hash = std::ptr::null_mut();
-    (*rt).atom_array = std::ptr::null_mut();
-    (*rt).atom_free_index = 0;
-
-    (*rt).class_count = 0;
-    (*rt).class_array = std::ptr::null_mut();
-
-    (*rt).context_list.init();
-    (*rt).gc_obj_list.init();
-    (*rt).gc_zero_ref_count_list.init();
-    (*rt).tmp_obj_list.init();
-    (*rt).gc_phase = 0;
-    (*rt).malloc_gc_threshold = 0;
-    (*rt).weakref_list.init();
-
-    (*rt).shape_hash_bits = 0;
-    (*rt).shape_hash_size = 0;
-    (*rt).shape_hash_count = 0;
-    (*rt).shape_hash = std::ptr::null_mut();
-
-    (*rt).user_opaque = std::ptr::null_mut();
-
-    (*rt).init_atoms();
-
-    rt
 }
 
 /// # Safety
@@ -812,58 +840,60 @@ pub unsafe fn JS_FreeRuntime(rt: *mut JSRuntime) {
     if !rt.is_null() {
         // Free allocated resources
         // For now, just free the rt
-        libc::free(rt as *mut c_void);
+        unsafe { libc::free(rt as *mut c_void) };
     }
 }
 
 /// # Safety
 /// The caller must ensure that `rt` is a valid pointer to a JSRuntime, and that the context is properly freed with JS_FreeContext.
 pub unsafe fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext {
-    let ctx = (*rt).js_malloc_rt(std::mem::size_of::<JSContext>()) as *mut JSContext;
-    if ctx.is_null() {
-        return std::ptr::null_mut();
+    unsafe {
+        let ctx = (*rt).js_malloc_rt(std::mem::size_of::<JSContext>()) as *mut JSContext;
+        if ctx.is_null() {
+            return std::ptr::null_mut();
+        }
+        (*ctx).header.ref_count = 1;
+        (*ctx).header.gc_obj_type = 0;
+        (*ctx).header.mark = 0;
+        (*ctx).header.dummy0 = 0;
+        (*ctx).header.dummy1 = 0;
+        (*ctx).header.dummy2 = 0;
+        (*ctx).header.link.init();
+        (*ctx).rt = rt;
+        (*ctx).link.init();
+        // Initialize other fields to zero/null
+        (*ctx).binary_object_count = 0;
+        (*ctx).binary_object_size = 0;
+        (*ctx).std_array_prototype = 0;
+        (*ctx).array_shape = std::ptr::null_mut();
+        (*ctx).arguments_shape = std::ptr::null_mut();
+        (*ctx).mapped_arguments_shape = std::ptr::null_mut();
+        (*ctx).regexp_shape = std::ptr::null_mut();
+        (*ctx).regexp_result_shape = std::ptr::null_mut();
+        (*ctx).class_proto = std::ptr::null_mut();
+        (*ctx).function_proto = JS_NULL;
+        (*ctx).function_ctor = JS_NULL;
+        (*ctx).array_ctor = JS_NULL;
+        (*ctx).regexp_ctor = JS_NULL;
+        (*ctx).promise_ctor = JS_NULL;
+        for i in 0..8 {
+            (*ctx).native_error_proto[i] = JS_NULL;
+        }
+        (*ctx).iterator_ctor = JS_NULL;
+        (*ctx).async_iterator_proto = JS_NULL;
+        (*ctx).array_proto_values = JS_NULL;
+        (*ctx).throw_type_error = JS_NULL;
+        (*ctx).eval_obj = JS_NULL;
+        (*ctx).global_obj = JS_NULL;
+        (*ctx).global_var_obj = JS_NULL;
+        (*ctx).random_state = 0;
+        (*ctx).interrupt_counter = 0;
+        (*ctx).loaded_modules.init();
+        (*ctx).compile_regexp = None;
+        (*ctx).eval_internal = None;
+        (*ctx).user_opaque = std::ptr::null_mut();
+        ctx
     }
-    (*ctx).header.ref_count = 1;
-    (*ctx).header.gc_obj_type = 0;
-    (*ctx).header.mark = 0;
-    (*ctx).header.dummy0 = 0;
-    (*ctx).header.dummy1 = 0;
-    (*ctx).header.dummy2 = 0;
-    (*ctx).header.link.init();
-    (*ctx).rt = rt;
-    (*ctx).link.init();
-    // Initialize other fields to zero/null
-    (*ctx).binary_object_count = 0;
-    (*ctx).binary_object_size = 0;
-    (*ctx).std_array_prototype = 0;
-    (*ctx).array_shape = std::ptr::null_mut();
-    (*ctx).arguments_shape = std::ptr::null_mut();
-    (*ctx).mapped_arguments_shape = std::ptr::null_mut();
-    (*ctx).regexp_shape = std::ptr::null_mut();
-    (*ctx).regexp_result_shape = std::ptr::null_mut();
-    (*ctx).class_proto = std::ptr::null_mut();
-    (*ctx).function_proto = JS_NULL;
-    (*ctx).function_ctor = JS_NULL;
-    (*ctx).array_ctor = JS_NULL;
-    (*ctx).regexp_ctor = JS_NULL;
-    (*ctx).promise_ctor = JS_NULL;
-    for i in 0..8 {
-        (*ctx).native_error_proto[i] = JS_NULL;
-    }
-    (*ctx).iterator_ctor = JS_NULL;
-    (*ctx).async_iterator_proto = JS_NULL;
-    (*ctx).array_proto_values = JS_NULL;
-    (*ctx).throw_type_error = JS_NULL;
-    (*ctx).eval_obj = JS_NULL;
-    (*ctx).global_obj = JS_NULL;
-    (*ctx).global_var_obj = JS_NULL;
-    (*ctx).random_state = 0;
-    (*ctx).interrupt_counter = 0;
-    (*ctx).loaded_modules.init();
-    (*ctx).compile_regexp = None;
-    (*ctx).eval_internal = None;
-    (*ctx).user_opaque = std::ptr::null_mut();
-    ctx
 }
 
 /// # Safety
@@ -871,90 +901,96 @@ pub unsafe fn JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext {
 /// and that no objects from this context are still in use.
 pub unsafe fn JS_FreeContext(ctx: *mut JSContext) {
     if !ctx.is_null() {
-        (*(*ctx).rt).js_free_rt(ctx as *mut c_void);
+        unsafe { (*(*ctx).rt).js_free_rt(ctx as *mut c_void) };
     }
 }
 
 /// # Safety
 /// The caller must ensure that `ctx` is a valid pointer to a JSContext.
 pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
-    let obj = (*(*ctx).rt).js_malloc_rt(std::mem::size_of::<JSObject>()) as *mut JSObject;
-    if obj.is_null() {
-        return JS_EXCEPTION;
+    unsafe {
+        let obj = (*(*ctx).rt).js_malloc_rt(std::mem::size_of::<JSObject>()) as *mut JSObject;
+        if obj.is_null() {
+            return JS_EXCEPTION;
+        }
+        (*obj).header.ref_count = 1;
+        (*obj).header.gc_obj_type = 0;
+        (*obj).header.mark = 0;
+        (*obj).header.dummy0 = 0;
+        (*obj).header.dummy1 = 0;
+        (*obj).header.dummy2 = 0;
+        (*obj).header.link.init();
+        (*obj).shape = (*(*ctx).rt).js_new_shape(std::ptr::null_mut());
+        if (*obj).shape.is_null() {
+            (*(*ctx).rt).js_free_rt(obj as *mut c_void);
+            return JS_EXCEPTION;
+        }
+        (*obj).prop = std::ptr::null_mut();
+        (*obj).first_weak_ref = std::ptr::null_mut();
+        JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
     }
-    (*obj).header.ref_count = 1;
-    (*obj).header.gc_obj_type = 0;
-    (*obj).header.mark = 0;
-    (*obj).header.dummy0 = 0;
-    (*obj).header.dummy1 = 0;
-    (*obj).header.dummy2 = 0;
-    (*obj).header.link.init();
-    (*obj).shape = (*(*ctx).rt).js_new_shape(std::ptr::null_mut());
-    if (*obj).shape.is_null() {
-        (*(*ctx).rt).js_free_rt(obj as *mut c_void);
-        return JS_EXCEPTION;
-    }
-    (*obj).prop = std::ptr::null_mut();
-    (*obj).first_weak_ref = std::ptr::null_mut();
-    JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
 }
 
 /// # Safety
 /// The caller must ensure that `ctx` is a valid pointer to a JSContext.
 pub unsafe fn JS_NewString(ctx: *mut JSContext, s: &[u16]) -> JSValue {
-    let utf8_str = utf16_to_utf8(s);
-    let len = utf8_str.len();
-    if len == 0 {
-        // Empty string
-        return JSValue::new_ptr(JS_TAG_STRING, std::ptr::null_mut());
+    unsafe {
+        let utf8_str = utf16_to_utf8(s);
+        let len = utf8_str.len();
+        if len == 0 {
+            // Empty string
+            return JSValue::new_ptr(JS_TAG_STRING, std::ptr::null_mut());
+        }
+        let str_size = std::mem::size_of::<JSString>() + len;
+        let p = (*(*ctx).rt).js_malloc_rt(str_size) as *mut JSString;
+        if p.is_null() {
+            return JS_EXCEPTION;
+        }
+        (*p).header.ref_count = 1;
+        (*p).len = len as u32;
+        (*p).hash = 0; // TODO: compute hash
+        (*p).hash_next = 0;
+        // Copy string data
+        let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
+        for (i, &byte) in utf8_str.as_bytes().iter().enumerate() {
+            *str_data.add(i) = byte;
+        }
+        JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
     }
-    let str_size = std::mem::size_of::<JSString>() + len;
-    let p = (*(*ctx).rt).js_malloc_rt(str_size) as *mut JSString;
-    if p.is_null() {
-        return JS_EXCEPTION;
-    }
-    (*p).header.ref_count = 1;
-    (*p).len = len as u32;
-    (*p).hash = 0; // TODO: compute hash
-    (*p).hash_next = 0;
-    // Copy string data
-    let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
-    for (i, &byte) in utf8_str.as_bytes().iter().enumerate() {
-        *str_data.add(i) = byte;
-    }
-    JSValue::new_ptr(JS_TAG_STRING, p as *mut c_void)
 }
 
 /// # Safety
 /// The caller must ensure that `ctx` is a valid pointer to a JSContext, and that `input` points to valid UTF-8 data of length `input_len`.
 pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, _filename: *const i8, _eval_flags: i32) -> JSValue {
-    if input_len == 0 {
-        return JS_UNDEFINED;
-    }
-    let s = std::slice::from_raw_parts(input as *const u8, input_len);
-    let script = std::str::from_utf8(s).unwrap_or("");
-
-    // Evaluate statements
-    match evaluate_script(script.trim()) {
-        Ok(Value::Number(num)) => JSValue::new_float64(num),
-        Ok(Value::String(s)) => JS_NewString(_ctx, &s),
-        Ok(Value::Boolean(b)) => {
-            if b {
-                JS_TRUE
-            } else {
-                JS_FALSE
-            }
+    unsafe {
+        if input_len == 0 {
+            return JS_UNDEFINED;
         }
-        Ok(Value::Undefined) => JS_UNDEFINED,
-        Ok(Value::Object(_)) => JS_UNDEFINED,          // For now
-        Ok(Value::Function(_)) => JS_UNDEFINED,        // For now
-        Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,   // For now
-        Ok(Value::ClassDefinition(_)) => JS_UNDEFINED, // For now
-        Ok(Value::Getter(_, _)) => JS_UNDEFINED,       // For now
-        Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
-        Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
-        Ok(Value::Promise(_)) => JS_UNDEFINED,         // For now
-        Err(_) => JS_UNDEFINED,
+        let s = std::slice::from_raw_parts(input as *const u8, input_len);
+        let script = std::str::from_utf8(s).unwrap_or("");
+
+        // Evaluate statements
+        match evaluate_script(script.trim()) {
+            Ok(Value::Number(num)) => JSValue::new_float64(num),
+            Ok(Value::String(s)) => JS_NewString(_ctx, &s),
+            Ok(Value::Boolean(b)) => {
+                if b {
+                    JS_TRUE
+                } else {
+                    JS_FALSE
+                }
+            }
+            Ok(Value::Undefined) => JS_UNDEFINED,
+            Ok(Value::Object(_)) => JS_UNDEFINED,          // For now
+            Ok(Value::Function(_)) => JS_UNDEFINED,        // For now
+            Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,   // For now
+            Ok(Value::ClassDefinition(_)) => JS_UNDEFINED, // For now
+            Ok(Value::Getter(_, _)) => JS_UNDEFINED,       // For now
+            Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
+            Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
+            Ok(Value::Promise(_)) => JS_UNDEFINED,         // For now
+            Err(_) => JS_UNDEFINED,
+        }
     }
 }
 
@@ -987,22 +1023,22 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     //   import * as NAME from "std";
     for line in script.lines() {
         let l = line.trim();
-        if l.starts_with("import * as") && l.contains("from") {
-            if let Some(as_idx) = l.find("as") {
-                if let Some(from_idx) = l.find("from") {
-                    let name_part = &l[as_idx + 2..from_idx].trim();
-                    let name = name_part.trim();
-                    if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                        let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                        let rest = &l[from_idx + start_quote + 1..];
-                        if let Some(end_quote) = rest.find(quote_char) {
-                            let module = &rest[..end_quote];
-                            if module == "std" {
-                                obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
-                            } else if module == "os" {
-                                obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
-                            }
-                        }
+        if l.starts_with("import * as")
+            && l.contains("from")
+            && let Some(as_idx) = l.find("as")
+            && let Some(from_idx) = l.find("from")
+        {
+            let name_part = &l[as_idx + 2..from_idx].trim();
+            let name = name_part.trim();
+            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
+                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
+                let rest = &l[from_idx + start_quote + 1..];
+                if let Some(end_quote) = rest.find(quote_char) {
+                    let module = &rest[..end_quote];
+                    if module == "std" {
+                        obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
+                    } else if module == "os" {
+                        obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
                     }
                 }
             }
@@ -1055,22 +1091,21 @@ pub fn evaluate_script_async<T: AsRef<str>>(script: T) -> Result<Value, JSError>
     //   import * as NAME from "std";
     for line in script.lines() {
         let l = line.trim();
-        if l.starts_with("import * as") && l.contains("from") {
-            if let Some(as_idx) = l.find("as") {
-                if let Some(from_idx) = l.find("from") {
-                    let name_part = &l[as_idx + 2..from_idx].trim();
-                    let name = name_part.trim();
-                    if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                        let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                        let rest = &l[from_idx + start_quote + 1..];
-                        if let Some(end_quote) = rest.find(quote_char) {
-                            let module = &rest[..end_quote];
-                            if module == "std" {
-                                obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
-                            } else if module == "os" {
-                                obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
-                            }
-                        }
+        if l.starts_with("import * as")
+            && l.contains("from")
+            && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
+        {
+            let name_part = &l[as_idx + 2..from_idx].trim();
+            let name = name_part.trim();
+            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
+                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
+                let rest = &l[from_idx + start_quote + 1..];
+                if let Some(end_quote) = rest.find(quote_char) {
+                    let module = &rest[..end_quote];
+                    if module == "std" {
+                        obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
+                    } else if module == "os" {
+                        obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
                     }
                 }
             }
@@ -1083,24 +1118,23 @@ pub fn evaluate_script_async<T: AsRef<str>>(script: T) -> Result<Value, JSError>
     match evaluate_statements(&env, &statements) {
         Ok(v) => {
             // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
-            if let Value::Object(obj) = &v {
-                if let Some(promise_val_rc) = obj_get_value(obj, "__promise")? {
-                    if let Value::Promise(promise) = &*promise_val_rc.borrow() {
-                        // Run the event loop until the promise is resolved
-                        loop {
-                            run_event_loop()?;
-                            let promise_borrow = promise.borrow();
-                            match &promise_borrow.state {
-                                PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                                PromiseState::Rejected(reason) => {
-                                    return Err(JSError::EvaluationError {
-                                        message: format!("Promise rejected: {:?}", reason),
-                                    });
-                                }
-                                PromiseState::Pending => {
-                                    // Continue running the event loop
-                                }
-                            }
+            if let Value::Object(obj) = &v
+                && let Some(promise_val_rc) = obj_get_value(obj, "__promise")?
+                && let Value::Promise(promise) = &*promise_val_rc.borrow()
+            {
+                // Run the event loop until the promise is resolved
+                loop {
+                    run_event_loop()?;
+                    let promise_borrow = promise.borrow();
+                    match &promise_borrow.state {
+                        PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                        PromiseState::Rejected(reason) => {
+                            return Err(JSError::EvaluationError {
+                                message: format!("Promise rejected: {:?}", reason),
+                            });
+                        }
+                        PromiseState::Pending => {
+                            // Continue running the event loop
                         }
                     }
                 }
@@ -1645,7 +1679,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     false
                 };
 
-                if let Some(Token::Identifier(ref method_name)) = tokens.first() {
+                if let Some(Token::Identifier(method_name)) = tokens.first() {
                     let method_name = method_name.clone();
                     if method_name == "constructor" {
                         tokens.remove(0);
@@ -1755,10 +1789,10 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     }
     let expr = parse_expression(tokens)?;
     // Check if this is an assignment expression
-    if let Expr::Assign(target, value) = &expr {
-        if let Expr::Var(name) = target.as_ref() {
-            return Ok(Statement::Assign(name.clone(), *value.clone()));
-        }
+    if let Expr::Assign(target, value) = &expr
+        && let Expr::Var(name) = target.as_ref()
+    {
+        return Ok(Statement::Assign(name.clone(), *value.clone()));
     }
     Ok(Statement::Expr(expr))
 }
@@ -2496,22 +2530,22 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 }
                 Value::Object(obj) => {
                     // Check if this is a Promise object with __promise property
-                    if let Some(promise_rc) = obj_get_value(&obj, "__promise")? {
-                        if let Value::Promise(promise) = promise_rc.borrow().clone() {
-                            // Wait for the promise to resolve by running the event loop
-                            loop {
-                                run_event_loop()?;
-                                let promise_borrow = promise.borrow();
-                                match &promise_borrow.state {
-                                    PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                                    PromiseState::Rejected(reason) => {
-                                        return Err(JSError::EvaluationError {
-                                            message: format!("Promise rejected: {:?}", reason),
-                                        });
-                                    }
-                                    PromiseState::Pending => {
-                                        // Continue running the event loop
-                                    }
+                    if let Some(promise_rc) = obj_get_value(&obj, "__promise")?
+                        && let Value::Promise(promise) = promise_rc.borrow().clone()
+                    {
+                        // Wait for the promise to resolve by running the event loop
+                        loop {
+                            run_event_loop()?;
+                            let promise_borrow = promise.borrow();
+                            match &promise_borrow.state {
+                                PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                                PromiseState::Rejected(reason) => {
+                                    return Err(JSError::EvaluationError {
+                                        message: format!("Promise rejected: {:?}", reason),
+                                    });
+                                }
+                                PromiseState::Pending => {
+                                    // Continue running the event loop
                                 }
                             }
                         }
@@ -2671,7 +2705,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid operands for +=".to_string(),
-            })
+            });
         }
     };
     let assignment_expr = match &result {
@@ -2692,7 +2726,7 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid operands for -=".to_string(),
-            })
+            });
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2709,7 +2743,7 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid operands for *=".to_string(),
-            })
+            });
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2733,7 +2767,7 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid operands for /=".to_string(),
-            })
+            });
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2757,7 +2791,7 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid operands for %=".to_string(),
-            })
+            });
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2817,7 +2851,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Increment operand must be a number".to_string(),
-            })
+            });
         }
     };
     // Assign back
@@ -2871,7 +2905,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Decrement operand must be a number".to_string(),
-            })
+            });
         }
     };
     // Assign back
@@ -2926,7 +2960,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Increment operand must be a number".to_string(),
-            })
+            });
         }
     };
     // Assign back
@@ -2981,7 +3015,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Decrement operand must be a number".to_string(),
-            })
+            });
         }
     };
     // Assign back
@@ -3322,10 +3356,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods
-        if let Expr::Var(var_name) = &**obj_expr {
-            if var_name == "Array" {
-                return crate::js_array::handle_array_static_method(method_name, args, env);
-            }
+        if let Expr::Var(var_name) = &**obj_expr
+            && var_name == "Array"
+        {
+            return crate::js_array::handle_array_static_method(method_name, args, env);
         }
 
         let obj_val = evaluate_expr(env, obj_expr)?;
@@ -3507,10 +3541,10 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods
-        if let Expr::Var(var_name) = &**obj_expr {
-            if var_name == "Array" {
-                return crate::js_array::handle_array_static_method(method_name, args, env);
-            }
+        if let Expr::Var(var_name) = &**obj_expr
+            && var_name == "Array"
+        {
+            return crate::js_array::handle_array_static_method(method_name, args, env);
         }
 
         let obj_val = evaluate_expr(env, obj_expr)?;
@@ -4156,25 +4190,25 @@ pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Resul
 //   the caller can decide what to do with the updated object value.
 pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Value) -> Result<Option<Value>, JSError> {
     // Fast path: obj_expr is a variable that we can mutate in-place in env
-    if let Expr::Var(varname) = obj_expr {
-        if let Some(rc_val) = env_get(env, varname) {
-            let mut borrowed = rc_val.borrow_mut();
-            if let Value::Object(ref mut map) = *borrowed {
-                // Special-case `__proto__` assignment: set the prototype
-                if prop == "__proto__" {
-                    if let Value::Object(proto_map) = val {
-                        map.borrow_mut().prototype = Some(proto_map);
-                        return Ok(None);
-                    } else {
-                        // Non-object assigned to __proto__: ignore or set to None
-                        map.borrow_mut().prototype = None;
-                        return Ok(None);
-                    }
+    if let Expr::Var(varname) = obj_expr
+        && let Some(rc_val) = env_get(env, varname)
+    {
+        let mut borrowed = rc_val.borrow_mut();
+        if let Value::Object(ref mut map) = *borrowed {
+            // Special-case `__proto__` assignment: set the prototype
+            if prop == "__proto__" {
+                if let Value::Object(proto_map) = val {
+                    map.borrow_mut().prototype = Some(proto_map);
+                    return Ok(None);
+                } else {
+                    // Non-object assigned to __proto__: ignore or set to None
+                    map.borrow_mut().prototype = None;
+                    return Ok(None);
                 }
-
-                obj_set_value(map, prop, val)?;
-                return Ok(None);
             }
+
+            obj_set_value(map, prop, val)?;
+            return Ok(None);
         }
     }
 
@@ -5615,7 +5649,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         _ => {
             return Err(JSError::EvaluationError {
                 message: "error".to_string(),
-            })
+            });
         }
     };
 
@@ -5837,7 +5871,7 @@ fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<Obj
 
             let value = if !tokens.is_empty() && matches!(tokens[0], Token::Colon) {
                 tokens.remove(0); // consume :
-                                  // Parse the value pattern
+                // Parse the value pattern
                 if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
                     DestructuringElement::NestedArray(parse_array_destructuring_pattern(tokens)?)
                 } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
@@ -5875,20 +5909,22 @@ fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<Obj
 /// # Safety
 /// The caller must ensure that `_ctx` is a valid pointer to a JSContext and `this_obj` is a valid JSValue.
 pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom) -> JSValue {
-    if this_obj.tag != JS_TAG_OBJECT as i64 {
-        return JS_UNDEFINED;
-    }
-    let p = this_obj.u.ptr as *mut JSObject;
-    let sh = (*p).shape;
-    if let Some((idx, _)) = (*sh).find_own_property(prop) {
-        let prop_val = (*(*p).prop.offset(idx as isize)).u.value;
-        // Duplicate returned value when it's ref-counted so caller owns a reference
-        if prop_val.has_ref_count() {
-            JS_DupValue((*_ctx).rt, prop_val);
+    unsafe {
+        if this_obj.tag != JS_TAG_OBJECT as i64 {
+            return JS_UNDEFINED;
         }
-        prop_val
-    } else {
-        JS_UNDEFINED
+        let p = this_obj.u.ptr as *mut JSObject;
+        let sh = (*p).shape;
+        if let Some((idx, _)) = (*sh).find_own_property(prop) {
+            let prop_val = (*(*p).prop.offset(idx as isize)).u.value;
+            // Duplicate returned value when it's ref-counted so caller owns a reference
+            if prop_val.has_ref_count() {
+                JS_DupValue((*_ctx).rt, prop_val);
+            }
+            prop_val
+        } else {
+            JS_UNDEFINED
+        }
     }
 }
 
@@ -5898,11 +5934,13 @@ pub unsafe fn JS_GetProperty(_ctx: *mut JSContext, this_obj: JSValue, prop: JSAt
 /// # Safety
 /// The caller must ensure that `v` is a valid JSValue and `_rt` is a valid JSRuntime pointer.
 pub unsafe fn JS_DupValue(_rt: *mut JSRuntime, v: JSValue) {
-    if v.has_ref_count() {
-        let p = v.get_ptr();
-        if !p.is_null() {
-            let header = p as *mut JSRefCountHeader;
-            (*header).ref_count += 1;
+    unsafe {
+        if v.has_ref_count() {
+            let p = v.get_ptr();
+            if !p.is_null() {
+                let header = p as *mut JSRefCountHeader;
+                (*header).ref_count += 1;
+            }
         }
     }
 }
@@ -5910,105 +5948,113 @@ pub unsafe fn JS_DupValue(_rt: *mut JSRuntime, v: JSValue) {
 /// # Safety
 /// The caller must ensure that `rt` is a valid JSRuntime pointer and `v` is a valid JSValue.
 pub unsafe fn JS_FreeValue(rt: *mut JSRuntime, v: JSValue) {
-    if v.has_ref_count() {
-        let p = v.get_ptr();
-        if p.is_null() {
-            return;
-        }
-        let header = p as *mut JSRefCountHeader;
-        (*header).ref_count -= 1;
-        if (*header).ref_count > 0 {
-            return;
-        }
-        // ref_count reached zero: dispatch based on tag to proper finalizer
-        match v.get_tag() {
-            x if x == JS_TAG_STRING => {
-                js_free_string(rt, v);
+    unsafe {
+        if v.has_ref_count() {
+            let p = v.get_ptr();
+            if p.is_null() {
+                return;
             }
-            x if x == JS_TAG_OBJECT => {
-                js_free_object(rt, v);
+            let header = p as *mut JSRefCountHeader;
+            (*header).ref_count -= 1;
+            if (*header).ref_count > 0 {
+                return;
             }
-            x if x == JS_TAG_FUNCTION_BYTECODE => {
-                js_free_function_bytecode(rt, v);
-            }
-            x if x == JS_TAG_SYMBOL => {
-                js_free_symbol(rt, v);
-            }
-            x if x == JS_TAG_BIG_INT => {
-                js_free_bigint(rt, v);
-            }
-            x if x == JS_TAG_MODULE => {
-                js_free_module(rt, v);
-            }
-            // For other heap types, do a default free of the pointer
-            _ => {
-                (*rt).js_free_rt(p);
+            // ref_count reached zero: dispatch based on tag to proper finalizer
+            match v.get_tag() {
+                x if x == JS_TAG_STRING => {
+                    js_free_string(rt, v);
+                }
+                x if x == JS_TAG_OBJECT => {
+                    js_free_object(rt, v);
+                }
+                x if x == JS_TAG_FUNCTION_BYTECODE => {
+                    js_free_function_bytecode(rt, v);
+                }
+                x if x == JS_TAG_SYMBOL => {
+                    js_free_symbol(rt, v);
+                }
+                x if x == JS_TAG_BIG_INT => {
+                    js_free_bigint(rt, v);
+                }
+                x if x == JS_TAG_MODULE => {
+                    js_free_module(rt, v);
+                }
+                // For other heap types, do a default free of the pointer
+                _ => {
+                    (*rt).js_free_rt(p);
+                }
             }
         }
     }
 }
 
 unsafe fn js_free_string(rt: *mut JSRuntime, v: JSValue) {
-    let p = v.get_ptr() as *mut JSString;
-    if p.is_null() {
-        return;
+    unsafe {
+        let p = v.get_ptr() as *mut JSString;
+        if p.is_null() {
+            return;
+        }
+        // The whole JSString allocation was allocated via js_malloc_rt
+        (*rt).js_free_rt(p as *mut c_void);
     }
-    // The whole JSString allocation was allocated via js_malloc_rt
-    (*rt).js_free_rt(p as *mut c_void);
 }
 
 unsafe fn js_free_object(rt: *mut JSRuntime, v: JSValue) {
-    let p = v.get_ptr() as *mut JSObject;
-    if p.is_null() {
-        return;
+    unsafe {
+        let p = v.get_ptr() as *mut JSObject;
+        if p.is_null() {
+            return;
+        }
+        // Free property array
+        if !(*p).prop.is_null() {
+            (*rt).js_free_rt((*p).prop as *mut c_void);
+            (*p).prop = std::ptr::null_mut();
+        }
+        // Free shape
+        if !(*p).shape.is_null() {
+            (*rt).js_free_shape((*p).shape);
+            (*p).shape = std::ptr::null_mut();
+        }
+        // Free object struct
+        (*rt).js_free_rt(p as *mut c_void);
     }
-    // Free property array
-    if !(*p).prop.is_null() {
-        (*rt).js_free_rt((*p).prop as *mut c_void);
-        (*p).prop = std::ptr::null_mut();
-    }
-    // Free shape
-    if !(*p).shape.is_null() {
-        (*rt).js_free_shape((*p).shape);
-        (*p).shape = std::ptr::null_mut();
-    }
-    // Free object struct
-    (*rt).js_free_rt(p as *mut c_void);
 }
 
 unsafe fn js_free_function_bytecode(rt: *mut JSRuntime, v: JSValue) {
-    let p = v.get_ptr() as *mut JSFunctionBytecode;
-    if p.is_null() {
-        return;
-    }
-    // Free bytecode buffer
-    if !(*p).byte_code_buf.is_null() {
-        (*rt).js_free_rt((*p).byte_code_buf as *mut c_void);
-        (*p).byte_code_buf = std::ptr::null_mut();
-    }
-    // Free pc2line buffer
-    if !(*p).pc2line_buf.is_null() {
-        (*rt).js_free_rt((*p).pc2line_buf as *mut c_void);
-        (*p).pc2line_buf = std::ptr::null_mut();
-    }
-    // Free source
-    if !(*p).source.is_null() {
-        (*rt).js_free_rt((*p).source as *mut c_void);
-        (*p).source = std::ptr::null_mut();
-    }
-    // Free cpool values
-    if !(*p).cpool.is_null() && (*p).cpool_count > 0 {
-        for i in 0..(*p).cpool_count as isize {
-            let val = *(*p).cpool.offset(i);
-            if val.has_ref_count() {
-                JS_FreeValue(rt, val);
-            }
+    unsafe {
+        let p = v.get_ptr() as *mut JSFunctionBytecode;
+        if p.is_null() {
+            return;
         }
-        (*rt).js_free_rt((*p).cpool as *mut c_void);
-        (*p).cpool = std::ptr::null_mut();
+        // Free bytecode buffer
+        if !(*p).byte_code_buf.is_null() {
+            (*rt).js_free_rt((*p).byte_code_buf as *mut c_void);
+            (*p).byte_code_buf = std::ptr::null_mut();
+        }
+        // Free pc2line buffer
+        if !(*p).pc2line_buf.is_null() {
+            (*rt).js_free_rt((*p).pc2line_buf as *mut c_void);
+            (*p).pc2line_buf = std::ptr::null_mut();
+        }
+        // Free source
+        if !(*p).source.is_null() {
+            (*rt).js_free_rt((*p).source as *mut c_void);
+            (*p).source = std::ptr::null_mut();
+        }
+        // Free cpool values
+        if !(*p).cpool.is_null() && (*p).cpool_count > 0 {
+            for i in 0..(*p).cpool_count as isize {
+                let val = *(*p).cpool.offset(i);
+                if val.has_ref_count() {
+                    JS_FreeValue(rt, val);
+                }
+            }
+            (*rt).js_free_rt((*p).cpool as *mut c_void);
+            (*p).cpool = std::ptr::null_mut();
+        }
+        // Finally free the struct
+        (*rt).js_free_rt(p as *mut c_void);
     }
-    // Finally free the struct
-    (*rt).js_free_rt(p as *mut c_void);
 }
 
 unsafe fn js_free_symbol(rt: *mut JSRuntime, v: JSValue) {
@@ -6018,7 +6064,7 @@ unsafe fn js_free_symbol(rt: *mut JSRuntime, v: JSValue) {
     }
     // Symbols typically store their name as a JSString or internal struct
     // For now, free the pointer directly. Add type-aware finalizer later.
-    (*rt).js_free_rt(p);
+    unsafe { (*rt).js_free_rt(p) };
 }
 
 unsafe fn js_free_bigint(rt: *mut JSRuntime, v: JSValue) {
@@ -6027,7 +6073,7 @@ unsafe fn js_free_bigint(rt: *mut JSRuntime, v: JSValue) {
         return;
     }
     // BigInt representation may be inline or heap-allocated. Here we free pointer.
-    (*rt).js_free_rt(p);
+    unsafe { (*rt).js_free_rt(p) };
 }
 
 unsafe fn js_free_module(rt: *mut JSRuntime, v: JSValue) {
@@ -6036,13 +6082,13 @@ unsafe fn js_free_module(rt: *mut JSRuntime, v: JSValue) {
         return;
     }
     // Module structure not modelled here; free pointer for now.
-    (*rt).js_free_rt(p);
+    unsafe { (*rt).js_free_rt(p) };
 }
 
 /// # Safety
 /// The caller must ensure that `ctx` is a valid JSContext pointer, `this_obj` is a valid JSValue, and `prop` is a valid JSAtom.
 pub unsafe fn JS_SetProperty(ctx: *mut JSContext, this_obj: JSValue, prop: JSAtom, val: JSValue) -> i32 {
-    JS_DefinePropertyValue(ctx, this_obj, prop, val, 0)
+    unsafe { JS_DefinePropertyValue(ctx, this_obj, prop, val, 0) }
 }
 
 impl JSRuntime {
@@ -6055,19 +6101,19 @@ impl JSRuntime {
         // Compute hash
         let mut h = 0u32;
         for i in 0..len {
-            h = h.wrapping_mul(31).wrapping_add(*name.add(i) as u32);
+            h = h.wrapping_mul(31).wrapping_add(unsafe { *name.add(i) } as u32);
         }
         // Find in hash table
         let hash_index = (h % self.atom_hash_size as u32) as i32;
-        let mut atom = *self.atom_hash.offset(hash_index as isize);
+        let mut atom = unsafe { *self.atom_hash.offset(hash_index as isize) };
         while atom != 0 {
-            let p = *self.atom_array.offset((atom - 1) as isize);
-            if (*p).len == len as u32 && (*p).hash == h {
+            let p = unsafe { *self.atom_array.offset((atom - 1) as isize) };
+            if unsafe { (*p).len == len as u32 && (*p).hash == h } {
                 // Check string
-                let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
+                let str_data = unsafe { (p as *mut u8).add(std::mem::size_of::<JSString>()) };
                 let mut equal = true;
                 for i in 0..len {
-                    if *str_data.add(i) != *name.add(i) {
+                    if unsafe { *str_data.add(i) != *name.add(i) } {
                         equal = false;
                         break;
                     }
@@ -6076,42 +6122,44 @@ impl JSRuntime {
                     return atom;
                 }
             }
-            atom = (*p).hash_next;
+            atom = unsafe { (*p).hash_next };
         }
         // Not found, create new
         if self.atom_count >= self.atom_size {
             let new_size = self.atom_size * 2;
-            let new_array = self.js_realloc_rt(
-                self.atom_array as *mut c_void,
-                (new_size as usize) * std::mem::size_of::<*mut JSAtomStruct>(),
-            ) as *mut *mut JSAtomStruct;
+            let new_array = unsafe {
+                self.js_realloc_rt(
+                    self.atom_array as *mut c_void,
+                    (new_size as usize) * std::mem::size_of::<*mut JSAtomStruct>(),
+                )
+            } as *mut *mut JSAtomStruct;
             if new_array.is_null() {
                 return 0;
             }
             self.atom_array = new_array;
             self.atom_size = new_size;
             for i in self.atom_count..new_size {
-                *self.atom_array.offset(i as isize) = std::ptr::null_mut();
+                unsafe { *self.atom_array.offset(i as isize) = std::ptr::null_mut() };
             }
         }
         // Allocate JSString
         let str_size = std::mem::size_of::<JSString>() + len;
-        let p = self.js_malloc_rt(str_size) as *mut JSString;
+        let p = unsafe { self.js_malloc_rt(str_size) } as *mut JSString;
         if p.is_null() {
             return 0;
         }
-        (*p).header.ref_count = 1;
-        (*p).len = len as u32;
-        (*p).hash = h;
-        (*p).hash_next = *self.atom_hash.offset(hash_index as isize);
+        unsafe { (*p).header.ref_count = 1 };
+        unsafe { (*p).len = len as u32 };
+        unsafe { (*p).hash = h };
+        unsafe { (*p).hash_next = *self.atom_hash.offset(hash_index as isize) };
         // Copy string
-        let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
+        let str_data = unsafe { (p as *mut u8).add(std::mem::size_of::<JSString>()) };
         for i in 0..len {
-            *str_data.add(i) = *name.add(i);
+            unsafe { *str_data.add(i) = *name.add(i) };
         }
         let new_atom = (self.atom_count + 1) as u32;
-        *self.atom_array.offset(self.atom_count as isize) = p;
-        *self.atom_hash.offset(hash_index as isize) = new_atom;
+        unsafe { *self.atom_array.offset(self.atom_count as isize) = p };
+        unsafe { *self.atom_hash.offset(hash_index as isize) = new_atom };
         self.atom_count += 1;
         new_atom
     }
@@ -6346,7 +6394,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
         None => {
             return Err(JSError::EvaluationError {
                 message: "Promise object missing internal promise".to_string(),
-            })
+            });
         }
     };
 
@@ -6355,7 +6403,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
         _ => {
             return Err(JSError::EvaluationError {
                 message: "Invalid promise object".to_string(),
-            })
+            });
         }
     };
 

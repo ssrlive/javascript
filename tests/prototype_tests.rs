@@ -1,4 +1,4 @@
-use javascript::{evaluate_script, Value};
+use javascript::{Value, evaluate_script};
 
 #[test]
 fn test_prototype_assignment() {

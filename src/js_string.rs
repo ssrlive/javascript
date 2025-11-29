@@ -1,6 +1,6 @@
 use crate::core::{
-    evaluate_expr, obj_set_value, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase,
-    utf16_to_uppercase, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value,
+    Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16, utf16_char_at, utf16_find, utf16_len,
+    utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
 };
 use crate::error::JSError;
 use crate::js_array::set_array_length;
@@ -338,11 +338,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         let pad_char = if args.len() >= 2 {
                             let pad_val = evaluate_expr(env, &args[1])?;
                             if let Value::String(pad_str) = pad_val {
-                                if !pad_str.is_empty() {
-                                    pad_str[0]
-                                } else {
-                                    ' ' as u16
-                                }
+                                if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
                             } else {
                                 ' ' as u16
                             }
@@ -377,11 +373,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         let pad_char = if args.len() >= 2 {
                             let pad_val = evaluate_expr(env, &args[1])?;
                             if let Value::String(pad_str) = pad_val {
-                                if !pad_str.is_empty() {
-                                    pad_str[0]
-                                } else {
-                                    ' ' as u16
-                                }
+                                if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
                             } else {
                                 ' ' as u16
                             }

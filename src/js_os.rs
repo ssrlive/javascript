@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{evaluate_expr, obj_set_value, utf16_to_utf8, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16, utf16_to_utf8};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use std::cell::RefCell;
@@ -23,7 +23,7 @@ fn get_next_os_file_id() -> u64 {
 fn get_parent_pid_windows() -> u32 {
     use windows_sys::Win32::Foundation::{CloseHandle, FALSE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, PROCESSENTRY32, Process32First, Process32Next, TH32CS_SNAPPROCESS,
     };
 
     let current_pid = std::process::id();
@@ -69,7 +69,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.open filename must be a string".to_string(),
-                            })
+                            });
                         }
                     };
                     log::trace!("os.open called with filename={} args={}", filename, args.len());
@@ -124,7 +124,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.close fd must be a number".to_string(),
-                            })
+                            });
                         }
                     };
                     let mut store = OS_FILE_STORE.lock().unwrap();
@@ -145,7 +145,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.read fd must be a number".to_string(),
-                            })
+                            });
                         }
                     };
                     let size = match size_val {
@@ -175,7 +175,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.write fd must be a number".to_string(),
-                            })
+                            });
                         }
                     };
                     let data = match data_val {
@@ -206,7 +206,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.seek fd must be a number".to_string(),
-                            })
+                            });
                         }
                     };
                     let offset = match offset_val {
@@ -241,7 +241,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.remove filename must be a string".to_string(),
-                            })
+                            });
                         }
                     };
                     match std::fs::remove_file(&filename) {
@@ -259,7 +259,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.mkdir dirname must be a string".to_string(),
-                            })
+                            });
                         }
                     };
                     match std::fs::create_dir(&dirname) {
@@ -277,7 +277,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => {
                             return Err(JSError::EvaluationError {
                                 message: "os.readdir dirname must be a string".to_string(),
-                            })
+                            });
                         }
                     };
                     match std::fs::read_dir(&dirname) {
@@ -305,10 +305,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {
-                if let Ok(path) = std::env::current_dir() {
-                    if let Some(path_str) = path.to_str() {
-                        return Ok(Value::String(utf8_to_utf16(path_str)));
-                    }
+                if let Ok(path) = std::env::current_dir()
+                    && let Some(path_str) = path.to_str()
+                {
+                    return Ok(Value::String(utf8_to_utf16(path_str)));
                 }
                 return Ok(Value::String(utf8_to_utf16("")));
             }
@@ -361,10 +361,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
-                    if let Some(parent) = path_obj.parent() {
-                        if let Some(parent_str) = parent.to_str() {
-                            return Ok(Value::String(utf8_to_utf16(parent_str)));
-                        }
+                    if let Some(parent) = path_obj.parent()
+                        && let Some(parent_str) = parent.to_str()
+                    {
+                        return Ok(Value::String(utf8_to_utf16(parent_str)));
                     }
                     return Ok(Value::String(utf8_to_utf16(".")));
                 }
@@ -378,10 +378,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
-                    if let Some(filename) = path_obj.file_name() {
-                        if let Some(filename_str) = filename.to_str() {
-                            return Ok(Value::String(utf8_to_utf16(filename_str)));
-                        }
+                    if let Some(filename) = path_obj.file_name()
+                        && let Some(filename_str) = filename.to_str()
+                    {
+                        return Ok(Value::String(utf8_to_utf16(filename_str)));
                     }
                     return Ok(Value::String(utf8_to_utf16("")));
                 }
@@ -395,10 +395,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
-                    if let Some(extension) = path_obj.extension() {
-                        if let Some(ext_str) = extension.to_str() {
-                            return Ok(Value::String(utf8_to_utf16(&format!(".{}", ext_str))));
-                        }
+                    if let Some(extension) = path_obj.extension()
+                        && let Some(ext_str) = extension.to_str()
+                    {
+                        return Ok(Value::String(utf8_to_utf16(&format!(".{}", ext_str))));
                     }
                     return Ok(Value::String(utf8_to_utf16("")));
                 }
@@ -411,10 +411,10 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
                     };
-                    if let Ok(canonical) = std::fs::canonicalize(&path) {
-                        if let Some(canonical_str) = canonical.to_str() {
-                            return Ok(Value::String(utf8_to_utf16(canonical_str)));
-                        }
+                    if let Ok(canonical) = std::fs::canonicalize(&path)
+                        && let Some(canonical_str) = canonical.to_str()
+                    {
+                        return Ok(Value::String(utf8_to_utf16(canonical_str)));
                     }
                     return Ok(Value::String(utf8_to_utf16(&path)));
                 }

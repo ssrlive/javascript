@@ -1,7 +1,7 @@
 use crate::{
     core::{
-        evaluate_expr, evaluate_statements, obj_get_value, obj_set_value, utf8_to_utf16, Expr, JSObjectData, JSObjectDataPtr, Statement,
-        Value,
+        Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value,
+        utf8_to_utf16,
     },
     error::JSError,
 };
@@ -30,24 +30,24 @@ pub struct ClassDefinition {
 pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Check if the object's prototype has a __class_def__ property
     // This means the object was created with 'new ClassName()'
-    if let Some(proto_val) = obj_get_value(obj, "__proto__")? {
-        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-            // Check if the prototype object has __class_def__
-            if let Some(class_def_val) = obj_get_value(proto_obj, "__class_def__")? {
-                if let Value::ClassDefinition(_) = *class_def_val.borrow() {
-                    return Ok(true);
-                }
-            }
+    if let Some(proto_val) = obj_get_value(obj, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        // Check if the prototype object has __class_def__
+        if let Some(class_def_val) = obj_get_value(proto_obj, "__class_def__")?
+            && let Value::ClassDefinition(_) = *class_def_val.borrow()
+        {
+            return Ok(true);
         }
     }
     Ok(false)
 }
 
 pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSError> {
-    if let Some(proto_val) = obj_get_value(class_obj, "__proto__")? {
-        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-            return Ok(proto_obj.clone());
-        }
+    if let Some(proto_val) = obj_get_value(class_obj, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        return Ok(proto_obj.clone());
     }
     Err(JSError::TypeError {
         message: "Prototype object not found".to_string(),
@@ -71,49 +71,49 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
     match constructor_val {
         Value::Object(class_obj) => {
             // Check if this is a class object
-            if let Some(class_def_val) = obj_get_value(&class_obj, "__class_def__")? {
-                if let Value::ClassDefinition(ref class_def) = *class_def_val.borrow() {
-                    // Create instance
-                    let instance = Rc::new(RefCell::new(JSObjectData::new()));
+            if let Some(class_def_val) = obj_get_value(&class_obj, "__class_def__")?
+                && let Value::ClassDefinition(ref class_def) = *class_def_val.borrow()
+            {
+                // Create instance
+                let instance = Rc::new(RefCell::new(JSObjectData::new()));
 
-                    // Set prototype
-                    if let Some(prototype_val) = obj_get_value(&class_obj, "prototype")? {
-                        obj_set_value(&instance, "__proto__", prototype_val.borrow().clone())?;
-                    }
-
-                    // Set instance properties
-                    for member in &class_def.members {
-                        if let ClassMember::Property(prop_name, value_expr) = member {
-                            let value = evaluate_expr(env, value_expr)?;
-                            obj_set_value(&instance, prop_name, value)?;
-                        }
-                    }
-
-                    // Call constructor if it exists
-                    for member in &class_def.members {
-                        if let ClassMember::Constructor(params, body) = member {
-                            // Create function environment with 'this' bound to instance
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-
-                            // Bind 'this' to the instance
-                            obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
-
-                            // Bind parameters
-                            for (i, param) in params.iter().enumerate() {
-                                if i < args.len() {
-                                    let arg_val = evaluate_expr(env, &args[i])?;
-                                    obj_set_value(&func_env, param, arg_val)?;
-                                }
-                            }
-
-                            // Execute constructor body
-                            evaluate_statements(&func_env, body)?;
-                            break;
-                        }
-                    }
-
-                    return Ok(Value::Object(instance));
+                // Set prototype
+                if let Some(prototype_val) = obj_get_value(&class_obj, "prototype")? {
+                    obj_set_value(&instance, "__proto__", prototype_val.borrow().clone())?;
                 }
+
+                // Set instance properties
+                for member in &class_def.members {
+                    if let ClassMember::Property(prop_name, value_expr) = member {
+                        let value = evaluate_expr(env, value_expr)?;
+                        obj_set_value(&instance, prop_name, value)?;
+                    }
+                }
+
+                // Call constructor if it exists
+                for member in &class_def.members {
+                    if let ClassMember::Constructor(params, body) = member {
+                        // Create function environment with 'this' bound to instance
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+
+                        // Bind 'this' to the instance
+                        obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
+
+                        // Bind parameters
+                        for (i, param) in params.iter().enumerate() {
+                            if i < args.len() {
+                                let arg_val = evaluate_expr(env, &args[i])?;
+                                obj_set_value(&func_env, param, arg_val)?;
+                            }
+                        }
+
+                        // Execute constructor body
+                        evaluate_statements(&func_env, body)?;
+                        break;
+                    }
+                }
+
+                return Ok(Value::Object(instance));
             }
         }
         Value::Closure(params, body, captured_env) => {
@@ -200,11 +200,11 @@ pub(crate) fn create_class_object(
         if let Some(parent_class_val) = obj_get_value(env, parent_class_name)? {
             if let Value::Object(parent_class_obj) = &*parent_class_val.borrow() {
                 // Get the parent class's prototype
-                if let Some(parent_proto_val) = obj_get_value(parent_class_obj, "prototype")? {
-                    if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                        // Set the child class prototype's __proto__ to parent prototype
-                        obj_set_value(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()))?;
-                    }
+                if let Some(parent_proto_val) = obj_get_value(parent_class_obj, "prototype")?
+                    && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
+                {
+                    // Set the child class prototype's __proto__ to parent prototype
+                    obj_set_value(&prototype_obj, "__proto__", Value::Object(parent_proto_obj.clone()))?;
                 }
             }
         } else {
@@ -360,19 +360,19 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
 
 pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Get the prototype of the constructor
-    if let Some(constructor_proto) = obj_get_value(constructor, "prototype")? {
-        if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
-            // Check if obj's prototype chain contains constructor's prototype
-            let mut current_proto = obj_get_value(obj, "__proto__")?;
-            while let Some(proto_val) = current_proto {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    if Rc::ptr_eq(proto_obj, constructor_proto_obj) {
-                        return Ok(true);
-                    }
-                    current_proto = obj_get_value(proto_obj, "__proto__")?;
-                } else {
-                    break;
+    if let Some(constructor_proto) = obj_get_value(constructor, "prototype")?
+        && let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow()
+    {
+        // Check if obj's prototype chain contains constructor's prototype
+        let mut current_proto = obj_get_value(obj, "__proto__")?;
+        while let Some(proto_val) = current_proto {
+            if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                if Rc::ptr_eq(proto_obj, constructor_proto_obj) {
+                    return Ok(true);
                 }
+                current_proto = obj_get_value(proto_obj, "__proto__")?;
+            } else {
+                break;
             }
         }
     }
@@ -382,16 +382,14 @@ pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPt
 pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // super refers to the parent class prototype
     // We need to find it from the current class context
-    if let Some(this_val) = obj_get_value(env, "this")? {
-        if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    // Get the parent prototype from the current prototype's __proto__
-                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
-                        return Ok(parent_proto_val.borrow().clone());
-                    }
-                }
-            }
+    if let Some(this_val) = obj_get_value(env, "this")?
+        && let Value::Object(instance) = &*this_val.borrow()
+        && let Some(proto_val) = obj_get_value(instance, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        // Get the parent prototype from the current prototype's __proto__
+        if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
+            return Ok(parent_proto_val.borrow().clone());
         }
     }
     Err(JSError::EvaluationError {
@@ -401,40 +399,38 @@ pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
 
 pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
     // super() calls the parent constructor
-    if let Some(this_val) = obj_get_value(env, "this")? {
-        if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
-                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                            // Find the parent class constructor
-                            if let Some(parent_class_def_val) = obj_get_value(parent_proto_obj, "__class_def__")? {
-                                if let Value::ClassDefinition(ref parent_class_def) = *parent_class_def_val.borrow() {
-                                    // Call parent constructor
-                                    for member in &parent_class_def.members {
-                                        if let ClassMember::Constructor(params, body) = member {
-                                            // Create function environment with 'this' bound to instance
-                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+    if let Some(this_val) = obj_get_value(env, "this")?
+        && let Value::Object(instance) = &*this_val.borrow()
+        && let Some(proto_val) = obj_get_value(instance, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        // Get the parent prototype
+        if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")?
+            && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
+        {
+            // Find the parent class constructor
+            if let Some(parent_class_def_val) = obj_get_value(parent_proto_obj, "__class_def__")?
+                && let Value::ClassDefinition(ref parent_class_def) = *parent_class_def_val.borrow()
+            {
+                // Call parent constructor
+                for member in &parent_class_def.members {
+                    if let ClassMember::Constructor(params, body) = member {
+                        // Create function environment with 'this' bound to instance
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
-                                            // Bind 'this' to the instance
-                                            obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
+                        // Bind 'this' to the instance
+                        obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
-                                            // Bind parameters
-                                            for (i, param) in params.iter().enumerate() {
-                                                if i < args.len() {
-                                                    let arg_val = evaluate_expr(env, &args[i])?;
-                                                    obj_set_value(&func_env, param, arg_val)?;
-                                                }
-                                            }
-
-                                            // Execute parent constructor body
-                                            return evaluate_statements(&func_env, body);
-                                        }
-                                    }
-                                }
+                        // Bind parameters
+                        for (i, param) in params.iter().enumerate() {
+                            if i < args.len() {
+                                let arg_val = evaluate_expr(env, &args[i])?;
+                                obj_set_value(&func_env, param, arg_val)?;
                             }
                         }
+
+                        // Execute parent constructor body
+                        return evaluate_statements(&func_env, body);
                     }
                 }
             }
@@ -447,20 +443,18 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
 
 pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Result<Value, JSError> {
     // super.property accesses parent class properties
-    if let Some(this_val) = obj_get_value(env, "this")? {
-        if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
-                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                            // Look for property in parent prototype
-                            if let Some(prop_val) = obj_get_value(parent_proto_obj, prop)? {
-                                return Ok(prop_val.borrow().clone());
-                            }
-                        }
-                    }
-                }
+    if let Some(this_val) = obj_get_value(env, "this")?
+        && let Value::Object(instance) = &*this_val.borrow()
+        && let Some(proto_val) = obj_get_value(instance, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        // Get the parent prototype
+        if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")?
+            && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
+        {
+            // Look for property in parent prototype
+            if let Some(prop_val) = obj_get_value(parent_proto_obj, prop)? {
+                return Ok(prop_val.borrow().clone());
             }
         }
     }
@@ -471,42 +465,40 @@ pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Resu
 
 pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &[Expr]) -> Result<Value, JSError> {
     // super.method() calls parent class methods
-    if let Some(this_val) = obj_get_value(env, "this")? {
-        if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get_value(instance, "__proto__")? {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")? {
-                        if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
-                            // Look for method in parent prototype
-                            if let Some(method_val) = obj_get_value(parent_proto_obj, method)? {
-                                match &*method_val.borrow() {
-                                    Value::Closure(params, body, _captured_env) => {
-                                        // Create function environment with 'this' bound to instance
-                                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+    if let Some(this_val) = obj_get_value(env, "this")?
+        && let Value::Object(instance) = &*this_val.borrow()
+        && let Some(proto_val) = obj_get_value(instance, "__proto__")?
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        // Get the parent prototype
+        if let Some(parent_proto_val) = obj_get_value(proto_obj, "__proto__")?
+            && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
+        {
+            // Look for method in parent prototype
+            if let Some(method_val) = obj_get_value(parent_proto_obj, method)? {
+                match &*method_val.borrow() {
+                    Value::Closure(params, body, _captured_env) => {
+                        // Create function environment with 'this' bound to instance
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
-                                        // Bind 'this' to the instance
-                                        obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
+                        // Bind 'this' to the instance
+                        obj_set_value(&func_env, "this", Value::Object(instance.clone()))?;
 
-                                        // Bind parameters
-                                        for (i, param) in params.iter().enumerate() {
-                                            if i < args.len() {
-                                                let arg_val = evaluate_expr(env, &args[i])?;
-                                                obj_set_value(&func_env, param, arg_val)?;
-                                            }
-                                        }
-
-                                        // Execute method body
-                                        return evaluate_statements(&func_env, body);
-                                    }
-                                    _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: format!("'{}' is not a method in parent class", method),
-                                        });
-                                    }
-                                }
+                        // Bind parameters
+                        for (i, param) in params.iter().enumerate() {
+                            if i < args.len() {
+                                let arg_val = evaluate_expr(env, &args[i])?;
+                                obj_set_value(&func_env, param, arg_val)?;
                             }
                         }
+
+                        // Execute method body
+                        return evaluate_statements(&func_env, body);
+                    }
+                    _ => {
+                        return Err(JSError::EvaluationError {
+                            message: format!("'{}' is not a method in parent class", method),
+                        });
                     }
                 }
             }

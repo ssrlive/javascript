@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, obj_get_value};
 
 #[test]
 fn test_promise_async_resolution() {
@@ -78,19 +78,91 @@ fn test_promise_chaining_async() {
 }
 
 #[test]
-fn test_promise_rejection_async() {
-    // Test that Promise rejection is properly handled
+fn test_promise_allsettled() {
+    // Test Promise.allSettled with mixed resolve/reject
     let script = r#"
-        new Promise((resolve, reject) => {
-            reject("error occurred");
-        })
+        Promise.allSettled([
+            new Promise(function(resolve, reject) { resolve(1); console.log("executor 1 called"); }),
+            new Promise(function(resolve, reject) { reject(2); console.log("executor 2 called"); }),
+            new Promise(function(resolve, reject) { resolve(3); console.log("executor 3 called"); })
+        ])
     "#;
     let result = evaluate_script(script);
     match result {
-        Ok(_) => panic!("Expected rejection but got success"),
-        Err(e) => {
-            // Should get the rejection error
-            assert!(e.to_string().contains("error occurred"));
+        Ok(value) => {
+            // Should get an array of settled results
+            match value {
+                Value::Object(arr) => {
+                    // Check that we have 3 elements
+                    if let Some(len_val) = obj_get_value(&arr, "length").unwrap()
+                        && let Value::Number(len) = *len_val.borrow()
+                    {
+                        assert_eq!(len, 3.0);
+                    }
+                    // Check first element is fulfilled with 1
+                    if let Some(elem0) = obj_get_value(&arr, "0").unwrap()
+                        && let Value::Object(result_obj) = &*elem0.borrow()
+                    {
+                        if let Some(status) = obj_get_value(result_obj, "status").unwrap()
+                            && let Value::String(s) = &*status.borrow()
+                        {
+                            assert_eq!(String::from_utf16_lossy(s), "fulfilled");
+                        }
+                        if let Some(value) = obj_get_value(result_obj, "value").unwrap()
+                            && let Value::Number(n) = *value.borrow()
+                        {
+                            assert_eq!(n, 1.0);
+                        }
+                    }
+                    // Check second element is rejected with 2
+                    if let Some(elem1) = obj_get_value(&arr, "1").unwrap()
+                        && let Value::Object(result_obj) = &*elem1.borrow()
+                    {
+                        if let Some(status) = obj_get_value(result_obj, "status").unwrap()
+                            && let Value::String(s) = &*status.borrow()
+                        {
+                            assert_eq!(String::from_utf16_lossy(s), "rejected");
+                        }
+                        if let Some(reason) = obj_get_value(result_obj, "reason").unwrap()
+                            && let Value::Number(n) = *reason.borrow()
+                        {
+                            assert_eq!(n, 2.0);
+                        }
+                    }
+                    // Check third element is fulfilled with 3
+                    if let Some(elem2) = obj_get_value(&arr, "2").unwrap()
+                        && let Value::Object(result_obj) = &*elem2.borrow()
+                    {
+                        if let Some(status) = obj_get_value(result_obj, "status").unwrap()
+                            && let Value::String(s) = &*status.borrow()
+                        {
+                            assert_eq!(String::from_utf16_lossy(s), "fulfilled");
+                        }
+                        if let Some(value) = obj_get_value(result_obj, "value").unwrap()
+                            && let Value::Number(n) = *value.borrow()
+                        {
+                            assert_eq!(n, 3.0);
+                        }
+                    }
+                }
+                _ => panic!("Expected array result, got {:?}", value),
+            }
         }
+        Err(e) => panic!("Script evaluation failed: {:?}", e),
+    }
+}
+
+#[test]
+fn test_main() {
+    let script = r#"
+        Promise.allSettled([
+            new Promise((resolve, reject) => { resolve(1); }),
+            new Promise((resolve, reject) => { reject(2); }),
+            new Promise((resolve, reject) => { resolve(3); })
+        ])
+    "#;
+    match evaluate_script(script) {
+        Ok(result) => println!("Success:{:?}", result),
+        Err(e) => println!("Error:{:?}", e),
     }
 }

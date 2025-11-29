@@ -353,6 +353,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "__internal_resolve_promise" => {
             // Internal function to resolve a promise
+            log::trace!("__internal_resolve_promise called");
             if args.len() < 2 {
                 return Err(JSError::TypeError {
                     message: "__internal_resolve_promise requires promise and value".to_string(),
@@ -360,6 +361,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
             let promise_val = evaluate_expr(env, &args[0])?;
             let value = evaluate_expr(env, &args[1])?;
+
+            log::trace!("__internal_resolve_promise called with value: {:?}", value);
 
             match promise_val {
                 Value::Promise(promise) => {
@@ -373,6 +376,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "__internal_reject_promise" => {
             // Internal function to reject a promise
+            log::trace!("__internal_reject_promise called");
             if args.len() < 2 {
                 return Err(JSError::TypeError {
                     message: "__internal_reject_promise requires promise and reason".to_string(),
@@ -380,6 +384,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
             let promise_val = evaluate_expr(env, &args[0])?;
             let reason = evaluate_expr(env, &args[1])?;
+
+            log::trace!("__internal_reject_promise called with reason: {:?}", reason);
 
             match promise_val {
                 Value::Promise(promise) => {
@@ -426,6 +432,58 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             } else {
                 Err(JSError::TypeError {
                     message: "First argument must be a number".to_string(),
+                })
+            }
+        }
+        "__internal_allsettled_state_record_fulfilled" => {
+            if args.len() < 3 {
+                return Err(JSError::TypeError {
+                    message: "__internal_allsettled_state_record_fulfilled requires 3 arguments".to_string(),
+                });
+            }
+            let state_id = evaluate_expr(env, &args[0])?;
+            let index = evaluate_expr(env, &args[1])?;
+            let value = evaluate_expr(env, &args[2])?;
+
+            log::trace!(
+                "__internal_allsettled_state_record_fulfilled called: state_id={:?}, index={:?}, value={:?}",
+                state_id,
+                index,
+                value
+            );
+
+            if let (Value::Number(state_id_val), Value::Number(index_val)) = (state_id, index) {
+                crate::js_promise::__internal_allsettled_state_record_fulfilled(state_id_val, index_val, value);
+                Ok(Value::Undefined)
+            } else {
+                Err(JSError::TypeError {
+                    message: "First two arguments must be numbers".to_string(),
+                })
+            }
+        }
+        "__internal_allsettled_state_record_rejected" => {
+            if args.len() < 3 {
+                return Err(JSError::TypeError {
+                    message: "__internal_allsettled_state_record_rejected requires 3 arguments".to_string(),
+                });
+            }
+            let state_id = evaluate_expr(env, &args[0])?;
+            let index = evaluate_expr(env, &args[1])?;
+            let reason = evaluate_expr(env, &args[2])?;
+
+            log::trace!(
+                "__internal_allsettled_state_record_rejected called: state_id={:?}, index={:?}, reason={:?}",
+                state_id,
+                index,
+                reason
+            );
+
+            if let (Value::Number(state_id_val), Value::Number(index_val)) = (state_id, index) {
+                crate::js_promise::__internal_allsettled_state_record_rejected(state_id_val, index_val, reason);
+                Ok(Value::Undefined)
+            } else {
+                Err(JSError::TypeError {
+                    message: "First two arguments must be numbers".to_string(),
                 })
             }
         }

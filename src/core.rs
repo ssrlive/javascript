@@ -6219,6 +6219,28 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
 
     // RegExp constructor (already handled by js_regexp module)
     env_borrow.insert("RegExp".to_string(), Rc::new(RefCell::new(Value::Function("RegExp".to_string()))));
+
+    // Internal promise resolution functions
+    env_borrow.insert(
+        "__internal_resolve_promise".to_string(),
+        Rc::new(RefCell::new(Value::Function("__internal_resolve_promise".to_string()))),
+    );
+    env_borrow.insert(
+        "__internal_reject_promise".to_string(),
+        Rc::new(RefCell::new(Value::Function("__internal_reject_promise".to_string()))),
+    );
+    env_borrow.insert(
+        "__internal_allsettled_state_record_fulfilled".to_string(),
+        Rc::new(RefCell::new(Value::Function(
+            "__internal_allsettled_state_record_fulfilled".to_string(),
+        ))),
+    );
+    env_borrow.insert(
+        "__internal_allsettled_state_record_rejected".to_string(),
+        Rc::new(RefCell::new(Value::Function(
+            "__internal_allsettled_state_record_rejected".to_string(),
+        ))),
+    );
 }
 
 /// Expand spread operator in function call arguments

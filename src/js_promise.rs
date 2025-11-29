@@ -1,15 +1,47 @@
+//! # JavaScript Promise Implementation
+//!
+//! This module implements JavaScript Promise functionality in Rust, including:
+//! - Promise constructor and basic lifecycle (pending → fulfilled/rejected)
+//! - Instance methods: then(), catch(), finally()
+//! - Static methods: all(), race(), allSettled(), any()
+//! - Asynchronous execution via event loop and task queue
+//!
+//! ## Architecture Overview
+//!
+//! The implementation uses several key components:
+//!
+//! 1. **JSPromise**: Core promise structure with state management
+//! 2. **Task Queue**: Global asynchronous task execution system
+//! 3. **Event Loop**: Processes queued tasks to enable async behavior
+//! 4. **Internal Callbacks**: Helper functions for static method coordination
+//!
+//! ## Complexity Issues Addressed
+//!
+//! This implementation has evolved to handle complex scenarios like Promise.allSettled,
+//! which requires coordinating multiple promises and maintaining shared state.
+//! The current implementation uses JS objects for shared state, which adds complexity.
+//!
+//! Future refactoring will introduce dedicated Rust structures for better type safety.
+
 use crate::core::{Expr, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, utf8_to_utf16};
 use crate::error::JSError;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-#[derive(Clone)]
+/// Asynchronous task types for the promise event loop.
+///
+/// Tasks represent deferred callback execution to maintain JavaScript's
+/// asynchronous behavior where promise callbacks are always executed
+/// asynchronously, even when the promise is already settled.
+#[derive(Clone, Debug)]
 enum Task {
+    /// Task to execute fulfilled callbacks with the resolved value
     Resolution {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
     },
+    /// Task to execute rejected callbacks with the rejection reason
     Rejection {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
@@ -17,22 +49,44 @@ enum Task {
 }
 
 thread_local! {
-    pub static GLOBAL_TASK_QUEUE: RefCell<VecDeque<Task>> = const { RefCell::new(VecDeque::new()) };
+    /// Global task queue for asynchronous promise operations.
+    /// Uses thread-local storage to maintain separate queues per thread.
+    /// This enables proper asynchronous execution of promise callbacks.
+    static GLOBAL_TASK_QUEUE: RefCell<VecDeque<Task>> = const { RefCell::new(VecDeque::new()) };
+
+    /// Global storage for AllSettledState instances during Promise.allSettled execution
+    static ALLSETTLED_STATES: RefCell<Vec<Rc<RefCell<AllSettledState>>>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Add a task to the global task queue for later execution.
+///
+/// # Arguments
+/// * `task` - The task to queue (Resolution or Rejection)
 fn queue_task(task: Task) {
+    log::debug!("queue_task called with {:?}", task);
     GLOBAL_TASK_QUEUE.with(|queue| {
         queue.borrow_mut().push_back(task);
     });
 }
 
-// Function to run the event loop and process asynchronous tasks
+/// Execute the event loop to process all queued asynchronous tasks.
+///
+/// This function simulates JavaScript's event loop for promises. It processes
+/// tasks in FIFO order, executing promise callbacks asynchronously.
+///
+/// # Returns
+/// * `Result<(), JSError>` - Success or evaluation error during callback execution
 pub fn run_event_loop() -> Result<(), JSError> {
+    log::trace!("run_event_loop called");
     loop {
-        let task = GLOBAL_TASK_QUEUE.with(|queue| queue.borrow_mut().pop_front());
-
+        let task = GLOBAL_TASK_QUEUE.with(|queue| {
+            let mut queue_borrow = queue.borrow_mut();
+            log::trace!("Task queue size before pop: {}", queue_borrow.len());
+            queue_borrow.pop_front()
+        });
         match task {
             Some(Task::Resolution { promise, callbacks }) => {
+                log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
@@ -43,21 +97,25 @@ pub fn run_event_loop() -> Result<(), JSError> {
                             }
                             match evaluate_statements(&func_env, body) {
                                 Ok(result) => {
+                                    log::trace!("Callback executed successfully, resolving promise");
                                     resolve_promise(&new_promise, result);
                                 }
                                 Err(e) => {
+                                    log::trace!("Callback execution failed: {:?}", e);
                                     reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
                                 }
                             }
                         }
                         _ => {
                             // If callback is not a function, resolve with undefined
+                            log::trace!("Callback is not a function, resolving with undefined");
                             resolve_promise(&new_promise, Value::Undefined);
                         }
                     }
                 }
             }
             Some(Task::Rejection { promise, callbacks }) => {
+                log::trace!("Processing Rejection task with {} callbacks", callbacks.len());
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
@@ -82,12 +140,20 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     }
                 }
             }
-            None => break, // No more tasks
+            None => {
+                log::trace!("No more tasks, exiting event loop");
+                break;
+            }
         }
     }
     Ok(())
 }
 
+/// Represents the current state of a JavaScript Promise.
+///
+/// Promises transition through these states exactly once:
+/// Pending → Fulfilled (with a value), or
+/// Pending → Rejected (with a reason)
 #[derive(Clone, Debug, Default)]
 pub enum PromiseState {
     #[default]
@@ -96,6 +162,10 @@ pub enum PromiseState {
     Rejected(Value),
 }
 
+/// Core JavaScript Promise structure.
+///
+/// Maintains the promise's current state and manages callback queues
+/// for then/catch/finally chaining.
 #[derive(Clone, Default)]
 pub struct JSPromise {
     pub state: PromiseState,
@@ -104,7 +174,114 @@ pub struct JSPromise {
     pub on_rejected: Vec<(Value, Rc<RefCell<JSPromise>>)>,  // Callbacks and their chaining promises
 }
 
+/// Represents the result of a settled promise in Promise.allSettled
+#[derive(Clone, Debug)]
+pub enum SettledResult {
+    /// Promise was fulfilled with a value
+    Fulfilled(Value),
+    /// Promise was rejected with a reason
+    Rejected(Value),
+}
+
+/// Dedicated state structure for Promise.allSettled coordination
+///
+/// This replaces the previous shared JS object approach with a type-safe
+/// Rust structure, eliminating the need for string-based property access
+/// and providing better compile-time guarantees.
+///
+/// # Fields
+/// * `results` - Array of settled results, indexed by original promise position
+/// * `completed` - Number of promises that have settled (fulfilled or rejected)
+/// * `total` - Total number of promises being tracked
+/// * `result_promise` - The main Promise.allSettled promise to resolve when all settle
+#[derive(Clone, Debug)]
+pub struct AllSettledState {
+    pub results: Vec<Option<SettledResult>>,
+    pub completed: usize,
+    pub total: usize,
+    pub result_promise: Rc<RefCell<JSPromise>>,
+}
+
+impl AllSettledState {
+    /// Create a new AllSettledState for tracking multiple promises
+    ///
+    /// # Arguments
+    /// * `total` - Number of promises to track
+    /// * `result_promise` - The promise to resolve when all promises settle
+    pub fn new(total: usize, result_promise: Rc<RefCell<JSPromise>>) -> Self {
+        AllSettledState {
+            results: vec![None; total],
+            completed: 0,
+            total,
+            result_promise,
+        }
+    }
+
+    /// Record that a promise at the given index has been fulfilled
+    ///
+    /// # Arguments
+    /// * `index` - Index of the promise in the original array
+    /// * `value` - The fulfilled value
+    pub fn record_fulfilled(&mut self, index: usize, value: Value) {
+        if index < self.results.len() {
+            self.results[index] = Some(SettledResult::Fulfilled(value));
+            self.completed += 1;
+            self.check_completion();
+        }
+    }
+
+    /// Record that a promise at the given index has been rejected
+    ///
+    /// # Arguments
+    /// * `index` - Index of the promise in the original array
+    /// * `reason` - The rejection reason
+    pub fn record_rejected(&mut self, index: usize, reason: Value) {
+        if index < self.results.len() {
+            self.results[index] = Some(SettledResult::Rejected(reason));
+            self.completed += 1;
+            self.check_completion();
+        }
+    }
+
+    /// Check if all promises have settled and resolve the result promise if so
+    fn check_completion(&self) {
+        log::trace!("check_completion: completed={}, total={}", self.completed, self.total);
+        if self.completed == self.total {
+            log::trace!("All promises settled, resolving result promise");
+            // All promises have settled, create the result array
+            let result_array = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+
+            for (i, result) in self.results.iter().enumerate() {
+                if let Some(settled_result) = result {
+                    let result_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+
+                    match settled_result {
+                        SettledResult::Fulfilled(value) => {
+                            crate::core::obj_set_value(&result_obj, "status", Value::String(utf8_to_utf16("fulfilled"))).unwrap();
+                            crate::core::obj_set_value(&result_obj, "value", value.clone()).unwrap();
+                        }
+                        SettledResult::Rejected(reason) => {
+                            crate::core::obj_set_value(&result_obj, "status", Value::String(utf8_to_utf16("rejected"))).unwrap();
+                            crate::core::obj_set_value(&result_obj, "reason", reason.clone()).unwrap();
+                        }
+                    }
+
+                    crate::core::obj_set_value(&result_array, i.to_string(), Value::Object(result_obj)).unwrap();
+                }
+            }
+
+            // Set the length property for array compatibility
+            crate::core::obj_set_value(&result_array, "length", Value::Number(self.total as f64)).unwrap();
+
+            // Resolve the main promise with the results array
+            log::trace!("Resolving allSettled result promise");
+            resolve_promise(&self.result_promise, Value::Object(result_array));
+        }
+    }
+}
+
 impl JSPromise {
+    /// Create a new promise in the pending state.
     pub fn new() -> Self {
         JSPromise {
             state: PromiseState::Pending,
@@ -127,7 +304,13 @@ impl std::fmt::Debug for JSPromise {
     }
 }
 
-/// Create a new Promise object
+/// Create a new JavaScript Promise object with prototype methods.
+///
+/// This function creates a JS object that wraps a JSPromise instance and
+/// attaches the standard Promise prototype methods (then, catch, finally).
+///
+/// # Returns
+/// * `Result<JSObjectDataPtr, JSError>` - The promise object or creation error
 pub fn make_promise_object() -> Result<JSObjectDataPtr, JSError> {
     let promise_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
 
@@ -146,7 +329,24 @@ pub fn make_promise_object() -> Result<JSObjectDataPtr, JSError> {
     Ok(promise_obj)
 }
 
-/// Handle Promise constructor calls
+/// Handle JavaScript Promise constructor calls (new Promise(executor)).
+///
+/// Creates a new promise and executes the executor function with resolve/reject
+/// functions. The executor typically initiates asynchronous operations.
+///
+/// # Arguments
+/// * `args` - Constructor arguments (should contain executor function)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - The promise object or construction error
+///
+/// # Example
+/// ```javascript
+/// new Promise((resolve, reject) => {
+///   setTimeout(() => resolve("done"), 1000);
+/// });
+/// ```
 pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
         return Err(JSError::EvaluationError {
@@ -155,42 +355,54 @@ pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectData
     }
 
     let executor = evaluate_expr(env, &args[0])?;
-    match executor {
-        Value::Closure(params, body, captured_env) => {
-            if params.len() != 2 {
-                return Err(JSError::EvaluationError {
-                    message: "Promise executor function must take exactly 2 parameters (resolve, reject)".to_string(),
-                });
-            }
-
-            // Create the promise
-            let promise = Rc::new(RefCell::new(JSPromise::new()));
-            let promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
-
-            // Create resolve and reject functions
-            let resolve_func = create_resolve_function(promise.clone(), env);
-            let reject_func = create_reject_function(promise.clone(), env);
-
-            // Call the executor with resolve and reject functions
-            let executor_env = captured_env.clone();
-            env_set(&executor_env, &params[0], resolve_func)?;
-            env_set(&executor_env, &params[1], reject_func)?;
-
-            // Execute the executor function
-            // Note: In a real implementation, this should be asynchronous
-            let _result = evaluate_statements(&executor_env, &body);
-
-            Ok(Value::Object(promise_obj))
+    let (params, captured_env) = match &executor {
+        Value::Closure(p, _b, c) => (p.clone(), c.clone()),
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Promise constructor requires a function as executor".to_string(),
+            });
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Promise constructor requires a function as executor".to_string(),
-        }),
-    }
+    };
+
+    // Create the promise
+    let promise = Rc::new(RefCell::new(JSPromise::new()));
+    let promise_obj = make_promise_object()?;
+    crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
+
+    // Create resolve and reject functions
+    let resolve_func = create_resolve_function(promise.clone(), env);
+    let reject_func = create_reject_function(promise.clone(), env);
+
+    // Call the executor with resolve and reject functions
+    let executor_env = captured_env.clone();
+    env_set(&executor_env, &params[0], resolve_func.clone())?;
+    env_set(&executor_env, &params[1], reject_func.clone())?;
+
+    log::trace!("About to call executor function");
+    // Execute the executor function by calling it
+    let call_expr = Expr::Call(
+        Box::new(Expr::Value(executor)),
+        vec![Expr::Value(resolve_func), Expr::Value(reject_func)],
+    );
+    evaluate_expr(&executor_env, &call_expr)?;
+    log::trace!("Executor function called");
+
+    Ok(Value::Object(promise_obj))
 }
 
-/// Create a resolve function for Promise executor
+/// Create a resolve function for Promise executor.
+///
+/// This function creates a closure that, when called, will resolve the promise
+/// with the provided value. It's passed to the executor function as the first parameter.
+///
+/// # Arguments
+/// * `promise` - The promise to resolve
+/// * `env` - Environment for closure creation
+///
+/// # Returns
+/// * `Value` - A closure that resolves the promise when called
 fn create_resolve_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPtr) -> Value {
+    log::trace!("create_resolve_function called");
     // Create a closure environment that captures the promise
     let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
     closure_env.borrow_mut().prototype = Some(env.clone());
@@ -198,16 +410,33 @@ fn create_resolve_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPt
 
     Value::Closure(
         vec!["value".to_string()],
-        vec![Statement::Expr(Expr::Call(
-            Box::new(Expr::Var("__internal_resolve_promise".to_string())),
-            vec![Expr::Var("__captured_promise".to_string()), Expr::Var("value".to_string())],
-        ))],
+        vec![
+            Statement::Expr(Expr::Call(
+                Box::new(Expr::Property(Box::new(Expr::Var("console".to_string())), "log".to_string())),
+                vec![Expr::StringLit(utf8_to_utf16("resolve function called"))],
+            )),
+            Statement::Expr(Expr::Call(
+                Box::new(Expr::Var("__internal_resolve_promise".to_string())),
+                vec![Expr::Var("__captured_promise".to_string()), Expr::Var("value".to_string())],
+            )),
+        ],
         closure_env,
     )
 }
 
-/// Create a reject function for Promise executor
+/// Create a reject function for Promise executor.
+///
+/// This function creates a closure that, when called, will reject the promise
+/// with the provided reason. It's passed to the executor function as the second parameter.
+///
+/// # Arguments
+/// * `promise` - The promise to reject
+/// * `env` - Environment for closure creation
+///
+/// # Returns
+/// * `Value` - A closure that rejects the promise when called
 fn create_reject_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPtr) -> Value {
+    log::trace!("create_reject_function called");
     // Create a closure environment that captures the promise
     let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
     closure_env.borrow_mut().prototype = Some(env.clone());
@@ -215,15 +444,35 @@ fn create_reject_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPtr
 
     Value::Closure(
         vec!["reason".to_string()],
-        vec![Statement::Expr(Expr::Call(
-            Box::new(Expr::Var("__internal_reject_promise".to_string())),
-            vec![Expr::Var("__captured_promise".to_string()), Expr::Var("reason".to_string())],
-        ))],
+        vec![
+            Statement::Expr(Expr::Call(
+                Box::new(Expr::Property(Box::new(Expr::Var("console".to_string())), "log".to_string())),
+                vec![Expr::StringLit(utf8_to_utf16("reject function called"))],
+            )),
+            Statement::Expr(Expr::Call(
+                Box::new(Expr::Var("__internal_reject_promise".to_string())),
+                vec![Expr::Var("__captured_promise".to_string()), Expr::Var("reason".to_string())],
+            )),
+        ],
         closure_env,
     )
 }
 
-/// Handle Promise.prototype.then calls
+/// Attaches fulfillment and rejection handlers to the promise, returning a new
+/// promise that resolves/rejects based on the callback return values.
+///
+/// # Arguments
+/// * `promise_obj` - The promise object to attach handlers to
+/// * `args` - Method arguments (onFulfilled, onRejected callbacks)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+///
+/// # Behavior
+/// - If promise is already fulfilled, queues callback for async execution
+/// - If promise is already rejected, does nothing (catch handles this)
+/// - Returns a new promise that resolves with callback return value
 pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
     let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
@@ -281,7 +530,23 @@ pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::E
     Ok(Value::Object(new_promise_obj))
 }
 
-/// Handle Promise.prototype.catch calls
+/// Handle Promise.prototype.catch() method calls.
+///
+/// Attaches a rejection handler to the promise, returning a new promise.
+/// Unlike then(), catch() only handles rejections and passes through fulfillments.
+///
+/// # Arguments
+/// * `promise_obj` - The promise object to attach handler to
+/// * `args` - Method arguments (onRejected callback)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+///
+/// # Behavior
+/// - If promise is already rejected, queues callback for async execution
+/// - If promise is already fulfilled, resolves new promise with original value
+/// - Returns a new promise that resolves with callback return value
 pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
     let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
@@ -346,7 +611,23 @@ pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::
     Ok(Value::Object(new_promise_obj))
 }
 
-/// Handle Promise.prototype.finally calls
+/// Handle Promise.prototype.finally() method calls.
+///
+/// Attaches a cleanup handler that executes regardless of promise outcome.
+/// The finally callback receives no arguments and its return value is ignored.
+///
+/// # Arguments
+/// * `promise_obj` - The promise object to attach handler to
+/// * `args` - Method arguments (onFinally callback)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+///
+/// # Behavior
+/// - Creates a callback that executes finally handler then returns original value
+/// - Attaches same callback to both fulfillment and rejection queues
+/// - If promise already settled, queues callback for async execution
 pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
     let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
@@ -429,8 +710,22 @@ pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core
     Ok(Value::Object(new_promise_obj))
 }
 
-/// Resolve a promise with a value
+/// Resolve a promise with a value, transitioning it to fulfilled state.
+///
+/// This function changes the promise state from Pending to Fulfilled and
+/// queues all registered fulfillment callbacks for asynchronous execution.
+///
+/// # Arguments
+/// * `promise` - The promise to resolve
+/// * `value` - The value to resolve the promise with
+///
+/// # Behavior
+/// - Only works if promise is currently in Pending state
+/// - Sets promise state to Fulfilled and stores the value
+/// - Queues all on_fulfilled callbacks for async execution
+/// - Clears the callback list after queuing
 pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
+    log::trace!("resolve_promise called");
     let mut promise_borrow = promise.borrow_mut();
     if let PromiseState::Pending = promise_borrow.state {
         promise_borrow.state = PromiseState::Fulfilled(value.clone());
@@ -440,6 +735,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
         let callbacks = promise_borrow.on_fulfilled.clone();
         promise_borrow.on_fulfilled.clear();
         if !callbacks.is_empty() {
+            log::trace!("resolve_promise: queuing {} callbacks", callbacks.len());
             queue_task(Task::Resolution {
                 promise: promise.clone(),
                 callbacks,
@@ -448,7 +744,20 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
     }
 }
 
-/// Reject a promise with a reason
+/// Reject a promise with a reason, transitioning it to rejected state.
+///
+/// This function changes the promise state from Pending to Rejected and
+/// queues all registered rejection callbacks for asynchronous execution.
+///
+/// # Arguments
+/// * `promise` - The promise to reject
+/// * `reason` - The reason for rejection
+///
+/// # Behavior
+/// - Only works if promise is currently in Pending state
+/// - Sets promise state to Rejected and stores the reason
+/// - Queues all on_rejected callbacks for async execution
+/// - Clears the callback list after queuing
 pub fn reject_promise(promise: &Rc<RefCell<JSPromise>>, reason: Value) {
     let mut promise_borrow = promise.borrow_mut();
     if let PromiseState::Pending = promise_borrow.state {
@@ -467,7 +776,13 @@ pub fn reject_promise(promise: &Rc<RefCell<JSPromise>>, reason: Value) {
     }
 }
 
-/// Check if an object is a promise
+/// Check if a JavaScript object represents a Promise.
+///
+/// # Arguments
+/// * `obj` - The object to check
+///
+/// # Returns
+/// * `bool` - True if the object contains a promise, false otherwise
 #[allow(dead_code)]
 pub fn is_promise(obj: &JSObjectDataPtr) -> bool {
     if let Ok(Some(val_rc)) = crate::core::obj_get_value(obj, "__promise") {
@@ -478,17 +793,33 @@ pub fn is_promise(obj: &JSObjectDataPtr) -> bool {
 }
 
 /// Handle Promise static methods like Promise.all, Promise.race, Promise.allSettled, Promise.any
+///
+/// These methods coordinate multiple promises and return a new promise that
+/// resolves based on the collective outcome of the input promises.
+///
+/// # Arguments
+/// * `method` - The static method name ("all", "race", "allSettled", "any")
+/// * `args` - Method arguments (typically an iterable of promises)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - Result promise or error
+///
+/// # Supported Methods
+/// - `Promise.all(iterable)` - Resolves when all promises resolve, rejects on first rejection
+/// - `Promise.race(iterable)` - Resolves/rejects with the first settled promise
+/// - `Promise.allSettled(iterable)` - Resolves when all promises settle (fulfill or reject)
+/// - `Promise.any(iterable)` - Resolves with first fulfillment, rejects only if all reject
 pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "all" => {
-            // Promise.all(iterable) - asynchronous implementation
+            // Promise.all(iterable) - resolves when all promises resolve, rejects on first rejection
             if args.is_empty() {
                 return Err(JSError::EvaluationError {
                     message: "Promise.all requires at least one argument".to_string(),
                 });
             }
 
-            // Evaluate the iterable argument
             let iterable = evaluate_expr(env, &args[0])?;
             let promises = match iterable {
                 Value::Object(arr) => {
@@ -532,7 +863,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 let results_clone = results.clone();
                 let completed_clone = completed.clone();
-                let _result_promise_clone = result_promise.clone();
+                let result_promise_clone = result_promise.clone();
 
                 match promise_val {
                     Value::Object(obj) => {
@@ -542,19 +873,31 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                 let then_callback = Value::Closure(
                                     vec!["value".to_string()],
                                     vec![Statement::Expr(Expr::Call(
-                                        Box::new(Expr::Var("__internal_resolve".to_string())),
-                                        vec![Expr::Number(idx as f64), Expr::Var("value".to_string())],
+                                        Box::new(Expr::Var("__internal_resolve_promise".to_string())),
+                                        vec![Expr::Var("__result_promise".to_string()), Expr::Var("value".to_string())],
                                     ))],
-                                    env.clone(),
+                                    {
+                                        let new_env = env.clone();
+                                        crate::core::obj_set_value(
+                                            &new_env,
+                                            "__result_promise",
+                                            Value::Promise(result_promise_clone.clone()),
+                                        )?;
+                                        new_env
+                                    },
                                 );
 
                                 let catch_callback = Value::Closure(
                                     vec!["reason".to_string()],
                                     vec![Statement::Expr(Expr::Call(
-                                        Box::new(Expr::Var("__internal_reject".to_string())),
-                                        vec![Expr::Var("reason".to_string())],
+                                        Box::new(Expr::Var("__internal_reject_promise".to_string())),
+                                        vec![Expr::Var("__result_promise".to_string()), Expr::Var("reason".to_string())],
                                     ))],
-                                    env.clone(),
+                                    {
+                                        let new_env = env.clone();
+                                        crate::core::obj_set_value(&new_env, "__result_promise", Value::Promise(result_promise_clone))?;
+                                        new_env
+                                    },
                                 );
 
                                 // Attach then and catch to the promise
@@ -606,7 +949,8 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             Ok(Value::Object(result_promise_obj))
         }
         "allSettled" => {
-            // Promise.allSettled(iterable) - asynchronous implementation using internal callbacks
+            // Promise.allSettled(iterable) - resolves when all promises settle (fulfill or reject)
+            // PHASE 2: Now using dedicated AllSettledState struct for better type safety
             if args.is_empty() {
                 return Err(JSError::EvaluationError {
                     message: "Promise.allSettled requires at least one argument".to_string(),
@@ -616,6 +960,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             let iterable = evaluate_expr(env, &args[0])?;
             let promises = match iterable {
                 Value::Object(arr) => {
+                    // Assume it's an array-like object
                     let mut promises = Vec::new();
                     let mut i = 0;
                     loop {
@@ -647,85 +992,56 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                 return Ok(Value::Object(result_promise_obj));
             }
 
-            // Create shared state for all promises
-            let shared_state = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-            let results_array = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-            crate::core::obj_set_value(&results_array, "length", Value::Number(num_promises as f64))?;
-            crate::core::obj_set_value(&shared_state, "results", Value::Object(results_array))?;
-            crate::core::obj_set_value(&shared_state, "completed", Value::Number(0.0))?;
-            crate::core::obj_set_value(&shared_state, "total", Value::Number(num_promises as f64))?;
-            crate::core::obj_set_value(&shared_state, "result_promise", Value::Promise(result_promise.clone()))?;
+            // Create dedicated state structure for coordination
+            let state = Rc::new(RefCell::new(AllSettledState::new(num_promises, result_promise.clone())));
+
+            // Store state in global storage and get its index
+            let state_index = ALLSETTLED_STATES.with(|states| {
+                let mut states_borrow = states.borrow_mut();
+                let index = states_borrow.len();
+                states_borrow.push(state.clone());
+                index
+            });
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
-                let shared_state_clone = shared_state.clone();
-
                 match promise_val {
                     Value::Object(obj) => {
                         if let Some(promise_rc) = crate::core::obj_get_value(&obj, "__promise")? {
-                            if let Value::Promise(_p) = &*promise_rc.borrow() {
-                                // Use internal callback functions
-                                let then_callback = Value::Closure(
-                                    vec!["value".to_string()],
-                                    vec![Statement::Expr(Expr::Call(
-                                        Box::new(Expr::Var("__internal_promise_allsettled_resolve".to_string())),
-                                        vec![
-                                            Expr::Number(idx as f64),
-                                            Expr::Var("value".to_string()),
-                                            Expr::Var("__shared_state".to_string()),
-                                        ],
-                                    ))],
-                                    {
-                                        let new_env = env.clone();
-                                        crate::core::obj_set_value(&new_env, "__shared_state", Value::Object(shared_state_clone.clone()))?;
-                                        new_env
-                                    },
-                                );
-
-                                let catch_callback = Value::Closure(
-                                    vec!["reason".to_string()],
-                                    vec![Statement::Expr(Expr::Call(
-                                        Box::new(Expr::Var("__internal_promise_allsettled_reject".to_string())),
-                                        vec![
-                                            Expr::Number(idx as f64),
-                                            Expr::Var("reason".to_string()),
-                                            Expr::Var("__shared_state".to_string()),
-                                        ],
-                                    ))],
-                                    {
-                                        let new_env = env.clone();
-                                        crate::core::obj_set_value(&new_env, "__shared_state", Value::Object(shared_state_clone))?;
-                                        new_env
-                                    },
-                                );
-
-                                handle_promise_then(&obj, &[Expr::Value(then_callback)], env)?;
-                                handle_promise_catch(&obj, &[Expr::Value(catch_callback)], env)?;
+                            if let Value::Promise(promise_ref) = &*promise_rc.borrow() {
+                                // Check if promise is already settled
+                                let promise_state = &promise_ref.borrow().state;
+                                match promise_state {
+                                    PromiseState::Fulfilled(val) => {
+                                        // Promise already fulfilled, record synchronously
+                                        state.borrow_mut().record_fulfilled(idx, val.clone());
+                                    }
+                                    PromiseState::Rejected(reason) => {
+                                        // Promise already rejected, record synchronously
+                                        state.borrow_mut().record_rejected(idx, reason.clone());
+                                    }
+                                    PromiseState::Pending => {
+                                        // Promise still pending, attach callbacks
+                                        let then_callback = create_allsettled_resolve_callback(state_index, idx);
+                                        let catch_callback = create_allsettled_reject_callback(state_index, idx);
+                                        handle_promise_then(&obj, &[Expr::Value(then_callback)], env)?;
+                                        handle_promise_catch(&obj, &[Expr::Value(catch_callback)], env)?;
+                                    }
+                                }
                             } else {
                                 // Not a promise, treat as resolved value
-                                __internal_promise_allsettled_resolve(
-                                    idx as f64,
-                                    Value::Object(obj.clone()),
-                                    Value::Object(shared_state.clone()),
-                                );
+                                state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()));
                             }
                         } else {
                             // Not a promise, treat as resolved value
-                            __internal_promise_allsettled_resolve(
-                                idx as f64,
-                                Value::Object(obj.clone()),
-                                Value::Object(shared_state.clone()),
-                            );
+                            state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()));
                         }
                     }
                     val => {
                         // Non-object, treat as resolved value
-                        __internal_promise_allsettled_resolve(idx as f64, val.clone(), Value::Object(shared_state.clone()));
+                        state.borrow_mut().record_fulfilled(idx, val);
                     }
                 }
             }
-
-            // Run the event loop to process any synchronously resolved promises
-            run_event_loop()?;
 
             Ok(Value::Object(result_promise_obj))
         }
@@ -971,6 +1287,20 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
 // These functions are called when individual promises in Promise.allSettled resolve/reject
 
 /// Internal function for Promise.allSettled resolve callback
+///
+/// Called when an individual promise in Promise.allSettled resolves.
+/// Creates a "fulfilled" result object and stores it in the shared state.
+///
+/// # Arguments
+/// * `idx` - Index of the promise in the original array
+/// * `value` - The resolved value
+/// * `shared_state` - Shared state object containing results array and completion tracking
+///
+/// # Behavior
+/// - Creates a result object with status="fulfilled" and the resolved value
+/// - Stores the result in the results array at the specified index
+/// - Increments the completion counter
+/// - Resolves the main Promise.allSettled promise when all promises have settled
 pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_state: Value) {
     if let Value::Object(shared_state_obj) = shared_state {
         // Get results array
@@ -1012,6 +1342,20 @@ pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_stat
 }
 
 /// Internal function for Promise.allSettled reject callback
+///
+/// Called when an individual promise in Promise.allSettled rejects.
+/// Creates a "rejected" result object and stores it in the shared state.
+///
+/// # Arguments
+/// * `idx` - Index of the promise in the original array
+/// * `reason` - The rejection reason
+/// * `shared_state` - Shared state object containing results array and completion tracking
+///
+/// # Behavior
+/// - Creates a result object with status="rejected" and the rejection reason
+/// - Stores the result in the results array at the specified index
+/// - Increments the completion counter
+/// - Resolves the main Promise.allSettled promise when all promises have settled
 pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_state: Value) {
     if let Value::Object(shared_state_obj) = shared_state {
         // Get results array
@@ -1053,11 +1397,34 @@ pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_stat
 }
 
 /// Internal function for Promise.any resolve callback
+///
+/// Called when any promise in Promise.any resolves.
+/// Immediately resolves the main Promise.any promise with the fulfilled value.
+///
+/// # Arguments
+/// * `value` - The resolved value from the first fulfilled promise
+/// * `result_promise` - The main Promise.any promise to resolve
 pub fn __internal_promise_any_resolve(value: Value, result_promise: Rc<RefCell<JSPromise>>) {
     resolve_promise(&result_promise, value);
 }
 
 /// Internal function for Promise.any reject callback
+///
+/// Called when individual promises in Promise.any reject.
+/// Tracks rejections and creates an AggregateError when all promises reject.
+///
+/// # Arguments
+/// * `idx` - Index of the rejected promise
+/// * `reason` - The rejection reason
+/// * `rejections` - Vector storing all rejection reasons
+/// * `rejected_count` - Counter of rejected promises
+/// * `total` - Total number of promises
+/// * `result_promise` - The main Promise.any promise
+///
+/// # Behavior
+/// - Stores the rejection reason
+/// - Increments rejection counter
+/// - When all promises reject, creates AggregateError with all rejection reasons
 pub fn __internal_promise_any_reject(
     idx: f64,
     reason: Value,
@@ -1095,11 +1462,129 @@ pub fn __internal_promise_any_reject(
 }
 
 /// Internal function for Promise.race resolve callback
+///
+/// Called when any promise in Promise.race resolves.
+/// Immediately resolves the main Promise.race promise with the value.
+///
+/// # Arguments
+/// * `value` - The resolved/rejected value from the first settled promise
+/// * `result_promise` - The main Promise.race promise to resolve/reject
 pub fn __internal_promise_race_resolve(value: Value, result_promise: Rc<RefCell<JSPromise>>) {
     resolve_promise(&result_promise, value);
 }
 
 /// Internal function for Promise.race reject callback
+///
+/// Called when any promise in Promise.race rejects.
+/// Immediately rejects the main Promise.race promise with the reason.
+///
+/// # Arguments
+/// * `reason` - The rejection reason from the first rejected promise
+/// * `result_promise` - The main Promise.race promise to reject
 pub fn __internal_promise_race_reject(reason: Value, result_promise: Rc<RefCell<JSPromise>>) {
     reject_promise(&result_promise, reason);
+}
+
+/// Internal function for AllSettledState resolve callback
+///
+/// Called when an individual promise in Promise.allSettled resolves.
+/// Records the fulfillment in the AllSettledState stored in global storage.
+///
+/// # Arguments
+/// * `state_index` - Index of the AllSettledState in global storage
+/// * `index` - Index of the promise in the original array
+/// * `value` - The resolved value
+pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64, value: Value) {
+    log::trace!("__internal_allsettled_state_record_fulfilled called: state_idx={state_index}, idx={index}, val={value:?}");
+    let state_index = state_index as usize;
+    let index = index as usize;
+
+    ALLSETTLED_STATES.with(|states| {
+        let states_borrow = states.borrow();
+        if state_index < states_borrow.len() {
+            let state = &states_borrow[state_index];
+            log::trace!("Recording fulfilled for index {} in state {}", index, state_index);
+            state.borrow_mut().record_fulfilled(index, value);
+        } else {
+            log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
+        }
+    });
+}
+
+/// Internal function for AllSettledState reject callback
+///
+/// Called when an individual promise in Promise.allSettled rejects.
+/// Records the rejection in the AllSettledState stored in global storage.
+///
+/// # Arguments
+/// * `state_index` - Index of the AllSettledState in global storage
+/// * `index` - Index of the promise in the original array
+/// * `reason` - The rejection reason
+pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64, reason: Value) {
+    log::trace!("__internal_allsettled_state_record_rejected called: state_index={state_index}, index={index}, reason={reason:?}");
+    let state_index = state_index as usize;
+    let index = index as usize;
+
+    ALLSETTLED_STATES.with(|states| {
+        let states_borrow = states.borrow();
+        if state_index < states_borrow.len() {
+            let state = &states_borrow[state_index];
+            log::trace!("Recording rejected for index {} in state {}", index, state_index);
+            state.borrow_mut().record_rejected(index, reason);
+        } else {
+            log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
+        }
+    });
+}
+
+/// Create a resolve callback function for Promise.allSettled
+///
+/// Creates a closure that calls the internal function to record fulfillment
+/// in the AllSettledState stored in global storage.
+///
+/// # Arguments
+/// * `state_index` - Index of the AllSettledState in global storage
+/// * `index` - Index of the promise in the original array
+///
+/// # Returns
+/// A Value::Closure that can be used as a then callback
+fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value {
+    Value::Closure(
+        vec!["value".to_string()],
+        vec![Statement::Expr(Expr::Call(
+            Box::new(Expr::Var("__internal_allsettled_state_record_fulfilled".to_string())),
+            vec![
+                Expr::Number(state_index as f64),
+                Expr::Number(index as f64),
+                Expr::Var("value".to_string()),
+            ],
+        ))],
+        Rc::new(RefCell::new(crate::core::JSObjectData::new())), // Empty environment
+    )
+}
+
+/// Create a reject callback function for Promise.allSettled
+///
+/// Creates a closure that calls the internal function to record rejection
+/// in the AllSettledState stored in global storage.
+///
+/// # Arguments
+/// * `state_index` - Index of the AllSettledState in global storage
+/// * `index` - Index of the promise in the original array
+///
+/// # Returns
+/// A Value::Closure that can be used as a catch callback
+fn create_allsettled_reject_callback(state_index: usize, index: usize) -> Value {
+    Value::Closure(
+        vec!["reason".to_string()],
+        vec![Statement::Expr(Expr::Call(
+            Box::new(Expr::Var("__internal_allsettled_state_record_rejected".to_string())),
+            vec![
+                Expr::Number(state_index as f64),
+                Expr::Number(index as f64),
+                Expr::Var("reason".to_string()),
+            ],
+        ))],
+        Rc::new(RefCell::new(crate::core::JSObjectData::new())), // Empty environment
+    )
 }

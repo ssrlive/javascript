@@ -6035,9 +6035,89 @@ impl JSRuntime {
 }
 
 fn filter_input_script(script: &str) -> String {
-    // Remove simple import lines that we've already handled via shim injection
+    // Remove comments and simple import lines that we've already handled via shim injection
     let mut filtered = String::new();
-    for (i, line) in script.lines().enumerate() {
+    let chars: Vec<char> = script.chars().collect();
+    let mut i = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut escape = false;
+
+    while i < chars.len() {
+        let ch = chars[i];
+
+        // Handle escape sequences
+        if escape {
+            filtered.push(ch);
+            escape = false;
+            i += 1;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            filtered.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Handle quote states
+        match ch {
+            '\'' if !in_double && !in_backtick => {
+                in_single = !in_single;
+                filtered.push(ch);
+                i += 1;
+                continue;
+            }
+            '"' if !in_single && !in_backtick => {
+                in_double = !in_double;
+                filtered.push(ch);
+                i += 1;
+                continue;
+            }
+            '`' if !in_single && !in_double => {
+                in_backtick = !in_backtick;
+                filtered.push(ch);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        // Only process comments when not inside quotes
+        if !in_single && !in_double && !in_backtick {
+            // Handle single-line comments: //
+            if i + 1 < chars.len() && ch == '/' && chars[i + 1] == '/' {
+                // Skip to end of line
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                // Don't add the newline yet, continue to next iteration
+                continue;
+            }
+
+            // Handle multi-line comments: /* */
+            if i + 1 < chars.len() && ch == '/' && chars[i + 1] == '*' {
+                i += 2; // Skip /*
+                while i + 1 < chars.len() {
+                    if chars[i] == '*' && chars[i + 1] == '/' {
+                        i += 2; // Skip */
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        // Handle regular characters and newlines
+        filtered.push(ch);
+        i += 1;
+    }
+
+    // Now process the filtered script line by line for import statements
+    let mut final_filtered = String::new();
+    for (i, line) in filtered.lines().enumerate() {
         // Split line on semicolons only when not inside quotes/backticks
         let mut current = String::new();
         let mut in_single = false;
@@ -6097,18 +6177,18 @@ fn filter_input_script(script: &str) -> String {
                 log::debug!("skipping import part[{i}]: \"{p}\"");
                 continue;
             }
-            filtered.push_str(p);
+            final_filtered.push_str(p);
             // Re-add semicolon if the original part was followed by a semicolon
             if *had_semicolon {
-                filtered.push(';');
+                final_filtered.push(';');
             }
         }
-        filtered.push('\n');
+        final_filtered.push('\n');
     }
 
     // Remove any trailing newline(s) added during filtering to avoid an extra
     // empty statement at the end when tokenizing/parsing.
-    filtered.trim_end_matches('\n').to_string()
+    final_filtered.trim_end_matches('\n').to_string()
 }
 
 /// Initialize global built-in constructors in the environment

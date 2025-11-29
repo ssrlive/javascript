@@ -348,6 +348,18 @@ pub fn make_promise_object() -> Result<JSObjectDataPtr, JSError> {
 /// });
 /// ```
 pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    handle_promise_constructor_direct(args, env)
+}
+
+/// Direct promise constructor that operates without abstraction layers
+///
+/// # Arguments
+/// * `args` - Constructor arguments (should contain executor function)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - The promise object or construction error
+pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
         return Err(JSError::EvaluationError {
             message: "Promise constructor requires an executor function".to_string(),
@@ -364,14 +376,14 @@ pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectData
         }
     };
 
-    // Create the promise
+    // Create the promise directly
     let promise = Rc::new(RefCell::new(JSPromise::new()));
     let promise_obj = make_promise_object()?;
     crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
 
-    // Create resolve and reject functions
-    let resolve_func = create_resolve_function(promise.clone(), env);
-    let reject_func = create_reject_function(promise.clone(), env);
+    // Create resolve and reject functions directly
+    let resolve_func = create_resolve_function_direct(promise.clone());
+    let reject_func = create_reject_function_direct(promise.clone());
 
     // Call the executor with resolve and reject functions
     let executor_env = captured_env.clone();
@@ -390,71 +402,55 @@ pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectData
     Ok(Value::Object(promise_obj))
 }
 
-/// Create a resolve function for Promise executor.
+/// Create a resolve function for Promise executor (direct version).
 ///
 /// This function creates a closure that, when called, will resolve the promise
 /// with the provided value. It's passed to the executor function as the first parameter.
 ///
 /// # Arguments
 /// * `promise` - The promise to resolve
-/// * `env` - Environment for closure creation
 ///
 /// # Returns
 /// * `Value` - A closure that resolves the promise when called
-fn create_resolve_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPtr) -> Value {
-    log::trace!("create_resolve_function called");
-    // Create a closure environment that captures the promise
-    let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-    closure_env.borrow_mut().prototype = Some(env.clone());
-    env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
-
+fn create_resolve_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
+    log::trace!("create_resolve_function_direct called");
     Value::Closure(
         vec!["value".to_string()],
-        vec![
-            Statement::Expr(Expr::Call(
-                Box::new(Expr::Property(Box::new(Expr::Var("console".to_string())), "log".to_string())),
-                vec![Expr::StringLit(utf8_to_utf16("resolve function called"))],
-            )),
-            Statement::Expr(Expr::Call(
-                Box::new(Expr::Var("__internal_resolve_promise".to_string())),
-                vec![Expr::Var("__captured_promise".to_string()), Expr::Var("value".to_string())],
-            )),
-        ],
-        closure_env,
+        vec![Statement::Expr(Expr::Call(
+            Box::new(Expr::Var("__internal_resolve_promise".to_string())),
+            vec![Expr::Var("__captured_promise".to_string()), Expr::Var("value".to_string())],
+        ))],
+        {
+            let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+            env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
+            closure_env
+        },
     )
 }
 
-/// Create a reject function for Promise executor.
+/// Create a reject function for Promise executor (direct version).
 ///
 /// This function creates a closure that, when called, will reject the promise
 /// with the provided reason. It's passed to the executor function as the second parameter.
 ///
 /// # Arguments
 /// * `promise` - The promise to reject
-/// * `env` - Environment for closure creation
 ///
 /// # Returns
 /// * `Value` - A closure that rejects the promise when called
-fn create_reject_function(promise: Rc<RefCell<JSPromise>>, env: &JSObjectDataPtr) -> Value {
-    log::trace!("create_reject_function called");
-    // Create a closure environment that captures the promise
-    let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-    closure_env.borrow_mut().prototype = Some(env.clone());
-    env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
-
+fn create_reject_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
+    log::trace!("create_reject_function_direct called");
     Value::Closure(
         vec!["reason".to_string()],
-        vec![
-            Statement::Expr(Expr::Call(
-                Box::new(Expr::Property(Box::new(Expr::Var("console".to_string())), "log".to_string())),
-                vec![Expr::StringLit(utf8_to_utf16("reject function called"))],
-            )),
-            Statement::Expr(Expr::Call(
-                Box::new(Expr::Var("__internal_reject_promise".to_string())),
-                vec![Expr::Var("__captured_promise".to_string()), Expr::Var("reason".to_string())],
-            )),
-        ],
-        closure_env,
+        vec![Statement::Expr(Expr::Call(
+            Box::new(Expr::Var("__internal_reject_promise".to_string())),
+            vec![Expr::Var("__captured_promise".to_string()), Expr::Var("reason".to_string())],
+        ))],
+        {
+            let closure_env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+            env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
+            closure_env
+        },
     )
 }
 
@@ -495,6 +491,23 @@ pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::E
         }
     };
 
+    handle_promise_then_direct(promise, args, env)
+}
+
+/// Direct then handler that operates on JSPromise directly
+///
+/// # Arguments
+/// * `promise` - The promise to attach handlers to
+/// * `args` - Method arguments (onFulfilled, onRejected callbacks)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+pub fn handle_promise_then_direct(
+    promise: Rc<RefCell<JSPromise>>,
+    args: &[crate::core::Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
@@ -569,6 +582,23 @@ pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::
         }
     };
 
+    handle_promise_catch_direct(promise, args, env)
+}
+
+/// Direct catch handler that operates on JSPromise directly
+///
+/// # Arguments
+/// * `promise` - The promise to attach handler to
+/// * `args` - Method arguments (onRejected callback)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+pub fn handle_promise_catch_direct(
+    promise: Rc<RefCell<JSPromise>>,
+    args: &[crate::core::Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
@@ -650,6 +680,23 @@ pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core
         }
     };
 
+    handle_promise_finally_direct(promise, args, env)
+}
+
+/// Direct finally handler that operates on JSPromise directly
+///
+/// # Arguments
+/// * `promise` - The promise to attach handler to
+/// * `args` - Method arguments (onFinally callback)
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - New promise for chaining or error
+pub fn handle_promise_finally_direct(
+    promise: Rc<RefCell<JSPromise>>,
+    args: &[crate::core::Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;

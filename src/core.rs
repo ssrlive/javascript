@@ -3801,12 +3801,25 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
     pub prototype: Option<Rc<RefCell<JSObjectData>>>,
     pub is_function_scope: bool,
+}
+
+impl std::fmt::Debug for JSObjectData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "JSObjectData {{ properties: {}, constants: {}, prototype: {}, is_function_scope: {} }}",
+            self.properties.len(),
+            self.constants.len(),
+            self.prototype.is_some(),
+            self.is_function_scope
+        )
+    }
 }
 
 impl JSObjectData {
@@ -3843,7 +3856,7 @@ impl JSObjectData {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Value {
     Number(f64),
     String(Vec<u16>), // UTF-16 code units
@@ -3862,6 +3875,25 @@ pub enum Value {
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
     Promise(Rc<RefCell<JSPromise>>), // Promise object
+}
+
+impl std::fmt::Debug for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "Number({})", n),
+            Value::String(s) => write!(f, "String({})", String::from_utf16_lossy(s)),
+            Value::Boolean(b) => write!(f, "Boolean({})", b),
+            Value::Undefined => write!(f, "Undefined"),
+            Value::Object(obj) => write!(f, "Object({:p})", Rc::as_ptr(obj)),
+            Value::Function(name) => write!(f, "Function({})", name),
+            Value::Closure(_, _, _) => write!(f, "Closure"),
+            Value::ClassDefinition(_) => write!(f, "ClassDefinition"),
+            Value::Getter(_, _) => write!(f, "Getter"),
+            Value::Setter(_, _, _) => write!(f, "Setter"),
+            Value::Property { .. } => write!(f, "Property"),
+            Value::Promise(p) => write!(f, "Promise({:p})", Rc::as_ptr(p)),
+        }
+    }
 }
 
 // Helper functions for UTF-16 string operations

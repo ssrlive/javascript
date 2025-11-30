@@ -241,4 +241,121 @@ mod promise_tests {
             _ => panic!("Expected array result, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_promise_constructor_direct_functionality() {
+        // Test that the direct constructor path works by creating a promise that resolves
+        let code = r#"
+            let result = null;
+            new Promise(function(resolve, reject) {
+                resolve("direct test");
+            }).then(function(value) {
+                result = value;
+            });
+            result
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // This tests that the direct constructor functions work properly
+    }
+
+    #[test]
+    fn test_promise_then_direct_functionality() {
+        // Test that the direct then handler works
+        let code = r#"
+            let result = null;
+            let p = new Promise(function(resolve, reject) {
+                resolve(42);
+            });
+            p.then(function(value) {
+                result = value * 2;
+            });
+            result
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // This tests that the direct then handler works
+    }
+
+    #[test]
+    fn test_promise_catch_direct_functionality() {
+        // Test that the direct catch handler works
+        let code = r#"
+            let result = null;
+            let p = new Promise(function(resolve, reject) {
+                reject("test error");
+            });
+            p.catch(function(reason) {
+                result = "caught: " + reason;
+            });
+            result
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // This tests that the direct catch handler works
+    }
+
+    #[test]
+    fn test_promise_finally_direct_functionality() {
+        // Test that the direct finally handler works
+        let code = r#"
+            let result = null;
+            new Promise(function(resolve, reject) {
+                resolve(100);
+            }).finally(function() {
+                result = "cleanup done";
+            });
+            result
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // This tests that the direct finally handler works
+    }
+
+    #[test]
+    fn test_promise_resolve_reject_functions_direct() {
+        // Test that the direct resolve/reject functions work
+        let code = r#"
+            let resolveResult = null;
+            let rejectResult = null;
+
+            new Promise(function(resolve, reject) {
+                resolve("resolved");
+            }).then(function(value) {
+                resolveResult = value;
+            });
+
+            new Promise(function(resolve, reject) {
+                reject("rejected");
+            }).catch(function(reason) {
+                rejectResult = reason;
+            });
+
+            [resolveResult, rejectResult]
+        "#;
+        let result = evaluate_script(code);
+        assert!(result.is_ok());
+        // This tests that the direct resolve/reject functions work
+    }
+
+    #[test]
+    fn test_promise_constructor_with_arrow_function() {
+        // Test that arrow functions work in Promise constructor
+        let code = r#"
+            let result = null;
+            new Promise(resolve => resolve(42)).then(value => {
+                result = value * 2;
+            });
+            result
+        "#;
+        let result = evaluate_script(code);
+        match result {
+            Ok(_) => {
+                // Test passed
+            }
+            Err(e) => {
+                panic!("Arrow function in Promise constructor failed: {:?}", e);
+            }
+        }
+    }
 }

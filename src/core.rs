@@ -1683,471 +1683,490 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
-        match stmt {
-            Statement::Let(name, expr_opt) => {
-                let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                env_set(env, name.as_str(), val.clone())?;
-                last_value = val;
-            }
-            Statement::Const(name, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                env_set_const(env, name.as_str(), val.clone());
-                last_value = val;
-            }
-            Statement::Class(name, extends, members) => {
-                let class_obj = create_class_object(name, extends, members, env)?;
-                env_set(env, name.as_str(), class_obj)?;
-                last_value = Value::Undefined;
-            }
-            Statement::Assign(name, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                env_set(env, name.as_str(), val.clone())?;
-                last_value = val;
-            }
-            Statement::Expr(expr) => {
-                // Special-case assignment expressions so we can mutate `env` or
-                // object properties. `parse_statement` only turns simple
-                // variable assignments into `Statement::Assign`, so here we
-                // handle expression-level assignments such as `obj.prop = val`
-                // and `arr[0] = val`.
-                if let Expr::Assign(target, value_expr) = expr {
-                    match target.as_ref() {
-                        Expr::Var(name) => {
-                            let v = evaluate_expr(env, value_expr)?;
-                            env_set(env, name.as_str(), v.clone())?;
-                            last_value = v;
-                        }
-                        Expr::Property(obj_expr, prop_name) => {
-                            let v = evaluate_expr(env, value_expr)?;
-                            // set_prop_env will attempt to mutate the env-held
-                            // object when possible, otherwise it will update
-                            // the evaluated object and return it.
-                            match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                                Some(updated_obj) => last_value = updated_obj,
-                                None => last_value = v,
+        // Evaluate the statement inside a closure so we can log the
+        // statement index and AST if an error occurs while preserving
+        // control-flow returns. The closure returns
+        // Result<Option<ControlFlow>, JSError> where `Ok(None)` means
+        // continue, `Ok(Some(cf))` means propagate control flow, and
+        // `Err(e)` means an error that we log and then return.
+        let eval_res: Result<Option<ControlFlow>, JSError> = (|| -> Result<Option<ControlFlow>, JSError> {
+            match stmt {
+                Statement::Let(name, expr_opt) => {
+                    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+                    env_set(env, name.as_str(), val.clone())?;
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::Const(name, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    env_set_const(env, name.as_str(), val.clone());
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::Class(name, extends, members) => {
+                    let class_obj = create_class_object(name, extends, members, env)?;
+                    env_set(env, name.as_str(), class_obj)?;
+                    last_value = Value::Undefined;
+                    Ok(None)
+                }
+                Statement::Assign(name, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    env_set(env, name.as_str(), val.clone())?;
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::Expr(expr) => {
+                    // Special-case assignment expressions so we can mutate `env` or
+                    // object properties. `parse_statement` only turns simple
+                    // variable assignments into `Statement::Assign`, so here we
+                    // handle expression-level assignments such as `obj.prop = val`
+                    // and `arr[0] = val`.
+                    if let Expr::Assign(target, value_expr) = expr {
+                        match target.as_ref() {
+                            Expr::Var(name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                env_set(env, name.as_str(), v.clone())?;
+                                last_value = v;
+                            }
+                            Expr::Property(obj_expr, prop_name) => {
+                                let v = evaluate_expr(env, value_expr)?;
+                                // set_prop_env will attempt to mutate the env-held
+                                // object when possible, otherwise it will update
+                                // the evaluated object and return it.
+                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            Expr::Index(obj_expr, idx_expr) => {
+                                // Evaluate index to a string key
+                                let idx_val = evaluate_expr(env, idx_expr)?;
+                                let key = match idx_val {
+                                    Value::Number(n) => n.to_string(),
+                                    Value::String(s) => String::from_utf16_lossy(&s),
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "Invalid index type".to_string(),
+                                        });
+                                    }
+                                };
+                                let v = evaluate_expr(env, value_expr)?;
+                                match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                    Some(updated_obj) => last_value = updated_obj,
+                                    None => last_value = v,
+                                }
+                            }
+                            _ => {
+                                // Fallback: evaluate the expression normally
+                                last_value = evaluate_expr(env, expr)?;
                             }
                         }
-                        Expr::Index(obj_expr, idx_expr) => {
-                            // Evaluate index to a string key
-                            let idx_val = evaluate_expr(env, idx_expr)?;
-                            let key = match idx_val {
-                                Value::Number(n) => n.to_string(),
-                                Value::String(s) => String::from_utf16_lossy(&s),
+                    } else if let Expr::LogicalAndAssign(target, value_expr) = expr {
+                        // Handle logical AND assignment: a &&= b
+                        let left_val = evaluate_expr(env, target)?;
+                        if is_truthy(&left_val) {
+                            match target.as_ref() {
+                                Expr::Var(name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    env_set(env, name.as_str(), v.clone())?;
+                                    last_value = v;
+                                }
+                                Expr::Property(obj_expr, prop_name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
+                                    }
+                                }
+                                Expr::Index(obj_expr, idx_expr) => {
+                                    let idx_val = evaluate_expr(env, idx_expr)?;
+                                    let key = match idx_val {
+                                        Value::Number(n) => n.to_string(),
+                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                        _ => {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Invalid index type".to_string(),
+                                            });
+                                        }
+                                    };
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
+                                    }
+                                }
                                 _ => {
-                                    return Err(JSError::EvaluationError {
-                                        message: "Invalid index type".to_string(),
-                                    });
-                                }
-                            };
-                            let v = evaluate_expr(env, value_expr)?;
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => last_value = updated_obj,
-                                None => last_value = v,
-                            }
-                        }
-                        _ => {
-                            // Fallback: evaluate the expression normally
-                            last_value = evaluate_expr(env, expr)?;
-                        }
-                    }
-                } else if let Expr::LogicalAndAssign(target, value_expr) = expr {
-                    // Handle logical AND assignment: a &&= b
-                    let left_val = evaluate_expr(env, target)?;
-                    if is_truthy(&left_val) {
-                        match target.as_ref() {
-                            Expr::Var(name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                env_set(env, name.as_str(), v.clone())?;
-                                last_value = v;
-                            }
-                            Expr::Property(obj_expr, prop_name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
+                                    last_value = evaluate_expr(env, expr)?;
                                 }
                             }
-                            Expr::Index(obj_expr, idx_expr) => {
-                                let idx_val = evaluate_expr(env, idx_expr)?;
-                                let key = match idx_val {
-                                    Value::Number(n) => n.to_string(),
-                                    Value::String(s) => String::from_utf16_lossy(&s),
-                                    _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Invalid index type".to_string(),
-                                        });
-                                    }
-                                };
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
-                                }
-                            }
-                            _ => {
-                                last_value = evaluate_expr(env, expr)?;
-                            }
-                        }
-                    } else {
-                        last_value = left_val;
-                    }
-                } else if let Expr::LogicalOrAssign(target, value_expr) = expr {
-                    // Handle logical OR assignment: a ||= b
-                    let left_val = evaluate_expr(env, target)?;
-                    if !is_truthy(&left_val) {
-                        match target.as_ref() {
-                            Expr::Var(name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                env_set(env, name.as_str(), v.clone())?;
-                                last_value = v;
-                            }
-                            Expr::Property(obj_expr, prop_name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
-                                }
-                            }
-                            Expr::Index(obj_expr, idx_expr) => {
-                                let idx_val = evaluate_expr(env, idx_expr)?;
-                                let key = match idx_val {
-                                    Value::Number(n) => n.to_string(),
-                                    Value::String(s) => String::from_utf16_lossy(&s),
-                                    _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Invalid index type".to_string(),
-                                        });
-                                    }
-                                };
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
-                                }
-                            }
-                            _ => {
-                                last_value = evaluate_expr(env, expr)?;
-                            }
-                        }
-                    } else {
-                        last_value = left_val;
-                    }
-                } else if let Expr::NullishAssign(target, value_expr) = expr {
-                    // Handle nullish coalescing assignment: a ??= b
-                    let left_val = evaluate_expr(env, target)?;
-                    match left_val {
-                        Value::Undefined => match target.as_ref() {
-                            Expr::Var(name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                env_set(env, name.as_str(), v.clone())?;
-                                last_value = v;
-                            }
-                            Expr::Property(obj_expr, prop_name) => {
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
-                                }
-                            }
-                            Expr::Index(obj_expr, idx_expr) => {
-                                let idx_val = evaluate_expr(env, idx_expr)?;
-                                let key = match idx_val {
-                                    Value::Number(n) => n.to_string(),
-                                    Value::String(s) => String::from_utf16_lossy(&s),
-                                    _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Invalid index type".to_string(),
-                                        });
-                                    }
-                                };
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
-                                }
-                            }
-                            _ => {
-                                last_value = evaluate_expr(env, expr)?;
-                            }
-                        },
-                        _ => {
+                        } else {
                             last_value = left_val;
                         }
-                    }
-                } else {
-                    last_value = evaluate_expr(env, expr)?;
-                }
-            }
-            Statement::Return(expr_opt) => {
-                let return_val = match expr_opt {
-                    Some(expr) => evaluate_expr(env, expr)?,
-                    None => Value::Undefined,
-                };
-                return Ok(ControlFlow::Return(return_val));
-            }
-            Statement::Throw(expr) => {
-                let throw_val = evaluate_expr(env, expr)?;
-                return Err(JSError::Throw { value: throw_val });
-            }
-            Statement::If(condition, then_body, else_body) => {
-                let cond_val = evaluate_expr(env, condition)?;
-                if is_truthy(&cond_val) {
-                    match evaluate_statements_with_context(env, then_body)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        cf => return Ok(cf),
-                    }
-                } else if let Some(else_stmts) = else_body {
-                    match evaluate_statements_with_context(env, else_stmts)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        cf => return Ok(cf),
-                    }
-                }
-            }
-            Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
-                // Execute try block and handle catch/finally semantics
-                match evaluate_statements_with_context(env, try_body) {
-                    Ok(ControlFlow::Normal(v)) => last_value = v,
-                    Ok(cf) => {
-                        // Handle control flow in try block
-                        match cf {
-                            ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
-                            ControlFlow::Break => return Ok(ControlFlow::Break),
-                            ControlFlow::Continue => return Ok(ControlFlow::Continue),
-                            _ => unreachable!(),
-                        }
-                    }
-                    Err(err) => {
-                        if catch_param.is_empty() {
-                            // No catch: run finally if present then propagate error
-                            if let Some(finally_body) = finally_body_opt {
-                                evaluate_statements_with_context(env, finally_body)?;
-                            }
-                            return Err(err);
-                        } else {
-                            let catch_env = env.clone();
-                            let catch_value = match &err {
-                                JSError::Throw { value } => value.clone(),
-                                _ => Value::String(utf8_to_utf16(&err.to_string())),
-                            };
-                            env_set(&catch_env, catch_param.as_str(), catch_value)?;
-                            match evaluate_statements_with_context(&catch_env, catch_body)? {
-                                ControlFlow::Normal(val) => last_value = val,
-                                cf => {
-                                    // Finally block executes after try/catch
-                                    if let Some(finally_body) = finally_body_opt {
-                                        evaluate_statements_with_context(env, finally_body)?;
-                                    }
-                                    return Ok(cf);
+                    } else if let Expr::LogicalOrAssign(target, value_expr) = expr {
+                        // Handle logical OR assignment: a ||= b
+                        let left_val = evaluate_expr(env, target)?;
+                        if !is_truthy(&left_val) {
+                            match target.as_ref() {
+                                Expr::Var(name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    env_set(env, name.as_str(), v.clone())?;
+                                    last_value = v;
                                 }
-                            }
-                        }
-                    }
-                }
-                // Finally block executes after try/catch
-                if let Some(finally_body) = finally_body_opt {
-                    match evaluate_statements_with_context(env, finally_body)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        cf => return Ok(cf),
-                    }
-                }
-            }
-            Statement::For(init, condition, increment, body) => {
-                // Execute initialization
-                if let Some(init_stmt) = init {
-                    match init_stmt.as_ref() {
-                        Statement::Let(name, expr_opt) => {
-                            let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                            env_set(env, name.as_str(), val)?;
-                        }
-                        Statement::Expr(expr) => {
-                            evaluate_expr(env, expr)?;
-                        }
-                        _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "error".to_string(),
-                            });
-                        } // For now, only support let and expr in init
-                    }
-                }
-
-                loop {
-                    // Check condition
-                    let should_continue = if let Some(cond_expr) = condition {
-                        let cond_val = evaluate_expr(env, cond_expr)?;
-                        is_truthy(&cond_val)
-                    } else {
-                        true // No condition means infinite loop
-                    };
-
-                    if !should_continue {
-                        break;
-                    }
-
-                    // Execute body
-                    match evaluate_statements_with_context(env, body)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue => {}
-                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
-                    }
-
-                    // Execute increment
-                    if let Some(incr_stmt) = increment {
-                        match incr_stmt.as_ref() {
-                            Statement::Expr(expr) => match expr {
-                                Expr::Assign(target, value) => {
-                                    if let Expr::Var(name) = target.as_ref() {
-                                        let val = evaluate_expr(env, value)?;
-                                        env_set(env, name.as_str(), val)?;
+                                Expr::Property(obj_expr, prop_name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
+                                    }
+                                }
+                                Expr::Index(obj_expr, idx_expr) => {
+                                    let idx_val = evaluate_expr(env, idx_expr)?;
+                                    let key = match idx_val {
+                                        Value::Number(n) => n.to_string(),
+                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                        _ => {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Invalid index type".to_string(),
+                                            });
+                                        }
+                                    };
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
                                     }
                                 }
                                 _ => {
-                                    evaluate_expr(env, expr)?;
+                                    last_value = evaluate_expr(env, expr)?;
+                                }
+                            }
+                        } else {
+                            last_value = left_val;
+                        }
+                    } else if let Expr::NullishAssign(target, value_expr) = expr {
+                        // Handle nullish coalescing assignment: a ??= b
+                        let left_val = evaluate_expr(env, target)?;
+                        match left_val {
+                            Value::Undefined => match target.as_ref() {
+                                Expr::Var(name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    env_set(env, name.as_str(), v.clone())?;
+                                    last_value = v;
+                                }
+                                Expr::Property(obj_expr, prop_name) => {
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
+                                    }
+                                }
+                                Expr::Index(obj_expr, idx_expr) => {
+                                    let idx_val = evaluate_expr(env, idx_expr)?;
+                                    let key = match idx_val {
+                                        Value::Number(n) => n.to_string(),
+                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                        _ => {
+                                            return Err(JSError::EvaluationError {
+                                                message: "Invalid index type".to_string(),
+                                            });
+                                        }
+                                    };
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                        Some(updated_obj) => last_value = updated_obj,
+                                        None => last_value = v,
+                                    }
+                                }
+                                _ => {
+                                    last_value = evaluate_expr(env, expr)?;
                                 }
                             },
+                            _ => {
+                                last_value = left_val;
+                            }
+                        }
+                    } else {
+                        last_value = evaluate_expr(env, expr)?;
+                    }
+                    Ok(None)
+                }
+                Statement::Return(expr_opt) => {
+                    let return_val = match expr_opt {
+                        Some(expr) => evaluate_expr(env, expr)?,
+                        None => Value::Undefined,
+                    };
+                    Ok(Some(ControlFlow::Return(return_val)))
+                }
+                Statement::Throw(expr) => {
+                    let throw_val = evaluate_expr(env, expr)?;
+                    Err(JSError::Throw { value: throw_val })
+                }
+                Statement::If(condition, then_body, else_body) => {
+                    let cond_val = evaluate_expr(env, condition)?;
+                    if is_truthy(&cond_val) {
+                        match evaluate_statements_with_context(env, then_body)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            cf => return Ok(Some(cf)),
+                        }
+                    } else if let Some(else_stmts) = else_body {
+                        match evaluate_statements_with_context(env, else_stmts)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            cf => return Ok(Some(cf)),
+                        }
+                    }
+                    Ok(None)
+                }
+                Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
+                    // Execute try block and handle catch/finally semantics
+                    match evaluate_statements_with_context(env, try_body) {
+                        Ok(ControlFlow::Normal(v)) => last_value = v,
+                        Ok(cf) => match cf {
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                            ControlFlow::Break => return Ok(Some(ControlFlow::Break)),
+                            ControlFlow::Continue => return Ok(Some(ControlFlow::Continue)),
+                            _ => unreachable!(),
+                        },
+                        Err(err) => {
+                            if catch_param.is_empty() {
+                                if let Some(finally_body) = finally_body_opt {
+                                    evaluate_statements_with_context(env, finally_body)?;
+                                }
+                                return Err(err);
+                            } else {
+                                let catch_env = env.clone();
+                                let catch_value = match &err {
+                                    JSError::Throw { value } => value.clone(),
+                                    _ => Value::String(utf8_to_utf16(&err.to_string())),
+                                };
+                                env_set(&catch_env, catch_param.as_str(), catch_value)?;
+                                match evaluate_statements_with_context(&catch_env, catch_body)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    cf => {
+                                        if let Some(finally_body) = finally_body_opt {
+                                            evaluate_statements_with_context(env, finally_body)?;
+                                        }
+                                        return Ok(Some(cf));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Finally block executes after try/catch
+                    if let Some(finally_body) = finally_body_opt {
+                        match evaluate_statements_with_context(env, finally_body)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            cf => return Ok(Some(cf)),
+                        }
+                    }
+                    Ok(None)
+                }
+                Statement::For(init, condition, increment, body) => {
+                    // Execute initialization
+                    if let Some(init_stmt) = init {
+                        match init_stmt.as_ref() {
+                            Statement::Let(name, expr_opt) => {
+                                let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+                                env_set(env, name.as_str(), val)?;
+                            }
+                            Statement::Expr(expr) => {
+                                evaluate_expr(env, expr)?;
+                            }
                             _ => {
                                 return Err(JSError::EvaluationError {
                                     message: "error".to_string(),
                                 });
-                            } // For now, only support expr in increment
+                            } // For now, only support let and expr in init
+                        }
+                    }
+
+                    loop {
+                        // Check condition
+                        let should_continue = if let Some(cond_expr) = condition {
+                            let cond_val = evaluate_expr(env, cond_expr)?;
+                            is_truthy(&cond_val)
+                        } else {
+                            true // No condition means infinite loop
+                        };
+
+                        if !should_continue {
+                            break;
+                        }
+
+                        // Execute body
+                        match evaluate_statements_with_context(env, body)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            ControlFlow::Break => break,
+                            ControlFlow::Continue => {}
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                        }
+
+                        // Execute increment
+                        if let Some(incr_stmt) = increment {
+                            match incr_stmt.as_ref() {
+                                Statement::Expr(expr) => match expr {
+                                    Expr::Assign(target, value) => {
+                                        if let Expr::Var(name) = target.as_ref() {
+                                            let val = evaluate_expr(env, value)?;
+                                            env_set(env, name.as_str(), val)?;
+                                        }
+                                    }
+                                    _ => {
+                                        evaluate_expr(env, expr)?;
+                                    }
+                                },
+                                _ => {
+                                    return Err(JSError::EvaluationError {
+                                        message: "error".to_string(),
+                                    });
+                                } // For now, only support expr in increment
+                            }
+                        }
+                    }
+                    Ok(None)
+                }
+                Statement::ForOf(var, iterable, body) => {
+                    let iterable_val = evaluate_expr(env, iterable)?;
+                    match iterable_val {
+                        Value::Object(obj_map) => {
+                            if is_array(&obj_map) {
+                                let len = get_array_length(&obj_map).unwrap_or(0);
+                                for i in 0..len {
+                                    let key = i.to_string();
+                                    if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
+                                        let element = element_rc.borrow().clone();
+                                        env_set(env, var.as_str(), element)?;
+                                        match evaluate_statements_with_context(env, body)? {
+                                            ControlFlow::Normal(val) => last_value = val,
+                                            ControlFlow::Break => break,
+                                            ControlFlow::Continue => {}
+                                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                        }
+                                    }
+                                }
+                                Ok(None)
+                            } else {
+                                Err(JSError::EvaluationError {
+                                    message: "for-of loop requires an iterable".to_string(),
+                                })
+                            }
+                        }
+                        _ => Err(JSError::EvaluationError {
+                            message: "for-of loop requires an iterable".to_string(),
+                        }),
+                    }
+                }
+                Statement::While(condition, body) => {
+                    loop {
+                        // Check condition
+                        let cond_val = evaluate_expr(env, condition)?;
+                        if !is_truthy(&cond_val) {
+                            break Ok(None);
+                        }
+
+                        // Execute body
+                        match evaluate_statements_with_context(env, body)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            ControlFlow::Break => break Ok(None),
+                            ControlFlow::Continue => {}
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                         }
                     }
                 }
-            }
-            Statement::ForOf(var, iterable, body) => {
-                let iterable_val = evaluate_expr(env, iterable)?;
-                match iterable_val {
-                    Value::Object(obj_map) => {
-                        if is_array(&obj_map) {
-                            let len = get_array_length(&obj_map).unwrap_or(0);
-                            for i in 0..len {
-                                let key = i.to_string();
-                                if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
-                                    let element = element_rc.borrow().clone();
-                                    env_set(env, var.as_str(), element)?;
-                                    match evaluate_statements_with_context(env, body)? {
+                Statement::DoWhile(body, condition) => {
+                    loop {
+                        // Execute body first
+                        match evaluate_statements_with_context(env, body)? {
+                            ControlFlow::Normal(val) => last_value = val,
+                            ControlFlow::Break => break Ok(None),
+                            ControlFlow::Continue => {}
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                        }
+
+                        // Check condition
+                        let cond_val = evaluate_expr(env, condition)?;
+                        if !is_truthy(&cond_val) {
+                            break Ok(None);
+                        }
+                    }
+                }
+                Statement::Switch(expr, cases) => {
+                    let switch_val = evaluate_expr(env, expr)?;
+                    let mut found_match = false;
+                    let mut executed_default = false;
+
+                    for case in cases {
+                        match case {
+                            SwitchCase::Case(case_expr, case_stmts) => {
+                                if !found_match {
+                                    let case_val = evaluate_expr(env, case_expr)?;
+                                    // Simple equality check for switch cases
+                                    if values_equal(&switch_val, &case_val) {
+                                        found_match = true;
+                                    }
+                                }
+                                if found_match {
+                                    match evaluate_statements_with_context(env, case_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
                                         ControlFlow::Break => break,
-                                        ControlFlow::Continue => {}
-                                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
+                                        cf => return Ok(Some(cf)),
                                     }
                                 }
                             }
-                        } else {
-                            return Err(JSError::EvaluationError {
-                                message: "for-of loop requires an iterable".to_string(),
-                            });
-                        }
-                    }
-                    _ => {
-                        return Err(JSError::EvaluationError {
-                            message: "for-of loop requires an iterable".to_string(),
-                        });
-                    }
-                }
-            }
-            Statement::While(condition, body) => {
-                loop {
-                    // Check condition
-                    let cond_val = evaluate_expr(env, condition)?;
-                    if !is_truthy(&cond_val) {
-                        break;
-                    }
-
-                    // Execute body
-                    match evaluate_statements_with_context(env, body)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue => {}
-                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
-                    }
-                }
-            }
-            Statement::DoWhile(body, condition) => {
-                loop {
-                    // Execute body first
-                    match evaluate_statements_with_context(env, body)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        ControlFlow::Break => break,
-                        ControlFlow::Continue => {}
-                        ControlFlow::Return(val) => return Ok(ControlFlow::Return(val)),
-                    }
-
-                    // Check condition
-                    let cond_val = evaluate_expr(env, condition)?;
-                    if !is_truthy(&cond_val) {
-                        break;
-                    }
-                }
-            }
-            Statement::Switch(expr, cases) => {
-                let switch_val = evaluate_expr(env, expr)?;
-                let mut found_match = false;
-                let mut executed_default = false;
-
-                for case in cases {
-                    match case {
-                        SwitchCase::Case(case_expr, case_stmts) => {
-                            if !found_match {
-                                let case_val = evaluate_expr(env, case_expr)?;
-                                // Simple equality check for switch cases
-                                if values_equal(&switch_val, &case_val) {
-                                    found_match = true;
-                                }
-                            }
-                            if found_match {
-                                match evaluate_statements_with_context(env, case_stmts)? {
-                                    ControlFlow::Normal(val) => last_value = val,
-                                    ControlFlow::Break => break,
-                                    cf => return Ok(cf),
-                                }
-                            }
-                        }
-                        SwitchCase::Default(default_stmts) => {
-                            if !found_match && !executed_default {
-                                executed_default = true;
-                                match evaluate_statements_with_context(env, default_stmts)? {
-                                    ControlFlow::Normal(val) => last_value = val,
-                                    ControlFlow::Break => break,
-                                    cf => return Ok(cf),
-                                }
-                            } else if found_match {
-                                // Default case also falls through if a match was found before it
-                                match evaluate_statements_with_context(env, default_stmts)? {
-                                    ControlFlow::Normal(val) => last_value = val,
-                                    ControlFlow::Break => break,
-                                    cf => return Ok(cf),
+                            SwitchCase::Default(default_stmts) => {
+                                if !found_match && !executed_default {
+                                    executed_default = true;
+                                    match evaluate_statements_with_context(env, default_stmts)? {
+                                        ControlFlow::Normal(val) => last_value = val,
+                                        ControlFlow::Break => break,
+                                        cf => return Ok(Some(cf)),
+                                    }
+                                } else if found_match {
+                                    // Default case also falls through if a match was found before it
+                                    match evaluate_statements_with_context(env, default_stmts)? {
+                                        ControlFlow::Normal(val) => last_value = val,
+                                        ControlFlow::Break => break,
+                                        cf => return Ok(Some(cf)),
+                                    }
                                 }
                             }
                         }
                     }
+                    Ok(None)
+                }
+                Statement::Break => Ok(Some(ControlFlow::Break)),
+                Statement::Continue => Ok(Some(ControlFlow::Continue)),
+                Statement::LetDestructuringArray(pattern, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    perform_array_destructuring(env, pattern, &val, false)?;
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::ConstDestructuringArray(pattern, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    perform_array_destructuring(env, pattern, &val, true)?;
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::LetDestructuringObject(pattern, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    perform_object_destructuring(env, pattern, &val, false)?;
+                    last_value = val;
+                    Ok(None)
+                }
+                Statement::ConstDestructuringObject(pattern, expr) => {
+                    let val = evaluate_expr(env, expr)?;
+                    perform_object_destructuring(env, pattern, &val, true)?;
+                    last_value = val;
+                    Ok(None)
                 }
             }
-            Statement::Break => {
-                return Ok(ControlFlow::Break);
-            }
-            Statement::Continue => {
-                return Ok(ControlFlow::Continue);
-            }
-            Statement::LetDestructuringArray(pattern, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                perform_array_destructuring(env, pattern, &val, false)?;
-                last_value = val;
-            }
-            Statement::ConstDestructuringArray(pattern, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                perform_array_destructuring(env, pattern, &val, true)?;
-                last_value = val;
-            }
-            Statement::LetDestructuringObject(pattern, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                perform_object_destructuring(env, pattern, &val, false)?;
-                last_value = val;
-            }
-            Statement::ConstDestructuringObject(pattern, expr) => {
-                let val = evaluate_expr(env, expr)?;
-                perform_object_destructuring(env, pattern, &val, true)?;
-                last_value = val;
+        })();
+        match eval_res {
+            Ok(Some(cf)) => return Ok(cf),
+            Ok(None) => {}
+            Err(e) => {
+                log::error!("evaluate_statements_with_context error at statement {}: {:?} stmt={:?}", i, e, stmt);
+                return Err(e);
             }
         }
     }
@@ -2439,8 +2458,9 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 }
 
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
-    if let Some(val) = env_get(env, name) {
-        Ok(val.borrow().clone())
+    if let Some(_val) = env_get(env, name) {
+        log::trace!("evaluate_var - {} (found)", name);
+        Ok(_val.borrow().clone())
     } else if name == "console" {
         Ok(Value::Object(js_console::make_console_object()?))
     } else if name == "String" {
@@ -3183,7 +3203,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
 
 fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
-    log::trace!("Property: obj_val={obj_val:?}, prop={prop}");
+    log::trace!("Property access prop={prop}");
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         Value::Object(obj_map) => {
@@ -3201,7 +3221,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
 
 fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
-    log::trace!("OptionalProperty: obj_val={obj_val:?}, prop={prop}");
+    log::trace!("Optional property access prop={prop}");
     match obj_val {
         Value::Undefined => Ok(Value::Undefined),
         Value::Object(obj_map) => {
@@ -3230,7 +3250,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         }
 
         let obj_val = evaluate_expr(env, obj_expr)?;
-        log::trace!("evaluate_call - object eval result: {obj_val:?}");
+        log::trace!("evaluate_call - object evaluated");
         match (obj_val, method_name.as_str()) {
             (Value::Object(obj_map), "log") if obj_map.borrow().contains_key("log") => {
                 js_console::handle_console_method(method_name, args, env)
@@ -3301,14 +3321,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
                                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                                if params.len() != evaluated_args.len() {
-                                    return Err(JSError::ParseError);
-                                }
                                 // Create new environment starting with captured environment
                                 let func_env = captured_env.clone();
-                                // Add parameters
-                                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
-                                    env_set(&func_env, param.as_str(), arg_val.clone())?;
+                                // Bind parameters: assign provided args, set missing params to undefined
+                                for (i, param) in params.iter().enumerate() {
+                                    if i < evaluated_args.len() {
+                                        env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                    } else {
+                                        env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                    }
                                 }
                                 // Execute function body
                                 evaluate_statements(&func_env, &body)
@@ -3373,14 +3394,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                if params.len() != evaluated_args.len() {
-                    return Err(JSError::ParseError);
-                }
                 // Create new environment starting with captured environment
                 let func_env = captured_env.clone();
-                // Add parameters
-                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
-                    env_set(&func_env, param.as_str(), arg_val.clone())?;
+                // Bind parameters: provide provided args, set missing params to undefined
+                for (i, param) in params.iter().enumerate() {
+                    if i < evaluated_args.len() {
+                        env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                    } else {
+                        env_set(&func_env, param.as_str(), Value::Undefined)?;
+                    }
                 }
                 // Execute function body
                 evaluate_statements(&func_env, &body)
@@ -3505,14 +3527,15 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                if params.len() != evaluated_args.len() {
-                    return Err(JSError::ParseError);
-                }
                 // Create new environment starting with captured environment
                 let func_env = captured_env.clone();
-                // Add parameters
-                for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
-                    env_set(&func_env, param.as_str(), arg_val.clone())?;
+                // Bind parameters: provide provided args, set missing params to undefined
+                for (i, param) in params.iter().enumerate() {
+                    if i < evaluated_args.len() {
+                        env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                    } else {
+                        env_set(&func_env, param.as_str(), Value::Undefined)?;
+                    }
                 }
                 // Execute function body
                 evaluate_statements(&func_env, &body)
@@ -3899,6 +3922,7 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
         let val_clone = val.borrow().clone();
         match val_clone {
             Value::Property { value, getter, .. } => {
+                log::trace!("obj_get_value - property descriptor found for key {}", key.as_ref());
                 if let Some((body, env)) = getter {
                     // Create a new environment with this bound to the object
                     let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
@@ -3913,6 +3937,7 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                 }
             }
             Value::Getter(body, env) => {
+                log::trace!("obj_get_value - getter found for key {}", key.as_ref());
                 // Create a new environment with this bound to the object
                 let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
                 getter_env.borrow_mut().prototype = Some(env);
@@ -3920,7 +3945,10 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                 let result = evaluate_statements(&getter_env, &body)?;
                 Ok(Some(Rc::new(RefCell::new(result))))
             }
-            _ => Ok(Some(val.clone())),
+            _ => {
+                log::trace!("obj_get_value - raw value found for key {}", key.as_ref());
+                Ok(Some(val.clone()))
+            }
         }
     } else if let Some(ref proto) = js_obj.borrow().prototype {
         obj_get_value(proto, key)
@@ -6192,7 +6220,7 @@ fn filter_input_script(script: &str) -> String {
 
     // Remove any trailing newline(s) added during filtering to avoid an extra
     // empty statement at the end when tokenizing/parsing.
-    final_filtered.trim_end_matches('\n').to_string()
+    final_filtered.trim().to_string()
 }
 
 /// Initialize global built-in constructors in the environment
@@ -6335,14 +6363,15 @@ fn handle_optional_method_call(
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                            if params.len() != evaluated_args.len() {
-                                return Err(JSError::ParseError);
-                            }
                             // Create new environment starting with captured environment
                             let func_env = captured_env.clone();
-                            // Add parameters
-                            for (param, arg_val) in params.iter().zip(evaluated_args.iter()) {
-                                env_set(&func_env, param.as_str(), arg_val.clone())?;
+                            // Bind parameters: provide provided args, set missing params to undefined
+                            for (i, param) in params.iter().enumerate() {
+                                if i < evaluated_args.len() {
+                                    env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                } else {
+                                    env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                }
                             }
                             // Execute function body
                             evaluate_statements(&func_env, &body)

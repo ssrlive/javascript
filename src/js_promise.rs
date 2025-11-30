@@ -387,8 +387,14 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
 
     // Call the executor with resolve and reject functions
     let executor_env = captured_env.clone();
-    env_set(&executor_env, &params[0], resolve_func.clone())?;
-    env_set(&executor_env, &params[1], reject_func.clone())?;
+    // Set resolve function (always the first parameter)
+    if !params.is_empty() {
+        env_set(&executor_env, &params[0], resolve_func.clone())?;
+        // Set reject function if executor accepts a second parameter
+        if params.len() > 1 {
+            env_set(&executor_env, &params[1], reject_func.clone())?;
+        }
+    }
 
     log::trace!("About to call executor function");
     // Execute the executor function by calling it
@@ -1310,6 +1316,51 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                 }
             }
 
+            Ok(Value::Object(result_promise_obj))
+        }
+        "resolve" => {
+            // Promise.resolve(value) - return the value wrapped in a resolved promise
+            let value = if args.is_empty() {
+                Value::Undefined
+            } else {
+                evaluate_expr(env, &args[0])?
+            };
+
+            // If the value is already a promise object, return it directly
+            if let Value::Object(obj) = &value
+                && let Some(promise_rc) = crate::core::obj_get_value(obj, "__promise")?
+                && let Value::Promise(_) = &*promise_rc.borrow()
+            {
+                return Ok(Value::Object(obj.clone()));
+            }
+
+            // Otherwise create a new resolved promise holding the value
+            let result_promise = Rc::new(RefCell::new(JSPromise::new()));
+            {
+                let mut p = result_promise.borrow_mut();
+                p.state = PromiseState::Fulfilled(value.clone());
+                p.value = Some(value.clone());
+            }
+            let result_promise_obj = make_promise_object()?;
+            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            Ok(Value::Object(result_promise_obj))
+        }
+        "reject" => {
+            // Promise.reject(reason) - return a rejected promise
+            let reason = if args.is_empty() {
+                Value::Undefined
+            } else {
+                evaluate_expr(env, &args[0])?
+            };
+
+            let result_promise = Rc::new(RefCell::new(JSPromise::new()));
+            {
+                let mut p = result_promise.borrow_mut();
+                p.state = PromiseState::Rejected(reason.clone());
+                p.value = Some(reason.clone());
+            }
+            let result_promise_obj = make_promise_object()?;
+            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
             Ok(Value::Object(result_promise_obj))
         }
         _ => Err(JSError::EvaluationError {

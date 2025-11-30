@@ -67,6 +67,7 @@ pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
 pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     // Evaluate the constructor
     let constructor_val = evaluate_expr(env, constructor)?;
+    log::trace!("evaluate_new - invoking constructor (evaluated)");
 
     match constructor_val {
         Value::Object(class_obj) => {
@@ -326,20 +327,23 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
     if let Some(method_val) = obj_get_value(&proto_obj, method)? {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
-            Value::Closure(params, body, _captured_env) => {
+            Value::Closure(params, body, captured_env) => {
                 log::trace!("Method is a closure with {} params", params.len());
-                // Create function environment with 'this' bound to the instance
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                // Use the closure's captured environment as the base for the
+                // function environment so outer-scope lookups work as expected.
+                let func_env = captured_env.clone();
 
-                // Bind 'this' to the instance
-                obj_set_value(&func_env, "this", Value::Object(obj_map.clone()))?;
+                // Bind 'this' to the instance (use env_set to avoid invoking setters)
+                crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                 log::trace!("Bound 'this' to instance");
 
-                // Bind parameters
+                // Bind parameters (missing params become undefined)
                 for (i, param) in params.iter().enumerate() {
                     if i < args.len() {
                         let arg_val = evaluate_expr(env, &args[i])?;
-                        obj_set_value(&func_env, param, arg_val)?;
+                        crate::core::env_set(&func_env, param.as_str(), arg_val)?;
+                    } else {
+                        crate::core::env_set(&func_env, param.as_str(), Value::Undefined)?;
                     }
                 }
 

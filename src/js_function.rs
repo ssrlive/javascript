@@ -497,18 +497,56 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 }),
             }
         }
-        "__internal_promise_race_reject" => {
-            // Internal function for Promise.race reject - requires 2 args: (reason, result_promise)
-            let args = extract_internal_args(args, env, 2)?;
-            match &args[1] {
-                Value::Promise(result_promise) => {
-                    crate::js_promise::__internal_promise_race_reject(args[0].clone(), result_promise.clone());
-                    Ok(Value::Undefined)
+        "__internal_promise_all_resolve" => {
+            // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
+            let args = extract_internal_args(args, env, 3)?;
+            let numbers = validate_number_args(&args, 1)?;
+            let idx = numbers[0] as usize;
+            let value = args[1].clone();
+            if let Value::Object(state_obj) = args[2].clone() {
+                // Store value in results[idx]
+                if let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, "results")?
+                    && let Value::Object(results_obj) = &*results_val_rc.borrow()
+                {
+                    crate::core::obj_set_value(results_obj, idx.to_string(), value)?;
                 }
-                _ => Err(JSError::TypeError {
-                    message: "Second argument must be a promise".to_string(),
-                }),
+                // Increment completed
+                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                    && let Value::Number(completed) = &*completed_val_rc.borrow()
+                {
+                    let new_completed = completed + 1.0;
+                    crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                    // Check if all completed
+                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                        && let Value::Number(total) = &*total_val_rc.borrow()
+                        && new_completed == *total
+                    {
+                        // Resolve result_promise with results array
+                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                            && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
+                            && let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, "results")?
+                            && let Value::Object(results_obj) = &*results_val_rc.borrow()
+                        {
+                            crate::js_promise::resolve_promise(result_promise, Value::Object(results_obj.clone()));
+                        }
+                    }
+                }
             }
+            Ok(Value::Undefined)
+        }
+        "__internal_promise_all_reject" => {
+            // Internal function for Promise.all reject - requires 2 args: (reason, state)
+            let args = extract_internal_args(args, env, 2)?;
+            let reason = args[0].clone();
+            if let Value::Object(state_obj) = args[1].clone() {
+                // Reject result_promise
+                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                    && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
+                {
+                    crate::js_promise::reject_promise(result_promise, reason);
+                }
+            }
+            Ok(Value::Undefined)
         }
 
         _ => Err(JSError::EvaluationError {

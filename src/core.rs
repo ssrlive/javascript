@@ -2528,10 +2528,7 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 }
 
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
-    if let Some(val_rc) = obj_get_value(env, name)? {
-        log::trace!("evaluate_var - {} (found)", name);
-        Ok(val_rc.borrow().clone())
-    } else if name == "console" {
+    if name == "console" {
         Ok(Value::Object(js_console::make_console_object()?))
     } else if name == "String" {
         Ok(Value::Function("String".to_string()))
@@ -2589,6 +2586,9 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {
         Ok(Value::Number(f64::INFINITY))
+    } else if let Some(val_rc) = obj_get_value(env, name)? {
+        log::trace!("evaluate_var - {name} (found)");
+        Ok(val_rc.borrow().clone())
     } else {
         Ok(Value::Undefined)
     }

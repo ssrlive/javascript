@@ -20,7 +20,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 p.then(result => result * 2);
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
@@ -36,7 +36,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                  .then(x => x - 3)
                  .then(x => x / 2);
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
@@ -49,7 +49,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 p.catch(err => "caught: " + err);
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
@@ -65,41 +65,42 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 });
                 Promise.all([p1, p2]);
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
     // Benchmark Promise.race
-    // c.bench_function("promise_race", |b| {
-    //     b.iter(|| {
-    //         let script = r#"
-    //             let p1 = new Promise(resolve => resolve(1));
-    //             let p2 = new Promise(resolve => resolve(2));
-    //             Promise.race([p1, p2]);
-    //         "#;
-    //         black_box(evaluate_script(script).unwrap());
-    //     })
-    // });
+    c.bench_function("promise_race", |b| {
+        b.iter(|| {
+            let script = r#"
+                let p1 = new Promise(resolve => resolve(1));
+                let p2 = new Promise(resolve => resolve(2));
+                Promise.race([p1, p2]);
+            "#;
+            black_box(evaluate_script(script)).unwrap();
+        })
+    });
 
     // Test arrow function syntax
-    // c.bench_function("arrow_function_test", |b| {
-    //     b.iter(|| {
-    //         let script = r#"
-    //             let f = x => x * 2;
-    //             f(5);
-    //         "#;
-    //         black_box(evaluate_script(script).unwrap());
-    //     })
-    // });
+    c.bench_function("arrow_function_test", |b| {
+        b.iter(|| {
+            let script = r#"
+                let f = x => x * 2;
+                f(5);
+            "#;
+            black_box(evaluate_script(script).unwrap());
+        })
+    });
 
     // Test Promise constructor syntax
     c.bench_function("promise_constructor_test", |b| {
         b.iter(|| {
             let script = r#"
-                function test() { return 42; }
-                test();
+                new Promise((resolve, reject) => {
+                    resolve(42);
+                });
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
@@ -110,7 +111,7 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 let arr = [1, 2, 3];
                 arr.length;
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
@@ -124,12 +125,24 @@ fn benchmark_promise_operations(c: &mut Criterion) {
                 }
                 test();
             "#;
-            let _ = black_box(evaluate_script(script));
+            black_box(evaluate_script(script)).unwrap();
         })
     });
 
     // Benchmark complex promise chains with error handling
     c.bench_function("promise_complex_chain", |b| {
+        b.iter(|| {
+            let script = r#"
+                Promise.resolve(5)
+                    .then(x => x * 2)
+                    .then(result => result + 10);
+            "#;
+            black_box(evaluate_script(script)).unwrap();
+        })
+    });
+
+    // Benchmark another complex promise chains with error handling
+    c.bench_function("promise_complex_chain_another", |b| {
         b.iter(|| {
             let script = r#"
                 function asyncOperation(value) {

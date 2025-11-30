@@ -947,6 +947,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
         log::trace!("stmt[{i}] = {stmt:?}");
     }
     let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
+    env.borrow_mut().is_function_scope = true;
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
     //   import * as NAME from "std";
@@ -1462,6 +1463,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     }
     if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
         let is_const = matches!(tokens[0], Token::Const);
+        let is_var = matches!(tokens[0], Token::Var);
         tokens.remove(0); // consume let/var/const
 
         // Check for destructuring
@@ -1500,11 +1502,17 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     let expr = parse_expression(tokens)?;
                     if is_const {
                         return Ok(Statement::Const(name, expr));
+                    } else if is_var {
+                        return Ok(Statement::Var(name, Some(expr)));
                     } else {
                         return Ok(Statement::Let(name, Some(expr)));
                     }
                 } else if !is_const {
-                    return Ok(Statement::Let(name, None));
+                    if is_var {
+                        return Ok(Statement::Var(name, None));
+                    } else {
+                        return Ok(Statement::Let(name, None));
+                    }
                 }
             }
         }
@@ -1680,6 +1688,15 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
 }
 
 fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
+    // Hoist var declarations if this is a function scope
+    if env.borrow().is_function_scope {
+        let mut var_names = std::collections::HashSet::new();
+        collect_var_names(statements, &mut var_names);
+        for name in var_names {
+            env_set(env, &name, Value::Undefined)?;
+        }
+    }
+
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
@@ -1697,6 +1714,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     last_value = val;
                     Ok(None)
                 }
+                Statement::Var(name, expr_opt) => {
+                    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+                    env_set_var(env, name.as_str(), val.clone())?;
+                    last_value = val;
+                    Ok(None)
+                }
                 Statement::Const(name, expr) => {
                     let val = evaluate_expr(env, expr)?;
                     env_set_const(env, name.as_str(), val.clone());
@@ -1711,7 +1734,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::Assign(name, expr) => {
                     let val = evaluate_expr(env, expr)?;
-                    env_set(env, name.as_str(), val.clone())?;
+                    env_set_recursive(env, name.as_str(), val.clone())?;
                     last_value = val;
                     Ok(None)
                 }
@@ -1725,7 +1748,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         match target.as_ref() {
                             Expr::Var(name) => {
                                 let v = evaluate_expr(env, value_expr)?;
-                                env_set(env, name.as_str(), v.clone())?;
+                                env_set_recursive(env, name.as_str(), v.clone())?;
                                 last_value = v;
                             }
                             Expr::Property(obj_expr, prop_name) => {
@@ -1768,7 +1791,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             match target.as_ref() {
                                 Expr::Var(name) => {
                                     let v = evaluate_expr(env, value_expr)?;
-                                    env_set(env, name.as_str(), v.clone())?;
+                                    env_set_recursive(env, name.as_str(), v.clone())?;
                                     last_value = v;
                                 }
                                 Expr::Property(obj_expr, prop_name) => {
@@ -1809,7 +1832,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             match target.as_ref() {
                                 Expr::Var(name) => {
                                     let v = evaluate_expr(env, value_expr)?;
-                                    env_set(env, name.as_str(), v.clone())?;
+                                    env_set_recursive(env, name.as_str(), v.clone())?;
                                     last_value = v;
                                 }
                                 Expr::Property(obj_expr, prop_name) => {
@@ -1850,7 +1873,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             Value::Undefined => match target.as_ref() {
                                 Expr::Var(name) => {
                                     let v = evaluate_expr(env, value_expr)?;
-                                    env_set(env, name.as_str(), v.clone())?;
+                                    env_set_recursive(env, name.as_str(), v.clone())?;
                                     last_value = v;
                                 }
                                 Expr::Property(obj_expr, prop_name) => {
@@ -1904,12 +1927,19 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 Statement::If(condition, then_body, else_body) => {
                     let cond_val = evaluate_expr(env, condition)?;
                     if is_truthy(&cond_val) {
-                        match evaluate_statements_with_context(env, then_body)? {
+                        // create new block scope
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, then_body)? {
                             ControlFlow::Normal(val) => last_value = val,
                             cf => return Ok(Some(cf)),
                         }
                     } else if let Some(else_stmts) = else_body {
-                        match evaluate_statements_with_context(env, else_stmts)? {
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, else_stmts)? {
                             ControlFlow::Normal(val) => last_value = val,
                             cf => return Ok(Some(cf)),
                         }
@@ -1933,7 +1963,9 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                                 return Err(err);
                             } else {
-                                let catch_env = env.clone();
+                                let catch_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                catch_env.borrow_mut().prototype = Some(env.clone());
+                                catch_env.borrow_mut().is_function_scope = false;
                                 let catch_value = match &err {
                                     JSError::Throw { value } => value.clone(),
                                     _ => Value::String(utf8_to_utf16(&err.to_string())),
@@ -1943,7 +1975,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     ControlFlow::Normal(val) => last_value = val,
                                     cf => {
                                         if let Some(finally_body) = finally_body_opt {
-                                            evaluate_statements_with_context(env, finally_body)?;
+                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            block_env.borrow_mut().prototype = Some(env.clone());
+                                            block_env.borrow_mut().is_function_scope = false;
+                                            evaluate_statements_with_context(&block_env, finally_body)?;
                                         }
                                         return Ok(Some(cf));
                                     }
@@ -1953,7 +1988,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
                     // Finally block executes after try/catch
                     if let Some(finally_body) = finally_body_opt {
-                        match evaluate_statements_with_context(env, finally_body)? {
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, finally_body)? {
                             ControlFlow::Normal(val) => last_value = val,
                             cf => return Ok(Some(cf)),
                         }
@@ -1961,15 +1999,26 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     Ok(None)
                 }
                 Statement::For(init, condition, increment, body) => {
-                    // Execute initialization
+                    let for_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    for_env.borrow_mut().prototype = Some(env.clone());
+                    for_env.borrow_mut().is_function_scope = false;
+                    // Execute initialization in for_env
                     if let Some(init_stmt) = init {
                         match init_stmt.as_ref() {
                             Statement::Let(name, expr_opt) => {
-                                let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                                env_set(env, name.as_str(), val)?;
+                                let val = expr_opt
+                                    .clone()
+                                    .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                                env_set(&for_env, name.as_str(), val)?;
+                            }
+                            Statement::Var(name, expr_opt) => {
+                                let val = expr_opt
+                                    .clone()
+                                    .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                                env_set_var(&for_env, name.as_str(), val)?;
                             }
                             Statement::Expr(expr) => {
-                                evaluate_expr(env, expr)?;
+                                evaluate_expr(&for_env, expr)?;
                             }
                             _ => {
                                 return Err(JSError::EvaluationError {
@@ -1980,9 +2029,9 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
 
                     loop {
-                        // Check condition
+                        // Check condition in for_env
                         let should_continue = if let Some(cond_expr) = condition {
-                            let cond_val = evaluate_expr(env, cond_expr)?;
+                            let cond_val = evaluate_expr(&for_env, cond_expr)?;
                             is_truthy(&cond_val)
                         } else {
                             true // No condition means infinite loop
@@ -1992,26 +2041,29 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             break;
                         }
 
-                        // Execute body
-                        match evaluate_statements_with_context(env, body)? {
+                        // Execute body in block_env
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(for_env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
                             ControlFlow::Break => break,
                             ControlFlow::Continue => {}
                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                         }
 
-                        // Execute increment
+                        // Execute increment in for_env
                         if let Some(incr_stmt) = increment {
                             match incr_stmt.as_ref() {
                                 Statement::Expr(expr) => match expr {
                                     Expr::Assign(target, value) => {
                                         if let Expr::Var(name) = target.as_ref() {
-                                            let val = evaluate_expr(env, value)?;
-                                            env_set(env, name.as_str(), val)?;
+                                            let val = evaluate_expr(&for_env, value)?;
+                                            env_set_recursive(&for_env, name.as_str(), val)?;
                                         }
                                     }
                                     _ => {
-                                        evaluate_expr(env, expr)?;
+                                        evaluate_expr(&for_env, expr)?;
                                     }
                                 },
                                 _ => {
@@ -2034,8 +2086,11 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     let key = i.to_string();
                                     if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                                         let element = element_rc.borrow().clone();
-                                        env_set(env, var.as_str(), element)?;
-                                        match evaluate_statements_with_context(env, body)? {
+                                        env_set_recursive(env, var.as_str(), element)?;
+                                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                        block_env.borrow_mut().prototype = Some(env.clone());
+                                        block_env.borrow_mut().is_function_scope = false;
+                                        match evaluate_statements_with_context(&block_env, body)? {
                                             ControlFlow::Normal(val) => last_value = val,
                                             ControlFlow::Break => break,
                                             ControlFlow::Continue => {}
@@ -2064,7 +2119,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         }
 
                         // Execute body
-                        match evaluate_statements_with_context(env, body)? {
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
                             ControlFlow::Break => break Ok(None),
                             ControlFlow::Continue => {}
@@ -2075,7 +2133,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 Statement::DoWhile(body, condition) => {
                     loop {
                         // Execute body first
-                        match evaluate_statements_with_context(env, body)? {
+                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().is_function_scope = false;
+                        match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
                             ControlFlow::Break => break Ok(None),
                             ControlFlow::Continue => {}
@@ -2105,7 +2166,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     }
                                 }
                                 if found_match {
-                                    match evaluate_statements_with_context(env, case_stmts)? {
+                                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                    block_env.borrow_mut().prototype = Some(env.clone());
+                                    block_env.borrow_mut().is_function_scope = false;
+                                    match evaluate_statements_with_context(&block_env, case_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
                                         ControlFlow::Break => break,
                                         cf => return Ok(Some(cf)),
@@ -2115,14 +2179,20 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             SwitchCase::Default(default_stmts) => {
                                 if !found_match && !executed_default {
                                     executed_default = true;
-                                    match evaluate_statements_with_context(env, default_stmts)? {
+                                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                    block_env.borrow_mut().prototype = Some(env.clone());
+                                    block_env.borrow_mut().is_function_scope = false;
+                                    match evaluate_statements_with_context(&block_env, default_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
                                         ControlFlow::Break => break,
                                         cf => return Ok(Some(cf)),
                                     }
                                 } else if found_match {
                                     // Default case also falls through if a match was found before it
-                                    match evaluate_statements_with_context(env, default_stmts)? {
+                                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                    block_env.borrow_mut().prototype = Some(env.clone());
+                                    block_env.borrow_mut().is_function_scope = false;
+                                    match evaluate_statements_with_context(&block_env, default_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
                                         ControlFlow::Break => break,
                                         cf => return Ok(Some(cf)),
@@ -2458,9 +2528,9 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 }
 
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
-    if let Some(_val) = env_get(env, name) {
+    if let Some(val_rc) = obj_get_value(env, name)? {
         log::trace!("evaluate_var - {} (found)", name);
-        Ok(_val.borrow().clone())
+        Ok(val_rc.borrow().clone())
     } else if name == "console" {
         Ok(Value::Object(js_console::make_console_object()?))
     } else if name == "String" {
@@ -2690,7 +2760,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
     let val = evaluate_expr(env, value)?;
     match target {
         Expr::Var(name) => {
-            env_set(env, name, val.clone())?;
+            env_set_recursive(env, name, val.clone())?;
             Ok(val)
         }
         Expr::Property(obj, prop) => {
@@ -2744,7 +2814,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     // Assign back
     match expr {
         Expr::Var(name) => {
-            env_set(env, name, new_val.clone())?;
+            env_set_recursive(env, name, new_val.clone())?;
             Ok(new_val)
         }
         Expr::Property(obj, prop) => {
@@ -2798,7 +2868,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     // Assign back
     match expr {
         Expr::Var(name) => {
-            env_set(env, name, new_val.clone())?;
+            env_set_recursive(env, name, new_val.clone())?;
             Ok(new_val)
         }
         Expr::Property(obj, prop) => {
@@ -2853,7 +2923,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     // Assign back
     match expr {
         Expr::Var(name) => {
-            env_set(env, name, new_val)?;
+            env_set_recursive(env, name, new_val)?;
             Ok(old_val)
         }
         Expr::Property(obj, prop) => {
@@ -2908,7 +2978,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     // Assign back
     match expr {
         Expr::Var(name) => {
-            env_set(env, name, new_val)?;
+            env_set_recursive(env, name, new_val)?;
             Ok(old_val)
         }
         Expr::Property(obj, prop) => {
@@ -3736,6 +3806,7 @@ pub struct JSObjectData {
     pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
     pub prototype: Option<Rc<RefCell<JSObjectData>>>,
+    pub is_function_scope: bool,
 }
 
 impl JSObjectData {
@@ -4020,6 +4091,83 @@ pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Resu
     Ok(())
 }
 
+pub fn env_set_recursive<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
+    let key = key.as_ref();
+    let mut current = env.clone();
+    loop {
+        if current.borrow().contains_key(key) {
+            return env_set(&current, key, val);
+        }
+        let parent_opt = current.borrow().prototype.clone();
+        if let Some(parent) = parent_opt {
+            current = parent;
+        } else {
+            // if not found, set in current env
+            return env_set(env, key, val);
+        }
+    }
+}
+
+pub fn env_set_var(env: &JSObjectDataPtr, key: &str, val: Value) -> Result<(), JSError> {
+    let mut current = env.clone();
+    loop {
+        if current.borrow().is_function_scope {
+            return env_set(&current, key, val);
+        }
+        let parent_opt = current.borrow().prototype.clone();
+        if let Some(parent) = parent_opt {
+            current = parent;
+        } else {
+            // If no function scope found, set in current env (global)
+            return env_set(env, key, val);
+        }
+    }
+}
+
+fn collect_var_names(statements: &[Statement], names: &mut std::collections::HashSet<String>) {
+    for stmt in statements {
+        match stmt {
+            Statement::Var(name, _) => {
+                names.insert(name.clone());
+            }
+            Statement::If(_, then_body, else_body) => {
+                collect_var_names(then_body, names);
+                if let Some(else_stmts) = else_body {
+                    collect_var_names(else_stmts, names);
+                }
+            }
+            Statement::For(_, _, _, body) => {
+                collect_var_names(body, names);
+            }
+            Statement::ForOf(_, _, body) => {
+                collect_var_names(body, names);
+            }
+            Statement::While(_, body) => {
+                collect_var_names(body, names);
+            }
+            Statement::DoWhile(body, _) => {
+                collect_var_names(body, names);
+            }
+            Statement::Switch(_, cases) => {
+                for case in cases {
+                    match case {
+                        SwitchCase::Case(_, stmts) => collect_var_names(stmts, names),
+                        SwitchCase::Default(stmts) => collect_var_names(stmts, names),
+                    }
+                }
+            }
+            Statement::TryCatch(try_body, _, catch_body, finally_body) => {
+                collect_var_names(try_body, names);
+                collect_var_names(catch_body, names);
+                if let Some(finally_stmts) = finally_body {
+                    collect_var_names(finally_stmts, names);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
     let mut env_mut = env.borrow_mut();
     env_mut.insert(key.to_string(), Rc::new(RefCell::new(val)));
@@ -4100,6 +4248,7 @@ pub enum SwitchCase {
 #[derive(Clone)]
 pub enum Statement {
     Let(String, Option<Expr>),
+    Var(String, Option<Expr>),
     Const(String, Expr),
     LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
     ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
@@ -4125,6 +4274,7 @@ impl std::fmt::Debug for Statement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
+            Statement::Var(var, expr) => write!(f, "Var({}, {:?})", var, expr),
             Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
             Statement::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
             Statement::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),

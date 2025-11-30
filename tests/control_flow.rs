@@ -217,4 +217,44 @@ mod control_flow_tests {
             _ => panic!("Expected number 42.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_var_hoisting() {
+        let script = "function f() { a = 10; return a; var a; } f()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 10.0),
+            _ => panic!("Expected number 10.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_var_in_block_scope() {
+        let script = "function f() { if (true) { var a = 5; } return a; } f()";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 5.0),
+            _ => panic!("Expected number 5.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_var_redeclaration() {
+        let script = "var a = 1; var a = 2; a";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!("Expected number 2.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_var_in_for_loop() {
+        let script = "for (var i = 0; i < 3; i++) {} i";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected number 3.0, got {:?}", result),
+        }
+    }
 }

@@ -1,7 +1,8 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, utf8_to_utf16};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, utf8_to_utf16, value_to_string};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
+use std::rc::Rc;
 
 /// Helper function to extract and validate arguments for internal functions
 /// Returns a vector of evaluated arguments or an error
@@ -63,8 +64,12 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
                     Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
                     Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
-                    Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
+                    Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[property]"))),
                     Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
+                    Value::Symbol(symbol_data) => match &symbol_data.description {
+                        Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
+                        None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
+                    },
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string
@@ -310,6 +315,22 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             // Date constructor - create a Date object
             handle_date_constructor(args, env)
         }
+        "Symbol" => {
+            // Symbol constructor - creates a unique symbol
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                let description = match arg_val {
+                    Value::String(s) => Some(String::from_utf16_lossy(&s)),
+                    Value::Undefined => None,
+                    _ => Some(value_to_string(&arg_val)),
+                };
+                let symbol_data = Rc::new(crate::core::SymbolData { description });
+                Ok(Value::Symbol(symbol_data))
+            } else {
+                let symbol_data = Rc::new(crate::core::SymbolData { description: None });
+                Ok(Value::Symbol(symbol_data)) // Symbol() with no args creates symbol with no description
+            }
+        }
         "new" => {
             // Handle new expressions: new Constructor(args)
             if args.len() == 1
@@ -427,14 +448,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             // Internal function for legacy allSettled - requires 3 args: (idx, value, shared_state)
             let args = extract_internal_args(args, env, 3)?;
             let numbers = validate_number_args(&args, 1)?;
-            crate::js_promise::__internal_promise_allsettled_resolve(numbers[0], args[1].clone(), args[2].clone());
+            crate::js_promise::__internal_promise_allsettled_resolve(numbers[0], args[1].clone(), args[2].clone())?;
             Ok(Value::Undefined)
         }
         "__internal_promise_allsettled_reject" => {
             // Internal function for legacy allSettled - requires 3 args: (idx, reason, shared_state)
             let args = extract_internal_args(args, env, 3)?;
             let numbers = validate_number_args(&args, 1)?;
-            crate::js_promise::__internal_promise_allsettled_reject(numbers[0], args[1].clone(), args[2].clone());
+            crate::js_promise::__internal_promise_allsettled_reject(numbers[0], args[1].clone(), args[2].clone())?;
             Ok(Value::Undefined)
         }
         "__internal_allsettled_state_record_fulfilled" => {
@@ -447,7 +468,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 numbers[1],
                 args[2]
             );
-            crate::js_promise::__internal_allsettled_state_record_fulfilled(numbers[0], numbers[1], args[2].clone());
+            crate::js_promise::__internal_allsettled_state_record_fulfilled(numbers[0], numbers[1], args[2].clone())?;
             Ok(Value::Undefined)
         }
         "__internal_allsettled_state_record_rejected" => {
@@ -460,7 +481,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 numbers[1],
                 args[2]
             );
-            crate::js_promise::__internal_allsettled_state_record_rejected(numbers[0], numbers[1], args[2].clone());
+            crate::js_promise::__internal_allsettled_state_record_rejected(numbers[0], numbers[1], args[2].clone())?;
             Ok(Value::Undefined)
         }
         "__internal_promise_any_resolve" => {
@@ -505,26 +526,26 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             let value = args[1].clone();
             if let Value::Object(state_obj) = args[2].clone() {
                 // Store value in results[idx]
-                if let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, "results")?
+                if let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, &"results".into())?
                     && let Value::Object(results_obj) = &*results_val_rc.borrow()
                 {
-                    crate::core::obj_set_value(results_obj, idx.to_string(), value)?;
+                    crate::core::obj_set_value(results_obj, &idx.to_string().into(), value)?;
                 }
                 // Increment completed
-                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
                     && let Value::Number(completed) = &*completed_val_rc.borrow()
                 {
                     let new_completed = completed + 1.0;
-                    crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                    crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                     // Check if all completed
-                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
                         && let Value::Number(total) = &*total_val_rc.borrow()
                         && new_completed == *total
                     {
                         // Resolve result_promise with results array
-                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                             && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
-                            && let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, "results")?
+                            && let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, &"results".into())?
                             && let Value::Object(results_obj) = &*results_val_rc.borrow()
                         {
                             crate::js_promise::resolve_promise(result_promise, Value::Object(results_obj.clone()));
@@ -540,7 +561,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             let reason = args[0].clone();
             if let Value::Object(state_obj) = args[1].clone() {
                 // Reject result_promise
-                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                     && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
                 {
                     crate::js_promise::reject_promise(result_promise, reason);

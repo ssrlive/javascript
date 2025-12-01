@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::{Value, evaluate_script};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -20,11 +19,11 @@ mod regexp_tests {
         match value {
             Value::Object(obj) => {
                 // Check that the object has the expected properties
-                assert!(obj.borrow().contains_key("__regex"));
-                assert!(obj.borrow().contains_key("__flags"));
-                assert!(obj.borrow().contains_key("toString"));
-                assert!(obj.borrow().contains_key("test"));
-                assert!(obj.borrow().contains_key("exec"));
+                assert!(obj.borrow().contains_key(&"__regex".into()));
+                assert!(obj.borrow().contains_key(&"__flags".into()));
+                assert!(obj.borrow().contains_key(&"toString".into()));
+                assert!(obj.borrow().contains_key(&"test".into()));
+                assert!(obj.borrow().contains_key(&"exec".into()));
             }
             _ => panic!("Expected object result"),
         }
@@ -38,8 +37,8 @@ mod regexp_tests {
         match value {
             Value::Object(obj) => {
                 // Check that the object has the expected properties
-                assert!(obj.borrow().contains_key("__regex"));
-                assert!(obj.borrow().contains_key("__flags"));
+                assert!(obj.borrow().contains_key(&"__regex".into()));
+                assert!(obj.borrow().contains_key(&"__flags".into()));
                 // We can't easily check the flags value without calling toString
             }
             _ => panic!("Expected object result"),
@@ -131,8 +130,8 @@ mod regexp_tests {
             Value::Object(arr_rc) => {
                 let arr = arr_rc.borrow();
                 // Expect two matches
-                let a0 = arr.get("0").unwrap().borrow().clone();
-                let a1 = arr.get("1").unwrap().borrow().clone();
+                let a0 = arr.get(&"0".into()).unwrap().borrow().clone();
+                let a1 = arr.get(&"1".into()).unwrap().borrow().clone();
                 match a0 {
                     Value::String(s0) => {
                         let s0s = String::from_utf16_lossy(&s0);

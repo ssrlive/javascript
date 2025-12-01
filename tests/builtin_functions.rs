@@ -1019,32 +1019,32 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 4.0),
                         _ => panic!("Expected length to be 4.0"),
                     }
                 }
                 // Check elements
-                if let Some(val0) = obj.get("0") {
+                if let Some(val0) = obj.get(&"0".into()) {
                     match *val0.borrow() {
                         Value::Number(n) => assert_eq!(n, 1.0),
                         _ => panic!("Expected element 0 to be 1.0"),
                     }
                 }
-                if let Some(val1) = obj.get("1") {
+                if let Some(val1) = obj.get(&"1".into()) {
                     match *val1.borrow() {
                         Value::Number(n) => assert_eq!(n, 2.0),
                         _ => panic!("Expected element 1 to be 2.0"),
                     }
                 }
-                if let Some(val2) = obj.get("2") {
+                if let Some(val2) = obj.get(&"2".into()) {
                     match *val2.borrow() {
                         Value::Number(n) => assert_eq!(n, 3.0),
                         _ => panic!("Expected element 2 to be 3.0"),
                     }
                 }
-                if let Some(val3) = obj.get("3") {
+                if let Some(val3) = obj.get(&"3".into()) {
                     match *val3.borrow() {
                         Value::Number(n) => assert_eq!(n, 4.0),
                         _ => panic!("Expected element 3 to be 4.0"),
@@ -1064,32 +1064,32 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 4.0),
                         _ => panic!("Expected length to be 4.0"),
                     }
                 }
                 // Check elements
-                if let Some(val0) = obj.get("0") {
+                if let Some(val0) = obj.get(&"0".into()) {
                     match *val0.borrow() {
                         Value::Number(n) => assert_eq!(n, 1.0),
                         _ => panic!("Expected element 0 to be 1.0"),
                     }
                 }
-                if let Some(val1) = obj.get("1") {
+                if let Some(val1) = obj.get(&"1".into()) {
                     match *val1.borrow() {
                         Value::Number(n) => assert_eq!(n, 2.0),
                         _ => panic!("Expected element 1 to be 2.0"),
                     }
                 }
-                if let Some(val2) = obj.get("2") {
+                if let Some(val2) = obj.get(&"2".into()) {
                     match *val2.borrow() {
                         Value::Number(n) => assert_eq!(n, 2.0),
                         _ => panic!("Expected element 2 to be 2.0"),
                     }
                 }
-                if let Some(val3) = obj.get("3") {
+                if let Some(val3) = obj.get(&"3".into()) {
                     match *val3.borrow() {
                         Value::Number(n) => assert_eq!(n, 4.0),
                         _ => panic!("Expected element 3 to be 4.0"),
@@ -1109,32 +1109,32 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 4.0),
                         _ => panic!("Expected length to be 4.0"),
                     }
                 }
                 // Check elements after copyWithin(0, 2, 4)
-                if let Some(val0) = obj.get("0") {
+                if let Some(val0) = obj.get(&"0".into()) {
                     match *val0.borrow() {
                         Value::Number(n) => assert_eq!(n, 3.0),
                         _ => panic!("Expected element 0 to be 3.0"),
                     }
                 }
-                if let Some(val1) = obj.get("1") {
+                if let Some(val1) = obj.get(&"1".into()) {
                     match *val1.borrow() {
                         Value::Number(n) => assert_eq!(n, 4.0),
                         _ => panic!("Expected element 1 to be 4.0"),
                     }
                 }
-                if let Some(val2) = obj.get("2") {
+                if let Some(val2) = obj.get(&"2".into()) {
                     match *val2.borrow() {
                         Value::Number(n) => assert_eq!(n, 3.0),
                         _ => panic!("Expected element 2 to be 3.0"),
                     }
                 }
-                if let Some(val3) = obj.get("3") {
+                if let Some(val3) = obj.get(&"3".into()) {
                     match *val3.borrow() {
                         Value::Number(n) => assert_eq!(n, 4.0),
                         _ => panic!("Expected element 3 to be 4.0"),
@@ -1154,24 +1154,24 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 2.0),
                         _ => panic!("Expected length to be 2.0"),
                     }
                 }
                 // Check first entry [0, 1]
-                if let Some(entry0) = obj.get("0") {
+                if let Some(entry0) = obj.get(&"0".into()) {
                     match &*entry0.borrow() {
                         Value::Object(entry_obj) => {
                             let entry_obj = entry_obj.borrow();
-                            if let Some(idx) = entry_obj.get("0") {
+                            if let Some(idx) = entry_obj.get(&"0".into()) {
                                 match *idx.borrow() {
                                     Value::Number(n) => assert_eq!(n, 0.0),
                                     _ => panic!("Expected entry[0][0] to be 0.0"),
                                 }
                             }
-                            if let Some(val) = entry_obj.get("1") {
+                            if let Some(val) = entry_obj.get(&"1".into()) {
                                 match *val.borrow() {
                                     Value::Number(n) => assert_eq!(n, 1.0),
                                     _ => panic!("Expected entry[0][1] to be 1.0"),
@@ -1182,17 +1182,17 @@ mod builtin_functions_tests {
                     }
                 }
                 // Check second entry [1, 2]
-                if let Some(entry1) = obj.get("1") {
+                if let Some(entry1) = obj.get(&"1".into()) {
                     match &*entry1.borrow() {
                         Value::Object(entry_obj) => {
                             let entry_obj = entry_obj.borrow();
-                            if let Some(idx) = entry_obj.get("0") {
+                            if let Some(idx) = entry_obj.get(&"0".into()) {
                                 match *idx.borrow() {
                                     Value::Number(n) => assert_eq!(n, 1.0),
                                     _ => panic!("Expected entry[1][0] to be 1.0"),
                                 }
                             }
-                            if let Some(val) = entry_obj.get("1") {
+                            if let Some(val) = entry_obj.get(&"1".into()) {
                                 match *val.borrow() {
                                     Value::Number(n) => assert_eq!(n, 2.0),
                                     _ => panic!("Expected entry[1][1] to be 2.0"),
@@ -1216,20 +1216,20 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 2.0),
                         _ => panic!("Expected length to be 2.0"),
                     }
                 }
                 // Check elements
-                if let Some(val0) = obj.get("0") {
+                if let Some(val0) = obj.get(&"0".into()) {
                     match *val0.borrow() {
                         Value::Number(n) => assert_eq!(n, 1.0),
                         _ => panic!("Expected element 0 to be 1.0"),
                     }
                 }
-                if let Some(val1) = obj.get("1") {
+                if let Some(val1) = obj.get(&"1".into()) {
                     match *val1.borrow() {
                         Value::Number(n) => assert_eq!(n, 2.0),
                         _ => panic!("Expected element 1 to be 2.0"),
@@ -1268,26 +1268,26 @@ mod builtin_functions_tests {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
                 // Check length
-                if let Some(length_val) = obj.get("length") {
+                if let Some(length_val) = obj.get(&"length".into()) {
                     match *length_val.borrow() {
                         Value::Number(len) => assert_eq!(len, 3.0),
                         _ => panic!("Expected length to be 3.0"),
                     }
                 }
                 // Check elements
-                if let Some(val0) = obj.get("0") {
+                if let Some(val0) = obj.get(&"0".into()) {
                     match *val0.borrow() {
                         Value::Number(n) => assert_eq!(n, 1.0),
                         _ => panic!("Expected element 0 to be 1.0"),
                     }
                 }
-                if let Some(val1) = obj.get("1") {
+                if let Some(val1) = obj.get(&"1".into()) {
                     match *val1.borrow() {
                         Value::Number(n) => assert_eq!(n, 2.0),
                         _ => panic!("Expected element 1 to be 2.0"),
                     }
                 }
-                if let Some(val2) = obj.get("2") {
+                if let Some(val2) = obj.get(&"2".into()) {
                     match *val2.borrow() {
                         Value::Number(n) => assert_eq!(n, 3.0),
                         _ => panic!("Expected element 2 to be 3.0"),

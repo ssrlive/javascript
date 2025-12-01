@@ -6,20 +6,20 @@ use std::rc::Rc;
 /// Create the Math object with all mathematical constants and functions
 pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     let math_obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&math_obj, "PI", Value::Number(std::f64::consts::PI))?;
-    obj_set_value(&math_obj, "E", Value::Number(std::f64::consts::E))?;
-    obj_set_value(&math_obj, "floor", Value::Function("Math.floor".to_string()))?;
-    obj_set_value(&math_obj, "ceil", Value::Function("Math.ceil".to_string()))?;
-    obj_set_value(&math_obj, "round", Value::Function("Math.round".to_string()))?;
-    obj_set_value(&math_obj, "abs", Value::Function("Math.abs".to_string()))?;
-    obj_set_value(&math_obj, "sqrt", Value::Function("Math.sqrt".to_string()))?;
-    obj_set_value(&math_obj, "pow", Value::Function("Math.pow".to_string()))?;
-    obj_set_value(&math_obj, "sin", Value::Function("Math.sin".to_string()))?;
-    obj_set_value(&math_obj, "cos", Value::Function("Math.cos".to_string()))?;
-    obj_set_value(&math_obj, "tan", Value::Function("Math.tan".to_string()))?;
-    obj_set_value(&math_obj, "random", Value::Function("Math.random".to_string()))?;
-    obj_set_value(&math_obj, "clz32", Value::Function("Math.clz32".to_string()))?;
-    obj_set_value(&math_obj, "imul", Value::Function("Math.imul".to_string()))?;
+    obj_set_value(&math_obj, &"PI".into(), Value::Number(std::f64::consts::PI))?;
+    obj_set_value(&math_obj, &"E".into(), Value::Number(std::f64::consts::E))?;
+    obj_set_value(&math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;
+    obj_set_value(&math_obj, &"ceil".into(), Value::Function("Math.ceil".to_string()))?;
+    obj_set_value(&math_obj, &"round".into(), Value::Function("Math.round".to_string()))?;
+    obj_set_value(&math_obj, &"abs".into(), Value::Function("Math.abs".to_string()))?;
+    obj_set_value(&math_obj, &"sqrt".into(), Value::Function("Math.sqrt".to_string()))?;
+    obj_set_value(&math_obj, &"pow".into(), Value::Function("Math.pow".to_string()))?;
+    obj_set_value(&math_obj, &"sin".into(), Value::Function("Math.sin".to_string()))?;
+    obj_set_value(&math_obj, &"cos".into(), Value::Function("Math.cos".to_string()))?;
+    obj_set_value(&math_obj, &"tan".into(), Value::Function("Math.tan".to_string()))?;
+    obj_set_value(&math_obj, &"random".into(), Value::Function("Math.random".to_string()))?;
+    obj_set_value(&math_obj, &"clz32".into(), Value::Function("Math.clz32".to_string()))?;
+    obj_set_value(&math_obj, &"imul".into(), Value::Function("Math.imul".to_string()))?;
     Ok(math_obj)
 }
 

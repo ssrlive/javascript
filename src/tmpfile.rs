@@ -37,18 +37,18 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
             let tmp = Rc::new(RefCell::new(JSObjectData::new()));
-            obj_set_value(&tmp, "__file_id", Value::Number(file_id as f64))?;
-            obj_set_value(&tmp, "__eof", Value::Boolean(false))?;
+            obj_set_value(&tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
+            obj_set_value(&tmp, &"__eof".into(), Value::Boolean(false))?;
             // methods
-            obj_set_value(&tmp, "puts", Value::Function("tmp.puts".to_string()))?;
-            obj_set_value(&tmp, "readAsString", Value::Function("tmp.readAsString".to_string()))?;
-            obj_set_value(&tmp, "seek", Value::Function("tmp.seek".to_string()))?;
-            obj_set_value(&tmp, "tell", Value::Function("tmp.tell".to_string()))?;
-            obj_set_value(&tmp, "putByte", Value::Function("tmp.putByte".to_string()))?;
-            obj_set_value(&tmp, "getByte", Value::Function("tmp.getByte".to_string()))?;
-            obj_set_value(&tmp, "getline", Value::Function("tmp.getline".to_string()))?;
-            obj_set_value(&tmp, "eof", Value::Function("tmp.eof".to_string()))?;
-            obj_set_value(&tmp, "close", Value::Function("tmp.close".to_string()))?;
+            obj_set_value(&tmp, &"puts".into(), Value::Function("tmp.puts".to_string()))?;
+            obj_set_value(&tmp, &"readAsString".into(), Value::Function("tmp.readAsString".to_string()))?;
+            obj_set_value(&tmp, &"seek".into(), Value::Function("tmp.seek".to_string()))?;
+            obj_set_value(&tmp, &"tell".into(), Value::Function("tmp.tell".to_string()))?;
+            obj_set_value(&tmp, &"putByte".into(), Value::Function("tmp.putByte".to_string()))?;
+            obj_set_value(&tmp, &"getByte".into(), Value::Function("tmp.getByte".to_string()))?;
+            obj_set_value(&tmp, &"getline".into(), Value::Function("tmp.getline".to_string()))?;
+            obj_set_value(&tmp, &"eof".into(), Value::Function("tmp.eof".to_string()))?;
+            obj_set_value(&tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(JSError::EvaluationError {
@@ -60,8 +60,8 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 /// Handle file object method calls
 pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if obj_map.borrow().contains_key("__file_id") {
-        let file_id_val = obj_map.borrow().get("__file_id").unwrap().borrow().clone();
+    if obj_map.borrow().contains_key(&"__file_id".into()) {
+        let file_id_val = obj_map.borrow().get(&"__file_id".into()).unwrap().borrow().clone();
         let file_id = match file_id_val {
             Value::Number(n) => n as u64,
             _ => {

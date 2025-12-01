@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16, utf16_to_utf8};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value, utf8_to_utf16, utf16_to_utf8};
 use crate::error::JSError;
 use crate::js_array::{is_array, set_array_length};
 use std::cell::RefCell;
@@ -68,7 +68,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
-                obj_set_value(&obj, i.to_string(), js_val)?;
+                obj_set_value(&obj, &i.to_string().into(), js_val)?;
             }
             set_array_length(&obj, len)?;
             Ok(Value::Object(obj))
@@ -77,7 +77,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let js_obj = Rc::new(RefCell::new(JSObjectData::new()));
             for (key, value) in obj.into_iter() {
                 let js_val = json_value_to_js_value(value)?;
-                obj_set_value(&js_obj, &key, js_val)?;
+                obj_set_value(&js_obj, &key.into(), js_val)?;
             }
             Ok(Value::Object(js_obj))
         }
@@ -109,7 +109,7 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                 let len = obj.borrow().properties.len();
                 let mut arr = Vec::new();
                 for i in 0..len {
-                    if let Some(val) = obj.borrow().get(&i.to_string()) {
+                    if let Some(val) = obj.borrow().get(&i.to_string().into()) {
                         if let Some(json_val) = js_value_to_json_value(val.borrow().clone()) {
                             arr.push(json_val);
                         } else {
@@ -123,9 +123,11 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
             } else {
                 let mut map = serde_json::Map::new();
                 for (key, value) in obj.borrow().properties.iter() {
-                    if key != "length" {
+                    if let PropertyKey::String(s) = key
+                        && s != "length"
+                    {
                         if let Some(json_val) = js_value_to_json_value(value.borrow().clone()) {
-                            map.insert(key.clone(), json_val);
+                            map.insert(s.clone(), json_val);
                         } else {
                             return None;
                         }

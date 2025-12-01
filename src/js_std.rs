@@ -12,14 +12,14 @@ fn utf8_to_utf16_local(s: &str) -> Vec<u16> {
 
 pub fn make_std_object() -> Result<JSObjectDataPtr, JSError> {
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&obj, "sprintf", Value::Function("std.sprintf".to_string()))?;
-    obj_set_value(&obj, "tmpfile", Value::Function("std.tmpfile".to_string()))?;
-    obj_set_value(&obj, "loadFile", Value::Function("std.loadFile".to_string()))?;
-    obj_set_value(&obj, "open", Value::Function("std.open".to_string()))?;
-    obj_set_value(&obj, "popen", Value::Function("std.popen".to_string()))?;
-    obj_set_value(&obj, "fdopen", Value::Function("std.fdopen".to_string()))?;
-    obj_set_value(&obj, "gc", Value::Function("std.gc".to_string()))?;
-    obj_set_value(&obj, "SEEK_SET", Value::Number(0.0))?;
-    obj_set_value(&obj, "SEEK_END", Value::Number(2.0))?;
+    obj_set_value(&obj, &"sprintf".into(), Value::Function("std.sprintf".to_string()))?;
+    obj_set_value(&obj, &"tmpfile".into(), Value::Function("std.tmpfile".to_string()))?;
+    obj_set_value(&obj, &"loadFile".into(), Value::Function("std.loadFile".to_string()))?;
+    obj_set_value(&obj, &"open".into(), Value::Function("std.open".to_string()))?;
+    obj_set_value(&obj, &"popen".into(), Value::Function("std.popen".to_string()))?;
+    obj_set_value(&obj, &"fdopen".into(), Value::Function("std.fdopen".to_string()))?;
+    obj_set_value(&obj, &"gc".into(), Value::Function("std.gc".to_string()))?;
+    obj_set_value(&obj, &"SEEK_SET".into(), Value::Number(0.0))?;
+    obj_set_value(&obj, &"SEEK_END".into(), Value::Number(2.0))?;
     Ok(obj)
 }

@@ -181,7 +181,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     }
                     let arr = Rc::new(RefCell::new(JSObjectData::new()));
                     for (i, part) in parts.into_iter().enumerate() {
-                        obj_set_value(&arr, i.to_string(), Value::String(part))?;
+                        obj_set_value(&arr, &i.to_string().into(), Value::String(part))?;
                     }
                     let len = arr.borrow().properties.len();
                     set_array_length(&arr, len)?;

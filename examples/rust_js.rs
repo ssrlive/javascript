@@ -57,5 +57,6 @@ fn main() {
         Value::Setter(_, _, _) => println!("[Setter]"),
         Value::Property { .. } => println!("[Property]"),
         Value::Promise(_) => println!("[object Promise]"),
+        Value::Symbol(_) => println!("[object Symbol]"),
     }
 }

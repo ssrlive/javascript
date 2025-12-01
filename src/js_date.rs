@@ -149,7 +149,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Create a Date object with timestamp
     let date_obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&date_obj, "__timestamp", Value::Number(timestamp))?;
+    obj_set_value(&date_obj, &"__timestamp".into(), Value::Number(timestamp))?;
 
     // Add toString method
     Ok(Value::Object(date_obj))
@@ -164,7 +164,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     // Convert timestamp to DateTime
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
@@ -193,7 +193,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getTime() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
@@ -213,7 +213,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.valueOf() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
@@ -233,7 +233,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getFullYear() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.year() as f64))
@@ -257,7 +257,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getMonth() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         // JavaScript months are 0-based
@@ -282,7 +282,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getDate() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.day() as f64))
@@ -306,7 +306,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getHours() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.hour() as f64))
@@ -330,7 +330,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getMinutes() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.minute() as f64))
@@ -354,7 +354,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getSeconds() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.second() as f64))
@@ -378,7 +378,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.getMilliseconds() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         Ok(Value::Number(dt.timestamp_subsec_millis() as f64))
@@ -402,7 +402,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toDateString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let local_dt = Local.from_utc_datetime(&dt.naive_utc());
@@ -428,7 +428,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toTimeString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let local_dt = Local.from_utc_datetime(&dt.naive_utc());
@@ -454,7 +454,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toISOString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let formatted = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
@@ -481,7 +481,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toUTCString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let formatted = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
@@ -506,7 +506,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toJSON() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if timestamp.is_nan() {
                         Ok(Value::Undefined)
@@ -535,7 +535,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toLocaleString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let local_dt = Local.from_utc_datetime(&dt.naive_utc());
@@ -562,7 +562,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toLocaleDateString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let local_dt = Local.from_utc_datetime(&dt.naive_utc());
@@ -589,7 +589,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                     message: "Date.toLocaleTimeString() takes no arguments".to_string(),
                 });
             }
-            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+            if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
                         let local_dt = Local.from_utc_datetime(&dt.naive_utc());

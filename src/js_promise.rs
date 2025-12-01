@@ -222,12 +222,13 @@ impl AllSettledState {
     /// # Arguments
     /// * `index` - Index of the promise in the original array
     /// * `value` - The fulfilled value
-    pub fn record_fulfilled(&mut self, index: usize, value: Value) {
+    pub fn record_fulfilled(&mut self, index: usize, value: Value) -> Result<(), JSError> {
         if index < self.results.len() {
             self.results[index] = Some(SettledResult::Fulfilled(value));
             self.completed += 1;
-            self.check_completion();
+            self.check_completion()?;
         }
+        Ok(())
     }
 
     /// Record that a promise at the given index has been rejected
@@ -235,16 +236,17 @@ impl AllSettledState {
     /// # Arguments
     /// * `index` - Index of the promise in the original array
     /// * `reason` - The rejection reason
-    pub fn record_rejected(&mut self, index: usize, reason: Value) {
+    pub fn record_rejected(&mut self, index: usize, reason: Value) -> Result<(), JSError> {
         if index < self.results.len() {
             self.results[index] = Some(SettledResult::Rejected(reason));
             self.completed += 1;
-            self.check_completion();
+            self.check_completion()?;
         }
+        Ok(())
     }
 
     /// Check if all promises have settled and resolve the result promise if so
-    fn check_completion(&self) {
+    fn check_completion(&self) -> Result<(), JSError> {
         log::trace!("check_completion: completed={}, total={}", self.completed, self.total);
         if self.completed == self.total {
             log::trace!("All promises settled, resolving result promise");
@@ -257,26 +259,27 @@ impl AllSettledState {
 
                     match settled_result {
                         SettledResult::Fulfilled(value) => {
-                            crate::core::obj_set_value(&result_obj, "status", Value::String(utf8_to_utf16("fulfilled"))).unwrap();
-                            crate::core::obj_set_value(&result_obj, "value", value.clone()).unwrap();
+                            crate::core::obj_set_value(&result_obj, &"status".into(), Value::String(utf8_to_utf16("fulfilled")))?;
+                            crate::core::obj_set_value(&result_obj, &"value".into(), value.clone())?;
                         }
                         SettledResult::Rejected(reason) => {
-                            crate::core::obj_set_value(&result_obj, "status", Value::String(utf8_to_utf16("rejected"))).unwrap();
-                            crate::core::obj_set_value(&result_obj, "reason", reason.clone()).unwrap();
+                            crate::core::obj_set_value(&result_obj, &"status".into(), Value::String(utf8_to_utf16("rejected")))?;
+                            crate::core::obj_set_value(&result_obj, &"reason".into(), reason.clone())?;
                         }
                     }
 
-                    crate::core::obj_set_value(&result_array, i.to_string(), Value::Object(result_obj)).unwrap();
+                    crate::core::obj_set_value(&result_array, &i.to_string().into(), Value::Object(result_obj))?;
                 }
             }
 
             // Set the length property for array compatibility
-            crate::core::obj_set_value(&result_array, "length", Value::Number(self.total as f64)).unwrap();
+            crate::core::obj_set_value(&result_array, &"length".into(), Value::Number(self.total as f64))?;
 
             // Resolve the main promise with the results array
             log::trace!("Resolving allSettled result promise");
             resolve_promise(&self.result_promise, Value::Object(result_array));
         }
+        Ok(())
     }
 }
 
@@ -316,15 +319,14 @@ pub fn make_promise_object() -> Result<JSObjectDataPtr, JSError> {
 
     // Add then method
     let then_func = Value::Function("Promise.prototype.then".to_string());
-    crate::core::obj_set_value(&promise_obj, "then", then_func)?;
+    crate::core::obj_set_value(&promise_obj, &"then".into(), then_func)?;
 
     // Add catch method
     let catch_func = Value::Function("Promise.prototype.catch".to_string());
-    crate::core::obj_set_value(&promise_obj, "catch", catch_func)?;
-
+    crate::core::obj_set_value(&promise_obj, &"catch".into(), catch_func)?;
     // Add finally method
     let finally_func = Value::Function("Promise.prototype.finally".to_string());
-    crate::core::obj_set_value(&promise_obj, "finally", finally_func)?;
+    crate::core::obj_set_value(&promise_obj, &"finally".into(), finally_func)?;
 
     Ok(promise_obj)
 }
@@ -379,7 +381,7 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     // Create the promise directly
     let promise = Rc::new(RefCell::new(JSPromise::new()));
     let promise_obj = make_promise_object()?;
-    crate::core::obj_set_value(&promise_obj, "__promise", Value::Promise(promise.clone()))?;
+    crate::core::obj_set_value(&promise_obj, &"__promise".into(), Value::Promise(promise.clone()))?;
 
     // Create resolve and reject functions directly
     let resolve_func = create_resolve_function_direct(promise.clone());
@@ -477,7 +479,7 @@ fn create_reject_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
 /// - Returns a new promise that resolves with callback return value
 pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
-    let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
+    let promise_val = crate::core::obj_get_value(promise_obj, &"__promise".into())?;
     let promise = match promise_val {
         Some(val_rc) => {
             let val = val_rc.borrow();
@@ -517,7 +519,7 @@ pub fn handle_promise_then_direct(
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
-    crate::core::obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
+    crate::core::obj_set_value(&new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
     // Get the onFulfilled callback
     let on_fulfilled = if !args.is_empty() {
@@ -624,7 +626,7 @@ pub fn handle_promise_then_direct(
 /// - Returns a new promise that resolves with callback return value
 pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
-    let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
+    let promise_val = crate::core::obj_get_value(promise_obj, &"__promise".into())?;
     let promise = match promise_val {
         Some(val_rc) => {
             let val = val_rc.borrow();
@@ -664,7 +666,7 @@ pub fn handle_promise_catch_direct(
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
-    crate::core::obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
+    crate::core::obj_set_value(&new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
     // Get the onRejected callback
     let on_rejected = if !args.is_empty() {
@@ -752,7 +754,7 @@ pub fn handle_promise_catch_direct(
 /// - If promise already settled, queues callback for async execution
 pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the underlying promise
-    let promise_val = crate::core::obj_get_value(promise_obj, "__promise")?;
+    let promise_val = crate::core::obj_get_value(promise_obj, &"__promise".into())?;
     let promise = match promise_val {
         Some(val_rc) => {
             let val = val_rc.borrow();
@@ -792,7 +794,7 @@ pub fn handle_promise_finally_direct(
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
-    crate::core::obj_set_value(&new_promise_obj, "__promise", Value::Promise(new_promise.clone()))?;
+    crate::core::obj_set_value(&new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
     // Get the onFinally callback
     let on_finally = if !args.is_empty() {
@@ -814,11 +816,11 @@ pub fn handle_promise_finally_direct(
             let new_env = env.clone();
             // Add the finally callback to the environment
             if let Some(callback) = on_finally {
-                crate::core::obj_set_value(&new_env, "finally_func", callback)?;
+                crate::core::obj_set_value(&new_env, &"finally_func".into(), callback)?;
             } else {
                 // No-op if no callback provided
                 let noop = Value::Closure(vec![], vec![], env.clone());
-                crate::core::obj_set_value(&new_env, "finally_func", noop)?;
+                crate::core::obj_set_value(&new_env, &"finally_func".into(), noop)?;
             }
             new_env
         },
@@ -871,7 +873,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
     if let PromiseState::Pending = promise_borrow.state {
         // Check if value is a promise object for flattening
         if let Value::Object(obj) = &value
-            && let Ok(Some(promise_val_rc)) = crate::core::obj_get_value(obj, "__promise")
+            && let Ok(Some(promise_val_rc)) = crate::core::obj_get_value(obj, &"__promise".into())
             && let Value::Promise(other_promise) = &*promise_val_rc.borrow()
         {
             // Adopt the state of the other promise
@@ -984,7 +986,7 @@ pub fn reject_promise(promise: &Rc<RefCell<JSPromise>>, reason: Value) {
 /// * `bool` - True if the object contains a promise, false otherwise
 #[allow(dead_code)]
 pub fn is_promise(obj: &JSObjectDataPtr) -> bool {
-    if let Ok(Some(val_rc)) = crate::core::obj_get_value(obj, "__promise") {
+    if let Ok(Some(val_rc)) = crate::core::obj_get_value(obj, &"__promise".into()) {
         matches!(&*val_rc.borrow(), Value::Promise(_))
     } else {
         false
@@ -1027,7 +1029,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     let mut i = 0;
                     loop {
                         let key = i.to_string();
-                        if let Some(val) = crate::core::obj_get_value(&arr, &key)? {
+                        if let Some(val) = crate::core::obj_get_value(&arr, &key.into())? {
                             promises.push((*val).borrow().clone());
                             i += 1;
                         } else {
@@ -1046,7 +1048,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             // Create a new promise that resolves when all promises resolve
             let result_promise = Rc::new(RefCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
             let num_promises = promises.len();
             if num_promises == 0 {
@@ -1059,37 +1061,37 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             // Create state object for coordination
             let state_obj = Rc::new(RefCell::new(JSObjectData::new()));
             let results_obj = Rc::new(RefCell::new(JSObjectData::new()));
-            crate::core::obj_set_value(&state_obj, "results", Value::Object(results_obj.clone()))?;
-            crate::core::obj_set_value(&state_obj, "completed", Value::Number(0.0))?;
-            crate::core::obj_set_value(&state_obj, "total", Value::Number(num_promises as f64))?;
-            crate::core::obj_set_value(&state_obj, "result_promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&state_obj, &"results".into(), Value::Object(results_obj.clone()))?;
+            crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(0.0))?;
+            crate::core::obj_set_value(&state_obj, &"total".into(), Value::Number(num_promises as f64))?;
+            crate::core::obj_set_value(&state_obj, &"result_promise".into(), Value::Promise(result_promise.clone()))?;
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 let state_obj_clone = state_obj.clone();
 
                 match promise_val {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, &"__promise".into())? {
                             if let Value::Promise(promise_ref) = &*promise_rc.borrow() {
                                 // Check if promise is already settled
                                 let promise_state = &promise_ref.borrow().state;
                                 match promise_state {
                                     PromiseState::Fulfilled(val) => {
                                         // Promise already fulfilled, record synchronously
-                                        crate::core::obj_set_value(&results_obj, idx.to_string(), val.clone())?;
+                                        crate::core::obj_set_value(&results_obj, &idx.to_string().into(), val.clone())?;
                                         // Increment completed
-                                        if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                                        if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
                                             && let Value::Number(completed) = &*completed_val_rc.borrow()
                                         {
                                             let new_completed = completed + 1.0;
-                                            crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                                            crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                                             // Check if all completed
-                                            if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                                            if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
                                                 && let Value::Number(total) = &*total_val_rc.borrow()
                                                 && new_completed == *total
                                             {
                                                 // Resolve result_promise with results array
-                                                if let Some(promise) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                                                if let Some(promise) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                                                     && let Value::Promise(result_promise_ref) = &*promise.borrow()
                                                 {
                                                     resolve_promise(result_promise_ref, Value::Object(results_obj.clone()));
@@ -1099,7 +1101,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                     }
                                     PromiseState::Rejected(reason) => {
                                         // Promise already rejected, reject result promise immediately
-                                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                                             && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
                                         {
                                             reject_promise(result_promise_ref, reason.clone());
@@ -1120,7 +1122,11 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                             ))],
                                             {
                                                 let new_env = env.clone();
-                                                crate::core::obj_set_value(&new_env, "__state", Value::Object(state_obj_clone.clone()))?;
+                                                crate::core::obj_set_value(
+                                                    &new_env,
+                                                    &"__state".into(),
+                                                    Value::Object(state_obj_clone.clone()),
+                                                )?;
                                                 new_env
                                             },
                                         );
@@ -1133,7 +1139,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                             ))],
                                             {
                                                 let new_env = env.clone();
-                                                crate::core::obj_set_value(&new_env, "__state", Value::Object(state_obj_clone))?;
+                                                crate::core::obj_set_value(&new_env, &"__state".into(), Value::Object(state_obj_clone))?;
                                                 new_env
                                             },
                                         );
@@ -1145,20 +1151,20 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                 }
                             } else {
                                 // Not a promise, treat as resolved value
-                                crate::core::obj_set_value(&results_obj, idx.to_string(), Value::Object(obj.clone()))?;
+                                crate::core::obj_set_value(&results_obj, &idx.to_string().into(), Value::Object(obj.clone()))?;
                                 // Increment completed
-                                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
                                     && let Value::Number(completed) = &*completed_val_rc.borrow()
                                 {
                                     let new_completed = completed + 1.0;
-                                    crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                                    crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                                     // Check if all completed
-                                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
                                         && let Value::Number(total) = &*total_val_rc.borrow()
                                         && new_completed == *total
                                     {
                                         // Resolve result_promise with results array
-                                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                                             && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
                                         {
                                             resolve_promise(result_promise_ref, Value::Object(results_obj.clone()));
@@ -1168,20 +1174,20 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                             }
                         } else {
                             // Not a promise, treat as resolved value
-                            crate::core::obj_set_value(&results_obj, idx.to_string(), Value::Object(obj.clone()))?;
+                            crate::core::obj_set_value(&results_obj, &idx.to_string().into(), Value::Object(obj.clone()))?;
                             // Increment completed
-                            if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                            if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
                                 && let Value::Number(completed) = &*completed_val_rc.borrow()
                             {
                                 let new_completed = completed + 1.0;
-                                crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                                crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                                 // Check if all completed
-                                if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                                if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
                                     && let Value::Number(total) = &*total_val_rc.borrow()
                                     && new_completed == *total
                                 {
                                     // Resolve result_promise with results array
-                                    if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                                    if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                                         && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
                                     {
                                         resolve_promise(result_promise_ref, Value::Object(results_obj.clone()));
@@ -1192,20 +1198,20 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     }
                     val => {
                         // Non-object value, treat as resolved
-                        crate::core::obj_set_value(&results_obj, idx.to_string(), val.clone())?;
+                        crate::core::obj_set_value(&results_obj, &idx.to_string().into(), val.clone())?;
                         // Increment completed
-                        if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, "completed")?
+                        if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
                             && let Value::Number(completed) = &*completed_val_rc.borrow()
                         {
                             let new_completed = completed + 1.0;
-                            crate::core::obj_set_value(&state_obj, "completed", Value::Number(new_completed))?;
+                            crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                             // Check if all completed
-                            if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, "total")?
+                            if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
                                 && let Value::Number(total) = &*total_val_rc.borrow()
                                 && new_completed == *total
                             {
                                 // Resolve result_promise with results array
-                                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, "result_promise")?
+                                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
                                     && let Value::Promise(result_promise_ref) = &*promise_val_rc.borrow()
                                 {
                                     resolve_promise(result_promise_ref, Value::Object(results_obj.clone()));
@@ -1235,7 +1241,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     let mut i = 0;
                     loop {
                         let key = i.to_string();
-                        if let Some(val) = crate::core::obj_get_value(&arr, &key)? {
+                        if let Some(val) = crate::core::obj_get_value(&arr, &key.into())? {
                             promises.push((*val).borrow().clone());
                             i += 1;
                         } else {
@@ -1253,7 +1259,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
             let result_promise = Rc::new(RefCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
             let num_promises = promises.len();
             if num_promises == 0 {
@@ -1276,18 +1282,18 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 match promise_val {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, &"__promise".into())? {
                             if let Value::Promise(promise_ref) = &*promise_rc.borrow() {
                                 // Check if promise is already settled
                                 let promise_state = &promise_ref.borrow().state;
                                 match promise_state {
                                     PromiseState::Fulfilled(val) => {
                                         // Promise already fulfilled, record synchronously
-                                        state.borrow_mut().record_fulfilled(idx, val.clone());
+                                        state.borrow_mut().record_fulfilled(idx, val.clone())?;
                                     }
                                     PromiseState::Rejected(reason) => {
                                         // Promise already rejected, record synchronously
-                                        state.borrow_mut().record_rejected(idx, reason.clone());
+                                        state.borrow_mut().record_rejected(idx, reason.clone())?;
                                     }
                                     PromiseState::Pending => {
                                         // Promise still pending, attach callbacks
@@ -1299,16 +1305,16 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                 }
                             } else {
                                 // Not a promise, treat as resolved value
-                                state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()));
+                                state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()))?;
                             }
                         } else {
                             // Not a promise, treat as resolved value
-                            state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()));
+                            state.borrow_mut().record_fulfilled(idx, Value::Object(obj.clone()))?;
                         }
                     }
                     val => {
                         // Non-object, treat as resolved value
-                        state.borrow_mut().record_fulfilled(idx, val);
+                        state.borrow_mut().record_fulfilled(idx, val)?;
                     }
                 }
             }
@@ -1330,7 +1336,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     let mut i = 0;
                     loop {
                         let key = i.to_string();
-                        if let Some(val) = crate::core::obj_get_value(&arr, &key)? {
+                        if let Some(val) = crate::core::obj_get_value(&arr, &key.into())? {
                             promises.push((*val).borrow().clone());
                             i += 1;
                         } else {
@@ -1348,16 +1354,16 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
             let result_promise = Rc::new(RefCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
             let num_promises = promises.len();
             if num_promises == 0 {
                 // Empty array, reject with AggregateError
                 let aggregate_error = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-                crate::core::obj_set_value(&aggregate_error, "name", Value::String(utf8_to_utf16("AggregateError")))?;
+                crate::core::obj_set_value(&aggregate_error, &"name".into(), Value::String(utf8_to_utf16("AggregateError")))?;
                 crate::core::obj_set_value(
                     &aggregate_error,
-                    "message",
+                    &"message".into(),
                     Value::String(utf8_to_utf16("All promises were rejected")),
                 )?;
                 reject_promise(&result_promise, Value::Object(aggregate_error));
@@ -1374,7 +1380,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
                 match promise_val {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, &"__promise".into())? {
                             if let Value::Promise(_p) = &*promise_rc.borrow() {
                                 let then_callback = Value::Closure(
                                     vec!["value".to_string()],
@@ -1386,7 +1392,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         let new_env = env.clone();
                                         crate::core::obj_set_value(
                                             &new_env,
-                                            "__result_promise",
+                                            &"__result_promise".into(),
                                             Value::Promise(result_promise_clone.clone()),
                                         )?;
                                         new_env
@@ -1410,11 +1416,15 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         let new_env = env.clone();
                                         crate::core::obj_set_value(
                                             &new_env,
-                                            "__rejected_count",
+                                            &"__rejected_count".into(),
                                             Value::Number(*rejected_count_clone.borrow() as f64),
                                         )?;
-                                        crate::core::obj_set_value(&new_env, "__total", Value::Number(num_promises as f64))?;
-                                        crate::core::obj_set_value(&new_env, "__result_promise", Value::Promise(result_promise_clone))?;
+                                        crate::core::obj_set_value(&new_env, &"__total".into(), Value::Number(num_promises as f64))?;
+                                        crate::core::obj_set_value(
+                                            &new_env,
+                                            &"__result_promise".into(),
+                                            Value::Promise(result_promise_clone),
+                                        )?;
                                         new_env
                                     },
                                 );
@@ -1456,7 +1466,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     let mut i = 0;
                     loop {
                         let key = i.to_string();
-                        if let Some(val) = crate::core::obj_get_value(&arr, &key)? {
+                        if let Some(val) = crate::core::obj_get_value(&arr, &key.into())? {
                             promises.push((*val).borrow().clone());
                             i += 1;
                         } else {
@@ -1474,14 +1484,14 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
             let result_promise = Rc::new(RefCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
             for promise_val in promises {
                 let result_promise_clone = result_promise.clone();
 
                 match promise_val {
                     Value::Object(obj) => {
-                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, "__promise")? {
+                        if let Some(promise_rc) = crate::core::obj_get_value(&obj, &"__promise".into())? {
                             if let Value::Promise(promise_ref) = &*promise_rc.borrow() {
                                 // Check if promise is already settled
                                 let promise_state = &promise_ref.borrow().state;
@@ -1508,7 +1518,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 let new_env = env.clone();
                                                 crate::core::obj_set_value(
                                                     &new_env,
-                                                    "__result_promise",
+                                                    &"__result_promise".into(),
                                                     Value::Promise(result_promise_clone.clone()),
                                                 )?;
                                                 new_env
@@ -1525,7 +1535,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 let new_env = env.clone();
                                                 crate::core::obj_set_value(
                                                     &new_env,
-                                                    "__result_promise",
+                                                    &"__result_promise".into(),
                                                     Value::Promise(result_promise_clone),
                                                 )?;
                                                 new_env
@@ -1566,7 +1576,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
             // If the value is already a promise object, return it directly
             if let Value::Object(obj) = &value
-                && let Some(promise_rc) = crate::core::obj_get_value(obj, "__promise")?
+                && let Some(promise_rc) = crate::core::obj_get_value(obj, &"__promise".into())?
                 && let Value::Promise(_) = &*promise_rc.borrow()
             {
                 return Ok(Value::Object(obj.clone()));
@@ -1580,7 +1590,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                 p.value = Some(value.clone());
             }
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
             Ok(Value::Object(result_promise_obj))
         }
         "reject" => {
@@ -1598,7 +1608,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                 p.value = Some(reason.clone());
             }
             let result_promise_obj = make_promise_object()?;
-            crate::core::obj_set_value(&result_promise_obj, "__promise", Value::Promise(result_promise.clone()))?;
+            crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
             Ok(Value::Object(result_promise_obj))
         }
         _ => Err(JSError::EvaluationError {
@@ -1637,37 +1647,36 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
 /// - Stores the result in the results array at the specified index
 /// - Increments the completion counter
 /// - Resolves the main Promise.allSettled promise when all promises have settled
-pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_state: Value) {
+pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_state: Value) -> Result<(), JSError> {
     if let Value::Object(shared_state_obj) = shared_state {
         // Get results array
-        if let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, "results").unwrap()
+        if let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"results".into())?
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             // Create settled result
             let settled = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-            crate::core::obj_set_value(&settled, "status", Value::String(utf8_to_utf16("fulfilled"))).unwrap();
-            crate::core::obj_set_value(&settled, "value", value).unwrap();
-
+            crate::core::obj_set_value(&settled, &"status".into(), Value::String(utf8_to_utf16("fulfilled")))?;
+            crate::core::obj_set_value(&settled, &"value".into(), value)?;
             // Add to results array at idx
-            crate::core::obj_set_value(results_obj, idx.to_string(), Value::Object(settled)).unwrap();
+            crate::core::obj_set_value(results_obj, &idx.to_string().into(), Value::Object(settled))?;
         }
 
         // Increment completed
-        if let Some(completed_val_rc) = crate::core::obj_get_value(&shared_state_obj, "completed").unwrap()
+        if let Some(completed_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"completed".into())?
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            crate::core::obj_set_value(&shared_state_obj, "completed", Value::Number(new_completed)).unwrap();
+            crate::core::obj_set_value(&shared_state_obj, &"completed".into(), Value::Number(new_completed))?;
 
             // Check if all completed
-            if let Some(total_val_rc) = crate::core::obj_get_value(&shared_state_obj, "total").unwrap()
+            if let Some(total_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"total".into())?
                 && let Value::Number(total) = &*total_val_rc.borrow()
                 && new_completed == *total
             {
                 // Resolve result promise
-                if let Some(promise_val_rc) = crate::core::obj_get_value(&shared_state_obj, "result_promise").unwrap()
+                if let Some(promise_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"result_promise".into())?
                     && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
-                    && let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, "results").unwrap()
+                    && let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"results".into())?
                     && let Value::Object(results_obj) = &*results_val_rc.borrow()
                 {
                     resolve_promise(result_promise, Value::Object(results_obj.clone()));
@@ -1675,6 +1684,7 @@ pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_stat
             }
         }
     }
+    Ok(())
 }
 
 /// Internal function for Promise.allSettled reject callback
@@ -1692,37 +1702,37 @@ pub fn __internal_promise_allsettled_resolve(idx: f64, value: Value, shared_stat
 /// - Stores the result in the results array at the specified index
 /// - Increments the completion counter
 /// - Resolves the main Promise.allSettled promise when all promises have settled
-pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_state: Value) {
+pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_state: Value) -> Result<(), JSError> {
     if let Value::Object(shared_state_obj) = shared_state {
         // Get results array
-        if let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, "results").unwrap()
+        if let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"results".into())?
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             // Create settled result
             let settled = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-            crate::core::obj_set_value(&settled, "status", Value::String(utf8_to_utf16("rejected"))).unwrap();
-            crate::core::obj_set_value(&settled, "reason", reason).unwrap();
+            crate::core::obj_set_value(&settled, &"status".into(), Value::String(utf8_to_utf16("rejected")))?;
+            crate::core::obj_set_value(&settled, &"reason".into(), reason)?;
 
             // Add to results array at idx
-            crate::core::obj_set_value(results_obj, idx.to_string(), Value::Object(settled)).unwrap();
+            crate::core::obj_set_value(results_obj, &idx.to_string().into(), Value::Object(settled))?;
         }
 
         // Increment completed
-        if let Some(completed_val_rc) = crate::core::obj_get_value(&shared_state_obj, "completed").unwrap()
+        if let Some(completed_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"completed".into())?
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            crate::core::obj_set_value(&shared_state_obj, "completed", Value::Number(new_completed)).unwrap();
+            crate::core::obj_set_value(&shared_state_obj, &"completed".into(), Value::Number(new_completed))?;
 
             // Check if all completed
-            if let Some(total_val_rc) = crate::core::obj_get_value(&shared_state_obj, "total").unwrap()
+            if let Some(total_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"total".into())?
                 && let Value::Number(total) = &*total_val_rc.borrow()
                 && new_completed == *total
             {
                 // Resolve result promise
-                if let Some(promise_val_rc) = crate::core::obj_get_value(&shared_state_obj, "result_promise").unwrap()
+                if let Some(promise_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"result_promise".into())?
                     && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
-                    && let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, "results").unwrap()
+                    && let Some(results_val_rc) = crate::core::obj_get_value(&shared_state_obj, &"results".into())?
                     && let Value::Object(results_obj) = &*results_val_rc.borrow()
                 {
                     resolve_promise(result_promise, Value::Object(results_obj.clone()));
@@ -1730,6 +1740,7 @@ pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_stat
             }
         }
     }
+    Ok(())
 }
 
 /// Internal function for Promise.any resolve callback
@@ -1768,7 +1779,7 @@ pub fn __internal_promise_any_reject(
     rejected_count: Rc<RefCell<usize>>,
     total: usize,
     result_promise: Rc<RefCell<JSPromise>>,
-) {
+) -> Result<(), JSError> {
     let idx = idx as usize;
     rejections.borrow_mut()[idx] = Some(reason);
     *rejected_count.borrow_mut() += 1;
@@ -1776,25 +1787,25 @@ pub fn __internal_promise_any_reject(
     if *rejected_count.borrow() == total {
         // All promises rejected, create AggregateError
         let aggregate_error = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-        crate::core::obj_set_value(&aggregate_error, "name", Value::String(utf8_to_utf16("AggregateError"))).unwrap();
+        crate::core::obj_set_value(&aggregate_error, &"name".into(), Value::String(utf8_to_utf16("AggregateError"))).unwrap();
         crate::core::obj_set_value(
             &aggregate_error,
-            "message",
+            &"message".into(),
             Value::String(utf8_to_utf16("All promises were rejected")),
-        )
-        .unwrap();
+        )?;
 
         let errors_array = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
         let rejections_vec = rejections.borrow();
         for (i, rejection) in rejections_vec.iter().enumerate() {
             if let Some(err) = rejection {
-                crate::core::obj_set_value(&errors_array, i.to_string(), err.clone()).unwrap();
+                crate::core::obj_set_value(&errors_array, &i.to_string().into(), err.clone())?;
             }
         }
-        crate::core::obj_set_value(&aggregate_error, "errors", Value::Object(errors_array)).unwrap();
+        crate::core::obj_set_value(&aggregate_error, &"errors".into(), Value::Object(errors_array))?;
 
         reject_promise(&result_promise, Value::Object(aggregate_error));
     }
+    Ok(())
 }
 
 /// Internal function for Promise.race resolve callback
@@ -1830,7 +1841,7 @@ pub fn __internal_promise_race_reject(reason: Value, result_promise: Rc<RefCell<
 /// * `state_index` - Index of the AllSettledState in global storage
 /// * `index` - Index of the promise in the original array
 /// * `value` - The resolved value
-pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64, value: Value) {
+pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64, value: Value) -> Result<(), JSError> {
     log::trace!("__internal_allsettled_state_record_fulfilled called: state_idx={state_index}, idx={index}, val={value:?}");
     let state_index = state_index as usize;
     let index = index as usize;
@@ -1840,11 +1851,13 @@ pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64
         if state_index < states_borrow.len() {
             let state = &states_borrow[state_index];
             log::trace!("Recording fulfilled for index {} in state {}", index, state_index);
-            state.borrow_mut().record_fulfilled(index, value);
+            state.borrow_mut().record_fulfilled(index, value)?;
         } else {
             log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
         }
-    });
+        Ok::<(), JSError>(())
+    })?;
+    Ok(())
 }
 
 /// Internal function for AllSettledState reject callback
@@ -1856,7 +1869,7 @@ pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64
 /// * `state_index` - Index of the AllSettledState in global storage
 /// * `index` - Index of the promise in the original array
 /// * `reason` - The rejection reason
-pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64, reason: Value) {
+pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64, reason: Value) -> Result<(), JSError> {
     log::trace!("__internal_allsettled_state_record_rejected called: state_index={state_index}, index={index}, reason={reason:?}");
     let state_index = state_index as usize;
     let index = index as usize;
@@ -1866,11 +1879,13 @@ pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64,
         if state_index < states_borrow.len() {
             let state = &states_borrow[state_index];
             log::trace!("Recording rejected for index {} in state {}", index, state_index);
-            state.borrow_mut().record_rejected(index, reason);
+            state.borrow_mut().record_rejected(index, reason)?;
         } else {
             log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
         }
-    });
+        Ok::<(), JSError>(())
+    })?;
+    Ok(())
 }
 
 /// Create a resolve callback function for Promise.allSettled

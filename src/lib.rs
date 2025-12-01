@@ -25,7 +25,7 @@ pub(crate) mod tmpfile;
 
 pub use core::{
     JS_DefinePropertyValue, JS_DupValue, JS_Eval, JS_FreeContext, JS_FreeRuntime, JS_FreeValue, JS_GetProperty, JS_NewContext,
-    JS_NewObject, JS_NewRuntime, JS_NewString, JS_SetProperty, JSClassDef, JSObject, JSStackFrame, JSString, JSValue, Value,
+    JS_NewObject, JS_NewRuntime, JS_NewString, JS_SetProperty, JSClassDef, JSObject, JSStackFrame, JSString, JSValue, PropertyKey, Value,
     evaluate_script, get_prop_env, obj_get_value, tokenize,
 };
 pub use core::{

@@ -19,7 +19,7 @@ fn test_prototype_assignment() {
             // Check if we can access the prototype's properties
             if let Some(proto_rc) = &obj.prototype {
                 let proto = proto_rc.borrow();
-                assert!(proto.contains_key("inheritedProp"));
+                assert!(proto.contains_key(&"inheritedProp".into()));
             }
         }
         _ => panic!("Expected object"),
@@ -39,7 +39,7 @@ fn test_prototype_chain_lookup() {
     match result {
         Value::Object(arr) => {
             // Check own property
-            let own_prop = arr.borrow().get("0").unwrap().borrow().clone();
+            let own_prop = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
             match own_prop {
                 Value::String(s) => {
                     let expected = "own value".encode_utf16().collect::<Vec<u16>>();
@@ -49,7 +49,7 @@ fn test_prototype_chain_lookup() {
             }
 
             // Check inherited property
-            let inherited_prop = arr.borrow().get("1").unwrap().borrow().clone();
+            let inherited_prop = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
             match inherited_prop {
                 Value::String(s) => {
                     let expected = "inherited value".encode_utf16().collect::<Vec<u16>>();
@@ -76,7 +76,7 @@ fn test_multi_level_prototype_chain() {
     match result {
         Value::Object(arr) => {
             // Check child property
-            let child_prop = arr.borrow().get("0").unwrap().borrow().clone();
+            let child_prop = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
             match child_prop {
                 Value::String(s) => {
                     let expected = "child value".encode_utf16().collect::<Vec<u16>>();
@@ -86,7 +86,7 @@ fn test_multi_level_prototype_chain() {
             }
 
             // Check parent property
-            let parent_prop = arr.borrow().get("1").unwrap().borrow().clone();
+            let parent_prop = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
             match parent_prop {
                 Value::String(s) => {
                     let expected = "parent value".encode_utf16().collect::<Vec<u16>>();
@@ -96,7 +96,7 @@ fn test_multi_level_prototype_chain() {
             }
 
             // Check grandparent property
-            let grandparent_prop = arr.borrow().get("2").unwrap().borrow().clone();
+            let grandparent_prop = arr.borrow().get(&"2".into()).unwrap().borrow().clone();
             match grandparent_prop {
                 Value::String(s) => {
                     let expected = "grandparent value".encode_utf16().collect::<Vec<u16>>();

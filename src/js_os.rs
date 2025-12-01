@@ -59,7 +59,7 @@ fn get_parent_pid_windows() -> u32 {
 /// Handle OS module method calls
 pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
-    if obj_map.borrow().contains_key("open") {
+    if obj_map.borrow().contains_key(&"open".into()) {
         match method {
             "open" => {
                 if !args.is_empty() {
@@ -286,7 +286,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                             let mut i = 0;
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
-                                    obj_set_value(&obj, i.to_string(), Value::String(utf8_to_utf16(name)))?;
+                                    obj_set_value(&obj, &i.to_string().into(), Value::String(utf8_to_utf16(name)))?;
                                     i += 1;
                                 }
                             }
@@ -336,7 +336,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
     }
 
     // If this object looks like the `os.path` module
-    if obj_map.borrow().contains_key("join") {
+    if obj_map.borrow().contains_key(&"join".into()) {
         match method {
             "join" => {
                 let mut result = String::new();
@@ -456,55 +456,58 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
 /// Create the OS object with all OS-related functions and constants
 pub fn make_os_object() -> Result<JSObjectDataPtr, JSError> {
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&obj, "remove", Value::Function("os.remove".to_string()))?;
-    obj_set_value(&obj, "mkdir", Value::Function("os.mkdir".to_string()))?;
-    obj_set_value(&obj, "open", Value::Function("os.open".to_string()))?;
-    obj_set_value(&obj, "write", Value::Function("os.write".to_string()))?;
-    obj_set_value(&obj, "read", Value::Function("os.read".to_string()))?;
-    obj_set_value(&obj, "seek", Value::Function("os.seek".to_string()))?;
-    obj_set_value(&obj, "close", Value::Function("os.close".to_string()))?;
-    obj_set_value(&obj, "readdir", Value::Function("os.readdir".to_string()))?;
-    obj_set_value(&obj, "utimes", Value::Function("os.utimes".to_string()))?;
-    obj_set_value(&obj, "stat", Value::Function("os.stat".to_string()))?;
-    obj_set_value(&obj, "lstat", Value::Function("os.lstat".to_string()))?;
-    obj_set_value(&obj, "symlink", Value::Function("os.symlink".to_string()))?;
-    obj_set_value(&obj, "readlink", Value::Function("os.readlink".to_string()))?;
-    obj_set_value(&obj, "getcwd", Value::Function("os.getcwd".to_string()))?;
-    obj_set_value(&obj, "realpath", Value::Function("os.realpath".to_string()))?;
-    obj_set_value(&obj, "exec", Value::Function("os.exec".to_string()))?;
-    obj_set_value(&obj, "pipe", Value::Function("os.pipe".to_string()))?;
-    obj_set_value(&obj, "waitpid", Value::Function("os.waitpid".to_string()))?;
-    obj_set_value(&obj, "kill", Value::Function("os.kill".to_string()))?;
-    obj_set_value(&obj, "isatty", Value::Function("os.isatty".to_string()))?;
-    obj_set_value(&obj, "getpid", Value::Function("os.getpid".to_string()))?;
-    obj_set_value(&obj, "getppid", Value::Function("os.getppid".to_string()))?;
-    obj_set_value(&obj, "O_RDWR", Value::Number(2.0))?;
-    obj_set_value(&obj, "O_CREAT", Value::Number(64.0))?;
-    obj_set_value(&obj, "O_TRUNC", Value::Number(512.0))?;
-    obj_set_value(&obj, "O_RDONLY", Value::Number(0.0))?;
-    obj_set_value(&obj, "S_IFMT", Value::Number(0o170000 as f64))?;
-    obj_set_value(&obj, "S_IFREG", Value::Number(0o100000 as f64))?;
-    obj_set_value(&obj, "S_IFLNK", Value::Number(0o120000 as f64))?;
-    obj_set_value(&obj, "SIGTERM", Value::Number(15.0))?;
+    obj_set_value(&obj, &"remove".into(), Value::Function("os.remove".to_string()))?;
+    obj_set_value(&obj, &"mkdir".into(), Value::Function("os.mkdir".to_string()))?;
+    obj_set_value(&obj, &"open".into(), Value::Function("os.open".to_string()))?;
+    obj_set_value(&obj, &"write".into(), Value::Function("os.write".to_string()))?;
+    obj_set_value(&obj, &"read".into(), Value::Function("os.read".to_string()))?;
+    obj_set_value(&obj, &"seek".into(), Value::Function("os.seek".to_string()))?;
+    obj_set_value(&obj, &"close".into(), Value::Function("os.close".to_string()))?;
+    obj_set_value(&obj, &"readdir".into(), Value::Function("os.readdir".to_string()))?;
+    obj_set_value(&obj, &"utimes".into(), Value::Function("os.utimes".to_string()))?;
+    obj_set_value(&obj, &"stat".into(), Value::Function("os.stat".to_string()))?;
+    obj_set_value(&obj, &"lstat".into(), Value::Function("os.lstat".to_string()))?;
+    obj_set_value(&obj, &"symlink".into(), Value::Function("os.symlink".to_string()))?;
+    obj_set_value(&obj, &"readlink".into(), Value::Function("os.readlink".to_string()))?;
+    obj_set_value(&obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
+    obj_set_value(&obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
+    obj_set_value(&obj, &"realpath".into(), Value::Function("os.realpath".to_string()))?;
+    obj_set_value(&obj, &"exec".into(), Value::Function("os.exec".to_string()))?;
+    obj_set_value(&obj, &"pipe".into(), Value::Function("os.pipe".to_string()))?;
+    obj_set_value(&obj, &"waitpid".into(), Value::Function("os.waitpid".to_string()))?;
+    obj_set_value(&obj, &"kill".into(), Value::Function("os.kill".to_string()))?;
+    obj_set_value(&obj, &"isatty".into(), Value::Function("os.isatty".to_string()))?;
+    obj_set_value(&obj, &"getpid".into(), Value::Function("os.getpid".to_string()))?;
+    obj_set_value(&obj, &"getppid".into(), Value::Function("os.getppid".to_string()))?;
+    obj_set_value(&obj, &"O_RDWR".into(), Value::Number(2.0))?;
+    obj_set_value(&obj, &"O_CREAT".into(), Value::Number(64.0))?;
+    obj_set_value(&obj, &"O_TRUNC".into(), Value::Number(512.0))?;
+    obj_set_value(&obj, &"O_RDONLY".into(), Value::Number(0.0))?;
+    obj_set_value(&obj, &"S_IFMT".into(), Value::Number(0o170000 as f64))?;
+    obj_set_value(&obj, &"S_IFREG".into(), Value::Number(0o100000 as f64))?;
+    obj_set_value(&obj, &"S_IFLNK".into(), Value::Number(0o120000 as f64))?;
+    obj_set_value(&obj, &"SIGTERM".into(), Value::Number(15.0))?;
 
     // Add path submodule
     let path_obj = make_path_object()?;
-    obj_set_value(&obj, "path", Value::Object(path_obj))?;
-
+    obj_set_value(&obj, &"path".into(), Value::Object(path_obj))?;
     Ok(obj)
 }
 
 /// Create the OS path object with path-related functions
 pub fn make_path_object() -> Result<JSObjectDataPtr, JSError> {
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
-    obj_set_value(&obj, "join", Value::Function("os.path.join".to_string()))?;
-    obj_set_value(&obj, "dirname", Value::Function("os.path.dirname".to_string()))?;
-    obj_set_value(&obj, "basename", Value::Function("os.path.basename".to_string()))?;
-    obj_set_value(&obj, "extname", Value::Function("os.path.extname".to_string()))?;
-    obj_set_value(&obj, "resolve", Value::Function("os.path.resolve".to_string()))?;
-    obj_set_value(&obj, "normalize", Value::Function("os.path.normalize".to_string()))?;
-    obj_set_value(&obj, "relative", Value::Function("os.path.relative".to_string()))?;
-    obj_set_value(&obj, "isAbsolute", Value::Function("os.path.isAbsolute".to_string()))?;
-    obj_set_value(&obj, "sep", Value::String(std::path::MAIN_SEPARATOR_STR.encode_utf16().collect()))?; // Platform-specific path separator
+    obj_set_value(&obj, &"join".into(), Value::Function("os.path.join".to_string()))?;
+    obj_set_value(&obj, &"dirname".into(), Value::Function("os.path.dirname".to_string()))?;
+    obj_set_value(&obj, &"basename".into(), Value::Function("os.path.basename".to_string()))?;
+    obj_set_value(&obj, &"extname".into(), Value::Function("os.path.extname".to_string()))?;
+    obj_set_value(&obj, &"resolve".into(), Value::Function("os.path.resolve".to_string()))?;
+    obj_set_value(&obj, &"normalize".into(), Value::Function("os.path.normalize".to_string()))?;
+    obj_set_value(&obj, &"relative".into(), Value::Function("os.path.relative".to_string()))?;
+    obj_set_value(&obj, &"isAbsolute".into(), Value::Function("os.path.isAbsolute".to_string()))?;
+
+    // Platform-specific path separator
+    let val = Value::String(std::path::MAIN_SEPARATOR_STR.encode_utf16().collect());
+    obj_set_value(&obj, &"sep".into(), val)?;
     Ok(obj)
 }

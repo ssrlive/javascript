@@ -2932,7 +2932,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), val.clone())?;
+                    obj_set_value(&obj_map, &prop.into(), val.clone())?;
                     Ok(val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2991,7 +2991,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val.clone())?;
+                    obj_set_value(&obj_map, &prop.into(), new_val.clone())?;
                     Ok(new_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -3050,7 +3050,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val.clone())?;
+                    obj_set_value(&obj_map, &prop.into(), new_val.clone())?;
                     Ok(new_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -3110,7 +3110,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val)?;
+                    obj_set_value(&obj_map, &prop.into(), new_val)?;
                     Ok(old_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -3170,7 +3170,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val)?;
+                    obj_set_value(&obj_map, &prop.into(), new_val)?;
                     Ok(old_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -3249,7 +3249,7 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    let deleted = obj_delete(&obj_map, &PropertyKey::String(prop.clone()));
+                    let deleted = obj_delete(&obj_map, &prop.into());
                     Ok(Value::Boolean(deleted))
                 }
                 _ => Ok(Value::Boolean(false)),
@@ -3884,7 +3884,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Getter(func_expr) => {
                     if let Expr::Function(_params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(&PropertyKey::String(key.clone()));
+                        let existing_opt = obj.borrow().get(&key.into());
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3926,7 +3926,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Setter(func_expr) => {
                     if let Expr::Function(params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(&PropertyKey::String(key.clone()));
+                        let existing_opt = obj.borrow().get(&key.into());
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3968,7 +3968,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 _ => {
                     let value = evaluate_expr(env, value_expr)?;
                     // Check if property already exists
-                    let existing_rc = obj.borrow().get(&PropertyKey::String(key.clone()));
+                    let existing_rc = obj.borrow().get(&key.into());
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
                         if let Value::Property {
@@ -4013,7 +4013,7 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
                 let mut i = 0;
                 loop {
                     let key = i.to_string();
-                    if let Some(val) = obj_get_value(&spread_obj, &PropertyKey::String(key))? {
+                    if let Some(val) = obj_get_value(&spread_obj, &key.into())? {
                         obj_set_value(&arr, &index.to_string().into(), val.borrow().clone())?;
                         index += 1;
                         i += 1;
@@ -4450,7 +4450,7 @@ pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> bool {
 }
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {
-    env.borrow().get(&PropertyKey::String(key.as_ref().to_string()))
+    env.borrow().get(&key.as_ref().into())
 }
 
 pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {

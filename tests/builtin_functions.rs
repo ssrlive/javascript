@@ -96,6 +96,69 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_math_clz32() {
+        // Test clz32 with zero
+        let script = "Math.clz32(0)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 32.0),
+            _ => panic!("Expected Math.clz32(0) to return 32, got {:?}", result),
+        }
+
+        // Test clz32 with 1
+        let script2 = "Math.clz32(1)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 31.0),
+            _ => panic!("Expected Math.clz32(1) to return 31, got {:?}", result2),
+        }
+
+        // Test clz32 with larger number (268435456 = 2^28)
+        let script3 = "Math.clz32(268435456)";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected Math.clz32(268435456) to return 3, got {:?}", result3),
+        }
+
+        // Test clz32 with NaN (should return 32)
+        let script4 = "Math.clz32(NaN)";
+        let result4 = evaluate_script(script4);
+        match result4 {
+            Ok(Value::Number(n)) => assert_eq!(n, 32.0),
+            _ => panic!("Expected Math.clz32(NaN) to return 32, got {:?}", result4),
+        }
+    }
+
+    #[test]
+    fn test_math_imul() {
+        // Test basic imul
+        let script = "Math.imul(2, 3)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
+            _ => panic!("Expected Math.imul(2, 3) to return 6, got {:?}", result),
+        }
+
+        // Test imul with negative numbers
+        let script2 = "Math.imul(-2, 3)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, -6.0),
+            _ => panic!("Expected Math.imul(-2, 3) to return -6, got {:?}", result2),
+        }
+
+        // Test imul with overflow (should wrap around)
+        // 2147483647 is 2^31 - 1 (max 32-bit signed int)
+        let script3 = "Math.imul(2147483647, 2)";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, -2.0), // Should wrap to -2
+            _ => panic!("Expected Math.imul(2147483647, 2) to return -2, got {:?}", result3),
+        }
+    }
+
+    #[test]
     fn test_parse_int() {
         let script = "parseInt('42')";
         let result = evaluate_script(script);
@@ -266,6 +329,61 @@ mod builtin_functions_tests {
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected Object.keys(obj).length to be 2.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_assign() {
+        // Test basic assign
+        let script = "let target = {a: 1}; let source = {b: 2, c: 3}; Object.assign(target, source); target.c";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected Object.assign to copy properties, got {:?}", result),
+        }
+
+        // Test assign with multiple sources
+        let script2 =
+            "let target = {a: 1}; let source1 = {b: 2}; let source2 = {c: 3}; Object.assign(target, source1, source2); target.b + target.c";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 5.0),
+            _ => panic!("Expected Object.assign with multiple sources to work, got {:?}", result2),
+        }
+
+        // Test assign returns target
+        let script3 = "let target = {a: 1}; let result = Object.assign(target, {b: 2}); result.a + result.b";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected Object.assign to return target, got {:?}", result3),
+        }
+    }
+
+    #[test]
+    fn test_object_create() {
+        // Test basic create with null prototype
+        let script = "let obj = Object.create(null); obj.a = 1; obj.a";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected Object.create(null) to work, got {:?}", result),
+        }
+
+        // Test create with prototype
+        let script2 = "let proto = {inherited: 'yes'}; let obj = Object.create(proto); obj.own = 'mine'; obj.inherited + obj.own";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "yesmine"),
+            _ => panic!("Expected Object.create with prototype to work, got {:?}", result2),
+        }
+
+        // Test create with property descriptors (basic)
+        let script3 = "let obj = Object.create({}, {prop: {value: 42}}); obj.prop";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected Object.create with property descriptors to work, got {:?}", result3),
         }
     }
 
@@ -1304,6 +1422,60 @@ mod builtin_functions_tests {
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected 'inherited' in obj to return true for inherited property, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_array_find_last() {
+        // Test findLast with even numbers
+        let script = "let arr = [1, 2, 3, 4, 5]; arr.findLast(x => x % 2 === 0)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 4.0),
+            _ => panic!("Expected findLast to return 4, got {:?}", result),
+        }
+
+        // Test findLast with no match
+        let script2 = "let arr = [1, 3, 5]; arr.findLast(x => x % 2 === 0)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Undefined) => (),
+            _ => panic!("Expected findLast with no match to return undefined, got {:?}", result2),
+        }
+
+        // Test findLast with strings
+        let script3 = "let arr = ['a', 'b', 'c']; arr.findLast(x => x === 'b')";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "b"),
+            _ => panic!("Expected findLast to return 'b', got {:?}", result3),
+        }
+    }
+
+    #[test]
+    fn test_array_find_last_index() {
+        // Test findLastIndex with even numbers
+        let script = "let arr = [1, 2, 3, 4, 5]; arr.findLastIndex(x => x % 2 === 0)";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected findLastIndex to return 3, got {:?}", result),
+        }
+
+        // Test findLastIndex with no match
+        let script2 = "let arr = [1, 3, 5]; arr.findLastIndex(x => x % 2 === 0)";
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected findLastIndex with no match to return -1, got {:?}", result2),
+        }
+
+        // Test findLastIndex with strings
+        let script3 = "let arr = ['a', 'b', 'c', 'b']; arr.findLastIndex(x => x === 'b')";
+        let result3 = evaluate_script(script3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected findLastIndex to return 3, got {:?}", result3),
         }
     }
 }

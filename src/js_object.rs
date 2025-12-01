@@ -88,6 +88,86 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }
             }
         }
+        "assign" => {
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Object.assign requires at least one argument".to_string(),
+                });
+            }
+            let target_val = evaluate_expr(env, &args[0])?;
+            let target_obj = match target_val {
+                Value::Object(obj) => obj,
+                _ => {
+                    return Err(JSError::TypeError {
+                        message: "Object.assign target must be an object".to_string(),
+                    });
+                }
+            };
+
+            // Copy properties from source objects to target
+            for arg in &args[1..] {
+                let source_val = evaluate_expr(env, arg)?;
+                if let Value::Object(source_obj) = source_val {
+                    for (key, value) in source_obj.borrow().properties.iter() {
+                        if key != "length" && key != "__proto__" {
+                            // Skip array length and prototype properties
+                            obj_set_value(&target_obj, key.clone(), value.borrow().clone())?;
+                        }
+                    }
+                }
+                // If source is not an object, skip it (like in JS)
+            }
+
+            Ok(Value::Object(target_obj))
+        }
+        "create" => {
+            if args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Object.create requires at least one argument".to_string(),
+                });
+            }
+            let proto_val = evaluate_expr(env, &args[0])?;
+            let proto_obj = match proto_val {
+                Value::Object(obj) => Some(obj),
+                Value::Undefined => None,
+                _ => {
+                    return Err(JSError::TypeError {
+                        message: "Object.create prototype must be an object or undefined".to_string(),
+                    });
+                }
+            };
+
+            // Create new object
+            let new_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+            // Set prototype
+            if let Some(proto) = proto_obj {
+                new_obj.borrow_mut().prototype = Some(proto);
+            }
+
+            // If properties descriptor is provided, add properties
+            if args.len() > 1 {
+                let props_val = evaluate_expr(env, &args[1])?;
+                if let Value::Object(props_obj) = props_val {
+                    for (key, desc_val) in props_obj.borrow().properties.iter() {
+                        if let Value::Object(desc_obj) = &*desc_val.borrow() {
+                            // Handle property descriptor
+                            let value = if let Some(val) = obj_get_value(desc_obj, "value")? {
+                                val.borrow().clone()
+                            } else {
+                                Value::Undefined
+                            };
+
+                            // For now, we just set the value directly
+                            // Full property descriptor support would require more complex implementation
+                            obj_set_value(&new_obj, key.clone(), value)?;
+                        }
+                    }
+                }
+            }
+
+            Ok(Value::Object(new_obj))
+        }
         _ => Err(JSError::EvaluationError {
             message: format!("Object.{} is not implemented", method),
         }),

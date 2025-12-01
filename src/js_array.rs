@@ -819,6 +819,10 @@ pub(crate) fn handle_array_instance_method(
             let current_len = get_array_length(obj_map).unwrap_or(0);
 
             // Extract array elements for sorting
+            // Note: This implementation uses O(n) extra space for simplicity.
+            // For better memory efficiency with large arrays, an in-place sort
+            // could be implemented, but it would be more complex with the current
+            // object storage model.
             let mut elements: Vec<(String, Value)> = Vec::new();
             for i in 0..current_len {
                 if let Some(val) = obj_get_value(obj_map, i.to_string())? {
@@ -1325,24 +1329,123 @@ pub(crate) fn handle_array_instance_method(
         "entries" => {
             let length = get_array_length(obj_map).unwrap_or(0);
 
-            let mut entries = Vec::new();
+            let result = Rc::new(RefCell::new(JSObjectData::new()));
+            set_array_length(&result, length)?;
             for i in 0..length {
                 if let Some(val) = obj_get_value(obj_map, i.to_string())? {
-                    let entry = [Value::Number(i as f64), val.borrow().clone()];
-                    let entry_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                    obj_set_value(&entry_obj, 0.to_string(), entry[0].clone())?;
-                    obj_set_value(&entry_obj, 1.to_string(), entry[1].clone())?;
-                    set_array_length(&entry_obj, 2)?;
-                    entries.push(Value::Object(entry_obj));
+                    // Create entry [i, value]
+                    let entry = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&entry, "0", Value::Number(i as f64))?;
+                    obj_set_value(&entry, "1", val.borrow().clone())?;
+                    set_array_length(&entry, 2)?;
+                    obj_set_value(&result, i.to_string(), Value::Object(entry))?;
                 }
             }
+            Ok(Value::Object(result))
+        }
+        "findLast" => {
+            if !args.is_empty() {
+                let callback = evaluate_expr(env, &args[0])?;
+                match callback {
+                    Value::Closure(params, body, captured_env) => {
+                        let current_len = get_array_length(obj_map).unwrap_or(0);
 
-            let iterator = Rc::new(RefCell::new(JSObjectData::new()));
-            set_array_length(&iterator, entries.len())?;
-            for (i, entry) in entries.into_iter().enumerate() {
-                obj_set_value(&iterator, i.to_string(), entry)?;
+                        // Search from the end
+                        for i in (0..current_len).rev() {
+                            if let Some(value) = obj_get_value(obj_map, i.to_string())? {
+                                let element = value.borrow().clone();
+                                let index_val = Value::Number(i as f64);
+
+                                // Create new environment for callback
+                                let func_env = captured_env.clone();
+                                if !params.is_empty() {
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
+                                }
+                                if params.len() >= 2 {
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
+                                }
+                                if params.len() > 2 {
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                                }
+
+                                let res = evaluate_statements(&func_env, &body)?;
+                                // truthy check
+                                let is_truthy = match res {
+                                    Value::Boolean(b) => b,
+                                    Value::Number(n) => n != 0.0,
+                                    Value::String(ref s) => !s.is_empty(),
+                                    Value::Object(_) => true,
+                                    Value::Undefined => false,
+                                    _ => false,
+                                };
+                                if is_truthy {
+                                    return Ok(element);
+                                }
+                            }
+                        }
+                        Ok(Value::Undefined)
+                    }
+                    _ => Err(JSError::EvaluationError {
+                        message: "Array.findLast expects a function".to_string(),
+                    }),
+                }
+            } else {
+                Err(JSError::EvaluationError {
+                    message: "Array.findLast expects at least one argument".to_string(),
+                })
             }
-            Ok(Value::Object(iterator))
+        }
+        "findLastIndex" => {
+            if !args.is_empty() {
+                let callback = evaluate_expr(env, &args[0])?;
+                match callback {
+                    Value::Closure(params, body, captured_env) => {
+                        let current_len = get_array_length(obj_map).unwrap_or(0);
+
+                        // Search from the end
+                        for i in (0..current_len).rev() {
+                            if let Some(value) = obj_get_value(obj_map, i.to_string())? {
+                                let element = value.borrow().clone();
+                                let index_val = Value::Number(i as f64);
+
+                                // Create new environment for callback
+                                let func_env = captured_env.clone();
+                                if !params.is_empty() {
+                                    env_set(&func_env, params[0].as_str(), element.clone())?;
+                                }
+                                if params.len() >= 2 {
+                                    env_set(&func_env, params[1].as_str(), index_val)?;
+                                }
+                                if params.len() > 2 {
+                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                                }
+
+                                let res = evaluate_statements(&func_env, &body)?;
+                                // truthy check
+                                let is_truthy = match res {
+                                    Value::Boolean(b) => b,
+                                    Value::Number(n) => n != 0.0,
+                                    Value::String(ref s) => !s.is_empty(),
+                                    Value::Object(_) => true,
+                                    Value::Undefined => false,
+                                    _ => false,
+                                };
+                                if is_truthy {
+                                    return Ok(Value::Number(i as f64));
+                                }
+                            }
+                        }
+                        Ok(Value::Number(-1.0))
+                    }
+                    _ => Err(JSError::EvaluationError {
+                        message: "Array.findLastIndex expects a function".to_string(),
+                    }),
+                }
+            } else {
+                Err(JSError::EvaluationError {
+                    message: "Array.findLastIndex expects at least one argument".to_string(),
+                })
+            }
         }
         _ => Err(JSError::EvaluationError {
             message: "error".to_string(),

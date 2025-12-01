@@ -18,6 +18,8 @@ pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_value(&math_obj, "cos", Value::Function("Math.cos".to_string()))?;
     obj_set_value(&math_obj, "tan", Value::Function("Math.tan".to_string()))?;
     obj_set_value(&math_obj, "random", Value::Function("Math.random".to_string()))?;
+    obj_set_value(&math_obj, "clz32", Value::Function("Math.clz32".to_string()))?;
+    obj_set_value(&math_obj, "imul", Value::Function("Math.imul".to_string()))?;
     Ok(math_obj)
 }
 
@@ -184,6 +186,46 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
             } else {
                 Err(JSError::EvaluationError {
                     message: "Math.random expects no arguments".to_string(),
+                })
+            }
+        }
+        "clz32" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    // Convert to u32, handling NaN and Infinity
+                    let u32_val = if n.is_nan() || n.is_infinite() { 0u32 } else { (n as i32) as u32 };
+                    let leading_zeros = u32_val.leading_zeros();
+                    Ok(Value::Number(leading_zeros as f64))
+                } else {
+                    Err(JSError::EvaluationError {
+                        message: "Math.clz32 expects a number".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::EvaluationError {
+                    message: "Math.clz32 expects exactly one argument".to_string(),
+                })
+            }
+        }
+        "imul" => {
+            if args.len() == 2 {
+                let a_val = evaluate_expr(env, &args[0])?;
+                let b_val = evaluate_expr(env, &args[1])?;
+                if let (Value::Number(a), Value::Number(b)) = (a_val, b_val) {
+                    // Convert to i32 and multiply, then convert back to f64
+                    let a_i32 = a as i32;
+                    let b_i32 = b as i32;
+                    let result_i32 = a_i32.wrapping_mul(b_i32);
+                    Ok(Value::Number(result_i32 as f64))
+                } else {
+                    Err(JSError::EvaluationError {
+                        message: "Math.imul expects two numbers".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::EvaluationError {
+                    message: "Math.imul expects exactly two arguments".to_string(),
                 })
             }
         }

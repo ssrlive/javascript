@@ -14,8 +14,13 @@ use crate::js_promise::{JSPromise, PromiseState, handle_promise_method, run_even
 use crate::sprintf;
 use crate::tmpfile;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::rc::Rc;
+
+thread_local! {
+    static SYMBOL_REGISTRY: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
+}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -918,6 +923,7 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
             Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
             Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
             Ok(Value::Promise(_)) => JS_UNDEFINED,         // For now
+            Ok(Value::Symbol(_)) => JS_UNDEFINED,          // For now
             Err(_) => JS_UNDEFINED,
         }
     }
@@ -958,16 +964,16 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
             && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
         {
             let name_part = &l[as_idx + 2..from_idx].trim();
-            let name = name_part.trim();
+            let name = PropertyKey::String(name_part.trim().to_string());
             if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
                 let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
                 let rest = &l[from_idx + start_quote + 1..];
                 if let Some(end_quote) = rest.find(quote_char) {
                     let module = &rest[..end_quote];
                     if module == "std" {
-                        obj_set_value(&env, name, Value::Object(crate::js_std::make_std_object()?))?;
+                        obj_set_value(&env, &name, Value::Object(crate::js_std::make_std_object()?))?;
                     } else if module == "os" {
-                        obj_set_value(&env, name, Value::Object(crate::js_os::make_os_object()?))?;
+                        obj_set_value(&env, &name, Value::Object(crate::js_os::make_os_object()?))?;
                     }
                 }
             }
@@ -981,7 +987,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
         Ok(v) => {
             // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
             if let Value::Object(obj) = &v
-                && let Some(promise_val_rc) = obj_get_value(obj, "__promise")?
+                && let Some(promise_val_rc) = obj_get_value(obj, &"__promise".into())?
                 && let Value::Promise(promise) = &*promise_val_rc.borrow()
             {
                 // Run the event loop until the promise is resolved
@@ -1762,21 +1768,62 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                             }
                             Expr::Index(obj_expr, idx_expr) => {
-                                // Evaluate index to a string key
+                                // Evaluate index — support number, string and symbol keys
                                 let idx_val = evaluate_expr(env, idx_expr)?;
-                                let key = match idx_val {
-                                    Value::Number(n) => n.to_string(),
-                                    Value::String(s) => String::from_utf16_lossy(&s),
+                                let v = evaluate_expr(env, value_expr)?;
+                                match idx_val {
+                                    Value::Number(n) => {
+                                        let key = n.to_string();
+                                        match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                            Some(updated_obj) => last_value = updated_obj,
+                                            None => last_value = v,
+                                        }
+                                    }
+                                    Value::String(s) => {
+                                        let key = String::from_utf16_lossy(&s);
+                                        match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                            Some(updated_obj) => last_value = updated_obj,
+                                            None => last_value = v,
+                                        }
+                                    }
+                                    Value::Symbol(sym) => {
+                                        // For symbols we must set the property with a Symbol key.
+                                        // Try fast path (obj_expr is a var that points to an object in env)
+                                        if let Expr::Var(varname) = obj_expr.as_ref()
+                                            && let Some(rc_val) = env_get(env, varname)
+                                        {
+                                            let mut borrowed = rc_val.borrow_mut();
+                                            if let Value::Object(ref mut map) = *borrowed {
+                                                let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                obj_set_value(map, &key, v.clone())?;
+                                                last_value = v;
+                                            } else {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "Cannot assign to property of non-object".to_string(),
+                                                });
+                                            }
+                                        } else {
+                                            // Fall back: evaluate object expression and set symbol key
+                                            let obj_val = evaluate_expr(env, obj_expr)?;
+                                            match obj_val {
+                                                Value::Object(obj_map) => {
+                                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                    obj_set_value(&obj_map, &key, v.clone())?;
+                                                    last_value = v;
+                                                }
+                                                _ => {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "Cannot assign to property of non-object".to_string(),
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
                                     _ => {
                                         return Err(JSError::EvaluationError {
                                             message: "Invalid index type".to_string(),
                                         });
                                     }
-                                };
-                                let v = evaluate_expr(env, value_expr)?;
-                                match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                    Some(updated_obj) => last_value = updated_obj,
-                                    None => last_value = v,
                                 }
                             }
                             _ => {
@@ -1803,19 +1850,58 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                                 Expr::Index(obj_expr, idx_expr) => {
                                     let idx_val = evaluate_expr(env, idx_expr)?;
-                                    let key = match idx_val {
-                                        Value::Number(n) => n.to_string(),
-                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match idx_val {
+                                        Value::Number(n) => {
+                                            let key = n.to_string();
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::String(s) => {
+                                            let key = String::from_utf16_lossy(&s);
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::Symbol(sym) => {
+                                            // symbol index — set symbol-keyed property
+                                            if let Expr::Var(varname) = obj_expr.as_ref()
+                                                && let Some(rc_val) = env_get(env, varname)
+                                            {
+                                                let mut borrowed = rc_val.borrow_mut();
+                                                if let Value::Object(ref mut map) = *borrowed {
+                                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                    obj_set_value(map, &key, v.clone())?;
+                                                    last_value = v;
+                                                } else {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "Cannot assign to property of non-object".to_string(),
+                                                    });
+                                                }
+                                            } else {
+                                                let obj_val = evaluate_expr(env, obj_expr)?;
+                                                match obj_val {
+                                                    Value::Object(obj_map) => {
+                                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                        obj_set_value(&obj_map, &key, v.clone())?;
+                                                        last_value = v;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message: "Cannot assign to property of non-object".to_string(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
                                         _ => {
                                             return Err(JSError::EvaluationError {
                                                 message: "Invalid index type".to_string(),
                                             });
                                         }
-                                    };
-                                    let v = evaluate_expr(env, value_expr)?;
-                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                        Some(updated_obj) => last_value = updated_obj,
-                                        None => last_value = v,
                                     }
                                 }
                                 _ => {
@@ -1844,19 +1930,57 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                                 Expr::Index(obj_expr, idx_expr) => {
                                     let idx_val = evaluate_expr(env, idx_expr)?;
-                                    let key = match idx_val {
-                                        Value::Number(n) => n.to_string(),
-                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match idx_val {
+                                        Value::Number(n) => {
+                                            let key = n.to_string();
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::String(s) => {
+                                            let key = String::from_utf16_lossy(&s);
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::Symbol(sym) => {
+                                            if let Expr::Var(varname) = obj_expr.as_ref()
+                                                && let Some(rc_val) = env_get(env, varname)
+                                            {
+                                                let mut borrowed = rc_val.borrow_mut();
+                                                if let Value::Object(ref mut map) = *borrowed {
+                                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                    obj_set_value(map, &key, v.clone())?;
+                                                    last_value = v;
+                                                } else {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "Cannot assign to property of non-object".to_string(),
+                                                    });
+                                                }
+                                            } else {
+                                                let obj_val = evaluate_expr(env, obj_expr)?;
+                                                match obj_val {
+                                                    Value::Object(obj_map) => {
+                                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                        obj_set_value(&obj_map, &key, v.clone())?;
+                                                        last_value = v;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message: "Cannot assign to property of non-object".to_string(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
                                         _ => {
                                             return Err(JSError::EvaluationError {
                                                 message: "Invalid index type".to_string(),
                                             });
                                         }
-                                    };
-                                    let v = evaluate_expr(env, value_expr)?;
-                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                        Some(updated_obj) => last_value = updated_obj,
-                                        None => last_value = v,
                                     }
                                 }
                                 _ => {
@@ -1885,19 +2009,57 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                                 Expr::Index(obj_expr, idx_expr) => {
                                     let idx_val = evaluate_expr(env, idx_expr)?;
-                                    let key = match idx_val {
-                                        Value::Number(n) => n.to_string(),
-                                        Value::String(s) => String::from_utf16_lossy(&s),
+                                    let v = evaluate_expr(env, value_expr)?;
+                                    match idx_val {
+                                        Value::Number(n) => {
+                                            let key = n.to_string();
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::String(s) => {
+                                            let key = String::from_utf16_lossy(&s);
+                                            match set_prop_env(env, obj_expr, &key, v.clone())? {
+                                                Some(updated_obj) => last_value = updated_obj,
+                                                None => last_value = v,
+                                            }
+                                        }
+                                        Value::Symbol(sym) => {
+                                            if let Expr::Var(varname) = obj_expr.as_ref()
+                                                && let Some(rc_val) = env_get(env, varname)
+                                            {
+                                                let mut borrowed = rc_val.borrow_mut();
+                                                if let Value::Object(ref mut map) = *borrowed {
+                                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                    obj_set_value(map, &key, v.clone())?;
+                                                    last_value = v;
+                                                } else {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "Cannot assign to property of non-object".to_string(),
+                                                    });
+                                                }
+                                            } else {
+                                                let obj_val = evaluate_expr(env, obj_expr)?;
+                                                match obj_val {
+                                                    Value::Object(obj_map) => {
+                                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                                                        obj_set_value(&obj_map, &key, v.clone())?;
+                                                        last_value = v;
+                                                    }
+                                                    _ => {
+                                                        return Err(JSError::EvaluationError {
+                                                            message: "Cannot assign to property of non-object".to_string(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                        }
                                         _ => {
                                             return Err(JSError::EvaluationError {
                                                 message: "Invalid index type".to_string(),
                                             });
                                         }
-                                    };
-                                    let v = evaluate_expr(env, value_expr)?;
-                                    match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                        Some(updated_obj) => last_value = updated_obj,
-                                        None => last_value = v,
                                     }
                                 }
                                 _ => {
@@ -2083,7 +2245,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             if is_array(&obj_map) {
                                 let len = get_array_length(&obj_map).unwrap_or(0);
                                 for i in 0..len {
-                                    let key = i.to_string();
+                                    let key = PropertyKey::String(i.to_string());
                                     if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                                         let element = element_rc.borrow().clone();
                                         env_set_recursive(env, var.as_str(), element)?;
@@ -2258,7 +2420,7 @@ fn perform_array_destructuring(
             for element in pattern {
                 match element {
                     DestructuringElement::Variable(var) => {
-                        let key = index.to_string();
+                        let key = PropertyKey::String(index.to_string());
                         let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
                             val_rc.borrow().clone()
                         } else {
@@ -2272,7 +2434,7 @@ fn perform_array_destructuring(
                         index += 1;
                     }
                     DestructuringElement::NestedArray(nested_pattern) => {
-                        let key = index.to_string();
+                        let key = PropertyKey::String(index.to_string());
                         let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
                             val_rc.borrow().clone()
                         } else {
@@ -2282,7 +2444,7 @@ fn perform_array_destructuring(
                         index += 1;
                     }
                     DestructuringElement::NestedObject(nested_pattern) => {
-                        let key = index.to_string();
+                        let key = PropertyKey::String(index.to_string());
                         let val = if let Some(val_rc) = obj_get_value(arr, &key)? {
                             val_rc.borrow().clone()
                         } else {
@@ -2307,7 +2469,7 @@ fn perform_array_destructuring(
                 let mut rest_elements: Vec<Value> = Vec::new();
                 let len = get_array_length(arr).unwrap_or(0);
                 for i in rest_start..len {
-                    let key = i.to_string();
+                    let key = PropertyKey::String(i.to_string());
                     if let Some(val_rc) = obj_get_value(arr, &key)? {
                         rest_elements.push(val_rc.borrow().clone());
                     }
@@ -2315,7 +2477,7 @@ fn perform_array_destructuring(
                 let rest_obj = Rc::new(RefCell::new(JSObjectData::new()));
                 let mut rest_index = 0;
                 for elem in rest_elements {
-                    obj_set_value(&rest_obj, rest_index.to_string(), elem)?;
+                    obj_set_value(&rest_obj, &rest_index.to_string().into(), elem)?;
                     rest_index += 1;
                 }
                 set_array_length(&rest_obj, rest_index)?;
@@ -2347,7 +2509,8 @@ fn perform_object_destructuring(
             for element in pattern {
                 match element {
                     ObjectDestructuringElement::Property { key, value: dest } => {
-                        let prop_val = if let Some(val_rc) = obj_get_value(obj, key)? {
+                        let key = PropertyKey::String(key.clone());
+                        let prop_val = if let Some(val_rc) = obj_get_value(obj, &key)? {
                             val_rc.borrow().clone()
                         } else {
                             Value::Undefined
@@ -2388,7 +2551,9 @@ fn perform_object_destructuring(
 
                         // Add remaining properties to rest object
                         for (key, val_rc) in obj.borrow().properties.iter() {
-                            if !assigned_keys.contains(key) {
+                            if let PropertyKey::String(k) = key
+                                && !assigned_keys.contains(k)
+                            {
                                 rest_obj.borrow_mut().insert(key.clone(), val_rc.clone());
                             }
                         }
@@ -2482,7 +2647,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 }
                 Value::Object(obj) => {
                     // Check if this is a Promise object with __promise property
-                    if let Some(promise_rc) = obj_get_value(&obj, "__promise")?
+                    if let Some(promise_rc) = obj_get_value(&obj, &"__promise".into())?
                         && let Value::Promise(promise) = promise_rc.borrow().clone()
                     {
                         // Wait for the promise to resolve by running the event loop
@@ -2536,8 +2701,8 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Object(js_math::make_math_object()?))
     } else if name == "JSON" {
         let json_obj = Rc::new(RefCell::new(JSObjectData::new()));
-        obj_set_value(&json_obj, "parse", Value::Function("JSON.parse".to_string()))?;
-        obj_set_value(&json_obj, "stringify", Value::Function("JSON.stringify".to_string()))?;
+        obj_set_value(&json_obj, &"parse".into(), Value::Function("JSON.parse".to_string()))?;
+        obj_set_value(&json_obj, &"stringify".into(), Value::Function("JSON.stringify".to_string()))?;
         Ok(Value::Object(json_obj))
     } else if name == "Object" {
         // Return Object constructor function, not an object with methods
@@ -2586,7 +2751,7 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {
         Ok(Value::Number(f64::INFINITY))
-    } else if let Some(val_rc) = obj_get_value(env, name)? {
+    } else if let Some(val_rc) = obj_get_value(env, &name.into())? {
         log::trace!("evaluate_var - {name} (found)");
         Ok(val_rc.borrow().clone())
     } else {
@@ -2767,7 +2932,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, prop, val.clone())?;
+                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), val.clone())?;
                     Ok(val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2780,12 +2945,17 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     obj_set_value(&obj_map, &key, val.clone())?;
                     Ok(val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    obj_set_value(&obj_map, &key, val.clone())?;
+                    Ok(val)
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     obj_set_value(&obj_map, &key, val.clone())?;
                     Ok(val)
                 }
@@ -2821,7 +2991,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, prop, new_val.clone())?;
+                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val.clone())?;
                     Ok(new_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2834,12 +3004,17 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -2875,7 +3050,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, prop, new_val.clone())?;
+                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val.clone())?;
                     Ok(new_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2888,12 +3063,17 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    obj_set_value(&obj_map, &key, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -2930,7 +3110,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, prop, new_val)?;
+                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val)?;
                     Ok(old_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2943,12 +3123,17 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
@@ -2985,7 +3170,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    obj_set_value(&obj_map, prop, new_val)?;
+                    obj_set_value(&obj_map, &PropertyKey::String(prop.clone()), new_val)?;
                     Ok(old_val)
                 }
                 _ => Err(JSError::EvaluationError {
@@ -2998,12 +3183,17 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    obj_set_value(&obj_map, &key, new_val)?;
+                    Ok(old_val)
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
@@ -3043,6 +3233,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Setter(_, _, _) => "function",
         Value::Property { .. } => "undefined",
         Value::Promise(_) => "object",
+        Value::Symbol(_) => "symbol",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -3058,7 +3249,7 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    let deleted = obj_delete(&obj_map, prop);
+                    let deleted = obj_delete(&obj_map, &PropertyKey::String(prop.clone()));
                     Ok(Value::Boolean(deleted))
                 }
                 _ => Ok(Value::Boolean(false)),
@@ -3070,12 +3261,17 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
                     let deleted = obj_delete(&obj_map, &key);
                     Ok(Value::Boolean(deleted))
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
-                    let key = n.to_string();
+                    let key = PropertyKey::String(n.to_string());
+                    let deleted = obj_delete(&obj_map, &key);
+                    Ok(Value::Boolean(deleted))
+                }
+                (Value::Object(obj_map), Value::Symbol(sym)) => {
+                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
                     let deleted = obj_delete(&obj_map, &key);
                     Ok(Value::Boolean(deleted))
                 }
@@ -3159,12 +3355,26 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::Equal => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
         },
         BinaryOp::StrictEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
+        },
+        BinaryOp::NotEqual => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
+            _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
+        },
+        BinaryOp::StrictNotEqual => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
+            _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
         },
         BinaryOp::LessThan => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
@@ -3219,7 +3429,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             // Check if property exists in object
             match (l, r) {
                 (Value::String(prop), Value::Object(obj)) => {
-                    let prop_str = String::from_utf16_lossy(&prop);
+                    let prop_str = PropertyKey::String(String::from_utf16_lossy(&prop));
                     Ok(Value::Boolean(obj_get_value(&obj, &prop_str)?.is_some()))
                 }
                 _ => Ok(Value::Boolean(false)),
@@ -3249,7 +3459,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
         }
         (Value::Object(obj_map), Value::Number(n)) => {
             // Array-like indexing
-            let key = n.to_string();
+            let key = PropertyKey::String(n.to_string());
             if let Some(val) = obj_get_value(&obj_map, &key)? {
                 Ok(val.borrow().clone())
             } else {
@@ -3258,7 +3468,16 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
         }
         (Value::Object(obj_map), Value::String(s)) => {
             // Object property access with string key
-            let key = String::from_utf16_lossy(&s);
+            let key = PropertyKey::String(String::from_utf16_lossy(&s));
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        (Value::Object(obj_map), Value::Symbol(sym)) => {
+            // Object property access with symbol key
+            let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
             if let Some(val) = obj_get_value(&obj_map, &key)? {
                 Ok(val.borrow().clone())
             } else {
@@ -3266,7 +3485,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
             }
         }
         _ => Err(JSError::EvaluationError {
-            message: "error".to_string(),
+            message: "Invalid index type".to_string(),
         }), // other types of indexing not supported yet
     }
 }
@@ -3277,13 +3496,17 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         Value::Object(obj_map) => {
-            if let Some(val) = obj_get_value(&obj_map, prop)? {
+            if let Some(val) = obj_get_value(&obj_map, &prop.into())? {
                 Ok(val.borrow().clone())
             } else {
                 Ok(Value::Undefined)
             }
         }
         Value::Number(n) => crate::js_number::box_number_and_get_property(n, prop, env),
+        Value::Symbol(symbol_data) if prop == "description" => match symbol_data.description.as_ref() {
+            Some(d) => Ok(Value::String(utf8_to_utf16(d))),
+            None => Ok(Value::Undefined),
+        },
         _ => Err(JSError::EvaluationError {
             message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
         }),
@@ -3296,13 +3519,17 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
     match obj_val {
         Value::Undefined => Ok(Value::Undefined),
         Value::Object(obj_map) => {
-            if let Some(val) = obj_get_value(&obj_map, prop)? {
+            if let Some(val) = obj_get_value(&obj_map, &prop.into())? {
                 Ok(val.borrow().clone())
             } else {
                 Ok(Value::Undefined)
             }
         }
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
+        Value::Symbol(symbol_data) if prop == "description" => match symbol_data.description.as_ref() {
+            Some(d) => Ok(Value::String(utf8_to_utf16(d))),
+            None => Ok(Value::Undefined),
+        },
         _ => Err(JSError::EvaluationError {
             message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
         }),
@@ -3320,17 +3547,24 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             return crate::js_array::handle_array_static_method(method_name, args, env);
         }
 
+        // Special case for Symbol static methods
+        if let Expr::Var(var_name) = &**obj_expr
+            && var_name == "Symbol"
+        {
+            return handle_symbol_static_method(method_name, args, env);
+        }
+
         let obj_val = evaluate_expr(env, obj_expr)?;
         log::trace!("evaluate_call - object evaluated");
         match (obj_val, method_name.as_str()) {
-            (Value::Object(obj_map), "log") if obj_map.borrow().contains_key("log") => {
+            (Value::Object(obj_map), "log") if obj_map.borrow().contains_key(&"log".into()) => {
                 js_console::handle_console_method(method_name, args, env)
             }
             (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
             (obj_val, "valueOf") => crate::js_object::handle_value_of_method(&obj_val, args),
             (Value::Object(obj_map), method) => {
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
-                if obj_map.borrow().contains_key("sprintf") {
+                if obj_map.borrow().contains_key(&"sprintf".into()) {
                     match method {
                         "sprintf" => {
                             log::trace!("js dispatch calling sprintf with {} args", args.len());
@@ -3344,50 +3578,50 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 }
 
                 // If this object looks like the `os` module (we used 'open' as marker)
-                if obj_map.borrow().contains_key("open") {
+                if obj_map.borrow().contains_key(&"open".into()) {
                     return crate::js_os::handle_os_method(&obj_map, method, args, env);
                 }
 
                 // If this object looks like the `os.path` module
-                if obj_map.borrow().contains_key("join") {
+                if obj_map.borrow().contains_key(&"join".into()) {
                     return crate::js_os::handle_os_method(&obj_map, method, args, env);
                 }
 
                 // If this object is a file-like object (we use '__file_id' as marker)
-                if obj_map.borrow().contains_key("__file_id") {
+                if obj_map.borrow().contains_key(&"__file_id".into()) {
                     return tmpfile::handle_file_method(&obj_map, method, args, env);
                 }
                 // Check if this is the Math object
-                if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
+                if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                     js_math::handle_math_method(method, args, env)
-                } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
+                } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                     crate::js_json::handle_json_method(method, args, env)
-                } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
+                } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {
                     crate::js_object::handle_object_method(method, args, env)
-                } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method, args, env)
-                } else if obj_map.borrow().contains_key("__value__") {
+                } else if obj_map.borrow().contains_key(&"__value__".into()) {
                     crate::js_number::handle_number_object_method(&obj_map, method, args, env)
-                } else if obj_map.borrow().contains_key("__timestamp") {
+                } else if obj_map.borrow().contains_key(&"__timestamp".into()) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method, args)
-                } else if obj_map.borrow().contains_key("__regex") {
+                } else if obj_map.borrow().contains_key(&"__regex".into()) {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
-                } else if obj_map.borrow().contains_key("__promise") {
+                } else if obj_map.borrow().contains_key(&"__promise".into()) {
                     // Promise instance methods
                     handle_promise_method(&obj_map, method, args, env)
-                } else if obj_map.borrow().contains_key("__class_def__") {
+                } else if obj_map.borrow().contains_key(&"__class_def__".into()) {
                     // Class static methods
                     call_static_method(&obj_map, method, args, env)
                 } else if is_class_instance(&obj_map)? {
                     call_class_method(&obj_map, method, args, env)
                 } else {
                     // Check for user-defined method
-                    if let Some(prop_val) = obj_get_value(&obj_map, method)? {
+                    if let Some(prop_val) = obj_get_value(&obj_map, &method.into())? {
                         match prop_val.borrow().clone() {
                             Value::Closure(params, body, captured_env) => {
                                 // Function call
@@ -3485,7 +3719,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             }
             Value::Object(obj_map) => {
                 // Check if this is a built-in constructor object
-                if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
                 } else {
@@ -3518,7 +3752,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
             Value::Undefined => Ok(Value::Undefined),
             Value::Object(obj_map) => {
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
-                if obj_map.borrow().contains_key("sprintf") {
+                if obj_map.borrow().contains_key(&"sprintf".into()) {
                     match method_name.as_str() {
                         "sprintf" => {
                             log::trace!("js dispatch calling sprintf with {} args", args.len());
@@ -3532,43 +3766,43 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 }
 
                 // If this object looks like the `os` module (we used 'open' as marker)
-                if obj_map.borrow().contains_key("open") {
+                if obj_map.borrow().contains_key(&"open".into()) {
                     return crate::js_os::handle_os_method(&obj_map, method_name, args, env);
                 }
 
                 // If this object looks like the `os.path` module
-                if obj_map.borrow().contains_key("join") {
+                if obj_map.borrow().contains_key(&"join".into()) {
                     return crate::js_os::handle_os_method(&obj_map, method_name, args, env);
                 }
 
                 // If this object is a file-like object (we use '__file_id' as marker)
-                if obj_map.borrow().contains_key("__file_id") {
+                if obj_map.borrow().contains_key(&"__file_id".into()) {
                     return tmpfile::handle_file_method(&obj_map, method_name, args, env);
                 }
                 // Check if this is the Math object
-                if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
+                if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                     js_math::handle_math_method(method_name, args, env)
-                } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
+                } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                     crate::js_json::handle_json_method(method_name, args, env)
-                } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
+                } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {
                     crate::js_object::handle_object_method(method_name, args, env)
-                } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
+                } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method_name, args, env)
-                } else if obj_map.borrow().contains_key("__value__") {
+                } else if obj_map.borrow().contains_key(&"__value__".into()) {
                     crate::js_number::handle_number_object_method(&obj_map, method_name, args, env)
-                } else if obj_map.borrow().contains_key("__timestamp") {
+                } else if obj_map.borrow().contains_key(&"__timestamp".into()) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method_name, args)
-                } else if obj_map.borrow().contains_key("__regex") {
+                } else if obj_map.borrow().contains_key(&"__regex".into()) {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
                     crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, obj_expr)
-                } else if obj_map.borrow().contains_key("__promise") {
+                } else if obj_map.borrow().contains_key(&"__promise".into()) {
                     // Promise instance methods
                     handle_promise_method(&obj_map, method_name, args, env)
-                } else if obj_map.borrow().contains_key("__class_def__") {
+                } else if obj_map.borrow().contains_key(&"__class_def__".into()) {
                     // Class static methods
                     call_static_method(&obj_map, method_name, args, env)
                 } else if is_class_instance(&obj_map)? {
@@ -3650,7 +3884,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Getter(func_expr) => {
                     if let Expr::Function(_params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(key);
+                        let existing_opt = obj.borrow().get(&PropertyKey::String(key.clone()));
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3661,7 +3895,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             {
                                 // Update getter
                                 getter.replace((body.clone(), env.clone()));
-                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                                obj.borrow_mut()
+                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
                                 let prop = Value::Property {
@@ -3669,7 +3904,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                     getter: Some((body.clone(), env.clone())),
                                     setter: None,
                                 };
-                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                                obj.borrow_mut()
+                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                             }
                         } else {
                             // Create new property descriptor with getter
@@ -3678,7 +3914,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 getter: Some((body.clone(), env.clone())),
                                 setter: None,
                             };
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut()
+                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                         }
                     } else {
                         return Err(JSError::EvaluationError {
@@ -3689,7 +3926,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Setter(func_expr) => {
                     if let Expr::Function(params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(key);
+                        let existing_opt = obj.borrow().get(&PropertyKey::String(key.clone()));
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3700,7 +3937,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             {
                                 // Update setter
                                 setter.replace((params.clone(), body.clone(), env.clone()));
-                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+                                obj.borrow_mut()
+                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
                                 let prop = Value::Property {
@@ -3708,7 +3946,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                     getter: None,
                                     setter: Some((params.clone(), body.clone(), env.clone())),
                                 };
-                                obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                                obj.borrow_mut()
+                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                             }
                         } else {
                             // Create new property descriptor with setter
@@ -3717,7 +3956,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 getter: None,
                                 setter: Some((params.clone(), body.clone(), env.clone())),
                             };
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut()
+                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                         }
                     } else {
                         return Err(JSError::EvaluationError {
@@ -3728,7 +3968,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 _ => {
                     let value = evaluate_expr(env, value_expr)?;
                     // Check if property already exists
-                    let existing_rc = obj.borrow().get(key);
+                    let existing_rc = obj.borrow().get(&PropertyKey::String(key.clone()));
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
                         if let Value::Property {
@@ -3739,7 +3979,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                         {
                             // Update value
                             prop_value.replace(Rc::new(RefCell::new(value)));
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(existing_val)));
+                            obj.borrow_mut()
+                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(existing_val)));
                         } else {
                             // Create new property descriptor
                             let prop = Value::Property {
@@ -3747,10 +3988,11 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 getter: None,
                                 setter: None,
                             };
-                            obj.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut()
+                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        obj_set_value(&obj, key.as_str(), value)?;
+                        obj_set_value(&obj, &key.into(), value)?;
                     }
                 }
             }
@@ -3771,8 +4013,8 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
                 let mut i = 0;
                 loop {
                     let key = i.to_string();
-                    if let Some(val) = obj_get_value(&spread_obj, &key)? {
-                        obj_set_value(&arr, index.to_string(), val.borrow().clone())?;
+                    if let Some(val) = obj_get_value(&spread_obj, &PropertyKey::String(key))? {
+                        obj_set_value(&arr, &index.to_string().into(), val.borrow().clone())?;
                         index += 1;
                         i += 1;
                     } else {
@@ -3786,7 +4028,7 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
             }
         } else {
             let value = evaluate_expr(env, elem_expr)?;
-            obj_set_value(&arr, index.to_string(), value)?;
+            obj_set_value(&arr, &index.to_string().into(), value)?;
             index += 1;
         }
     }
@@ -3809,11 +4051,88 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
     })
 }
 
+#[derive(Clone, Debug)]
+pub enum PropertyKey {
+    String(String),
+    Symbol(Rc<RefCell<Value>>),
+}
+
+impl From<&str> for PropertyKey {
+    fn from(s: &str) -> Self {
+        PropertyKey::String(s.to_string())
+    }
+}
+
+impl From<String> for PropertyKey {
+    fn from(s: String) -> Self {
+        PropertyKey::String(s)
+    }
+}
+
+impl From<&String> for PropertyKey {
+    fn from(s: &String) -> Self {
+        PropertyKey::String(s.clone())
+    }
+}
+
+impl PartialEq for PropertyKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PropertyKey::String(s1), PropertyKey::String(s2)) => s1 == s2,
+            (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => {
+                if let (Value::Symbol(s1), Value::Symbol(s2)) = (&*sym1.borrow(), &*sym2.borrow()) {
+                    Rc::ptr_eq(s1, s2)
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PropertyKey {}
+
+impl std::hash::Hash for PropertyKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            PropertyKey::String(s) => {
+                0u8.hash(state);
+                s.hash(state);
+            }
+            PropertyKey::Symbol(sym) => {
+                1u8.hash(state);
+                if let Value::Symbol(s) = &*sym.borrow() {
+                    Rc::as_ptr(s).hash(state);
+                }
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for PropertyKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PropertyKey::String(s) => write!(f, "{}", s),
+            PropertyKey::Symbol(_) => write!(f, "[symbol]"),
+        }
+    }
+}
+
+impl AsRef<str> for PropertyKey {
+    fn as_ref(&self) -> &str {
+        match self {
+            PropertyKey::String(s) => s,
+            PropertyKey::Symbol(_) => "[symbol]",
+        }
+    }
+}
+
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
 #[derive(Clone, Default)]
 pub struct JSObjectData {
-    pub properties: std::collections::HashMap<String, Rc<RefCell<Value>>>,
+    pub properties: std::collections::HashMap<PropertyKey, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
     pub prototype: Option<Rc<RefCell<JSObjectData>>>,
     pub is_function_scope: bool,
@@ -3837,23 +4156,23 @@ impl JSObjectData {
         JSObjectData::default()
     }
 
-    pub fn insert(&mut self, key: String, val: Rc<RefCell<Value>>) {
+    pub fn insert(&mut self, key: PropertyKey, val: Rc<RefCell<Value>>) {
         self.properties.insert(key, val);
     }
 
-    pub fn get(&self, key: &str) -> Option<Rc<RefCell<Value>>> {
+    pub fn get(&self, key: &PropertyKey) -> Option<Rc<RefCell<Value>>> {
         self.properties.get(key).cloned()
     }
 
-    pub fn contains_key(&self, key: &str) -> bool {
+    pub fn contains_key(&self, key: &PropertyKey) -> bool {
         self.properties.contains_key(key)
     }
 
-    pub fn remove(&mut self, key: &str) -> Option<Rc<RefCell<Value>>> {
+    pub fn remove(&mut self, key: &PropertyKey) -> Option<Rc<RefCell<Value>>> {
         self.properties.remove(key)
     }
 
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, String, Rc<RefCell<Value>>> {
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, PropertyKey, Rc<RefCell<Value>>> {
         self.properties.keys()
     }
 
@@ -3864,6 +4183,11 @@ impl JSObjectData {
     pub fn set_const(&mut self, key: String) {
         self.constants.insert(key);
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct SymbolData {
+    pub description: Option<String>,
 }
 
 #[derive(Clone)]
@@ -3885,6 +4209,7 @@ pub enum Value {
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
     Promise(Rc<RefCell<JSPromise>>), // Promise object
+    Symbol(Rc<SymbolData>),          // Symbol primitive with description
 }
 
 impl std::fmt::Debug for Value {
@@ -3902,6 +4227,7 @@ impl std::fmt::Debug for Value {
             Value::Setter(_, _, _) => write!(f, "Setter"),
             Value::Property { .. } => write!(f, "Property"),
             Value::Promise(p) => write!(f, "Promise({:p})", Rc::as_ptr(p)),
+            Value::Symbol(_) => write!(f, "Symbol"),
         }
     }
 }
@@ -3977,6 +4303,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
         (Value::Undefined, Value::Undefined) => true,
         (Value::Object(_), Value::Object(_)) => false, // Objects are not equal unless same reference
+        (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
         _ => false,                                    // Different types are not equal
     }
 }
@@ -3996,6 +4323,10 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Setter(_, _, _) => "setter".to_string(),
         Value::Property { .. } => "[property]".to_string(),
         Value::Promise(_) => "[object Promise]".to_string(),
+        Value::Symbol(desc) => match desc.description.as_ref() {
+            Some(d) => format!("Symbol({})", d),
+            None => "Symbol()".to_string(),
+        },
     }
 }
 
@@ -4024,18 +4355,19 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Setter(_, _, _) => "[setter]".to_string(),
         Value::Property { .. } => "[property]".to_string(),
         Value::Promise(_) => "[object Promise]".to_string(),
+        Value::Symbol(_) => "[object Symbol]".to_string(),
     }
 }
 
 // Helper accessors for objects and environments
-pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
-    let obj = js_obj.borrow().get(key.as_ref());
+pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+    let obj = js_obj.borrow().get(key);
     if let Some(val) = obj {
         // Check if this is a property descriptor
         let val_clone = val.borrow().clone();
         match val_clone {
             Value::Property { value, getter, .. } => {
-                log::trace!("obj_get_value - property descriptor found for key {}", key.as_ref());
+                log::trace!("obj_get_value - property descriptor found for key {}", key);
                 if let Some((body, env)) = getter {
                     // Create a new environment with this bound to the object
                     let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
@@ -4050,7 +4382,7 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                 }
             }
             Value::Getter(body, env) => {
-                log::trace!("obj_get_value - getter found for key {}", key.as_ref());
+                log::trace!("obj_get_value - getter found for key {}", key);
                 // Create a new environment with this bound to the object
                 let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
                 getter_env.borrow_mut().prototype = Some(env);
@@ -4059,7 +4391,7 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
                 Ok(Some(Rc::new(RefCell::new(result))))
             }
             _ => {
-                log::trace!("obj_get_value - raw value found for key {}", key.as_ref());
+                log::trace!("obj_get_value - raw value found for key {}", key);
                 Ok(Some(val.clone()))
             }
         }
@@ -4070,10 +4402,9 @@ pub fn obj_get_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T) -> Result<
     }
 }
 
-pub fn obj_set_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
-    let key = key.as_ref().to_string();
+pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
     // Check if there's a setter for this property
-    let existing_opt = js_obj.borrow().get(&key);
+    let existing_opt = js_obj.borrow().get(key);
     if let Some(existing) = existing_opt {
         match existing.borrow().clone() {
             Value::Property { value: _, getter, setter } => {
@@ -4088,7 +4419,7 @@ pub fn obj_set_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T, val: Value
                     // No setter, update value
                     let value = Some(Rc::new(RefCell::new(val)));
                     let new_prop = Value::Property { value, getter, setter };
-                    js_obj.borrow_mut().insert(key, Rc::new(RefCell::new(new_prop)));
+                    js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(new_prop)));
                 }
                 return Ok(());
             }
@@ -4105,21 +4436,21 @@ pub fn obj_set_value<T: AsRef<str>>(js_obj: &JSObjectDataPtr, key: T, val: Value
         }
     }
     // No setter, just set the value normally
-    js_obj.borrow_mut().insert(key, Rc::new(RefCell::new(val)));
+    js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(val)));
     Ok(())
 }
 
-pub fn obj_set_rc(map: &JSObjectDataPtr, key: &str, val_rc: Rc<RefCell<Value>>) {
-    map.borrow_mut().insert(key.to_string(), val_rc);
+pub fn obj_set_rc(map: &JSObjectDataPtr, key: &PropertyKey, val_rc: Rc<RefCell<Value>>) {
+    map.borrow_mut().insert(key.clone(), val_rc);
 }
 
-pub fn obj_delete(map: &JSObjectDataPtr, key: &str) -> bool {
+pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> bool {
     map.borrow_mut().remove(key);
     true // In JavaScript, delete always returns true
 }
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {
-    env.borrow().get(key.as_ref())
+    env.borrow().get(&PropertyKey::String(key.as_ref().to_string()))
 }
 
 pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
@@ -4129,23 +4460,24 @@ pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Resu
             message: format!("Assignment to constant variable '{key}'"),
         });
     }
-    env.borrow_mut().insert(key.to_string(), Rc::new(RefCell::new(val)));
+    env.borrow_mut()
+        .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
     Ok(())
 }
 
 pub fn env_set_recursive<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
-    let key = key.as_ref();
+    let key_str = key.as_ref();
     let mut current = env.clone();
     loop {
-        if current.borrow().contains_key(key) {
-            return env_set(&current, key, val);
+        if current.borrow().contains_key(&key_str.into()) {
+            return env_set(&current, key_str, val);
         }
         let parent_opt = current.borrow().prototype.clone();
         if let Some(parent) = parent_opt {
             current = parent;
         } else {
             // if not found, set in current env
-            return env_set(env, key, val);
+            return env_set(env, key_str, val);
         }
     }
 }
@@ -4212,7 +4544,7 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
 
 pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
     let mut env_mut = env.borrow_mut();
-    env_mut.insert(key.to_string(), Rc::new(RefCell::new(val)));
+    env_mut.insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
     env_mut.set_const(key.to_string());
 }
 
@@ -4221,7 +4553,7 @@ pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
 pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     let obj_val = evaluate_expr(env, obj_expr)?;
     match obj_val {
-        Value::Object(map) => obj_get_value(&map, prop),
+        Value::Object(map) => obj_get_value(&map, &prop.into()),
         _ => Ok(None),
     }
 }
@@ -4252,7 +4584,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
                 }
             }
 
-            obj_set_value(map, prop, val)?;
+            obj_set_value(map, &prop.into(), val)?;
             return Ok(None);
         }
     }
@@ -4272,7 +4604,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
                 }
             }
 
-            obj_set_value(&obj, prop, val)?;
+            obj_set_value(&obj, &prop.into(), val)?;
             Ok(Some(Value::Object(obj)))
         }
         _ => Err(JSError::EvaluationError {
@@ -4415,6 +4747,8 @@ pub enum BinaryOp {
     Mod,
     Equal,
     StrictEqual,
+    NotEqual,
+    StrictNotEqual,
     LessThan,
     GreaterThan,
     LessEqual,
@@ -4611,6 +4945,18 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     i += 2;
                 } else {
                     return Err(JSError::TokenizationError);
+                }
+            }
+            '!' => {
+                if i + 2 < chars.len() && chars[i + 1] == '=' && chars[i + 2] == '=' {
+                    tokens.push(Token::StrictNotEqual);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::NotEqual);
+                    i += 2;
+                } else {
+                    tokens.push(Token::LogicalNot);
+                    i += 1;
                 }
             }
             '=' => {
@@ -4894,6 +5240,8 @@ pub enum Token {
     Semicolon,
     Equal,
     StrictEqual,
+    NotEqual,
+    StrictNotEqual,
     LessThan,
     GreaterThan,
     LessEqual,
@@ -4904,6 +5252,7 @@ pub enum Token {
     Spread,
     OptionalChain,
     NullishCoalescing,
+    LogicalNot,
     LogicalAnd,
     LogicalOr,
     LogicalAndAssign,
@@ -4978,6 +5327,7 @@ fn is_truthy(val: &Value) -> bool {
         Value::Setter(_, _, _) => true,
         Value::Property { .. } => true,
         Value::Promise(_) => true,
+        Value::Symbol(_) => true,
     }
 }
 
@@ -5107,6 +5457,16 @@ fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             tokens.remove(0);
             let right = parse_comparison(tokens)?;
             Ok(Expr::Binary(Box::new(left), BinaryOp::StrictEqual, Box::new(right)))
+        }
+        Token::NotEqual => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::NotEqual, Box::new(right)))
+        }
+        Token::StrictNotEqual => {
+            tokens.remove(0);
+            let right = parse_comparison(tokens)?;
+            Ok(Expr::Binary(Box::new(left), BinaryOp::StrictNotEqual, Box::new(right)))
         }
         Token::LessThan => {
             tokens.remove(0);
@@ -6420,43 +6780,67 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
     let mut env_borrow = env.borrow_mut();
 
     // Object constructor
-    env_borrow.insert("Object".to_string(), Rc::new(RefCell::new(Value::Function("Object".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("Object".to_string()),
+        Rc::new(RefCell::new(Value::Function("Object".to_string()))),
+    );
 
     // Number constructor - handled by evaluate_var
-    // env_borrow.insert("Number".to_string(), Rc::new(RefCell::new(Value::Function("Number".to_string()))));
+    // env_borrow.insert(PropertyKey::String("Number".to_string()), Rc::new(RefCell::new(Value::Function("Number".to_string()))));
 
     // Boolean constructor
-    env_borrow.insert("Boolean".to_string(), Rc::new(RefCell::new(Value::Function("Boolean".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("Boolean".to_string()),
+        Rc::new(RefCell::new(Value::Function("Boolean".to_string()))),
+    );
 
     // String constructor
-    env_borrow.insert("String".to_string(), Rc::new(RefCell::new(Value::Function("String".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("String".to_string()),
+        Rc::new(RefCell::new(Value::Function("String".to_string()))),
+    );
 
     // Array constructor (already handled by js_array module)
-    env_borrow.insert("Array".to_string(), Rc::new(RefCell::new(Value::Function("Array".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("Array".to_string()),
+        Rc::new(RefCell::new(Value::Function("Array".to_string()))),
+    );
 
     // Date constructor (already handled by js_date module)
-    env_borrow.insert("Date".to_string(), Rc::new(RefCell::new(Value::Function("Date".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("Date".to_string()),
+        Rc::new(RefCell::new(Value::Function("Date".to_string()))),
+    );
 
     // RegExp constructor (already handled by js_regexp module)
-    env_borrow.insert("RegExp".to_string(), Rc::new(RefCell::new(Value::Function("RegExp".to_string()))));
+    env_borrow.insert(
+        PropertyKey::String("RegExp".to_string()),
+        Rc::new(RefCell::new(Value::Function("RegExp".to_string()))),
+    );
+
+    // Symbol constructor
+    env_borrow.insert(
+        PropertyKey::String("Symbol".to_string()),
+        Rc::new(RefCell::new(Value::Function("Symbol".to_string()))),
+    );
 
     // Internal promise resolution functions
     env_borrow.insert(
-        "__internal_resolve_promise".to_string(),
+        PropertyKey::String("__internal_resolve_promise".to_string()),
         Rc::new(RefCell::new(Value::Function("__internal_resolve_promise".to_string()))),
     );
     env_borrow.insert(
-        "__internal_reject_promise".to_string(),
+        PropertyKey::String("__internal_reject_promise".to_string()),
         Rc::new(RefCell::new(Value::Function("__internal_reject_promise".to_string()))),
     );
     env_borrow.insert(
-        "__internal_allsettled_state_record_fulfilled".to_string(),
+        PropertyKey::String("__internal_allsettled_state_record_fulfilled".to_string()),
         Rc::new(RefCell::new(Value::Function(
             "__internal_allsettled_state_record_fulfilled".to_string(),
         ))),
     );
     env_borrow.insert(
-        "__internal_allsettled_state_record_rejected".to_string(),
+        PropertyKey::String("__internal_allsettled_state_record_rejected".to_string()),
         Rc::new(RefCell::new(Value::Function(
             "__internal_allsettled_state_record_rejected".to_string(),
         ))),
@@ -6472,7 +6856,7 @@ fn expand_spread_in_call_args(env: &JSObjectDataPtr, args: &[Expr], evaluated_ar
                 // Assume it's an array-like object
                 let mut i = 0;
                 loop {
-                    let key = i.to_string();
+                    let key = PropertyKey::String(i.to_string());
                     if let Some(val) = obj_get_value(&spread_obj, &key)? {
                         evaluated_args.push(val.borrow().clone());
                         i += 1;
@@ -6502,12 +6886,12 @@ fn handle_optional_method_call(
     obj_expr: &Expr,
 ) -> Result<Value, JSError> {
     match method {
-        "log" if obj_map.borrow().contains_key("log") => js_console::handle_console_method(method, args, env),
+        "log" if obj_map.borrow().contains_key(&"log".into()) => js_console::handle_console_method(method, args, env),
         "toString" => crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args),
         "valueOf" => crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args),
         method => {
             // If this object looks like the `std` module (we used 'sprintf' as marker)
-            if obj_map.borrow().contains_key("sprintf") {
+            if obj_map.borrow().contains_key(&"sprintf".into()) {
                 match method {
                     "sprintf" => {
                         log::trace!("js dispatch calling sprintf with {} args", args.len());
@@ -6516,39 +6900,39 @@ fn handle_optional_method_call(
                     "tmpfile" => tmpfile::create_tmpfile(),
                     _ => Ok(Value::Undefined),
                 }
-            } else if obj_map.borrow().contains_key("open") {
+            } else if obj_map.borrow().contains_key(&"open".into()) {
                 // If this object looks like the `os` module (we used 'open' as marker)
                 crate::js_os::handle_os_method(obj_map, method, args, env)
-            } else if obj_map.borrow().contains_key("join") {
+            } else if obj_map.borrow().contains_key(&"join".into()) {
                 // If this object looks like the `os.path` module
                 crate::js_os::handle_os_method(obj_map, method, args, env)
-            } else if obj_map.borrow().contains_key("__file_id") {
+            } else if obj_map.borrow().contains_key(&"__file_id".into()) {
                 // If this object is a file-like object (we use '__file_id' as marker)
                 tmpfile::handle_file_method(obj_map, method, args, env)
-            } else if obj_map.borrow().contains_key("PI") && obj_map.borrow().contains_key("E") {
+            } else if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                 // Check if this is the Math object
                 js_math::handle_math_method(method, args, env)
-            } else if obj_map.borrow().contains_key("parse") && obj_map.borrow().contains_key("stringify") {
+            } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                 crate::js_json::handle_json_method(method, args, env)
-            } else if obj_map.borrow().contains_key("keys") && obj_map.borrow().contains_key("values") {
+            } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {
                 crate::js_object::handle_object_method(method, args, env)
-            } else if obj_map.borrow().contains_key("__timestamp") {
+            } else if obj_map.borrow().contains_key(&"__timestamp".into()) {
                 // Date instance methods
                 crate::js_date::handle_date_method(obj_map, method, args)
-            } else if obj_map.borrow().contains_key("__regex") {
+            } else if obj_map.borrow().contains_key(&"__regex".into()) {
                 // RegExp instance methods
                 crate::js_regexp::handle_regexp_method(obj_map, method, args, env)
             } else if is_array(obj_map) {
                 // Array instance methods
                 crate::js_array::handle_array_instance_method(obj_map, method, args, env, obj_expr)
-            } else if obj_map.borrow().contains_key("__class_def__") {
+            } else if obj_map.borrow().contains_key(&"__class_def__".into()) {
                 // Class static methods
                 call_static_method(obj_map, method, args, env)
             } else if is_class_instance(obj_map)? {
                 call_class_method(obj_map, method, args, env)
             } else {
                 // Check for user-defined method
-                if let Some(prop_val) = obj_get_value(obj_map, method)? {
+                if let Some(prop_val) = obj_get_value(obj_map, &method.into())? {
                     match prop_val.borrow().clone() {
                         Value::Closure(params, body, captured_env) => {
                             // Function call
@@ -6578,5 +6962,70 @@ fn handle_optional_method_call(
                 }
             }
         }
+    }
+}
+
+fn handle_symbol_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    match method {
+        "for" => {
+            // Symbol.for(key) - returns a symbol from the global registry
+            if args.len() != 1 {
+                return Err(JSError::TypeError {
+                    message: "Symbol.for requires exactly one argument".to_string(),
+                });
+            }
+            let key_expr = &args[0];
+            let key_val = evaluate_expr(env, key_expr)?;
+            let key = match key_val {
+                Value::String(s) => utf16_to_utf8(&s),
+                _ => value_to_string(&key_val),
+            };
+
+            SYMBOL_REGISTRY.with(|registry| {
+                let mut reg = registry.borrow_mut();
+                if let Some(symbol) = reg.get(&key) {
+                    Ok(symbol.borrow().clone())
+                } else {
+                    // Create a new symbol and register it
+                    let symbol_data = Rc::new(SymbolData {
+                        description: Some(key.clone()),
+                    });
+                    let symbol = Rc::new(RefCell::new(Value::Symbol(symbol_data)));
+                    reg.insert(key, symbol.clone());
+                    Ok(symbol.borrow().clone())
+                }
+            })
+        }
+        "keyFor" => {
+            // Symbol.keyFor(symbol) - returns the key for a symbol in the global registry
+            if args.len() != 1 {
+                return Err(JSError::TypeError {
+                    message: "Symbol.keyFor requires exactly one argument".to_string(),
+                });
+            }
+            let symbol_expr = &args[0];
+            let symbol_val = evaluate_expr(env, symbol_expr)?;
+
+            if let Value::Symbol(symbol_data) = symbol_val {
+                SYMBOL_REGISTRY.with(|registry| {
+                    let reg = registry.borrow();
+                    for (key, sym) in reg.iter() {
+                        if let Value::Symbol(stored_data) = &*sym.borrow()
+                            && Rc::ptr_eq(&symbol_data, stored_data)
+                        {
+                            return Ok(Value::String(utf8_to_utf16(key)));
+                        }
+                    }
+                    Ok(Value::Undefined)
+                })
+            } else {
+                Err(JSError::TypeError {
+                    message: "Symbol.keyFor requires a symbol as argument".to_string(),
+                })
+            }
+        }
+        _ => Err(JSError::TypeError {
+            message: format!("Symbol has no static method '{}'", method),
+        }),
     }
 }

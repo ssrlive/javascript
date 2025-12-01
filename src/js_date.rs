@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value, utf8_to_utf16};
 use crate::error::JSError;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -168,8 +168,10 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     // Convert timestamp to DateTime
                     if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        // Convert UTC to local time
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
                         // Format similar to JavaScript's Date.toString()
-                        let formatted = dt.format("%a %b %d %Y %H:%M:%S GMT%z (Coordinated Universal Time)").to_string();
+                        let formatted = local_dt.format("%a %b %d %Y %H:%M:%S GMT%z (%Z)").to_string();
                         Ok(Value::String(utf8_to_utf16(&formatted)))
                     } else {
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
@@ -394,8 +396,221 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                 })
             }
         }
+        "toDateString" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toDateString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        let formatted = local_dt.format("%a %b %d %Y").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toTimeString" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toTimeString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        let formatted = local_dt.format("%H:%M:%S GMT%z").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toISOString" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toISOString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let formatted = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Err(JSError::TypeError {
+                            message: "Invalid time value".to_string(),
+                        })
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toUTCString" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toUTCString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let formatted = dt.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toJSON" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toJSON() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if timestamp.is_nan() {
+                        Ok(Value::Undefined)
+                    } else if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let formatted = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toLocaleString" => {
+            // For simplicity, we'll use the same format as toString()
+            // In a real implementation, this would use locale-specific formatting
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toLocaleString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        let formatted = local_dt.format("%a %b %d %Y %H:%M:%S GMT%z").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toLocaleDateString" => {
+            // For simplicity, we'll use the same format as toDateString()
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toLocaleDateString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        let formatted = local_dt.format("%a %b %d %Y").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
+        "toLocaleTimeString" => {
+            // For simplicity, we'll use the same format as toTimeString()
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.toLocaleTimeString() takes no arguments".to_string(),
+                });
+            }
+            if let Some(timestamp_val) = obj_map.borrow().get("__timestamp") {
+                if let Value::Number(timestamp) = *timestamp_val.borrow() {
+                    if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                        let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                        let formatted = local_dt.format("%H:%M:%S GMT%z").to_string();
+                        Ok(Value::String(utf8_to_utf16(&formatted)))
+                    } else {
+                        Ok(Value::String(utf8_to_utf16("Invalid Date")))
+                    }
+                } else {
+                    Err(JSError::TypeError {
+                        message: "Invalid Date object".to_string(),
+                    })
+                }
+            } else {
+                Err(JSError::TypeError {
+                    message: "Invalid Date object".to_string(),
+                })
+            }
+        }
         _ => Err(JSError::EvaluationError {
-            message: format!("Date.{method} is not implemented"),
+            message: format!("Date has no method '{method}'"),
         }),
     }
 }

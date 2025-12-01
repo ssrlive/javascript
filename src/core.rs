@@ -3283,6 +3283,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 Ok(Value::Undefined)
             }
         }
+        Value::Number(n) => crate::js_number::box_number_and_get_property(n, prop, env),
         _ => Err(JSError::EvaluationError {
             message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
         }),
@@ -3365,6 +3366,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_object::handle_object_method(method, args, env)
                 } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
                     crate::js_number::handle_number_method(method, args, env)
+                } else if obj_map.borrow().contains_key("__value__") {
+                    crate::js_number::handle_number_object_method(&obj_map, method, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method, args)
@@ -3429,6 +3432,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 }
             }
             (Value::String(s), method) => crate::js_string::handle_string_method(&s, method, args, env),
+            (Value::Number(n), method) => crate::js_number::handle_number_instance_method(&n, method, args, env),
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -3451,6 +3455,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 }
             }
             Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
+            Value::Number(n) => crate::js_number::handle_number_instance_method(&n, method_name, args, env),
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -3549,6 +3554,8 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     crate::js_object::handle_object_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key("MAX_VALUE") && obj_map.borrow().contains_key("MIN_VALUE") {
                     crate::js_number::handle_number_method(method_name, args, env)
+                } else if obj_map.borrow().contains_key("__value__") {
+                    crate::js_number::handle_number_object_method(&obj_map, method_name, args, env)
                 } else if obj_map.borrow().contains_key("__timestamp") {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method_name, args)
@@ -3584,6 +3591,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 }
             }
             Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
+            Value::Number(n) => crate::js_number::handle_number_instance_method(&n, method_name, args, env),
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
 use crate::error::JSError;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -20,6 +20,28 @@ pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_value(&number_obj, "isSafeInteger", Value::Function("Number.isSafeInteger".to_string()))?;
     obj_set_value(&number_obj, "parseFloat", Value::Function("Number.parseFloat".to_string()))?;
     obj_set_value(&number_obj, "parseInt", Value::Function("Number.parseInt".to_string()))?;
+
+    // Create Number.prototype
+    let number_prototype = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_value(
+        &number_prototype,
+        "toString",
+        Value::Function("Number.prototype.toString".to_string()),
+    )?;
+    obj_set_value(
+        &number_prototype,
+        "valueOf",
+        Value::Function("Number.prototype.valueOf".to_string()),
+    )?;
+    obj_set_value(
+        &number_prototype,
+        "toLocaleString",
+        Value::Function("Number.prototype.toLocaleString".to_string()),
+    )?;
+
+    // Set prototype on Number constructor
+    obj_set_value(&number_obj, "prototype", Value::Object(number_prototype))?;
+
     Ok(number_obj)
 }
 
@@ -177,5 +199,92 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         _ => Err(JSError::EvaluationError {
             message: format!("Number.{method} is not implemented"),
         }),
+    }
+}
+
+/// Handle Number instance method calls
+pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    match method {
+        "toString" => {
+            if args.is_empty() {
+                Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string())))
+            } else {
+                Err(JSError::EvaluationError {
+                    message: format!("toString method expects no arguments, got {}", args.len()),
+                })
+            }
+        }
+        "valueOf" => {
+            if args.is_empty() {
+                Ok(Value::Number(*n))
+            } else {
+                Err(JSError::EvaluationError {
+                    message: format!("valueOf method expects no arguments, got {}", args.len()),
+                })
+            }
+        }
+        "toLocaleString" => {
+            if args.is_empty() {
+                // For now, same as toString
+                Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string())))
+            } else {
+                Err(JSError::EvaluationError {
+                    message: format!("toLocaleString method expects no arguments, got {}", args.len()),
+                })
+            }
+        }
+        _ => Err(JSError::EvaluationError {
+            message: format!("Number.prototype.{method} is not implemented"),
+        }),
+    }
+}
+
+/// Handle Number object method calls (for boxed Number objects)
+pub fn handle_number_object_method(
+    obj_map: &JSObjectDataPtr,
+    method: &str,
+    _args: &[Expr],
+    _env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
+    // Handle Number instance methods
+    if let Some(value_val) = crate::core::obj_get_value(obj_map, "__value__")? {
+        if let Value::Number(n) = *value_val.borrow() {
+            match method {
+                "toString" => Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string()))),
+                "valueOf" => Ok(Value::Number(n)),
+                "toLocaleString" => Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string()))), // For now, same as toString
+                _ => Err(JSError::EvaluationError {
+                    message: format!("Number.prototype.{method} is not implemented"),
+                }),
+            }
+        } else {
+            Err(JSError::EvaluationError {
+                message: "Invalid __value__ for Number instance".to_string(),
+            })
+        }
+    } else {
+        Err(JSError::EvaluationError {
+            message: "__value__ not found on Number instance".to_string(),
+        })
+    }
+}
+
+/// Box a number into a Number object and get a property
+pub fn box_number_and_get_property(n: f64, prop: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Box the number into a Number object
+    let number_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_value(&number_obj, "__value__", Value::Number(n))?;
+    // Set prototype to Number.prototype
+    if let Some(number_constructor) = obj_get_value(env, "Number")?
+        && let Value::Object(num_ctor) = &*number_constructor.borrow()
+        && let Some(proto_val) = obj_get_value(num_ctor, "prototype")?
+    {
+        obj_set_value(&number_obj, "__proto__", proto_val.borrow().clone())?;
+    }
+    // Now look up the property on the boxed object
+    if let Some(val) = obj_get_value(&number_obj, prop)? {
+        Ok(val.borrow().clone())
+    } else {
+        Ok(Value::Undefined)
     }
 }

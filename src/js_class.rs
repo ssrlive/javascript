@@ -116,6 +116,10 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
                 return Ok(Value::Object(instance));
             }
+            // Check if this is the Number constructor object
+            if obj_get_value(&class_obj, "MAX_VALUE")?.is_some() {
+                return handle_number_constructor(args, env);
+            }
         }
         Value::Closure(params, body, captured_env) => {
             // Handle function constructors

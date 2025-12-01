@@ -24,7 +24,7 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let temp_dir = std::env::temp_dir();
-    let filename = temp_dir.join(format!("quickjs_tmp_{}.tmp", timestamp));
+    let filename = temp_dir.join(format!("rust_js_tmp_{}.tmp", timestamp));
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)

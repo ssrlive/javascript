@@ -3422,6 +3422,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Object" => crate::js_object::handle_object_method(method, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method, args, env),
+                    "Date" => crate::js_date::handle_date_static_method(method, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method),
                     }),
@@ -3576,6 +3577,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 match func_name.as_str() {
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
+                    "Date" => crate::js_date::handle_date_static_method(method_name, args, env),
                     _ => Err(JSError::EvaluationError {
                         message: format!("{} has no static method '{}'", func_name, method_name),
                     }),

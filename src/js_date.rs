@@ -399,3 +399,22 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
         }),
     }
 }
+
+/// Handle Date static method calls
+pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    match method {
+        "now" => {
+            if !args.is_empty() {
+                return Err(JSError::TypeError {
+                    message: "Date.now() takes no arguments".to_string(),
+                });
+            }
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            Ok(Value::Number(duration.as_millis() as f64))
+        }
+        _ => Err(JSError::EvaluationError {
+            message: format!("Date has no static method '{}'", method),
+        }),
+    }
+}

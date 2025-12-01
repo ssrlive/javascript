@@ -1,4 +1,7 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_get_value, obj_set_value, utf8_to_utf16};
+use crate::core::{
+    Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, obj_get_value, obj_set_value,
+    utf8_to_utf16,
+};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use std::cell::RefCell;
@@ -322,6 +325,15 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if obj_map.borrow().contains_key(&"__timestamp".into()) {
                 return crate::js_date::handle_date_method(obj_map, "toString", args);
+            }
+            // If object contains a Symbol.toStringTag property, honor it
+            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
+                let key = PropertyKey::Symbol(tag_sym_rc.clone());
+                if let Some(tag_val_rc) = obj_get_value(obj_map, &key)?
+                    && let Value::String(s) = &*tag_val_rc.borrow()
+                {
+                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", String::from_utf16_lossy(s)))));
+                }
             }
             // If this object looks like an array, join elements with comma
             if is_array(obj_map) {

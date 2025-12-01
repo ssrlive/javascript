@@ -20,6 +20,9 @@ use std::rc::Rc;
 
 thread_local! {
     static SYMBOL_REGISTRY: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
+
+    // Well-known symbols storage (iterator, toStringTag, etc.)
+    static WELL_KNOWN_SYMBOLS: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
 
 #[repr(C)]
@@ -2262,9 +2265,109 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                                 Ok(None)
                             } else {
-                                Err(JSError::EvaluationError {
-                                    message: "for-of loop requires an iterable".to_string(),
-                                })
+                                // Attempt iterator protocol via Symbol.iterator
+                                // Look up well-known Symbol.iterator and call it on the object to obtain an iterator
+                                if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator") {
+                                    let key = PropertyKey::Symbol(iter_sym_rc.clone());
+                                    if let Some(method_rc) = obj_get_value(&obj_map, &key)? {
+                                        // method can be a function/closure or an object
+                                        let iterator_val = match &*method_rc.borrow() {
+                                            Value::Closure(_params, body, captured_env) => {
+                                                // Call closure with 'this' bound to the object
+                                                let func_env = captured_env.clone();
+                                                obj_set_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                                                // Execute body to produce iterator result
+                                                evaluate_statements(&func_env, body)?
+                                            }
+                                            Value::Function(func_name) => {
+                                                // Call built-in function (no arguments)
+                                                crate::js_function::handle_global_function(func_name, &[], env)?
+                                            }
+                                            Value::Object(iter_obj) => Value::Object(iter_obj.clone()),
+                                            _ => {
+                                                return Err(JSError::EvaluationError {
+                                                    message: "iterator property is not callable".to_string(),
+                                                });
+                                            }
+                                        };
+
+                                        // Now we have iterator_val, expected to be an object with next() method
+                                        if let Value::Object(iter_obj) = iterator_val {
+                                            loop {
+                                                // call iter_obj.next()
+                                                if let Some(next_rc) = obj_get_value(&iter_obj, &"next".into())? {
+                                                    let next_val = match &*next_rc.borrow() {
+                                                        Value::Closure(_params, body, captured_env) => {
+                                                            let func_env = captured_env.clone();
+                                                            obj_set_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
+                                                            evaluate_statements(&func_env, body)?
+                                                        }
+                                                        Value::Function(func_name) => {
+                                                            crate::js_function::handle_global_function(func_name, &[], env)?
+                                                        }
+                                                        _ => {
+                                                            return Err(JSError::EvaluationError {
+                                                                message: "next is not callable".to_string(),
+                                                            });
+                                                        }
+                                                    };
+
+                                                    // next_val should be an object with { value, done }
+                                                    if let Value::Object(res_obj) = next_val {
+                                                        // Check done
+                                                        let done_val = obj_get_value(&res_obj, &"done".into())?;
+                                                        let done = match done_val {
+                                                            Some(d) => is_truthy(&d.borrow().clone()),
+                                                            None => false,
+                                                        };
+                                                        if done {
+                                                            break;
+                                                        }
+
+                                                        // Extract value
+                                                        let value_val = obj_get_value(&res_obj, &"value".into())?;
+                                                        let element = match value_val {
+                                                            Some(v) => v.borrow().clone(),
+                                                            None => Value::Undefined,
+                                                        };
+
+                                                        env_set_recursive(env, var.as_str(), element)?;
+                                                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                                        block_env.borrow_mut().prototype = Some(env.clone());
+                                                        block_env.borrow_mut().is_function_scope = false;
+                                                        match evaluate_statements_with_context(&block_env, body)? {
+                                                            ControlFlow::Normal(val) => last_value = val,
+                                                            ControlFlow::Break => break,
+                                                            ControlFlow::Continue => {}
+                                                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                                        }
+                                                    } else {
+                                                        return Err(JSError::EvaluationError {
+                                                            message: "iterator.next() must return an object".to_string(),
+                                                        });
+                                                    }
+                                                } else {
+                                                    return Err(JSError::EvaluationError {
+                                                        message: "iterator object missing next()".to_string(),
+                                                    });
+                                                }
+                                            }
+                                            Ok(None)
+                                        } else {
+                                            Err(JSError::EvaluationError {
+                                                message: "iterator method did not return an object".to_string(),
+                                            })
+                                        }
+                                    } else {
+                                        Err(JSError::EvaluationError {
+                                            message: "for-of loop requires an iterable".to_string(),
+                                        })
+                                    }
+                                } else {
+                                    Err(JSError::EvaluationError {
+                                        message: "for-of loop requires an iterable".to_string(),
+                                    })
+                                }
                             }
                         }
                         _ => Err(JSError::EvaluationError {
@@ -3511,8 +3614,29 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             Some(d) => Ok(Value::String(utf8_to_utf16(d))),
             None => Ok(Value::Undefined),
         },
+        Value::Function(func_name) => {
+            // Special-case static properties on constructors like Symbol.iterator
+            if func_name == "Symbol" {
+                // Look for well-known symbol by name
+                return WELL_KNOWN_SYMBOLS.with(|wk| {
+                    let map = wk.borrow();
+                    if let Some(sym_rc) = map.get(prop)
+                        && let Value::Symbol(sd) = &*sym_rc.borrow()
+                    {
+                        return Ok(Value::Symbol(sd.clone()));
+                    }
+                    Err(JSError::EvaluationError {
+                        message: format!("Property not found for Symbol constructor property: {prop}"),
+                    })
+                });
+            }
+
+            Err(JSError::EvaluationError {
+                message: format!("Property not found for prop={prop}"),
+            })
+        }
         _ => Err(JSError::EvaluationError {
-            message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
+            message: format!("Property not found for prop={prop}"),
         }),
     }
 }
@@ -3534,8 +3658,20 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
             Some(d) => Ok(Value::String(utf8_to_utf16(d))),
             None => Ok(Value::Undefined),
         },
+        Value::Function(func_name) if func_name == "Symbol" && (prop == "iterator" || prop == "toStringTag") => {
+            // Expose Symbol.iterator and Symbol.toStringTag via optional property access too
+            WELL_KNOWN_SYMBOLS.with(|wk| {
+                let map = wk.borrow();
+                if let Some(sym_rc) = map.get(prop)
+                    && let Value::Symbol(sd) = &*sym_rc.borrow()
+                {
+                    return Ok(Value::Symbol(sd.clone()));
+                }
+                Ok(Value::Undefined)
+            })
+        }
         _ => Err(JSError::EvaluationError {
-            message: format!("Property not found for obj_val={obj_val:?}, prop={prop}"),
+            message: format!("Property not found for prop={prop}"),
         }),
     }
 }
@@ -4560,6 +4696,21 @@ pub fn get_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str) -> Resul
         Value::Object(map) => obj_get_value(&map, &prop.into()),
         _ => Ok(None),
     }
+}
+
+// Helper to access well-known symbols as Rc<RefCell<Value>> or as Value
+pub fn get_well_known_symbol_rc(name: &str) -> Option<Rc<RefCell<Value>>> {
+    WELL_KNOWN_SYMBOLS.with(|wk| wk.borrow().get(name).cloned())
+}
+
+#[allow(dead_code)]
+pub fn get_well_known_symbol(name: &str) -> Option<Value> {
+    WELL_KNOWN_SYMBOLS.with(|wk| {
+        wk.borrow().get(name).and_then(|v| match &*v.borrow() {
+            Value::Symbol(sd) => Some(Value::Symbol(sd.clone())),
+            _ => None,
+        })
+    })
 }
 
 // `set_prop_env` attempts to set a property on the object referenced by `obj_expr`.
@@ -6827,6 +6978,22 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
         PropertyKey::String("Symbol".to_string()),
         Rc::new(RefCell::new(Value::Function("Symbol".to_string()))),
     );
+
+    // Create a few well-known symbols and store them in the well-known symbol registry
+    WELL_KNOWN_SYMBOLS.with(|wk| {
+        let mut map = wk.borrow_mut();
+        // Symbol.iterator
+        let iter_sym_data = Rc::new(SymbolData {
+            description: Some("Symbol.iterator".to_string()),
+        });
+        map.insert("iterator".to_string(), Rc::new(RefCell::new(Value::Symbol(iter_sym_data.clone()))));
+
+        // Symbol.toStringTag
+        let tt_sym_data = Rc::new(SymbolData {
+            description: Some("Symbol.toStringTag".to_string()),
+        });
+        map.insert("toStringTag".to_string(), Rc::new(RefCell::new(Value::Symbol(tt_sym_data.clone()))));
+    });
 
     // Internal promise resolution functions
     env_borrow.insert(

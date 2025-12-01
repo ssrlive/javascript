@@ -336,5 +336,52 @@ mod symbol_additional_tests {
         }
     }
 
+    #[test]
+    fn test_well_known_symbol_iterator_and_iterable() {
+        let script = r#"
+            typeof Symbol.iterator
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol"),
+            _ => panic!("Expected string 'symbol' for Symbol.iterator, got {:?}", result),
+        }
+
+        // Custom iterable using computed symbol key
+        let script2 = r#"
+            let s = Symbol.iterator;
+            let o = {};
+            o[s] = function() {
+                let i = 1;
+                return { next: function() { if (i <= 3) { return { value: i++, done: false } } else { return { done: true } } } };
+            };
+            let sum = 0;
+            for (let x of o) { sum = sum + x; }
+            sum
+        "#;
+
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
+            _ => panic!("Expected number 6 from iterable for-of, got {:?}", result2),
+        }
+    }
+
+    #[test]
+    fn test_symbol_to_string_tag() {
+        let script = r#"
+            let tag = Symbol.toStringTag;
+            let o = {};
+            o[tag] = 'MyTag';
+            o.toString();
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "[object MyTag]"),
+            _ => panic!("Expected [object MyTag], got {:?}", result),
+        }
+    }
+
     // debug test removed
 }

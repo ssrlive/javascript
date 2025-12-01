@@ -3355,24 +3355,28 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::Equal => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
         },
         BinaryOp::StrictEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
         },
         BinaryOp::NotEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb != rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
         },
         BinaryOp::StrictNotEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb != rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
         },

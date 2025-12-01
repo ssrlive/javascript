@@ -200,6 +200,78 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }),
             }
         }
+        "getOwnPropertyDescriptors" => {
+            if args.len() != 1 {
+                return Err(JSError::TypeError {
+                    message: "Object.getOwnPropertyDescriptors requires exactly one argument".to_string(),
+                });
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            match obj_val {
+                Value::Object(obj) => {
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+                    for (key, val_rc) in obj.borrow().properties.iter() {
+                        // iterate own properties
+                        // Build descriptor object
+                        let desc_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+                        match &*val_rc.borrow() {
+                            Value::Property { value, getter, setter } => {
+                                // Data value
+                                if let Some(v) = value {
+                                    obj_set_value(&desc_obj, &"value".into(), v.borrow().clone())?;
+                                    // writable: treat as true by default for data properties
+                                    obj_set_value(&desc_obj, &"writable".into(), Value::Boolean(true))?;
+                                }
+                                // Accessor
+                                if let Some((gbody, genv)) = getter {
+                                    // expose getter as function (Closure) on descriptor
+                                    obj_set_value(&desc_obj, &"get".into(), Value::Closure(Vec::new(), gbody.clone(), genv.clone()))?;
+                                }
+                                if let Some((sparams, sbody, senv)) = setter {
+                                    // expose setter as function (Closure) on descriptor
+                                    obj_set_value(
+                                        &desc_obj,
+                                        &"set".into(),
+                                        Value::Closure(sparams.clone(), sbody.clone(), senv.clone()),
+                                    )?;
+                                }
+                                // default flags
+                                obj_set_value(&desc_obj, &"enumerable".into(), Value::Boolean(true))?;
+                                obj_set_value(&desc_obj, &"configurable".into(), Value::Boolean(true))?;
+                            }
+                            other => {
+                                // plain value stored directly
+                                obj_set_value(&desc_obj, &"value".into(), other.clone())?;
+                                obj_set_value(&desc_obj, &"writable".into(), Value::Boolean(true))?;
+                                obj_set_value(&desc_obj, &"enumerable".into(), Value::Boolean(true))?;
+                                obj_set_value(&desc_obj, &"configurable".into(), Value::Boolean(true))?;
+                            }
+                        }
+
+                        // debug dump
+                        log::trace!("descriptor for key={} created: {:?}", key, desc_obj.borrow().properties);
+                        // Put descriptor onto result using the original key (string or symbol)
+                        match key {
+                            PropertyKey::String(s) => {
+                                obj_set_value(&result_obj, &s.clone().into(), Value::Object(desc_obj.clone()))?;
+                            }
+                            PropertyKey::Symbol(sym_rc) => {
+                                // Push symbol-keyed property on returned object with the same symbol key
+                                let property_key = PropertyKey::Symbol(sym_rc.clone());
+                                obj_set_value(&result_obj, &property_key, Value::Object(desc_obj.clone()))?;
+                            }
+                        }
+                    }
+
+                    Ok(Value::Object(result_obj))
+                }
+                _ => Err(JSError::TypeError {
+                    message: "Object.getOwnPropertyDescriptors called on non-object".to_string(),
+                }),
+            }
+        }
         _ => Err(JSError::EvaluationError {
             message: format!("Object.{} is not implemented", method),
         }),

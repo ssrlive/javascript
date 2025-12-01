@@ -11,9 +11,13 @@ fn __init_test_logger() {
 #[cfg(test)]
 mod symbol_additional_tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn test_symbol_typeof() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             typeof Symbol('x')
         "#;
@@ -25,7 +29,37 @@ mod symbol_additional_tests {
     }
 
     #[test]
+    fn debug_descriptor_array() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let script = r#"
+            let s = Symbol('k');
+            let o = { a: 1 };
+            o[s] = 2;
+            let d = Object.getOwnPropertyDescriptors(o);
+            [d.a.value === 1, d[s].value === 2, d.a.writable === true]
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(arr)) => {
+                let a = arr.borrow().get(&"0".into()).unwrap();
+                let b = arr.borrow().get(&"1".into()).unwrap();
+                let c = arr.borrow().get(&"2".into()).unwrap();
+                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
+                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
+                        assert_eq!(*na, 1.0);
+                        assert_eq!(*nb, 1.0);
+                        assert_eq!(*nc, 1.0);
+                    }
+                    _ => panic!("Expected numeric truthy results for descriptors"),
+                }
+            }
+            _ => panic!("Expected array result from descriptors test, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_symbol_to_string_and_description() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             let a = Symbol('my-desc');
             let b = Symbol();
@@ -49,6 +83,7 @@ mod symbol_additional_tests {
 
     #[test]
     fn test_symbol_uniqueness() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             Symbol() !== Symbol()
         "#;
@@ -61,6 +96,7 @@ mod symbol_additional_tests {
 
     #[test]
     fn test_json_stringify_ignores_symbol_keys() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             let s = Symbol('k');
             let o = {};
@@ -77,6 +113,7 @@ mod symbol_additional_tests {
     #[test]
     fn test_object_keys_values_ignore_symbol_keys() {
         // Object.keys and Object.values should not include symbol-keyed properties
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             let s = Symbol('k');
             let o = { a: 1 };
@@ -84,7 +121,7 @@ mod symbol_additional_tests {
             [Object.keys(o).length, Object.values(o).length]
         "#;
         let result = evaluate_script(script);
-        match result {
+        match &result {
             Ok(Value::Object(arr)) => {
                 // Expect [1, 1]
                 let k = arr.borrow().get(&"0".into()).unwrap();
@@ -103,6 +140,7 @@ mod symbol_additional_tests {
 
     #[test]
     fn test_object_assign_ignores_symbol_keys() {
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let script = r#"
             let s = Symbol('k');
             let src = { a: 1 };
@@ -127,6 +165,7 @@ mod symbol_additional_tests {
                 'error'
             }
         "#;
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "error"),
@@ -140,6 +179,7 @@ mod symbol_additional_tests {
             let s = Symbol('k');
             s.valueOf() === s
         "#;
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
@@ -161,6 +201,7 @@ mod symbol_additional_tests {
             [init, after, fromProto]
         "#;
 
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(arr)) => {
@@ -194,6 +235,7 @@ mod symbol_additional_tests {
             [ownLen, protoLen, same]
         "#;
 
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(arr)) => {
@@ -223,6 +265,7 @@ mod symbol_additional_tests {
             [arr.length, arr[0] === s]
         "#;
 
+        let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
             Ok(Value::Object(arr)) => {
@@ -239,4 +282,59 @@ mod symbol_additional_tests {
             _ => panic!("Expected array from getOwnPropertySymbols on object test"),
         }
     }
+
+    #[test]
+    fn test_get_own_property_descriptors() {
+        // Part 1: string and symbol keys
+        let script = r#"
+            let s = Symbol('k');
+            let o = { a: 1 };
+            o[s] = 2;
+            let d = Object.getOwnPropertyDescriptors(o);
+            [d.a.value === 1, d[s].value === 2, d.a.writable === true]
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(arr)) => {
+                let a = arr.borrow().get(&"0".into()).unwrap();
+                let b = arr.borrow().get(&"1".into()).unwrap();
+                let c = arr.borrow().get(&"2".into()).unwrap();
+                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
+                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
+                        assert_eq!(*na, 1.0);
+                        assert_eq!(*nb, 1.0);
+                        assert_eq!(*nc, 1.0);
+                    }
+                    _ => panic!("Expected numeric truthy results for descriptors"),
+                }
+            }
+            _ => panic!("Expected array result from descriptors test, got {:?}", result),
+        }
+
+        // Part 2: accessor descriptors (getters/setters)
+        let script2 = r#"
+            let o = { get x() { return 9; }, set x(v) { this._x = v } };
+            let d = Object.getOwnPropertyDescriptors(o);
+            [typeof d.x.get, typeof d.x.set]
+        "#;
+
+        let result2 = evaluate_script(script2);
+        match result2 {
+            Ok(Value::Object(arr)) => {
+                let a = arr.borrow().get(&"0".into()).unwrap();
+                let b = arr.borrow().get(&"1".into()).unwrap();
+                match (&*a.borrow(), &*b.borrow()) {
+                    (Value::String(sa), Value::String(sb)) => {
+                        assert_eq!(String::from_utf16_lossy(sa), "function");
+                        assert_eq!(String::from_utf16_lossy(sb), "function");
+                    }
+                    _ => panic!("Expected string results for accessor descriptor types"),
+                }
+            }
+            _ => panic!("Expected array result from accessor descriptors test"),
+        }
+    }
+
+    // debug test removed
 }

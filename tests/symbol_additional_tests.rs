@@ -383,5 +383,115 @@ mod symbol_additional_tests {
         }
     }
 
+    #[test]
+    fn test_string_for_of() {
+        let script = r#"
+            let s = "abc";
+            let acc = "";
+            for (let ch of s) { acc = acc + ch; }
+            acc
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "abc"),
+            _ => panic!("Expected 'abc' from string for-of, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_symbol_to_string_tag_defaults() {
+        let script = r#"
+            let a = [1,2,3];
+            let s = new String('x');
+            [a[Symbol.toStringTag], s[Symbol.toStringTag]]
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(arr)) => {
+                let a0 = arr.borrow().get(&"0".into()).unwrap();
+                let a1 = arr.borrow().get(&"1".into()).unwrap();
+                match (&*a0.borrow(), &*a1.borrow()) {
+                    (Value::String(tag_a), Value::String(tag_s)) => {
+                        assert_eq!(String::from_utf16_lossy(tag_a), "Array");
+                        assert_eq!(String::from_utf16_lossy(tag_s), "String");
+                    }
+                    _ => panic!("Expected string tags in result"),
+                }
+            }
+            _ => panic!("Expected array result from tag test, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_array_symbol_iterator_callable() {
+        let script = r#"
+            let a = [1,2,3];
+            let iter = a[Symbol.iterator]();
+            let s = 0;
+            s = s + iter.next().value;
+            s = s + iter.next().value;
+            s = s + iter.next().value;
+            s
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
+            _ => panic!("Expected 6 from manual iterator next(), got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_object_symbol_iterator_callable() {
+        let script = r#"
+            let s = new String('xy');
+            let it = s[Symbol.iterator]();
+            let a = it.next().value + it.next().value;
+            a
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "xy"),
+            _ => panic!("Expected 'xy' from string iterator, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_symbol_to_primitive_coercion() {
+        // Objects may define [Symbol.toPrimitive] to customize coercion
+        let script = r#"
+            let tp = Symbol.toPrimitive;
+            let o = {};
+            o[tp] = function(hint) {
+                if (hint === 'string') { return 'S-PRIM'; }
+                return 40;
+            };
+                let res = [String(o), Number(o), o + 2]; res
+        "#;
+
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Object(arr)) => {
+                let s = arr.borrow().get(&"0".into()).unwrap();
+                let n = arr.borrow().get(&"1".into()).unwrap();
+                let sum = arr.borrow().get(&"2".into()).unwrap();
+                match (&*s.borrow(), &*n.borrow(), &*sum.borrow()) {
+                    (Value::String(ss), Value::Number(nn), Value::Number(sn)) => {
+                        assert_eq!(String::from_utf16_lossy(ss), "S-PRIM");
+                        assert_eq!(*nn, 40.0);
+                        assert_eq!(*sn, 42.0);
+                    }
+                    _ => panic!("Expected [string, number, number] from toPrimitive coercion test"),
+                }
+            }
+            other => panic!("Expected array result for toPrimitive test, got {:?}", other),
+        }
+    }
+
+    // debug test removed
+
     // debug test removed
 }

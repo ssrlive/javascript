@@ -2370,6 +2370,24 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 }
                             }
                         }
+                        Value::String(s) => {
+                            // Iterate over UTF-16 units in the string
+                            let mut i = 0usize;
+                            while let Some(ch) = utf16_char_at(&s, i) {
+                                env_set_recursive(env, var.as_str(), Value::String(vec![ch]))?;
+                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                block_env.borrow_mut().prototype = Some(env.clone());
+                                block_env.borrow_mut().is_function_scope = false;
+                                match evaluate_statements_with_context(&block_env, body)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break => break,
+                                    ControlFlow::Continue => {}
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                }
+                                i += 1;
+                            }
+                            Ok(None)
+                        }
                         _ => Err(JSError::EvaluationError {
                             message: "for-of loop requires an iterable".to_string(),
                         }),
@@ -3398,37 +3416,50 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
     let l = evaluate_expr(env, left)?;
     let r = evaluate_expr(env, right)?;
     match op {
-        BinaryOp::Add => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-            (Value::String(ls), Value::String(rs)) => {
-                let mut result = ls.clone();
-                result.extend_from_slice(&rs);
-                Ok(Value::String(result))
+        BinaryOp::Add => {
+            // If either side is an object, attempt ToPrimitive coercion (default hint) first
+            let l_prim = if matches!(l, Value::Object(_)) {
+                to_primitive(&l, "default")?
+            } else {
+                l.clone()
+            };
+            let r_prim = if matches!(r, Value::Object(_)) {
+                to_primitive(&r, "default")?
+            } else {
+                r.clone()
+            };
+            match (l_prim, r_prim) {
+                (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                (Value::String(ls), Value::String(rs)) => {
+                    let mut result = ls.clone();
+                    result.extend_from_slice(&rs);
+                    Ok(Value::String(result))
+                }
+                (Value::Number(ln), Value::String(rs)) => {
+                    let mut result = utf8_to_utf16(&ln.to_string());
+                    result.extend_from_slice(&rs);
+                    Ok(Value::String(result))
+                }
+                (Value::String(ls), Value::Number(rn)) => {
+                    let mut result = ls.clone();
+                    result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
+                    Ok(Value::String(result))
+                }
+                (Value::Boolean(lb), Value::String(rs)) => {
+                    let mut result = utf8_to_utf16(&lb.to_string());
+                    result.extend_from_slice(&rs);
+                    Ok(Value::String(result))
+                }
+                (Value::String(ls), Value::Boolean(rb)) => {
+                    let mut result = ls.clone();
+                    result.extend_from_slice(&utf8_to_utf16(&rb.to_string()));
+                    Ok(Value::String(result))
+                }
+                _ => Err(JSError::EvaluationError {
+                    message: "error".to_string(),
+                }),
             }
-            (Value::Number(ln), Value::String(rs)) => {
-                let mut result = utf8_to_utf16(&ln.to_string());
-                result.extend_from_slice(&rs);
-                Ok(Value::String(result))
-            }
-            (Value::String(ls), Value::Number(rn)) => {
-                let mut result = ls.clone();
-                result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
-                Ok(Value::String(result))
-            }
-            (Value::Boolean(lb), Value::String(rs)) => {
-                let mut result = utf8_to_utf16(&lb.to_string());
-                result.extend_from_slice(&rs);
-                Ok(Value::String(result))
-            }
-            (Value::String(ls), Value::Boolean(rb)) => {
-                let mut result = ls.clone();
-                result.extend_from_slice(&utf8_to_utf16(&rb.to_string()));
-                Ok(Value::String(result))
-            }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
-        },
+        }
         BinaryOp::Sub => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
             _ => Err(JSError::EvaluationError {
@@ -4470,6 +4501,74 @@ pub fn value_to_string(val: &Value) -> String {
     }
 }
 
+// Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
+pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
+    match val {
+        Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Symbol(_) => Ok(val.clone()),
+        Value::Object(obj_map) => {
+            // Prefer explicit [Symbol.toPrimitive] if present and callable
+            if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
+                let key = PropertyKey::Symbol(tp_sym.clone());
+                if let Some(method_rc) = obj_get_value(obj_map, &key)? {
+                    let method_val = method_rc.borrow().clone();
+                    match method_val {
+                        Value::Closure(params, body, captured_env) => {
+                            // Create a new execution env and bind this
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                            // Pass hint as first param if the function declares params
+                            if !params.is_empty() {
+                                env_set(&func_env, &params[0], Value::String(utf8_to_utf16(hint)))?;
+                            }
+                            let result = evaluate_statements(&func_env, &body)?;
+                            match result {
+                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_) => return Ok(result),
+                                _ => {
+                                    return Err(JSError::TypeError {
+                                        message: "[Symbol.toPrimitive] must return a primitive".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                        _ => {
+                            // Not a closure/minimally supported callable - fall through to default algorithm
+                        }
+                    }
+                }
+            }
+
+            // Default algorithm: order depends on hint
+            if hint == "string" {
+                // toString -> valueOf
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                    return Ok(to_s);
+                }
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
+                if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                    return Ok(val_of);
+                }
+            } else {
+                // number or default: valueOf -> toString
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
+                if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_)) {
+                    return Ok(val_of);
+                }
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                    return Ok(to_s);
+                }
+            }
+
+            Err(JSError::TypeError {
+                message: "Cannot convert object to primitive".to_string(),
+            })
+        }
+        _ => Ok(val.clone()),
+    }
+}
+
 // Helper function to convert value to string for sorting
 pub fn value_to_sort_string(val: &Value) -> String {
     match val {
@@ -4535,10 +4634,153 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                 Ok(Some(val.clone()))
             }
         }
-    } else if let Some(ref proto) = js_obj.borrow().prototype {
-        obj_get_value(proto, key)
     } else {
-        Ok(None)
+        // Provide default well-known symbol fallbacks (non-own) for some built-ins.
+        if let PropertyKey::Symbol(sym_rc) = key {
+            // Support default Symbol.iterator for built-ins like Array and wrapped String objects.
+            if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator")
+                && let (Value::Symbol(iter_sd), Value::Symbol(req_sd)) = (&*iter_sym_rc.borrow(), &*sym_rc.borrow())
+                && Rc::ptr_eq(iter_sd, req_sd)
+            {
+                // Array default iterator
+                if is_array(js_obj) {
+                    // next function body
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Property(Box::new(Expr::Var("__array".to_string())), "length".to_string())),
+                            ),
+                            vec![
+                                Statement::Let(
+                                    "v".to_string(),
+                                    Some(Expr::Index(
+                                        Box::new(Expr::Var("__array".to_string())),
+                                        Box::new(Expr::Var("idx".to_string())),
+                                    )),
+                                ),
+                                Statement::Expr(Expr::Assign(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("idx".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
+                                )),
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("v".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
+
+                    let arr_iter_body = vec![
+                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                        Statement::Return(Some(Expr::Object(vec![(
+                            "next".to_string(),
+                            Expr::Function(Vec::new(), next_body),
+                        )]))),
+                    ];
+
+                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    captured_env.borrow_mut().insert(
+                        PropertyKey::String("__array".to_string()),
+                        Rc::new(RefCell::new(Value::Object(js_obj.clone()))),
+                    );
+                    let closure = Value::Closure(Vec::new(), arr_iter_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
+                }
+
+                // Wrapped String iterator (for String objects)
+                if let Some(wrapped) = js_obj.borrow().get(&"__value__".into())
+                    && let Value::String(_) = &*wrapped.borrow()
+                {
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Property(Box::new(Expr::Var("__s".to_string())), "length".to_string())),
+                            ),
+                            vec![
+                                Statement::Let(
+                                    "v".to_string(),
+                                    Some(Expr::Index(
+                                        Box::new(Expr::Var("__s".to_string())),
+                                        Box::new(Expr::Var("idx".to_string())),
+                                    )),
+                                ),
+                                Statement::Expr(Expr::Assign(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("idx".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
+                                )),
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("v".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
+
+                    let str_iter_body = vec![
+                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                        Statement::Return(Some(Expr::Object(vec![(
+                            "next".to_string(),
+                            Expr::Function(Vec::new(), next_body),
+                        )]))),
+                    ];
+
+                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    captured_env.borrow_mut().insert(
+                        PropertyKey::String("__s".to_string()),
+                        Rc::new(RefCell::new(wrapped.borrow().clone())),
+                    );
+                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
+                }
+            }
+            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag")
+                && let (Value::Symbol(tag_sd), Value::Symbol(req_sd)) = (&*tag_sym_rc.borrow(), &*sym_rc.borrow())
+                && Rc::ptr_eq(tag_sd, req_sd)
+            {
+                if is_array(js_obj) {
+                    return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Array"))))));
+                }
+                if let Some(wrapped) = js_obj.borrow().get(&"__value__".into()) {
+                    match &*wrapped.borrow() {
+                        Value::String(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("String")))))),
+                        Value::Number(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Number")))))),
+                        Value::Boolean(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Boolean")))))),
+                        _ => {}
+                    }
+                }
+                if js_obj.borrow().contains_key(&"__timestamp".into()) {
+                    return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Date"))))));
+                }
+            }
+        }
+
+        if let Some(ref proto) = js_obj.borrow().prototype {
+            obj_get_value(proto, key)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -6993,6 +7235,11 @@ fn initialize_global_constructors(env: &JSObjectDataPtr) {
             description: Some("Symbol.toStringTag".to_string()),
         });
         map.insert("toStringTag".to_string(), Rc::new(RefCell::new(Value::Symbol(tt_sym_data.clone()))));
+        // Symbol.toPrimitive
+        let tp_sym_data = Rc::new(SymbolData {
+            description: Some("Symbol.toPrimitive".to_string()),
+        });
+        map.insert("toPrimitive".to_string(), Rc::new(RefCell::new(Value::Symbol(tp_sym_data.clone()))));
     });
 
     // Internal promise resolution functions

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, utf8_to_utf16, value_to_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, to_primitive, utf8_to_utf16, value_to_string};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
@@ -58,7 +58,20 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::String(s) => Ok(Value::String(s.clone())),
                     Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
-                    Value::Object(_) => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+                    Value::Object(obj) => {
+                        // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
+                        let prim = to_primitive(&Value::Object(obj.clone()), "string")?;
+                        match prim {
+                            Value::String(s) => Ok(Value::String(s)),
+                            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                            Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                            Value::Symbol(sd) => match sd.description {
+                                Some(ref d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", d)))),
+                                None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
+                            },
+                            _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+                        }
+                    }
                     Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
                     Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                     Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
@@ -288,6 +301,22 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         }
                     }
                     Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                    Value::Object(obj) => {
+                        // Try ToPrimitive with 'number' hint
+                        let prim = to_primitive(&Value::Object(obj.clone()), "number")?;
+                        match prim {
+                            Value::Number(n) => Ok(Value::Number(n)),
+                            Value::String(s) => {
+                                let str_val = String::from_utf16_lossy(&s);
+                                match str_val.trim().parse::<f64>() {
+                                    Ok(n) => Ok(Value::Number(n)),
+                                    Err(_) => Ok(Value::Number(f64::NAN)),
+                                }
+                            }
+                            Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                            _ => Ok(Value::Number(f64::NAN)),
+                        }
+                    }
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {

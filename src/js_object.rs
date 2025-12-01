@@ -322,20 +322,13 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                     _ => {}
                 }
             }
+
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if obj_map.borrow().contains_key(&"__timestamp".into()) {
                 return crate::js_date::handle_date_method(obj_map, "toString", args);
             }
-            // If object contains a Symbol.toStringTag property, honor it
-            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
-                let key = PropertyKey::Symbol(tag_sym_rc.clone());
-                if let Some(tag_val_rc) = obj_get_value(obj_map, &key)?
-                    && let Value::String(s) = &*tag_val_rc.borrow()
-                {
-                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", String::from_utf16_lossy(s)))));
-                }
-            }
-            // If this object looks like an array, join elements with comma
+
+            // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
             if is_array(obj_map) {
                 let current_len = get_array_length(obj_map).unwrap_or(0);
                 let mut parts = Vec::new();
@@ -351,10 +344,21 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                         parts.push("".to_string())
                     }
                 }
-                Ok(Value::String(utf8_to_utf16(&parts.join(","))))
-            } else {
-                Ok(Value::String(utf8_to_utf16("[object Object]")))
+                return Ok(Value::String(utf8_to_utf16(&parts.join(","))));
             }
+
+            // If this object contains a Symbol.toStringTag property, honor it
+            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
+                let key = PropertyKey::Symbol(tag_sym_rc.clone());
+                if let Some(tag_val_rc) = obj_get_value(obj_map, &key)?
+                    && let Value::String(s) = &*tag_val_rc.borrow()
+                {
+                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", String::from_utf16_lossy(s)))));
+                }
+            }
+
+            // Default object tag
+            Ok(Value::String(utf8_to_utf16("[object Object]")))
         }
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
         Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),

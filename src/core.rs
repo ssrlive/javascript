@@ -458,18 +458,21 @@ impl JSRuntime {
     /// # Safety
     /// The caller must ensure that `sh` is a valid pointer to a JSShape that is not concurrently accessed,
     /// and that the runtime's memory allocation functions are properly set up.
-    pub unsafe fn add_property(&mut self, sh: *mut JSShape, atom: JSAtom, flags: u8) -> i32 {
+    pub unsafe fn add_property(&mut self, sh: *mut JSShape, atom: JSAtom, flags: u8) -> (i32, i32) {
         unsafe {
+            // Remember previous prop_size (before any possible resize)
+            let prev_prop_size = (*sh).prop_size;
+
             // Check if property already exists
             if let Some((idx, _)) = (*sh).find_own_property(atom) {
                 // Already exists
-                return idx;
+                return (idx, prev_prop_size);
             }
 
             if (*sh).prop_count >= (*sh).prop_size {
                 let new_size = if (*sh).prop_size == 0 { 4 } else { (*sh).prop_size * 3 / 2 };
                 if self.resize_shape(sh, new_size) < 0 {
-                    return -1;
+                    return (-1, prev_prop_size);
                 }
             }
 
@@ -480,7 +483,7 @@ impl JSRuntime {
                 let hash_size = 16;
                 (*sh).prop_hash = self.js_malloc_rt(hash_size * std::mem::size_of::<u32>()) as *mut u32;
                 if (*sh).prop_hash.is_null() {
-                    return -1;
+                    return (-1, prev_prop_size);
                 }
                 for i in 0..hash_size {
                     *(*sh).prop_hash.add(i) = 0;
@@ -507,7 +510,8 @@ impl JSRuntime {
             }
             (*sh).prop_count += 1;
 
-            idx
+            // return index and previous prop_size so callers can resize object prop arrays
+            (idx, prev_prop_size)
         }
     }
 
@@ -638,7 +642,7 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     // Note: In real QuickJS, we might need to clone shape if it is shared
     // For now, assume shape is unique to object or we modify it in place (dangerous if shared)
 
-    let idx = unsafe { (*(*ctx).rt).add_property(sh, prop, flags as u8) };
+    let (idx, prev_prop_size) = unsafe { (*(*ctx).rt).add_property(sh, prop, flags as u8) };
     if idx < 0 {
         return -1;
     }
@@ -684,6 +688,15 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     if old_prop.is_null() && !new_prop.is_null() {
         let size_bytes = unsafe { ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>() };
         unsafe { std::ptr::write_bytes(new_prop as *mut u8, 0, size_bytes) };
+    } else if !old_prop.is_null() && unsafe { (*sh).prop_size } > prev_prop_size {
+        // Zero only the newly-added slots so we don't overwrite existing properties.
+        let start_index = prev_prop_size as usize;
+        let new_slots = (unsafe { (*sh).prop_size } - prev_prop_size) as usize;
+        if new_slots > 0 {
+            let start_ptr = unsafe { new_prop.add(start_index) } as *mut u8;
+            let bytes = new_slots * std::mem::size_of::<JSProperty>();
+            unsafe { std::ptr::write_bytes(start_ptr, 0, bytes) };
+        }
     }
 
     // Set value

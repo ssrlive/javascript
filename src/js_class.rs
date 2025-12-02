@@ -2,7 +2,7 @@ use crate::js_array::is_array;
 use crate::{
     core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value},
     error::JSError,
-    utf16::utf8_to_utf16,
+    unicode::utf8_to_utf16,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -173,12 +173,12 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     let locale_arg = if !args.is_empty() {
                         match evaluate_expr(env, &args[0])? {
                             // Accept either a single string or an array containing a string
-                            Value::String(s) => Some(crate::utf16::utf16_to_utf8(&s)),
+                            Value::String(s) => Some(crate::unicode::utf16_to_utf8(&s)),
                             Value::Object(arr_obj) if is_array(&arr_obj) => {
                                 // Try to read index 0 from the array
                                 if let Some(first_rc) = obj_get_value(&arr_obj, &"0".into())? {
                                     match &*first_rc.borrow() {
-                                        Value::String(s) => Some(crate::utf16::utf16_to_utf8(s)),
+                                        Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
                                         _ => None,
                                     }
                                 } else {

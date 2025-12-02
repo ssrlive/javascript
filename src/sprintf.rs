@@ -1,7 +1,7 @@
 use crate::core::JSObjectDataPtr;
 use crate::core::{Expr, Value, evaluate_expr};
 use crate::error::JSError;
-use crate::utf16::{utf8_to_utf16, utf16_to_utf8};
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("handle_sprintf_call called with {} args", args.len());

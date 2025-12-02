@@ -1,7 +1,7 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
-use crate::utf16::{
+use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
 };
 use std::cell::RefCell;

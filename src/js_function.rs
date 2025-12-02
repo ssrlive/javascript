@@ -2,7 +2,7 @@ use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, to_primi
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
-use crate::utf16::utf8_to_utf16;
+use crate::unicode::utf8_to_utf16;
 use std::rc::Rc;
 
 /// Helper function to extract and validate arguments for internal functions

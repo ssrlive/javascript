@@ -3,7 +3,7 @@ use crate::core::{
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
-use crate::utf16::utf8_to_utf16;
+use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
 

@@ -25,7 +25,7 @@ pub(crate) mod js_testintl;
 pub(crate) mod repl;
 pub(crate) mod sprintf;
 pub(crate) mod tmpfile;
-pub(crate) mod utf16;
+pub(crate) mod unicode;
 
 pub use core::{
     JS_DefinePropertyValue, JS_DupValue, JS_Eval, JS_FreeContext, JS_FreeRuntime, JS_FreeValue, JS_GetProperty, JS_NewContext,

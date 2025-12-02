@@ -1,7 +1,7 @@
 use crate::{
     core::{JSObjectData, JSObjectDataPtr, PropertyKey},
     error::JSError,
-    utf16::utf8_to_utf16,
+    unicode::utf8_to_utf16,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

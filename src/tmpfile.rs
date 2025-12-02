@@ -7,7 +7,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::utf16::{utf8_to_utf16, utf16_to_utf8};
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 static FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));

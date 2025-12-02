@@ -25,7 +25,7 @@
 
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements};
 use crate::error::JSError;
-use crate::utf16::utf8_to_utf16;
+use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;

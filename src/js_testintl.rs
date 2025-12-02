@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::utf16::{utf8_to_utf16, utf16_to_utf8};
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::rc::Rc;
 

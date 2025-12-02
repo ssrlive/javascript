@@ -3,7 +3,7 @@
 
 use crate::error::JSError;
 use crate::js_promise::{PromiseState, run_event_loop};
-use crate::utf16::{utf8_to_utf16, utf16_to_utf8};
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;

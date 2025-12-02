@@ -19,7 +19,7 @@ use crate::{
     obj_get_value,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
-    utf16::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_to_utf8},
+    unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_to_utf8},
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 

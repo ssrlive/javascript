@@ -277,6 +277,9 @@ pub struct JSShape {
     pub deleted_prop_count: i32,
     pub prop: *mut JSShapeProperty,
     pub prop_hash: *mut u32,
+    // Linked list of objects which currently use this shape. Each object's
+    // `next_in_shape` pointer links to the next object in the list.
+    pub first_object: *mut JSObject,
     pub proto: *mut JSObject,
 }
 
@@ -394,6 +397,8 @@ pub struct JSObject {
     pub shape: *mut JSShape,
     pub prop: *mut JSProperty,
     pub first_weak_ref: *mut JSObject,
+    // Pointer to next object in the shape's object list
+    pub next_in_shape: *mut JSObject,
 }
 
 #[repr(C)]
@@ -471,8 +476,46 @@ impl JSRuntime {
 
             if (*sh).prop_count >= (*sh).prop_size {
                 let new_size = if (*sh).prop_size == 0 { 4 } else { (*sh).prop_size * 3 / 2 };
+                // Resize the shape's property descriptor array
                 if self.resize_shape(sh, new_size) < 0 {
                     return (-1, prev_prop_size);
+                }
+
+                // For all objects that currently use this shape, reallocate their
+                // JSProperty arrays to match the new shape size so every object
+                // has space for the newly added property slots.
+                let mut obj_ptr = (*sh).first_object;
+                while !obj_ptr.is_null() {
+                    // keep next pointer in case reallocation moves memory
+                    let next_obj = (*obj_ptr).next_in_shape;
+
+                    let old_prop = (*obj_ptr).prop;
+                    let new_prop_obj = self.js_realloc_rt(old_prop as *mut c_void, (new_size as usize) * std::mem::size_of::<JSProperty>())
+                        as *mut JSProperty;
+
+                    if new_prop_obj.is_null() {
+                        return (-1, prev_prop_size);
+                    }
+
+                    // If we just allocated the array, zero-initialize all slots.
+                    if old_prop.is_null() {
+                        // Initialize all slots to JS_UNDEFINED (correct default), avoid raw zeros
+                        for i in 0..(new_size as isize) {
+                            (*new_prop_obj.offset(i)).u.value = JS_UNDEFINED;
+                        }
+                    } else if new_size > prev_prop_size {
+                        // Zero only the newly-added slots
+                        let start_index = prev_prop_size as usize;
+                        let new_slots = (new_size - prev_prop_size) as usize;
+                        if new_slots > 0 {
+                            for i in start_index..(start_index + new_slots) {
+                                (*new_prop_obj.add(i)).u.value = JS_UNDEFINED;
+                            }
+                        }
+                    }
+
+                    (*obj_ptr).prop = new_prop_obj;
+                    obj_ptr = next_obj;
                 }
             }
 
@@ -606,6 +649,7 @@ impl JSRuntime {
             (*sh).deleted_prop_count = 0;
             (*sh).prop = std::ptr::null_mut();
             (*sh).prop_hash = std::ptr::null_mut();
+            (*sh).first_object = std::ptr::null_mut();
             (*sh).proto = proto;
             sh
         }
@@ -642,60 +686,30 @@ pub unsafe fn JS_DefinePropertyValue(ctx: *mut JSContext, this_obj: JSValue, pro
     // Note: In real QuickJS, we might need to clone shape if it is shared
     // For now, assume shape is unique to object or we modify it in place (dangerous if shared)
 
-    let (idx, prev_prop_size) = unsafe { (*(*ctx).rt).add_property(sh, prop, flags as u8) };
+    let (idx, _prev_prop_size) = unsafe { (*(*ctx).rt).add_property(sh, prop, flags as u8) };
     if idx < 0 {
         return -1;
     }
 
-    // Resize object prop array if needed
-    // JSObject prop array stores JSProperty (values)
-    // JSShape prop array stores JSShapeProperty (names/flags)
-    // They must match in size/index
-
-    // TODO: Resize object prop array
-    // For now, let's assume we have enough space or implement resize logic for object prop
-
-    // Actually, we need to implement object prop resizing here
-    // But JSObject definition: pub prop: *mut JSProperty
-    // We don't store prop_size in JSObject?
-    // QuickJS stores it in JSShape? No.
-    // QuickJS: JSObject has no size field. It relies on Shape?
-    // Ah, JSObject allocates prop array based on shape->prop_size?
-    // Or maybe it reallocates when shape grows?
-
-    // Let's look at QuickJS:
-    // JS_DefinePropertyValue -> JS_DefineProperty -> add_property
-    // add_property modifies shape.
-    // If shape grows, we need to grow object's prop array too?
-    // Yes, but how do we know the current size of object's prop array?
-    // It seems we assume it matches shape's prop_count or prop_size?
-
-    // Let's implement a simple resize for object prop
+    // After add_property we should have ensured the shape has enough capacity and
+    // that objects using this shape have their prop arrays resized. However it's
+    // still possible this particular object has no prop array (for example a
+    // newly created object that was not present when the shape grew). In that
+    // case allocate a prop array sized to the current shape.
     let old_prop = unsafe { (*p).prop };
-    let new_prop = unsafe {
-        (*(*ctx).rt).js_realloc_rt(
-            (*p).prop as *mut c_void,
-            ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>(),
-        ) as *mut JSProperty
-    };
-
-    if new_prop.is_null() {
-        return -1;
-    }
-    unsafe { (*p).prop = new_prop };
-    // If the prop array was just created, zero-initialize it to avoid reading
-    // uninitialized JSProperty values later.
-    if old_prop.is_null() && !new_prop.is_null() {
-        let size_bytes = unsafe { ((*sh).prop_size as usize) * std::mem::size_of::<JSProperty>() };
-        unsafe { std::ptr::write_bytes(new_prop as *mut u8, 0, size_bytes) };
-    } else if !old_prop.is_null() && unsafe { (*sh).prop_size } > prev_prop_size {
-        // Zero only the newly-added slots so we don't overwrite existing properties.
-        let start_index = prev_prop_size as usize;
-        let new_slots = (unsafe { (*sh).prop_size } - prev_prop_size) as usize;
-        if new_slots > 0 {
-            let start_ptr = unsafe { new_prop.add(start_index) } as *mut u8;
-            let bytes = new_slots * std::mem::size_of::<JSProperty>();
-            unsafe { std::ptr::write_bytes(start_ptr, 0, bytes) };
+    if old_prop.is_null() && unsafe { (*sh).prop_size } > 0 {
+        let size = unsafe { (*sh).prop_size as usize } * std::mem::size_of::<JSProperty>();
+        let new_prop = unsafe { (*(*ctx).rt).js_realloc_rt(std::ptr::null_mut(), size) as *mut JSProperty };
+        if new_prop.is_null() {
+            return -1;
+        }
+        unsafe {
+            (*p).prop = new_prop;
+            // initialize slots to JS_UNDEFINED
+            let n = (*sh).prop_size as isize;
+            for i in 0..n {
+                (*new_prop.offset(i)).u.value = JS_UNDEFINED;
+            }
         }
     }
 
@@ -877,6 +891,17 @@ pub unsafe fn JS_NewObject(ctx: *mut JSContext) -> JSValue {
         }
         (*obj).prop = std::ptr::null_mut();
         (*obj).first_weak_ref = std::ptr::null_mut();
+        (*obj).next_in_shape = std::ptr::null_mut();
+
+        // Link object into its shape's object list so that when the shape changes
+        // (for example when its prop_size grows) we can update all objects using
+        // the same shape.
+        if !(*obj).shape.is_null() {
+            let sh = (*obj).shape;
+            // prepend to shape's list
+            (*obj).next_in_shape = (*sh).first_object;
+            (*sh).first_object = obj;
+        }
         JSValue::new_ptr(JS_TAG_OBJECT, obj as *mut c_void)
     }
 }
@@ -6967,9 +6992,29 @@ unsafe fn js_free_object(rt: *mut JSRuntime, v: JSValue) {
             (*rt).js_free_rt((*p).prop as *mut c_void);
             (*p).prop = std::ptr::null_mut();
         }
-        // Free shape
+        // Unlink from shape's object list and free shape only if no objects remain
         if !(*p).shape.is_null() {
-            (*rt).js_free_shape((*p).shape);
+            let sh = (*p).shape;
+            // unlink p from sh->first_object list
+            if (*sh).first_object == p {
+                (*sh).first_object = (*p).next_in_shape;
+            } else {
+                let mut prev = (*sh).first_object;
+                while !prev.is_null() {
+                    if (*prev).next_in_shape == p {
+                        (*prev).next_in_shape = (*p).next_in_shape;
+                        break;
+                    }
+                    prev = (*prev).next_in_shape;
+                }
+            }
+            // clear link for p
+            (*p).next_in_shape = std::ptr::null_mut();
+
+            // if no objects remain using this shape, free it
+            if (*sh).first_object.is_null() {
+                (*rt).js_free_shape(sh);
+            }
             (*p).shape = std::ptr::null_mut();
         }
         // Free object struct

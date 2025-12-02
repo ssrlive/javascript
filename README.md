@@ -90,18 +90,13 @@ let result = evaluate_script(r#"
 
 ### Command Line Interface
 
-The crate provides two example binaries:
+The crate provides an example CLI binary with REPL support:
 
-#### `js` - QuickJS-compatible FFI interface
+#### `js` - Command-line interface with REPL
 ```bash
 cargo run --example js -- -e "console.log('Hello World!')"
 cargo run --example js script.js
-```
-
-#### `rust_js` - High-level Rust interface
-```bash
-cargo run --example rust_js -- -e "1 + 2 * 3"
-cargo run --example rust_js script.js
+cargo run --example js  # no args -> enter a quick REPL (non-persistent environment)
 ```
 
 ## API Reference

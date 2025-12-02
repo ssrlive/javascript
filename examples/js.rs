@@ -12,84 +12,91 @@ struct Cli {
     file: Option<std::path::PathBuf>,
 }
 
-unsafe fn get_js_string(val: &JSValue) -> String {
-    unsafe {
-        if val.get_tag() != JS_TAG_STRING {
-            return String::new();
-        }
-        let p = val.get_ptr() as *mut JSString;
-        if p.is_null() {
-            return String::new();
-        }
-        let len = (*p).len as usize;
-        let str_data = (p as *mut u8).add(std::mem::size_of::<JSString>());
-        let bytes = std::slice::from_raw_parts(str_data, len);
-        String::from_utf8_lossy(bytes).to_string()
-    }
-}
-
 fn main() {
     let cli = <Cli as clap::Parser>::parse();
 
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
 
-    let script_content: String;
-    let mut filename = "<eval>".to_string();
+    let script_content: Option<String>;
+    // script_content will hold the script to execute when a script is provided
 
     if let Some(script) = cli.eval {
-        script_content = script;
+        script_content = Some(script);
     } else if let Some(file) = cli.file {
-        filename = file.to_string_lossy().to_string();
+        // filename previously used for low-level JS_Eval, no longer needed here
         match std::fs::read_to_string(&file) {
-            Ok(content) => script_content = content,
+            Ok(content) => script_content = Some(content),
             Err(e) => {
                 eprintln!("Error reading file {}: {}", file.display(), e);
                 process::exit(1);
             }
         }
     } else {
-        eprintln!("Error: Must provide either --eval or a file");
-        process::exit(1);
+        // No script argument -> start simple REPL (non-persistent environment per-line)
+        // We intentionally use evaluate_script (safe API) which builds a fresh env per execution.
+        use std::io::{self, Write};
+        println!("JavaScript REPL (quick, non-persistent). Type 'exit' or Ctrl-D to quit.");
+        loop {
+            print!("js> ");
+            let _ = io::stdout().flush();
+            let mut buf = String::new();
+            match io::stdin().read_line(&mut buf) {
+                Ok(0) => {
+                    // EOF
+                    println!();
+                    break;
+                }
+                Ok(_) => {
+                    let line = buf.trim_end();
+                    if line == "exit" || line == "quit" {
+                        break;
+                    }
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match javascript::evaluate_script(line) {
+                        Ok(result) => print_eval_result(&result),
+                        Err(e) => eprintln!("Error: {:?}", e),
+                    }
+                }
+                Err(e) => {
+                    eprintln!("REPL read error: {}", e);
+                    break;
+                }
+            }
+        }
+        return;
     }
 
-    unsafe {
-        let rt = JS_NewRuntime();
-        if rt.is_null() {
-            eprintln!("Failed to create runtime");
-            process::exit(1);
-        }
-        let ctx = JS_NewContext(rt);
-        if ctx.is_null() {
-            eprintln!("Failed to create context");
-            JS_FreeRuntime(rt);
-            process::exit(1);
-        }
-
-        let script_c = std::ffi::CString::new(script_content.clone()).unwrap();
-        let result = JS_Eval(
-            ctx,
-            script_c.as_ptr(),
-            script_content.len(),
-            std::ffi::CString::new(filename).unwrap().as_ptr(),
-            0,
-        );
-
-        // Print result
-        match result.get_tag() {
-            JS_TAG_FLOAT64 => println!("{}", result.u.float64),
-            JS_TAG_INT => println!("{}", result.u.int32),
-            JS_TAG_BOOL => println!("{}", if result.u.int32 != 0 { "true" } else { "false" }),
-            JS_TAG_NULL => println!("null"),
-            JS_TAG_UNDEFINED => println!("undefined"),
-            JS_TAG_STRING => {
-                let s = get_js_string(&result);
-                println!("{}", s);
+    // If we got here we have a script to execute. Prefer the safe evaluate_script
+    if let Some(script) = script_content {
+        match evaluate_script(script) {
+            Ok(result) => {
+                print_eval_result(&result);
             }
-            _ => println!("[unknown]"),
+            Err(err) => {
+                eprintln!("Evaluation failed: {:?}", err);
+                process::exit(1);
+            }
         }
+    }
+}
 
-        JS_FreeContext(ctx);
-        JS_FreeRuntime(rt);
+fn print_eval_result(result: &Value) {
+    match result {
+        Value::Number(n) => println!("{}", n),
+        Value::String(s) => println!("{}", String::from_utf16_lossy(s)),
+        Value::Boolean(b) => println!("{}", b),
+        Value::Undefined => println!("undefined"),
+        Value::Object(_) => println!("[object Object]"),
+        Value::Function(name) => println!("[Function: {}]", name),
+        Value::Closure(_, _, _) => println!("[Function]"),
+        Value::ClassDefinition(_) => println!("[Class]"),
+        Value::Getter(_, _) => println!("[Getter]"),
+        Value::Setter(_, _, _) => println!("[Setter]"),
+        Value::Property { .. } => println!("[Property]"),
+        Value::Promise(_) => println!("[object Promise]"),
+        Value::Symbol(_) => println!("[object Symbol]"),
     }
 }

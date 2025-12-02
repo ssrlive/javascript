@@ -32,10 +32,6 @@ env_logger = { version = "0.11" }
 name = "js"
 path = "examples/js.rs"
 
-[[example]]
-name = "rust_js"
-path = "examples/rust_js.rs"
-
 [[bench]]
 name = "promise_benchmarks"
 path = "benches/promise_benchmarks.rs"

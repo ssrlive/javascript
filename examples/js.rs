@@ -21,12 +21,10 @@ fn main() {
     env_logger::init();
 
     let script_content: Option<String>;
-    // script_content will hold the script to execute when a script is provided
 
     if let Some(script) = cli.eval {
         script_content = Some(script);
     } else if let Some(file) = cli.file {
-        // filename previously used for low-level JS_Eval, no longer needed here
         match std::fs::read_to_string(&file) {
             Ok(content) => script_content = Some(content),
             Err(e) => {
@@ -35,109 +33,15 @@ fn main() {
             }
         }
     } else {
-        // No script argument -> start simple REPL (non-persistent environment per-line)
-        // We intentionally use evaluate_script (safe API) which builds a fresh env per execution.
-        // using rustyline for interactive features (history, nicer prompt)
-        println!("JavaScript REPL (persistent environment). Type 'exit' or Ctrl-D to quit.");
-        // persistent environment so definitions persist across inputs
-        let repl = javascript::Repl::new();
-
-        // configure history path — prefer $HOME/.js_repl_history
-        let history_path = std::env::var_os("HOME")
-            .map(|h| {
-                let mut p = std::path::PathBuf::from(h);
-                p.push(".js_repl_history");
-                p
-            })
-            .unwrap_or_else(|| std::path::PathBuf::from(".js_repl_history"));
-
-        let mut rl = rustyline::DefaultEditor::new().expect("failed to create editor");
-        if rl.load_history(&history_path).is_err() {
-            // no history yet — ignore
-        }
-
-        // small bracket-balance check for crude multi-line input support
-        fn needs_more_input(s: &str) -> bool {
-            let mut stack = Vec::new();
-            for ch in s.chars() {
-                match ch {
-                    '(' => stack.push(')'),
-                    '[' => stack.push(']'),
-                    '{' => stack.push('}'),
-                    ')' | ']' | '}' => {
-                        if stack.pop() != Some(ch) {
-                            return true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            !stack.is_empty()
-        }
-
-        loop {
-            match rl.readline("js> ") {
-                Ok(mut line) => {
-                    // support multi-line while brackets are unbalanced
-                    while needs_more_input(&line) {
-                        match rl.readline("...> ") {
-                            Ok(cont) => {
-                                line.push('\n');
-                                line.push_str(&cont);
-                            }
-                            Err(rustyline::error::ReadlineError::Interrupted) => {
-                                println!("");
-                                break;
-                            }
-                            Err(_) => {
-                                println!("");
-                                break;
-                            }
-                        }
-                    }
-
-                    let trimmed = line.trim();
-                    if trimmed == "exit" || trimmed == "quit" {
-                        break;
-                    }
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-
-                    let _ = rl.add_history_entry(trimmed);
-
-                    match repl.eval(line) {
-                        Ok(result) => print_eval_result(&result),
-                        Err(e) => eprintln!("Error: {:?}", e),
-                    }
-                }
-                Err(rustyline::error::ReadlineError::Interrupted) => {
-                    // Ctrl-C
-                    println!("");
-                    continue;
-                }
-                Err(rustyline::error::ReadlineError::Eof) => {
-                    // Ctrl-D
-                    println!("");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("REPL error: {e}");
-                    break;
-                }
-            }
-        }
-
-        let _ = rl.save_history(&history_path);
+        // No script argument -> start the interactive, persistent REPL
+        run_persistent_repl();
         return;
     }
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
     if let Some(script) = script_content {
         match evaluate_script(script) {
-            Ok(result) => {
-                print_eval_result(&result);
-            }
+            Ok(result) => print_eval_result(&result),
             Err(err) => {
                 eprintln!("Evaluation failed: {:?}", err);
                 process::exit(1);
@@ -161,5 +65,89 @@ fn print_eval_result(result: &Value) {
         Value::Property { .. } => println!("[Property]"),
         Value::Promise(_) => println!("[object Promise]"),
         Value::Symbol(_) => println!("[object Symbol]"),
+    }
+}
+
+// Persistent rustyline-powered REPL loop extracted into a helper to keep `main()` small.
+fn run_persistent_repl() {
+    use rustyline::Editor;
+    use rustyline::error::ReadlineError;
+    use std::path::PathBuf;
+
+    let mut rl = match Editor::<(), rustyline::history::FileHistory>::new() {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("Failed to initialize line editor: {}", err);
+            process::exit(1);
+        }
+    };
+
+    // Simple history file in the user's home directory
+    let history_path: Option<PathBuf> = std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".js_repl_history"));
+    if let Some(ref p) = history_path {
+        let _ = rl.load_history(p);
+    }
+
+    let repl = Repl::new();
+
+    let mut buffer = String::new();
+
+    loop {
+        let prompt = if buffer.is_empty() { "js> " } else { ".... " };
+
+        match rl.readline(prompt) {
+            Ok(line) => {
+                // support quick exit from the REPL
+                let trimmed = line.trim();
+                if trimmed == "exit" || trimmed == ".exit" {
+                    break;
+                }
+
+                // accumulate into buffer when multi-line is needed
+                if buffer.is_empty() {
+                    buffer = line.clone();
+                } else {
+                    buffer.push('\n');
+                    buffer.push_str(&line);
+                }
+
+                // if the input looks incomplete (unclosed brackets/strings/templates/comments), keep reading
+                if !is_complete_input(&buffer) {
+                    continue;
+                }
+
+                // Avoid evaluating empty submissions
+                if buffer.trim().is_empty() {
+                    buffer.clear();
+                    continue;
+                }
+
+                let _ = rl.add_history_entry(buffer.clone());
+
+                match repl.eval(&buffer) {
+                    Ok(val) => print_eval_result(&val),
+                    Err(e) => eprintln!("Error: {:?}", e),
+                }
+
+                buffer.clear();
+            }
+            Err(ReadlineError::Interrupted) => {
+                println!("");
+                buffer.clear();
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!("Goodbye");
+                break;
+            }
+            Err(err) => {
+                eprintln!("Readline error: {}", err);
+                break;
+            }
+        }
+    }
+
+    if let Some(ref p) = history_path {
+        let _ = rl.save_history(p);
     }
 }

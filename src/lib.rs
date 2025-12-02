@@ -20,6 +20,7 @@ pub(crate) mod js_promise;
 pub(crate) mod js_regexp;
 pub(crate) mod js_std;
 pub(crate) mod js_string;
+pub(crate) mod repl_utils;
 pub(crate) mod sprintf;
 pub(crate) mod tmpfile;
 
@@ -34,3 +35,4 @@ pub use core::{
     JS_TAG_SHORT_BIG_INT, JS_TAG_STRING, JS_TAG_STRING_ROPE, JS_TAG_UNDEFINED, JS_UNINITIALIZED,
 };
 pub use error::JSError;
+pub use repl_utils::is_complete_input;

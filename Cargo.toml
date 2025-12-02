@@ -27,6 +27,7 @@ clap = { version = "4.5.53", features = ["derive"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 ctor = "0.6"
 env_logger = { version = "0.11" }
+rustyline = "17"
 
 [[example]]
 name = "js"

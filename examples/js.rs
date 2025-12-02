@@ -1,3 +1,5 @@
+#![allow(clippy::println_empty_string)]
+
 use javascript::*;
 use std::process;
 
@@ -35,39 +37,98 @@ fn main() {
     } else {
         // No script argument -> start simple REPL (non-persistent environment per-line)
         // We intentionally use evaluate_script (safe API) which builds a fresh env per execution.
-        use std::io::{self, Write};
+        // using rustyline for interactive features (history, nicer prompt)
         println!("JavaScript REPL (persistent environment). Type 'exit' or Ctrl-D to quit.");
         // persistent environment so definitions persist across inputs
         let repl = javascript::Repl::new();
-        loop {
-            print!("js> ");
-            let _ = io::stdout().flush();
-            let mut buf = String::new();
-            match io::stdin().read_line(&mut buf) {
-                Ok(0) => {
-                    // EOF
-                    println!();
-                    break;
+
+        // configure history path — prefer $HOME/.js_repl_history
+        let history_path = std::env::var_os("HOME")
+            .map(|h| {
+                let mut p = std::path::PathBuf::from(h);
+                p.push(".js_repl_history");
+                p
+            })
+            .unwrap_or_else(|| std::path::PathBuf::from(".js_repl_history"));
+
+        let mut rl = rustyline::DefaultEditor::new().expect("failed to create editor");
+        if rl.load_history(&history_path).is_err() {
+            // no history yet — ignore
+        }
+
+        // small bracket-balance check for crude multi-line input support
+        fn needs_more_input(s: &str) -> bool {
+            let mut stack = Vec::new();
+            for ch in s.chars() {
+                match ch {
+                    '(' => stack.push(')'),
+                    '[' => stack.push(']'),
+                    '{' => stack.push('}'),
+                    ')' | ']' | '}' => {
+                        if stack.pop() != Some(ch) {
+                            return true;
+                        }
+                    }
+                    _ => {}
                 }
-                Ok(_) => {
-                    let line = buf.trim_end();
-                    if line == "exit" || line == "quit" {
+            }
+            !stack.is_empty()
+        }
+
+        loop {
+            match rl.readline("js> ") {
+                Ok(mut line) => {
+                    // support multi-line while brackets are unbalanced
+                    while needs_more_input(&line) {
+                        match rl.readline("...> ") {
+                            Ok(cont) => {
+                                line.push('\n');
+                                line.push_str(&cont);
+                            }
+                            Err(rustyline::error::ReadlineError::Interrupted) => {
+                                println!("");
+                                break;
+                            }
+                            Err(_) => {
+                                println!("");
+                                break;
+                            }
+                        }
+                    }
+
+                    let trimmed = line.trim();
+                    if trimmed == "exit" || trimmed == "quit" {
                         break;
                     }
-                    if line.is_empty() {
+                    if trimmed.is_empty() {
                         continue;
                     }
+
+                    let _ = rl.add_history_entry(trimmed);
+
                     match repl.eval(line) {
                         Ok(result) => print_eval_result(&result),
                         Err(e) => eprintln!("Error: {:?}", e),
                     }
                 }
+                Err(rustyline::error::ReadlineError::Interrupted) => {
+                    // Ctrl-C
+                    println!("");
+                    continue;
+                }
+                Err(rustyline::error::ReadlineError::Eof) => {
+                    // Ctrl-D
+                    println!("");
+                    break;
+                }
                 Err(e) => {
-                    eprintln!("REPL read error: {}", e);
+                    eprintln!("REPL error: {e}");
                     break;
                 }
             }
         }
+
+        let _ = rl.save_history(&history_path);
         return;
     }
 

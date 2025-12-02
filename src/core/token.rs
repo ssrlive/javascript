@@ -65,6 +65,7 @@ pub enum Token {
     Arrow,
     Spread,
     OptionalChain,
+    QuestionMark,
     NullishCoalescing,
     LogicalNot,
     LogicalAnd,
@@ -177,6 +178,25 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::DivAssign);
                     i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '/' {
+                    // Single-line comment: //
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    // Don't consume the newline, let the whitespace handler deal with it
+                } else if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    // Multi-line comment: /*
+                    i += 2; // skip /*
+                    while i + 1 < chars.len() {
+                        if chars[i] == '*' && chars[i + 1] == '/' {
+                            i += 2; // skip */
+                            break;
+                        }
+                        i += 1;
+                    }
+                    if i >= chars.len() {
+                        return Err(JSError::TokenizationError); // Unterminated comment
+                    }
                 } else {
                     tokens.push(Token::Divide);
                     i += 1;
@@ -229,7 +249,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 }
             }
             '?' => {
-                // Recognize '??=' (nullish coalescing assignment), '??' (nullish coalescing), and '?.' (optional chaining)
+                // Recognize '??=' (nullish coalescing assignment), '??' (nullish coalescing), '?.' (optional chaining), and '?' (conditional)
                 if i + 2 < chars.len() && chars[i + 1] == '?' && chars[i + 2] == '=' {
                     tokens.push(Token::NullishAssign);
                     i += 3;
@@ -240,7 +260,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     tokens.push(Token::OptionalChain);
                     i += 2;
                 } else {
-                    return Err(JSError::TokenizationError);
+                    tokens.push(Token::QuestionMark);
+                    i += 1;
                 }
             }
             '!' => {

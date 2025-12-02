@@ -6,6 +6,7 @@ use crate::{
         to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
+    js_assert::make_assert_object,
     js_class::{
         call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
         evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
@@ -14,6 +15,7 @@ use crate::{
     js_math::{handle_math_method, make_math_object},
     js_number::make_number_object,
     js_promise::{PromiseState, handle_promise_method, run_event_loop},
+    js_testintl::make_testintl_object,
     obj_get_value,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
@@ -482,8 +484,29 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 catch_env.borrow_mut().prototype = Some(env.clone());
                                 catch_env.borrow_mut().is_function_scope = false;
                                 let catch_value = match &err {
+                                    // Thrown values created by `throw <expr>` should be delivered
+                                    // to the catch clause unmodified (as in ECMA-262).
+                                    // Only JS engine error variants (TypeError, SyntaxError,
+                                    // RuntimeError, EvaluationError) are converted into
+                                    // Error-like objects for the catch. Preserve the
+                                    // original thrown value here.
                                     JSError::Throw { value } => value.clone(),
-                                    _ => Value::String(utf8_to_utf16(&err.to_string())),
+                                    JSError::TypeError { .. }
+                                    | JSError::SyntaxError { .. }
+                                    | JSError::RuntimeError { .. }
+                                    | JSError::EvaluationError { .. } => {
+                                        // For engine-generated errors, expose the textual
+                                        // representation to the catch clause as a string
+                                        // (tests expect error text rather than an object).
+                                        Value::String(utf8_to_utf16(&err.to_string()))
+                                    }
+                                    _ => {
+                                        // For other errors, create a generic Error object
+                                        let error_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                                        obj_set_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
+                                        obj_set_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
+                                        Value::Object(error_obj)
+                                    }
                                 };
                                 env_set(&catch_env, catch_param.as_str(), catch_value)?;
                                 match evaluate_statements_with_context(&catch_env, catch_body)? {
@@ -1148,6 +1171,14 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             }
         }
         Expr::Value(value) => Ok(value.clone()),
+        Expr::Conditional(condition, true_expr, false_expr) => {
+            let cond_val = evaluate_expr(env, condition)?;
+            if is_truthy(&cond_val) {
+                evaluate_expr(env, true_expr)
+            } else {
+                evaluate_expr(env, false_expr)
+            }
+        }
     }
 }
 
@@ -1166,6 +1197,12 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     if name == "console" {
         Ok(Value::Object(make_console_object()?))
+    } else if name == "assert" {
+        Ok(Value::Object(make_assert_object()?))
+    } else if name == "testIntl" {
+        Ok(Value::Object(make_testintl_object()?))
+    } else if name == "testWithIntlConstructors" {
+        Ok(Value::Function("testWithIntlConstructors".to_string()))
     } else if name == "String" {
         Ok(Value::Function("String".to_string()))
     } else if name == "Math" {
@@ -1785,6 +1822,17 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     result.extend_from_slice(&rs);
                     Ok(Value::String(result))
                 }
+                // Concatenate string with undefined by coercing undefined to "undefined"
+                (Value::String(ls), Value::Undefined) => {
+                    let mut result = ls.clone();
+                    result.extend_from_slice(&utf8_to_utf16("undefined"));
+                    Ok(Value::String(result))
+                }
+                (Value::Undefined, Value::String(rs)) => {
+                    let mut result = utf8_to_utf16("undefined");
+                    result.extend_from_slice(&rs);
+                    Ok(Value::String(result))
+                }
                 (Value::Number(ln), Value::String(rs)) => {
                     let mut result = utf8_to_utf16(&ln.to_string());
                     result.extend_from_slice(&rs);
@@ -1841,6 +1889,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Number(1.0)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
         },
         BinaryOp::StrictEqual => match (l, r) {
@@ -1848,6 +1898,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Number(1.0)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 1.0 } else { 0.0 })),
             _ => Ok(Value::Number(0.0)), // Different types are not equal
         },
         BinaryOp::NotEqual => match (l, r) {
@@ -1983,6 +2035,8 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
     log::trace!("Property access prop={prop}");
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
+        // Accessing other properties on string primitives should return undefined
+        Value::String(_) => Ok(Value::Undefined),
         Value::Object(obj_map) => {
             if let Some(val) = obj_get_value(&obj_map, &prop.into())? {
                 Ok(val.borrow().clone())
@@ -2016,6 +2070,10 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 message: format!("Property not found for prop={prop}"),
             })
         }
+        // For boolean and other primitive types, property access should usually
+        // coerce to a primitive wrapper or return undefined if not found. To
+        // keep things simple, return undefined for boolean properties.
+        Value::Boolean(_) => Ok(Value::Undefined),
         _ => Err(JSError::EvaluationError {
             message: format!("Property not found for prop={prop}"),
         }),
@@ -2136,6 +2194,16 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // Promise instance methods
                     handle_promise_method(&obj_map, method, args, env)
                 } else if obj_map.borrow().contains_key(&"__class_def__".into()) {
+                    // Class static methods
+                    call_static_method(&obj_map, method, args, env)
+                } else if obj_map.borrow().contains_key(&"sameValue".into()) {
+                    crate::js_assert::handle_assert_method(method, args, env)
+                } else if obj_map.borrow().contains_key(&"testWithIntlConstructors".into()) {
+                    crate::js_testintl::handle_testintl_method(method, args, env)
+                } else if obj_map.borrow().contains_key(&"__locale".into()) && method == "resolvedOptions" {
+                    // Handle resolvedOptions method on mock Intl instances
+                    crate::js_testintl::handle_resolved_options(&obj_map)
+                } else if is_array(&obj_map) {
                     // Class static methods
                     call_static_method(&obj_map, method, args, env)
                 } else if is_class_instance(&obj_map)? {

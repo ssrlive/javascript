@@ -169,6 +169,7 @@ pub enum Expr {
     SuperMethod(String, Vec<Expr>),                       // super.method() call
     ArrayDestructuring(Vec<DestructuringElement>),        // array destructuring: [a, b, ...rest]
     ObjectDestructuring(Vec<ObjectDestructuringElement>), // object destructuring: {a, b: c, ...rest}
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),         // conditional expression: condition ? trueExpr : falseExpr
     Value(Value),                                         // literal value
 }
 

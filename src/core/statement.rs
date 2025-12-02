@@ -86,6 +86,12 @@ impl std::fmt::Debug for Statement {
 pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
     while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+        // Skip empty statement semicolons that may appear (e.g. from inserted tokens)
+        if matches!(tokens[0], Token::Semicolon) {
+            tokens.remove(0);
+            continue;
+        }
+        log::trace!("parse_statements next token: {:?}", tokens.first());
         let stmt = parse_statement(tokens)?;
         statements.push(stmt);
         if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
@@ -98,10 +104,19 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
 fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::Break) {
         tokens.remove(0); // consume break
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        // Accept either an explicit semicolon, or allow automatic semicolon
+        // insertion when the next token is a block terminator (e.g. `}`), or
+        // part of a try/catch/finally sequence. This keeps `throw <expr>` and
+        // `throw <expr>;` equivalent inside blocks.
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+            tokens.remove(0); // consume ;
+        } else if !tokens.is_empty()
+            && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
+        {
+            // semicolon omitted but next token terminates the statement; accept
+        } else {
             return Err(JSError::ParseError);
         }
-        tokens.remove(0); // consume ;
         return Ok(Statement::Break);
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Continue) {
@@ -229,10 +244,17 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::Throw) {
         tokens.remove(0); // consume throw
         let expr = parse_expression(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        // Accept an explicit semicolon, or allow ASI-ish omission when next token
+        // ends the block or begins a catch/finally block.
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+            tokens.remove(0); // consume ;
+        } else if !tokens.is_empty()
+            && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
+        {
+            // semicolon omitted but next token terminates the statement; accept
+        } else {
             return Err(JSError::ParseError);
         }
-        tokens.remove(0); // consume ;
         return Ok(Statement::Throw(expr));
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Async) {
@@ -568,6 +590,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             // Regular variable declaration
             if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                 tokens.remove(0);
+                // Handle optional initializer (e.g., var x = 1)
                 if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
                     tokens.remove(0);
                     let expr = parse_expression(tokens)?;
@@ -579,6 +602,51 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         return Ok(Statement::Let(name, Some(expr)));
                     }
                 } else if !is_const {
+                    // Support comma-separated declarations like `var a, b, c;` by
+                    // inserting subsequent simple declarators back into the token
+                    // stream as separate var/let statements. For now we only support
+                    // subsequent declarators without initializers (e.g., `, b, c`).
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                        let mut extra_names: Vec<String> = Vec::new();
+                        // Collect following identifiers separated by commas
+                        while !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                            tokens.remove(0); // consume comma
+                            if let Some(Token::Identifier(n)) = tokens.first().cloned() {
+                                tokens.remove(0);
+                                // If there is an initializer on the later decl, bail out (not supported here)
+                                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                                    return Err(JSError::ParseError);
+                                }
+                                extra_names.push(n);
+                            } else {
+                                return Err(JSError::ParseError);
+                            }
+                        }
+
+                        // Insert the remaining declarations back into tokens as separate
+                        // var/let statements so the parser will parse them on subsequent
+                        // iterations. Insert in reverse order so they are parsed in the
+                        // original left-to-right order.
+                        for n in extra_names.into_iter().rev() {
+                            // Add a semicolon terminator for each inserted declaration
+                            tokens.insert(0, Token::Semicolon);
+                            // Identifier
+                            tokens.insert(0, Token::Identifier(n));
+                            // var/let token
+                            if is_var {
+                                tokens.insert(0, Token::Var);
+                            } else {
+                                tokens.insert(0, Token::Let);
+                            }
+                        }
+
+                        // Return the first declaration
+                        if is_var {
+                            return Ok(Statement::Var(name, None));
+                        } else {
+                            return Ok(Statement::Let(name, None));
+                        }
+                    }
                     if is_var {
                         return Ok(Statement::Var(name, None));
                     } else {

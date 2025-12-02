@@ -42,7 +42,26 @@ pub fn parse_statement_block(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, 
 }
 
 pub fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    parse_assignment(tokens)
+    parse_conditional(tokens)
+}
+
+pub fn parse_conditional(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    let condition = parse_assignment(tokens)?;
+    if tokens.is_empty() {
+        return Ok(condition);
+    }
+    if matches!(tokens[0], Token::QuestionMark) {
+        tokens.remove(0); // consume ?
+        let true_expr = parse_conditional(tokens)?; // Allow nesting
+        if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume :
+        let false_expr = parse_conditional(tokens)?; // Allow nesting
+        Ok(Expr::Conditional(Box::new(condition), Box::new(true_expr), Box::new(false_expr)))
+    } else {
+        Ok(condition)
+    }
 }
 
 pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
@@ -770,9 +789,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            });
+            // Provide better error information for unexpected tokens during parsing
+            // Log the remaining tokens for better context to help debugging
+            if !tokens.is_empty() {
+                log::debug!("parse_expression unexpected token: {:?}; remaining tokens: {:?}", tokens[0], tokens);
+            } else {
+                log::debug!("parse_expression unexpected end of tokens; tokens empty");
+            }
+            return Err(JSError::ParseError);
         }
     };
 

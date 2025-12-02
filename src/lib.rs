@@ -7,6 +7,7 @@
 pub(crate) mod core;
 pub(crate) mod error;
 pub(crate) mod js_array;
+pub(crate) mod js_assert;
 pub(crate) mod js_class;
 pub(crate) mod js_console;
 pub(crate) mod js_date;
@@ -20,6 +21,7 @@ pub(crate) mod js_promise;
 pub(crate) mod js_regexp;
 pub(crate) mod js_std;
 pub(crate) mod js_string;
+pub(crate) mod js_testintl;
 pub(crate) mod repl;
 pub(crate) mod repl_utils;
 pub(crate) mod sprintf;

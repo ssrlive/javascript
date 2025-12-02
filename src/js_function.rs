@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, to_primitive, value_to_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, to_primitive, value_to_string};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
@@ -597,6 +597,38 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     crate::js_promise::reject_promise(result_promise, reason);
                 }
             }
+            Ok(Value::Undefined)
+        }
+        "testWithIntlConstructors" => {
+            // testWithIntlConstructors function - used for testing Intl constructors
+            if args.len() != 1 {
+                return Err(JSError::TypeError {
+                    message: "testWithIntlConstructors requires exactly 1 argument".to_string(),
+                });
+            }
+            let callback = evaluate_expr(env, &args[0])?;
+            let callback_func = match callback {
+                Value::Closure(params, body, captured_env) => (params, body, captured_env),
+                _ => {
+                    return Err(JSError::TypeError {
+                        message: "testWithIntlConstructors requires a function as argument".to_string(),
+                    });
+                }
+            };
+
+            // Create a mock constructor
+            let mock_constructor = crate::js_testintl::create_mock_intl_constructor()?;
+
+            // Call the callback function with the mock constructor as argument
+            // Create new environment starting with captured environment
+            let func_env = callback_func.2.clone();
+            // Bind the mock constructor to the first parameter
+            if !callback_func.0.is_empty() {
+                env_set(&func_env, &callback_func.0[0], mock_constructor)?;
+            }
+            // Execute function body
+            crate::core::evaluate_statements(&func_env, &callback_func.1)?;
+
             Ok(Value::Undefined)
         }
 

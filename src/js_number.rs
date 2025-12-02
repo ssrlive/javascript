@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
 use crate::error::JSError;
+use crate::utf16::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -210,7 +211,7 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
     match method {
         "toString" => {
             if args.is_empty() {
-                Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string())))
+                Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
                 Err(JSError::EvaluationError {
                     message: format!("toString method expects no arguments, got {}", args.len()),
@@ -229,7 +230,7 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
         "toLocaleString" => {
             if args.is_empty() {
                 // For now, same as toString
-                Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string())))
+                Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
                 Err(JSError::EvaluationError {
                     message: format!("toLocaleString method expects no arguments, got {}", args.len()),
@@ -253,9 +254,9 @@ pub fn handle_number_object_method(
     if let Some(value_val) = crate::core::obj_get_value(obj_map, &"__value__".into())? {
         if let Value::Number(n) = *value_val.borrow() {
             match method {
-                "toString" => Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string()))),
+                "toString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                 "valueOf" => Ok(Value::Number(n)),
-                "toLocaleString" => Ok(Value::String(crate::core::utf8_to_utf16(&n.to_string()))), // For now, same as toString
+                "toLocaleString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))), // For now, same as toString
                 _ => Err(JSError::EvaluationError {
                     message: format!("Number.prototype.{method} is not implemented"),
                 }),

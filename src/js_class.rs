@@ -1,9 +1,7 @@
 use crate::{
-    core::{
-        Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value,
-        utf8_to_utf16,
-    },
+    core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value},
     error::JSError,
+    utf16::utf8_to_utf16,
 };
 use std::{cell::RefCell, rc::Rc};
 

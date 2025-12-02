@@ -23,8 +23,9 @@
 //!
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, utf8_to_utf16};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements};
 use crate::error::JSError;
+use crate::utf16::utf8_to_utf16;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -511,11 +512,7 @@ pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::E
 ///
 /// # Returns
 /// * `Result<Value, JSError>` - New promise for chaining or error
-pub fn handle_promise_then_direct(
-    promise: Rc<RefCell<JSPromise>>,
-    args: &[crate::core::Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Create a new promise for chaining
     let new_promise = Rc::new(RefCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;

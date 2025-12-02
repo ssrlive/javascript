@@ -1,9 +1,9 @@
 use crate::core::{
     Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, obj_get_value, obj_set_value,
-    utf8_to_utf16,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
+use crate::utf16::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
 

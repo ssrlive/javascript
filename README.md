@@ -96,7 +96,7 @@ The crate provides an example CLI binary with REPL support:
 ```bash
 cargo run --example js -- -e "console.log('Hello World!')"
 cargo run --example js script.js
-cargo run --example js  # no args -> enter a quick REPL (non-persistent environment)
+cargo run --example js  # no args -> enter persistent REPL (state is retained across inputs)
 ```
 
 ## API Reference

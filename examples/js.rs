@@ -36,7 +36,9 @@ fn main() {
         // No script argument -> start simple REPL (non-persistent environment per-line)
         // We intentionally use evaluate_script (safe API) which builds a fresh env per execution.
         use std::io::{self, Write};
-        println!("JavaScript REPL (quick, non-persistent). Type 'exit' or Ctrl-D to quit.");
+        println!("JavaScript REPL (persistent environment). Type 'exit' or Ctrl-D to quit.");
+        // persistent environment so definitions persist across inputs
+        let repl = javascript::Repl::new();
         loop {
             print!("js> ");
             let _ = io::stdout().flush();
@@ -55,7 +57,7 @@ fn main() {
                     if line.is_empty() {
                         continue;
                     }
-                    match javascript::evaluate_script(line) {
+                    match repl.eval(line) {
                         Ok(result) => print_eval_result(&result),
                         Err(e) => eprintln!("Error: {:?}", e),
                     }

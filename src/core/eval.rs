@@ -891,7 +891,23 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
             Ok(Some(cf)) => return Ok(cf),
             Ok(None) => {}
             Err(e) => {
-                log::error!("evaluate_statements_with_context error at statement {}: {:?} stmt={:?}", i, e, stmt);
+                // Thrown values (user code `throw`) are expected control flow and
+                // are noisy when logged at error level during batch testing. Lower
+                // their logging to debug so test runs aren't flooded. Keep other
+                // engine/internal errors at error level.
+                match &e {
+                    JSError::Throw { .. } => {
+                        log::debug!(
+                            "evaluate_statements_with_context thrown value at statement {}: {:?} stmt={:?}",
+                            i,
+                            e,
+                            stmt
+                        );
+                    }
+                    _ => {
+                        log::error!("evaluate_statements_with_context error at statement {}: {:?} stmt={:?}", i, e, stmt);
+                    }
+                }
                 return Err(e);
             }
         }

@@ -74,6 +74,9 @@ fn run_persistent_repl() {
     use rustyline::error::ReadlineError;
     use std::path::PathBuf;
 
+    let ver = clap::crate_version!();
+    println!("JavaScript Interpreter REPL (persistent environment) v{ver}. Type 'exit' or Ctrl-D to quit.");
+
     let mut rl = match Editor::<(), rustyline::history::FileHistory>::new() {
         Ok(e) => e,
         Err(err) => {

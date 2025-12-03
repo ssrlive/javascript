@@ -288,6 +288,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 "{}.toString() takes no arguments, but {} were provided",
                 match obj_val {
                     Value::Number(_) => "Number",
+                    Value::BigInt(_) => "BigInt",
                     Value::String(_) => "String",
                     Value::Boolean(_) => "Boolean",
                     Value::Object(_) => "Object",
@@ -307,6 +308,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
     }
     match obj_val {
         Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+        Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(s))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Undefined => Err(JSError::TypeError {
@@ -317,6 +319,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             if let Some(wrapped_val) = obj_get_value(obj_map, &"__value__".into())? {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                    Value::BigInt(s) => return Ok(Value::String(utf8_to_utf16(s))),
                     Value::Boolean(b) => return Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::String(s) => return Ok(Value::String(s.clone())),
                     _ => {}
@@ -392,6 +395,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                     &Value::Setter(_, _, _) => "Setter",
                     &Value::Property { .. } => "Property",
                     &Value::Promise(_) => "Promise",
+                    Value::BigInt(_) => "BigInt",
                     Value::Symbol(_) => "Symbol",
                 },
                 args.len()
@@ -400,6 +404,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
     }
     match obj_val {
         Value::Number(n) => Ok(Value::Number(*n)),
+        Value::BigInt(s) => Ok(Value::BigInt(s.clone())),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
         Value::Undefined => Err(JSError::TypeError {

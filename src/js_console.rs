@@ -19,6 +19,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                 let arg_val = evaluate_expr(env, arg)?;
                 match arg_val {
                     Value::Number(n) => print!("{}", n),
+                    Value::BigInt(s) => print!("{}", s),
                     Value::String(s) => {
                         print!("{}", String::from_utf16_lossy(&s))
                     }
@@ -36,6 +37,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 if let Some(val_rc) = crate::core::obj_get_value(&obj, &i.to_string().into())? {
                                     match &*val_rc.borrow() {
                                         Value::Number(n) => print!("{}", n),
+                                        Value::BigInt(s) => print!("{}", s),
                                         Value::String(s) => print!("\"{}\"", String::from_utf16_lossy(s)),
                                         Value::Boolean(b) => print!("{}", b),
                                         Value::Undefined => print!("undefined"),

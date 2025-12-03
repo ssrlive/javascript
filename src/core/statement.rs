@@ -22,13 +22,15 @@ pub enum Statement {
     ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
     LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
     ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
-    Class(String, Option<String>, Vec<ClassMember>),        // name, extends, members
+    Class(String, Option<crate::core::Expr>, Vec<ClassMember>), // name, extends, members
     Assign(String, Expr),                                   // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
     ForOf(String, Expr, Vec<Statement>),              // variable, iterable, body
+    ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
+    ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
     While(Expr, Vec<Statement>),                      // condition, body
     DoWhile(Vec<Statement>, Expr),                    // body, condition
     Switch(Expr, Vec<SwitchCase>),                    // expression, cases
@@ -63,6 +65,12 @@ impl std::fmt::Debug for Statement {
             }
             Statement::ForOf(var, iterable, body) => {
                 write!(f, "ForOf({}, {:?}, {:?})", var, iterable, body)
+            }
+            Statement::ForOfDestructuringObject(pat, iterable, body) => {
+                write!(f, "ForOfDestructuringObject({:?}, {:?}, {:?})", pat, iterable, body)
+            }
+            Statement::ForOfDestructuringArray(pat, iterable, body) => {
+                write!(f, "ForOfDestructuringArray({:?}, {:?}, {:?})", pat, iterable, body)
             }
             Statement::While(cond, body) => {
                 write!(f, "While({:?}, {:?})", cond, body)
@@ -682,6 +690,72 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.insert(0, saved_identifier_token);
                     tokens.insert(0, saved_declaration_token);
                 }
+            } else if let Some(Token::LBrace) = tokens.first().cloned()
+                && matches!(saved_declaration_token, Token::Var)
+            {
+                // var { ... } of iterable
+                let pattern = parse_object_destructuring_pattern(tokens)?;
+                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                    tokens.remove(0); // consume of
+                    let iterable = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+                    // parse body
+                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                        tokens.remove(0); // consume {
+                        let b = parse_statements(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume }
+                        b
+                    } else {
+                        let s = parse_statement(tokens)?;
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        vec![s]
+                    };
+                    return Ok(Statement::ForOfDestructuringObject(pattern, iterable, body));
+                } else {
+                    // Not a for-of; restore declaration token
+                    tokens.insert(0, saved_declaration_token);
+                }
+            } else if let Some(Token::LBracket) = tokens.first().cloned()
+                && matches!(saved_declaration_token, Token::Var)
+            {
+                // var [ ... ] of iterable
+                let pattern = parse_array_destructuring_pattern(tokens)?;
+                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                    tokens.remove(0); // consume of
+                    let iterable = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume )
+                    // parse body
+                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                        tokens.remove(0); // consume {
+                        let b = parse_statements(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume }
+                        b
+                    } else {
+                        let s = parse_statement(tokens)?;
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        vec![s]
+                    };
+                    return Ok(Statement::ForOfDestructuringArray(pattern, iterable, body));
+                } else {
+                    // Not a for-of; restore declaration token
+                    tokens.insert(0, saved_declaration_token);
+                }
             } else {
                 // Not an identifier, put back the declaration token
                 tokens.insert(0, saved_declaration_token);
@@ -1009,12 +1083,9 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             tokens.remove(0);
             let extends = if !tokens.is_empty() && matches!(tokens[0], Token::Extends) {
                 tokens.remove(0); // consume extends
-                if let Some(Token::Identifier(parent_name)) = tokens.first().cloned() {
-                    tokens.remove(0);
-                    Some(parent_name)
-                } else {
-                    return Err(JSError::ParseError);
-                }
+                // Parse an arbitrary expression for the superclass (e.g. Intl.PluralRules)
+                let super_expr = parse_expression(tokens)?;
+                Some(super_expr)
             } else {
                 None
             };

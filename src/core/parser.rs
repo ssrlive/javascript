@@ -284,6 +284,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     }
     let mut expr = match tokens.remove(0) {
         Token::Number(n) => Expr::Number(n),
+        Token::BigInt(s) => Expr::BigInt(s.clone()),
         Token::StringLit(s) => Expr::StringLit(s),
         Token::True => Expr::Boolean(true),
         Token::False => Expr::Boolean(false),
@@ -332,6 +333,17 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             return Err(JSError::ParseError);
                         }
                         tokens.remove(0); // consume ','
+                        // allow trailing comma + optional line terminators before ')'
+                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        if tokens.is_empty() {
+                            return Err(JSError::ParseError);
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            // trailing comma
+                            break;
+                        }
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
@@ -458,6 +470,16 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                                 return Err(JSError::ParseError);
                             }
                             tokens.remove(0); // consume ','
+                            // permit trailing comma before ) and skip newlines
+                            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                                tokens.remove(0);
+                            }
+                            if tokens.is_empty() {
+                                return Err(JSError::ParseError);
+                            }
+                            if matches!(tokens[0], Token::RParen) {
+                                break;
+                            }
                         }
                     }
                     if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
@@ -1193,6 +1215,9 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
             tokens.remove(0);
         }
+        if tokens.is_empty() {
+            break;
+        }
         match &tokens[0] {
             Token::LBracket => {
                 tokens.remove(0); // consume '['
@@ -1274,6 +1299,16 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             return Err(JSError::ParseError);
                         }
                         tokens.remove(0); // consume ','
+                        // allow trailing comma before ')' and skip newlines
+                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        if tokens.is_empty() {
+                            return Err(JSError::ParseError);
+                        }
+                        if matches!(tokens[0], Token::RParen) {
+                            break;
+                        }
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
@@ -1352,7 +1387,31 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<
             pattern.push(DestructuringElement::NestedObject(nested_pattern));
         } else if let Some(Token::Identifier(name)) = tokens.first().cloned() {
             tokens.remove(0);
-            pattern.push(DestructuringElement::Variable(name));
+            // Accept optional default initializer in patterns: e.g. `a = 1`
+            let mut default_expr: Option<Box<Expr>> = None;
+            if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                tokens.remove(0); // consume '='
+                // capture initializer tokens until top-level comma or ] and parse them
+                let mut depth: i32 = 0;
+                let mut init_tokens: Vec<Token> = Vec::new();
+                while !tokens.is_empty() {
+                    if depth == 0 && (matches!(tokens[0], Token::Comma) || matches!(tokens[0], Token::RBracket)) {
+                        break;
+                    }
+                    match tokens[0] {
+                        Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                        Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                        _ => {}
+                    }
+                    init_tokens.push(tokens.remove(0));
+                }
+                if !init_tokens.is_empty() {
+                    let mut tmp = init_tokens.clone();
+                    let expr = parse_expression(&mut tmp)?;
+                    default_expr = Some(Box::new(expr));
+                }
+            }
+            pattern.push(DestructuringElement::Variable(name, default_expr));
         } else {
             return Err(JSError::ParseError);
         }
@@ -1418,13 +1477,59 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec
                     DestructuringElement::NestedObject(parse_object_destructuring_pattern(tokens)?)
                 } else if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                     tokens.remove(0);
-                    DestructuringElement::Variable(name)
+                    // Allow default initializer for property value like `a: b = 1`
+                    let mut default_expr: Option<Box<Expr>> = None;
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                        tokens.remove(0);
+                        let mut depth: i32 = 0;
+                        let mut init_tokens: Vec<Token> = Vec::new();
+                        while !tokens.is_empty() {
+                            if depth == 0 && (matches!(tokens[0], Token::Comma) || matches!(tokens[0], Token::RBrace)) {
+                                break;
+                            }
+                            match tokens[0] {
+                                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                                Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                                _ => {}
+                            }
+                            init_tokens.push(tokens.remove(0));
+                        }
+                        if !init_tokens.is_empty() {
+                            let mut tmp = init_tokens.clone();
+                            let expr = parse_expression(&mut tmp)?;
+                            default_expr = Some(Box::new(expr));
+                        }
+                    }
+                    DestructuringElement::Variable(name, default_expr)
                 } else {
                     return Err(JSError::ParseError);
                 }
             } else {
-                // Shorthand: key is the same as variable name
-                DestructuringElement::Variable(key.clone())
+                // Shorthand: key is the same as variable name. Allow optional
+                // default initializer after the shorthand, e.g. `{a = 1}`.
+                let mut init_tokens: Vec<Token> = Vec::new();
+                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                    tokens.remove(0); // consume '='
+                    let mut depth: i32 = 0;
+                    while !tokens.is_empty() {
+                        if depth == 0 && (matches!(tokens[0], Token::Comma) || matches!(tokens[0], Token::RBrace)) {
+                            break;
+                        }
+                        match tokens[0] {
+                            Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                            Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                            _ => {}
+                        }
+                        init_tokens.push(tokens.remove(0));
+                    }
+                }
+                let mut default_expr: Option<Box<Expr>> = None;
+                if !init_tokens.is_empty() {
+                    let mut tmp = init_tokens.clone();
+                    let expr = parse_expression(&mut tmp)?;
+                    default_expr = Some(Box::new(expr));
+                }
+                DestructuringElement::Variable(key.clone(), default_expr)
             };
 
             pattern.push(ObjectDestructuringElement::Property { key, value });

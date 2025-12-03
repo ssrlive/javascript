@@ -126,6 +126,8 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(f64),
+    /// BigInt literal (string form)
+    BigInt(String),
     StringLit(Vec<u16>),
     Boolean(bool),
     Var(String),
@@ -201,7 +203,7 @@ pub enum BinaryOp {
 
 #[derive(Debug, Clone)]
 pub enum DestructuringElement {
-    Variable(String),                              // a
+    Variable(String, Option<Box<Expr>>),           // a or a = default
     NestedArray(Vec<DestructuringElement>),        // [a, b]
     NestedObject(Vec<ObjectDestructuringElement>), // {a, b}
     Rest(String),                                  // ...rest

@@ -3,6 +3,8 @@ use crate::JSError;
 #[derive(Debug, Clone)]
 pub enum Token {
     Number(f64),
+    /// BigInt literal: integer digits followed by an 'n' suffix
+    BigInt(String),
     StringLit(Vec<u16>),
     TemplateString(Vec<TemplatePart>),
     Identifier(String),
@@ -422,10 +424,27 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '0'..='9' => {
                 let start = i;
-                // integer and fractional part
-                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                // integer part
+                while i < chars.len() && chars[i].is_ascii_digit() {
                     i += 1;
                 }
+
+                // BigInt literal: digits followed by 'n' (no decimal/exponent allowed)
+                if i < chars.len() && chars[i] == 'n' {
+                    let num_str: String = chars[start..i].iter().collect();
+                    tokens.push(Token::BigInt(num_str));
+                    i += 1; // consume trailing 'n'
+                    continue;
+                }
+
+                // fractional part
+                if i < chars.len() && chars[i] == '.' {
+                    i += 1;
+                    while i < chars.len() && chars[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+
                 // optional exponent part
                 if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
                     let mut j = i + 1;
@@ -443,6 +462,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     }
                     i = j;
                 }
+
                 let num_str: String = chars[start..i].iter().collect();
                 let num = num_str.parse::<f64>().map_err(|_| JSError::TokenizationError)?;
                 tokens.push(Token::Number(num));
@@ -509,9 +529,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 tokens.push(Token::TemplateString(parts));
                 i += 1; // skip closing backtick
             }
-            'a'..='z' | 'A'..='Z' | '_' => {
+            'a'..='z' | 'A'..='Z' | '_' | '$' => {
                 let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                     i += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();

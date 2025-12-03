@@ -84,6 +84,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
                         None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
                     },
+                    Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(&s))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string

@@ -73,6 +73,8 @@ pub struct SymbolData {
 #[derive(Clone)]
 pub enum Value {
     Number(f64),
+    /// BigInt literal stored as string form (e.g. "123n" or "0x123n")
+    BigInt(String),
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
@@ -96,6 +98,7 @@ impl std::fmt::Debug for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "Number({})", n),
+            Value::BigInt(s) => write!(f, "BigInt({})", s),
             Value::String(s) => write!(f, "String({})", String::from_utf16_lossy(s)),
             Value::Boolean(b) => write!(f, "Boolean({})", b),
             Value::Undefined => write!(f, "Undefined"),
@@ -114,6 +117,21 @@ impl std::fmt::Debug for Value {
 
 pub fn is_truthy(val: &Value) -> bool {
     match val {
+        Value::BigInt(s) => {
+            // Simple check: treat bigint as falsy only when it's zero (0n, 0x0n, 0b0n, 0o0n).
+            let s_no_n = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
+            #[allow(clippy::if_same_then_else)]
+            let s_no_prefix = if s_no_n.starts_with("0x") || s_no_n.starts_with("0X") {
+                &s_no_n[2..]
+            } else if s_no_n.starts_with("0b") || s_no_n.starts_with("0B") {
+                &s_no_n[2..]
+            } else if s_no_n.starts_with("0o") || s_no_n.starts_with("0O") {
+                &s_no_n[2..]
+            } else {
+                s_no_n
+            };
+            !s_no_prefix.chars().all(|c| c == '0')
+        }
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(s) => !s.is_empty(),
         Value::Boolean(b) => *b,
@@ -133,6 +151,7 @@ pub fn is_truthy(val: &Value) -> bool {
 // Helper function to compare two values for equality
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::BigInt(sa), Value::BigInt(sb)) => sa == sb,
         (Value::Number(na), Value::Number(nb)) => na == nb,
         (Value::String(sa), Value::String(sb)) => sa == sb,
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
@@ -147,6 +166,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 pub fn value_to_string(val: &Value) -> String {
     match val {
         Value::Number(n) => n.to_string(),
+        Value::BigInt(s) => s.clone(),
         Value::String(s) => String::from_utf16_lossy(s),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
@@ -247,6 +267,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
                 n.to_string()
             }
         }
+        Value::BigInt(s) => s.clone(),
         Value::String(s) => String::from_utf16_lossy(s),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),

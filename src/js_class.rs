@@ -22,7 +22,7 @@ pub enum ClassMember {
 #[derive(Debug, Clone)]
 pub struct ClassDefinition {
     pub name: String,
-    pub extends: Option<String>,
+    pub extends: Option<Expr>,
     pub members: Vec<ClassMember>,
 }
 
@@ -209,7 +209,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
 pub(crate) fn create_class_object(
     name: &str,
-    extends: &Option<String>,
+    extends: &Option<Expr>,
     members: &[ClassMember],
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
@@ -223,21 +223,20 @@ pub(crate) fn create_class_object(
     let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
 
     // Handle inheritance if extends is specified
-    if let Some(parent_class_name) = extends {
-        // Look up the parent class in the environment
-        if let Some(parent_class_val) = obj_get_value(env, &parent_class_name.into())? {
-            if let Value::Object(parent_class_obj) = &*parent_class_val.borrow() {
-                // Get the parent class's prototype
-                if let Some(parent_proto_val) = obj_get_value(parent_class_obj, &"prototype".into())?
-                    && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
-                {
-                    // Set the child class prototype's __proto__ to parent prototype
-                    obj_set_value(&prototype_obj, &"__proto__".into(), Value::Object(parent_proto_obj.clone()))?;
-                }
+    if let Some(parent_expr) = extends {
+        // Evaluate the extends expression to get the parent class object
+        let parent_val = evaluate_expr(env, parent_expr)?;
+        if let Value::Object(parent_class_obj) = parent_val {
+            // Get the parent class's prototype
+            if let Some(parent_proto_val) = obj_get_value(&parent_class_obj, &"prototype".into())?
+                && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
+            {
+                // Set the child class prototype's __proto__ to parent prototype
+                obj_set_value(&prototype_obj, &"__proto__".into(), Value::Object(parent_proto_obj.clone()))?;
             }
         } else {
             return Err(JSError::EvaluationError {
-                message: format!("Parent class '{}' not found", parent_class_name),
+                message: "Parent class expression did not evaluate to a class constructor".to_string(),
             });
         }
     }
@@ -584,6 +583,14 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"__value__".into(), Value::String(s))?;
             Ok(Value::Object(obj))
         }
+        Value::BigInt(s) => {
+            // Object(bigint) creates a boxed BigInt-like object
+            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
+            obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
+            obj_set_value(&obj, &"__value__".into(), Value::BigInt(s))?;
+            Ok(Value::Object(obj))
+        }
         _ => {
             // For other types, return empty object
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -675,6 +682,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Property { .. } => utf8_to_utf16("[Property]"),
             Value::Promise(_) => utf8_to_utf16("[object Promise]"),
             Value::Symbol(_) => utf8_to_utf16("[object Symbol]"),
+            Value::BigInt(s) => utf8_to_utf16(&s),
         }
     };
 

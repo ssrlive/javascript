@@ -21,6 +21,8 @@ use crate::{
     tmpfile::{create_tmpfile, handle_file_method},
     unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_to_utf8},
 };
+use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 thread_local! {
@@ -2408,6 +2410,16 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             };
             match (l_prim, r_prim) {
                 (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    // BigInt + BigInt -> BigInt
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                        message: "invalid bigint".to_string(),
+                    })?;
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                        message: "invalid bigint".to_string(),
+                    })?;
+                    Ok(Value::BigInt((a + b).to_string()))
+                }
                 (Value::String(ls), Value::String(rs)) => {
                     let mut result = ls.clone();
                     result.extend_from_slice(&rs);
@@ -2444,6 +2456,18 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     result.extend_from_slice(&utf8_to_utf16(&rb.to_string()));
                     Ok(Value::String(result))
                 }
+                (Value::String(ls), Value::BigInt(rb)) => {
+                    // String + BigInt -> concatenation
+                    let mut result = ls.clone();
+                    result.extend_from_slice(&utf8_to_utf16(&rb));
+                    Ok(Value::String(result))
+                }
+                (Value::BigInt(la), Value::String(rs)) => {
+                    // BigInt + String -> concatenation
+                    let mut result = utf8_to_utf16(&la);
+                    result.extend_from_slice(&rs);
+                    Ok(Value::String(result))
+                }
                 _ => Err(JSError::EvaluationError {
                     message: "error".to_string(),
                 }),
@@ -2451,12 +2475,30 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::Sub => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::BigInt((a - b).to_string()))
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
         },
         BinaryOp::Mul => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::BigInt((a * b).to_string()))
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -2471,12 +2513,66 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(ln / rn))
                 }
             }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                if b == BigInt::from(0) {
+                    Err(JSError::EvaluationError {
+                        message: "error".to_string(),
+                    })
+                } else {
+                    Ok(Value::BigInt((a / b).to_string()))
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
         },
         BinaryOp::Equal => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la == rb { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                // If number is integral, compare as BigInt where possible
+                if rn.fract() == 0.0
+                    && let Some(i) = rn.to_i128()
+                {
+                    let b = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                        message: "invalid bigint".to_string(),
+                    })?;
+                    return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
+                }
+                // otherwise compare numeric conversion (may lose precision)
+                if let Some(bf) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if bf == rn { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if ln.fract() == 0.0
+                    && let Some(i) = ln.to_i128()
+                {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                        message: "invalid bigint".to_string(),
+                    })?;
+                    return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
+                }
+                if let Some(bf) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if bf == ln { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
@@ -2486,6 +2582,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::StrictEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la == rb { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
@@ -2510,6 +2607,35 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::LessThan => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::Number(if a < b { 1.0 } else { 0.0 }))
+            }
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if a_num < rn { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if ln < b_num { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -2517,6 +2643,35 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::GreaterThan => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::Number(if a > b { 1.0 } else { 0.0 }))
+            }
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if a_num > rn { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if ln > b_num { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -2524,6 +2679,35 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::LessEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::Number(if a <= b { 1.0 } else { 0.0 }))
+            }
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if a_num <= rn { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if ln <= b_num { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -2531,6 +2715,35 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::GreaterEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::Number(if a >= b { 1.0 } else { 0.0 }))
+            }
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if a_num >= rn { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(if ln >= b_num { 1.0 } else { 0.0 }))
+                } else {
+                    Ok(Value::Number(0.0))
+                }
+            }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),
             }),
@@ -2543,6 +2756,21 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     })
                 } else {
                     Ok(Value::Number(ln % rn))
+                }
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                if b == BigInt::from(0) {
+                    Err(JSError::EvaluationError {
+                        message: "Division by zero".to_string(),
+                    })
+                } else {
+                    Ok(Value::BigInt((a % b).to_string()))
                 }
             }
             _ => Err(JSError::EvaluationError {

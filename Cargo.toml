@@ -12,11 +12,13 @@ keywords = ["javascript", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
 [dependencies]
-chrono = { version = "0.4", features = ["serde"] }
-libc = "0.2.177"
-log = "0.4"
+chrono = { version = "0.4.42", features = ["serde"] }
+libc = "0.2.178"
+log = "0.4.29"
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
 regex = "1.12.2"
-serde_json = "1.0"
+serde_json = "1.0.145"
 thiserror = "2.0.17"
 
 [target.'cfg(windows)'.dependencies]
@@ -24,10 +26,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32
 
 [dev-dependencies]
 clap = { version = "4.5.53", features = ["derive", "cargo"] }
-criterion = { version = "0.8", features = ["html_reports"] }
-ctor = "0.6"
-env_logger = { version = "0.11" }
-rustyline = "17"
+criterion = { version = "0.8.0", features = ["html_reports"] }
+ctor = "0.6.2"
+env_logger = { version = "0.11.8" }
+rustyline = "17.0.2"
 
 [[example]]
 name = "js"

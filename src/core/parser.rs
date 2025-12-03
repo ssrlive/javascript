@@ -42,6 +42,13 @@ pub fn parse_statement_block(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, 
 }
 
 pub fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    // Allow line terminators inside expressions (e.g., after a binary operator
+    // at the end of a line). Tokenizer emits `LineTerminator` for newlines —
+    // when parsing an expression we should treat those as insignificant
+    // whitespace and skip them so expressions that span lines parse correctly.
+    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        tokens.remove(0);
+    }
     parse_conditional(tokens)
 }
 
@@ -239,6 +246,11 @@ fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    // Skip any leading line terminators inside expressions so multi-line
+    // expression continuations like `a +\n b` parse correctly.
+    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        tokens.remove(0);
+    }
     if tokens.is_empty() {
         return Err(JSError::ParseError);
     }
@@ -262,6 +274,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::Await => {
             let inner = parse_primary(tokens)?;
             Expr::Await(Box::new(inner))
+        }
+        Token::LogicalNot => {
+            let inner = parse_primary(tokens)?;
+            Expr::LogicalNot(Box::new(inner))
         }
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression
@@ -429,6 +445,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
         Token::LBrace => {
             // Parse object literal
+            // Skip any leading line terminators inside the object literal so
+            // properties spread across multiple lines parse correctly.
+            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                tokens.remove(0);
+            }
             let mut properties = Vec::new();
             if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
                 // Empty object {}
@@ -436,15 +457,36 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Object(properties));
             }
             loop {
+                // Skip blank lines that may appear between properties.
+                while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                    tokens.remove(0);
+                }
+                if tokens.is_empty() {
+                    return Err(JSError::ParseError);
+                }
                 // Check for spread
                 if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
                     tokens.remove(0); // consume ...
                     let expr = parse_expression(tokens)?;
                     properties.push(("".to_string(), Expr::Spread(Box::new(expr))));
                 } else {
-                    // Check for getter/setter
-                    let is_getter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "get");
-                    let is_setter = !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref id) if id == "set");
+                    // Check for getter/setter: only treat as getter/setter if the
+                    // identifier 'get'/'set' is followed by a property key and
+                    // an opening parenthesis (no colon). This avoids confusing a
+                    // regular property named 'get'/'set' (e.g. `set: function(...)`) with
+                    // the getter/setter syntax.
+                    let is_getter = tokens.len() >= 3
+                        && matches!(tokens[0], Token::Identifier(ref id) if id == "get")
+                        && (matches!(tokens[1], Token::Identifier(_))
+                            || matches!(tokens[1], Token::StringLit(_))
+                            || matches!(tokens[1], Token::LBracket))
+                        && matches!(tokens[2], Token::LParen);
+                    let is_setter = tokens.len() >= 3
+                        && matches!(tokens[0], Token::Identifier(ref id) if id == "set")
+                        && (matches!(tokens[1], Token::Identifier(_))
+                            || matches!(tokens[1], Token::StringLit(_))
+                            || matches!(tokens[1], Token::LBracket))
+                        && matches!(tokens[2], Token::LParen);
 
                     if is_getter || is_setter {
                         tokens.remove(0); // consume get/set
@@ -517,7 +559,12 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     }
                 }
 
-                // Check for comma or end
+                // Check for comma or end. Allow intervening line terminators or
+                // stray semicolons between properties and the closing `}`.
+                while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                    tokens.remove(0);
+                }
+
                 if tokens.is_empty() {
                     return Err(JSError::ParseError);
                 }
@@ -534,6 +581,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
         Token::LBracket => {
             // Parse array literal
+            log::trace!(
+                "parse_primary: starting array literal; next tokens (first 12): {:?}",
+                tokens.iter().take(12).collect::<Vec<_>>()
+            );
             let mut elements = Vec::new();
             if !tokens.is_empty() && matches!(tokens[0], Token::RBracket) {
                 // Empty array []
@@ -541,11 +592,30 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Array(elements));
             }
             loop {
+                // If next token is a closing bracket then the array is complete
+                // This handles trailing commas like `[1, 2,]` correctly — we should
+                // stop and not attempt to parse a non-existent element.
+                if !tokens.is_empty() && matches!(tokens[0], Token::RBracket) {
+                    tokens.remove(0); // consume ]
+                    log::trace!(
+                        "parse_primary: completed array literal with {} elements; remaining tokens (first 12): {:?}",
+                        elements.len(),
+                        tokens.iter().take(12).collect::<Vec<_>>()
+                    );
+                    break;
+                }
+
+                log::trace!("parse_primary: array element next token: {:?}", tokens.first());
                 // Parse element
                 let elem = parse_expression(tokens)?;
                 elements.push(elem);
 
-                // Check for comma or end
+                // Check for comma or end. Allow intervening line terminators
+                // between elements so array items can be split across lines.
+                while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                    tokens.remove(0);
+                }
+
                 if tokens.is_empty() {
                     return Err(JSError::ParseError);
                 }
@@ -800,8 +870,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
     };
 
-    // Handle postfix operators like index access
+    // Handle postfix operators like index access. Accept line terminators
+    // between the primary and the postfix operator to support call-chains
+    // split across lines (e.g. `promise.then(...)
+    // .then(...)`).
     while !tokens.is_empty() {
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
         match &tokens[0] {
             Token::LBracket => {
                 tokens.remove(0); // consume '['

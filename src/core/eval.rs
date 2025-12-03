@@ -30,18 +30,18 @@ thread_local! {
 #[derive(Clone, Debug)]
 pub enum ControlFlow {
     Normal(Value),
-    Break,
-    Continue,
+    Break(Option<String>),
+    Continue(Option<String>),
     Return(Value),
 }
 
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
     match evaluate_statements_with_context(env, statements)? {
         ControlFlow::Normal(val) => Ok(val),
-        ControlFlow::Break => Err(JSError::EvaluationError {
+        ControlFlow::Break(_) => Err(JSError::EvaluationError {
             message: "break statement not in loop or switch".to_string(),
         }),
-        ControlFlow::Continue => Err(JSError::EvaluationError {
+        ControlFlow::Continue(_) => Err(JSError::EvaluationError {
             message: "continue statement not in loop".to_string(),
         }),
         ControlFlow::Return(val) => Ok(val),
@@ -91,6 +91,16 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     let class_obj = create_class_object(name, extends, members, env)?;
                     env_set(env, name.as_str(), class_obj)?;
                     last_value = Value::Undefined;
+                    Ok(None)
+                }
+                Statement::Block(stmts) => {
+                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().is_function_scope = false;
+                    match evaluate_statements_with_context(&block_env, stmts)? {
+                        ControlFlow::Normal(val) => last_value = val,
+                        cf => return Ok(Some(cf)),
+                    }
                     Ok(None)
                 }
                 Statement::Assign(name, expr) => {
@@ -435,6 +445,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         Some(expr) => evaluate_expr(env, expr)?,
                         None => Value::Undefined,
                     };
+                    log::trace!("Statement::Return evaluated value = {:?}", return_val);
                     Ok(Some(ControlFlow::Return(return_val)))
                 }
                 Statement::Throw(expr) => {
@@ -463,16 +474,318 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
                     Ok(None)
                 }
+                Statement::Label(label_name, inner_stmt) => {
+                    // Labels commonly attach to loops/switches. Re-implement
+                    // loop/switch evaluation here with awareness of the label so
+                    // labeled `break/continue` control flow can be handled.
+                    match inner_stmt.as_ref() {
+                        Statement::For(init, condition, increment, body) => {
+                            let for_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            for_env.borrow_mut().prototype = Some(env.clone());
+                            for_env.borrow_mut().is_function_scope = false;
+                            // Execute initialization
+                            if let Some(init_stmt) = init {
+                                match init_stmt.as_ref() {
+                                    Statement::Let(name, expr_opt) => {
+                                        let val = expr_opt
+                                            .clone()
+                                            .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                                        env_set(&for_env, name.as_str(), val)?;
+                                    }
+                                    Statement::Var(name, expr_opt) => {
+                                        let val = expr_opt
+                                            .clone()
+                                            .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                                        env_set_var(&for_env, name.as_str(), val)?;
+                                    }
+                                    Statement::Expr(expr) => {
+                                        evaluate_expr(&for_env, expr)?;
+                                    }
+                                    _ => {
+                                        return Err(JSError::EvaluationError {
+                                            message: "error".to_string(),
+                                        });
+                                    }
+                                }
+                            }
+
+                            loop {
+                                let should_continue = if let Some(cond_expr) = condition {
+                                    let cond_val = evaluate_expr(&for_env, cond_expr)?;
+                                    is_truthy(&cond_val)
+                                } else {
+                                    true
+                                };
+                                if !should_continue {
+                                    break;
+                                }
+
+                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                block_env.borrow_mut().prototype = Some(for_env.clone());
+                                block_env.borrow_mut().is_function_scope = false;
+                                match evaluate_statements_with_context(&block_env, body)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break(None) => break,
+                                    ControlFlow::Break(Some(lbl)) => {
+                                        if lbl == *label_name {
+                                            break;
+                                        } else {
+                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Continue(None) => {}
+                                    ControlFlow::Continue(Some(lbl)) => {
+                                        if lbl == *label_name { /* continue loop */
+                                        } else {
+                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                }
+
+                                if let Some(incr_stmt) = increment {
+                                    match incr_stmt.as_ref() {
+                                        Statement::Expr(expr) => match expr {
+                                            Expr::Assign(target, value) => {
+                                                if let Expr::Var(name) = target.as_ref() {
+                                                    let val = evaluate_expr(&for_env, value)?;
+                                                    env_set_recursive(&for_env, name.as_str(), val)?;
+                                                }
+                                            }
+                                            _ => {
+                                                evaluate_expr(&for_env, expr)?;
+                                            }
+                                        },
+                                        _ => {
+                                            return Err(JSError::EvaluationError {
+                                                message: "error".to_string(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(None)
+                        }
+                        Statement::ForOf(var, iterable, body) => {
+                            let iterable_val = evaluate_expr(env, iterable)?;
+                            match iterable_val {
+                                Value::Object(obj_map) => {
+                                    if is_array(&obj_map) {
+                                        let len = get_array_length(&obj_map).unwrap_or(0);
+                                        for i in 0..len {
+                                            let key = PropertyKey::String(i.to_string());
+                                            if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
+                                                let element = element_rc.borrow().clone();
+                                                env_set_recursive(env, var.as_str(), element)?;
+                                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                                block_env.borrow_mut().prototype = Some(env.clone());
+                                                block_env.borrow_mut().is_function_scope = false;
+                                                match evaluate_statements_with_context(&block_env, body)? {
+                                                    ControlFlow::Normal(val) => last_value = val,
+                                                    ControlFlow::Break(None) => break,
+                                                    ControlFlow::Break(Some(lbl)) => {
+                                                        if lbl == *label_name {
+                                                            break;
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                        }
+                                                    }
+                                                    ControlFlow::Continue(None) => {}
+                                                    ControlFlow::Continue(Some(lbl)) => {
+                                                        if lbl == *label_name { /* continue */
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                        }
+                                                    }
+                                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                                }
+                                            }
+                                        }
+                                        Ok(None)
+                                    } else {
+                                        /* fallback path uses same behavior as unlabeled */
+                                        // Reuse existing for-of logic by delegating (no special label handling)
+                                        match evaluate_statements_with_context(env, &[inner_stmt.as_ref().clone()])? {
+                                            ControlFlow::Normal(_) => Ok(None),
+                                            cf => match cf {
+                                                ControlFlow::Normal(_) => Ok(None),
+                                                _ => Ok(Some(cf)),
+                                            },
+                                        }
+                                    }
+                                }
+                                _ => Err(JSError::EvaluationError {
+                                    message: "for-of loop requires an iterable".to_string(),
+                                }),
+                            }
+                        }
+                        Statement::While(condition, body) => {
+                            loop {
+                                let cond_val = evaluate_expr(env, condition)?;
+                                if !is_truthy(&cond_val) {
+                                    break Ok(None);
+                                }
+                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                block_env.borrow_mut().prototype = Some(env.clone());
+                                block_env.borrow_mut().is_function_scope = false;
+                                match evaluate_statements_with_context(&block_env, body)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break(None) => break Ok(None),
+                                    ControlFlow::Break(Some(lbl)) => {
+                                        if lbl == *label_name {
+                                            break Ok(None);
+                                        } else {
+                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Continue(None) => {}
+                                    ControlFlow::Continue(Some(lbl)) => {
+                                        if lbl == *label_name { /* continue */
+                                        } else {
+                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                }
+                            }
+                        }
+                        Statement::DoWhile(body, condition) => {
+                            loop {
+                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                block_env.borrow_mut().prototype = Some(env.clone());
+                                block_env.borrow_mut().is_function_scope = false;
+                                match evaluate_statements_with_context(&block_env, body)? {
+                                    ControlFlow::Normal(val) => last_value = val,
+                                    ControlFlow::Break(None) => break Ok(None),
+                                    ControlFlow::Break(Some(lbl)) => {
+                                        if lbl == *label_name {
+                                            break Ok(None);
+                                        } else {
+                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Continue(None) => {}
+                                    ControlFlow::Continue(Some(lbl)) => {
+                                        if lbl == *label_name { /* continue */
+                                        } else {
+                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                        }
+                                    }
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                }
+                                let cond_val = evaluate_expr(env, condition)?;
+                                if !is_truthy(&cond_val) {
+                                    break Ok(None);
+                                }
+                            }
+                        }
+                        Statement::Switch(expr, cases) => {
+                            // Label on switch: let inner evaluate but consume labeled break that targets this label
+                            let switch_val = evaluate_expr(env, expr)?;
+                            let mut found_match = false;
+                            let mut executed_default = false;
+                            for case in cases {
+                                match case {
+                                    SwitchCase::Case(case_expr, case_stmts) => {
+                                        if !found_match {
+                                            let case_val = evaluate_expr(env, case_expr)?;
+                                            if values_equal(&switch_val, &case_val) {
+                                                found_match = true;
+                                            }
+                                        }
+                                        if found_match {
+                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            block_env.borrow_mut().prototype = Some(env.clone());
+                                            block_env.borrow_mut().is_function_scope = false;
+                                            match evaluate_statements_with_context(&block_env, case_stmts)? {
+                                                ControlFlow::Normal(val) => last_value = val,
+                                                ControlFlow::Break(None) => break,
+                                                ControlFlow::Break(Some(lbl)) => {
+                                                    if lbl == *label_name {
+                                                        break;
+                                                    } else {
+                                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                    }
+                                                }
+                                                cf => return Ok(Some(cf)),
+                                            }
+                                        }
+                                    }
+                                    SwitchCase::Default(default_stmts) => {
+                                        if !found_match && !executed_default {
+                                            executed_default = true;
+                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            block_env.borrow_mut().prototype = Some(env.clone());
+                                            block_env.borrow_mut().is_function_scope = false;
+                                            match evaluate_statements_with_context(&block_env, default_stmts)? {
+                                                ControlFlow::Normal(val) => last_value = val,
+                                                ControlFlow::Break(None) => break,
+                                                ControlFlow::Break(Some(lbl)) => {
+                                                    if lbl == *label_name {
+                                                        break;
+                                                    } else {
+                                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                    }
+                                                }
+                                                cf => return Ok(Some(cf)),
+                                            }
+                                        } else if found_match {
+                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            block_env.borrow_mut().prototype = Some(env.clone());
+                                            block_env.borrow_mut().is_function_scope = false;
+                                            match evaluate_statements_with_context(&block_env, default_stmts)? {
+                                                ControlFlow::Normal(val) => last_value = val,
+                                                ControlFlow::Break(None) => break,
+                                                ControlFlow::Break(Some(lbl)) => {
+                                                    if lbl == *label_name {
+                                                        break;
+                                                    } else {
+                                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                    }
+                                                }
+                                                cf => return Ok(Some(cf)),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(None)
+                        }
+                        // If it's some other statement type, just evaluate it here. Important: a
+                        // Normal control flow result from the inner statement should *not*
+                        // be propagated out of the label — labels only affect break/continue
+                        // that target the label itself. Propagate non-normal control-flow
+                        // (break/continue/return) as before, but swallow Normal so execution
+                        // continues.
+                        other => match evaluate_statements_with_context(env, std::slice::from_ref(other))? {
+                            ControlFlow::Break(Some(lbl)) if lbl == *label_name => Ok(None),
+                            ControlFlow::Break(opt) => Ok(Some(ControlFlow::Break(opt))),
+                            ControlFlow::Continue(Some(lbl)) if lbl == *label_name => Ok(Some(ControlFlow::Continue(None))),
+                            ControlFlow::Continue(opt) => Ok(Some(ControlFlow::Continue(opt))),
+                            ControlFlow::Normal(_) => Ok(None),
+                            cf => Ok(Some(cf)),
+                        },
+                    }
+                }
                 Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
                     // Execute try block and handle catch/finally semantics
                     match evaluate_statements_with_context(env, try_body) {
                         Ok(ControlFlow::Normal(v)) => last_value = v,
-                        Ok(cf) => match cf {
-                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                            ControlFlow::Break => return Ok(Some(ControlFlow::Break)),
-                            ControlFlow::Continue => return Ok(Some(ControlFlow::Continue)),
-                            _ => unreachable!(),
-                        },
+                        Ok(cf) => {
+                            // For any non-normal control flow, execute finally (if present)
+                            // then propagate the eventual control flow (finally can override).
+                            if let Some(finally_body) = finally_body_opt {
+                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                block_env.borrow_mut().prototype = Some(env.clone());
+                                block_env.borrow_mut().is_function_scope = false;
+                                match evaluate_statements_with_context(&block_env, finally_body)? {
+                                    ControlFlow::Normal(_) => return Ok(Some(cf)),
+                                    other => return Ok(Some(other)),
+                                }
+                            } else {
+                                return Ok(Some(cf));
+                            }
+                        }
                         Err(err) => {
                             if catch_param.is_empty() {
                                 if let Some(finally_body) = finally_body_opt {
@@ -516,7 +829,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                             let block_env = Rc::new(RefCell::new(JSObjectData::new()));
                                             block_env.borrow_mut().prototype = Some(env.clone());
                                             block_env.borrow_mut().is_function_scope = false;
-                                            evaluate_statements_with_context(&block_env, finally_body)?;
+                                            match evaluate_statements_with_context(&block_env, finally_body)? {
+                                                ControlFlow::Normal(_) => return Ok(Some(cf)),
+                                                other => return Ok(Some(other)),
+                                            }
                                         }
                                         return Ok(Some(cf));
                                     }
@@ -585,8 +901,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
-                            ControlFlow::Break => break,
-                            ControlFlow::Continue => {}
+                            ControlFlow::Break(None) => break,
+                            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                            ControlFlow::Continue(None) => {}
+                            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                         }
 
@@ -630,8 +948,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                         block_env.borrow_mut().is_function_scope = false;
                                         match evaluate_statements_with_context(&block_env, body)? {
                                             ControlFlow::Normal(val) => last_value = val,
-                                            ControlFlow::Break => break,
-                                            ControlFlow::Continue => {}
+                                            ControlFlow::Break(None) => break,
+                                            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                                            ControlFlow::Continue(None) => {}
+                                            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                         }
                                     }
@@ -710,8 +1030,14 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                                         block_env.borrow_mut().is_function_scope = false;
                                                         match evaluate_statements_with_context(&block_env, body)? {
                                                             ControlFlow::Normal(val) => last_value = val,
-                                                            ControlFlow::Break => break,
-                                                            ControlFlow::Continue => {}
+                                                            ControlFlow::Break(None) => break,
+                                                            ControlFlow::Break(Some(lbl)) => {
+                                                                return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                            }
+                                                            ControlFlow::Continue(None) => {}
+                                                            ControlFlow::Continue(Some(lbl)) => {
+                                                                return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                            }
                                                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                                         }
                                                     } else {
@@ -753,8 +1079,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 block_env.borrow_mut().is_function_scope = false;
                                 match evaluate_statements_with_context(&block_env, body)? {
                                     ControlFlow::Normal(val) => last_value = val,
-                                    ControlFlow::Break => break,
-                                    ControlFlow::Continue => {}
+                                    ControlFlow::Break(None) => break,
+                                    ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                                    ControlFlow::Continue(None) => {}
+                                    ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                                     ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                 }
                                 i += 1;
@@ -780,8 +1108,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
-                            ControlFlow::Break => break Ok(None),
-                            ControlFlow::Continue => {}
+                            ControlFlow::Break(None) => break Ok(None),
+                            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                            ControlFlow::Continue(None) => {}
+                            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                         }
                     }
@@ -794,8 +1124,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => last_value = val,
-                            ControlFlow::Break => break Ok(None),
-                            ControlFlow::Continue => {}
+                            ControlFlow::Break(None) => break Ok(None),
+                            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                            ControlFlow::Continue(None) => {}
+                            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                         }
 
@@ -827,7 +1159,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     block_env.borrow_mut().is_function_scope = false;
                                     match evaluate_statements_with_context(&block_env, case_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
-                                        ControlFlow::Break => break,
+                                        ControlFlow::Break(None) => break,
+                                        ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
                                         cf => return Ok(Some(cf)),
                                     }
                                 }
@@ -840,7 +1173,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     block_env.borrow_mut().is_function_scope = false;
                                     match evaluate_statements_with_context(&block_env, default_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
-                                        ControlFlow::Break => break,
+                                        ControlFlow::Break(None) => break,
+                                        ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
                                         cf => return Ok(Some(cf)),
                                     }
                                 } else if found_match {
@@ -850,7 +1184,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                     block_env.borrow_mut().is_function_scope = false;
                                     match evaluate_statements_with_context(&block_env, default_stmts)? {
                                         ControlFlow::Normal(val) => last_value = val,
-                                        ControlFlow::Break => break,
+                                        ControlFlow::Break(None) => break,
+                                        ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
                                         cf => return Ok(Some(cf)),
                                     }
                                 }
@@ -859,8 +1194,8 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
                     Ok(None)
                 }
-                Statement::Break => Ok(Some(ControlFlow::Break)),
-                Statement::Continue => Ok(Some(ControlFlow::Continue)),
+                Statement::Break(opt) => Ok(Some(ControlFlow::Break(opt.clone()))),
+                Statement::Continue(opt) => Ok(Some(ControlFlow::Continue(opt.clone()))),
                 Statement::LetDestructuringArray(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
                     perform_array_destructuring(env, pattern, &val, false)?;
@@ -1107,6 +1442,10 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::PostIncrement(expr) => evaluate_post_increment(env, expr),
         Expr::PostDecrement(expr) => evaluate_post_decrement(env, expr),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
+        Expr::LogicalNot(expr) => {
+            let v = evaluate_expr(env, expr)?;
+            Ok(Value::Boolean(!is_truthy(&v)))
+        }
         Expr::TypeOf(expr) => evaluate_typeof(env, expr),
         Expr::Delete(expr) => evaluate_delete(env, expr),
         Expr::Void(expr) => evaluate_void(env, expr),

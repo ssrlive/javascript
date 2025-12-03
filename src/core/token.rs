@@ -82,6 +82,7 @@ pub enum Token {
     Decrement,
     Async,
     Await,
+    LineTerminator,
 }
 
 impl Token {
@@ -140,7 +141,11 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            ' ' | '\t' | '\n' => i += 1,
+            ' ' | '\t' => i += 1,
+            '\n' => {
+                tokens.push(Token::LineTerminator);
+                i += 1;
+            }
             '+' => {
                 if i + 1 < chars.len() && chars[i + 1] == '+' {
                     tokens.push(Token::Increment);
@@ -191,6 +196,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         if chars[i] == '*' && chars[i + 1] == '/' {
                             i += 2; // skip */
                             break;
+                        }
+                        if chars[i] == '\n' {
+                            tokens.push(Token::LineTerminator);
                         }
                         i += 1;
                     }
@@ -514,18 +522,52 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                 '\'' => result.push('\'' as u16),
                 '`' => result.push('`' as u16),
                 'u' => {
-                    // Unicode escape sequence \uXXXX
+                    // Unicode escape sequences: either \uXXXX or \u{HEX...}
                     *start += 1;
-                    if *start + 4 > chars.len() {
+                    if *start >= chars.len() {
                         return Err(JSError::TokenizationError);
                     }
-                    let hex_str: String = chars[*start..*start + 4].iter().collect();
-                    *start += 3; // will be incremented by 1 at the end
-                    match u16::from_str_radix(&hex_str, 16) {
-                        Ok(code) => {
-                            result.push(code);
+                    if chars[*start] == '{' {
+                        // \u{HEX...}
+                        *start += 1; // skip '{'
+                        let mut hex_str = String::new();
+                        while *start < chars.len() && chars[*start] != '}' {
+                            hex_str.push(chars[*start]);
+                            *start += 1;
                         }
-                        Err(_) => return Err(JSError::TokenizationError), // Invalid hex
+                        if *start >= chars.len() || chars[*start] != '}' {
+                            return Err(JSError::TokenizationError); // no closing brace
+                        }
+                        // parse hex as codepoint
+                        match u32::from_str_radix(&hex_str, 16) {
+                            Ok(cp) if cp <= 0x10FFFF => {
+                                if cp <= 0xFFFF {
+                                    result.push(cp as u16);
+                                } else {
+                                    // Convert to UTF-16 surrogate pair
+                                    let u = cp - 0x10000;
+                                    let high = 0xD800u16 + ((u >> 10) as u16);
+                                    let low = 0xDC00u16 + ((u & 0x3FF) as u16);
+                                    result.push(high);
+                                    result.push(low);
+                                }
+                            }
+                            _ => return Err(JSError::TokenizationError),
+                        }
+                        // `start` currently at closing '}', the outer loop will increment it further
+                    } else {
+                        // Unicode escape sequence \uXXXX
+                        if *start + 4 > chars.len() {
+                            return Err(JSError::TokenizationError);
+                        }
+                        let hex_str: String = chars[*start..*start + 4].iter().collect();
+                        *start += 3; // will be incremented by 1 at the end
+                        match u16::from_str_radix(&hex_str, 16) {
+                            Ok(code) => {
+                                result.push(code);
+                            }
+                            Err(_) => return Err(JSError::TokenizationError), // Invalid hex
+                        }
                     }
                 }
                 'x' => {

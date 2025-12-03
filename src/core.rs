@@ -18,7 +18,7 @@ mod property_key;
 pub use property_key::*;
 
 mod statement;
-pub(crate) use statement::*;
+pub use statement::*;
 
 mod token;
 pub use token::*;
@@ -27,7 +27,7 @@ mod eval;
 pub use eval::*;
 
 mod parser;
-pub(crate) use parser::*;
+pub use parser::*;
 
 thread_local! {
     // Well-known symbols storage (iterator, toStringTag, etc.)
@@ -131,6 +131,7 @@ pub enum Expr {
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
+    LogicalNot(Box<Expr>),
     TypeOf(Box<Expr>),
     Delete(Box<Expr>),
     Void(Box<Expr>),

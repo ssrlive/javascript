@@ -32,8 +32,10 @@ pub enum Statement {
     While(Expr, Vec<Statement>),                      // condition, body
     DoWhile(Vec<Statement>, Expr),                    // body, condition
     Switch(Expr, Vec<SwitchCase>),                    // expression, cases
-    Break,
-    Continue,
+    Block(Vec<Statement>),                            // block statement `{ ... }`
+    Break(Option<String>),
+    Continue(Option<String>),
+    Label(String, Box<Statement>),
     TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
     Throw(Expr),                                                              // throw expression
 }
@@ -71,8 +73,12 @@ impl std::fmt::Debug for Statement {
             Statement::Switch(expr, cases) => {
                 write!(f, "Switch({:?}, {:?})", expr, cases)
             }
-            Statement::Break => write!(f, "Break"),
-            Statement::Continue => write!(f, "Continue"),
+            Statement::Break(None) => write!(f, "Break"),
+            Statement::Break(Some(lbl)) => write!(f, "Break({})", lbl),
+            Statement::Continue(None) => write!(f, "Continue"),
+            Statement::Continue(Some(lbl)) => write!(f, "Continue({})", lbl),
+            Statement::Label(name, stmt) => write!(f, "Label({}, {:?})", name, stmt),
+            Statement::Block(stmts) => write!(f, "Block({:?})", stmts),
             Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
                 write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
             }
@@ -87,28 +93,85 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
     let mut statements = Vec::new();
     while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
         // Skip empty statement semicolons that may appear (e.g. from inserted tokens)
-        if matches!(tokens[0], Token::Semicolon) {
+        if matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0);
             continue;
         }
         log::trace!("parse_statements next token: {:?}", tokens.first());
-        let stmt = parse_statement(tokens)?;
+        // Keep a snapshot of tokens so we can log the original context in case
+        // parse_statement mutates the token stream before returning an error.
+        let tokens_snapshot = tokens.clone();
+        let stmt = match parse_statement(tokens) {
+            Ok(s) => s,
+            Err(e) => {
+                // Provide context for parse errors to aid debugging large harness files.
+                // Use the snapshot (pre-parse) so partial consumption doesn't hide
+                // the original tokens at the start of the statement.
+                log::error!("parse_statements error at token start. remaining tokens (first 40):");
+                for (i, t) in tokens_snapshot.iter().take(40).enumerate() {
+                    log::error!("  {}: {:?}", i, t);
+                }
+                return Err(e);
+            }
+        };
         statements.push(stmt);
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0);
         }
     }
     Ok(statements)
 }
 
-fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
+pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
+    // Skip any leading line terminators so statements inside blocks (e.g., cases)
+    // can contain blank lines or comments that emitted line terminators.
+    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        tokens.remove(0);
+    }
+    // This function parses a single statement from the token stream.
+    // It handles various types of statements including break, continue, and return.
+
+    // Labelled statement: `label: <statement>`
+    if tokens.len() > 1
+        && let Token::Identifier(name) = tokens[0].clone()
+        && matches!(tokens[1], Token::Colon)
+    {
+        // consume identifier and colon
+        tokens.remove(0);
+        tokens.remove(0);
+        let stmt = parse_statement(tokens)?;
+        return Ok(Statement::Label(name, Box::new(stmt)));
+    }
+
+    // Block statement as a standalone statement
+    if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        tokens.remove(0); // consume {
+        let body = parse_statements(tokens)?;
+        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+            return Err(JSError::ParseError);
+        }
+        tokens.remove(0); // consume }
+        return Ok(Statement::Block(body));
+    }
+
     if !tokens.is_empty() && matches!(tokens[0], Token::Break) {
         tokens.remove(0); // consume break
+        // optional label identifier
+        let label = if !tokens.is_empty() {
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                Some(name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         // Accept either an explicit semicolon, or allow automatic semicolon
         // insertion when the next token is a block terminator (e.g. `}`), or
         // part of a try/catch/finally sequence. This keeps `throw <expr>` and
         // `throw <expr>;` equivalent inside blocks.
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0); // consume ;
         } else if !tokens.is_empty()
             && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
@@ -117,15 +180,26 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         } else {
             return Err(JSError::ParseError);
         }
-        return Ok(Statement::Break);
+        return Ok(Statement::Break(label));
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Continue) {
         tokens.remove(0); // consume continue
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        // optional label identifier
+        let label = if !tokens.is_empty() {
+            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                tokens.remove(0);
+                Some(name)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume ;
-        return Ok(Statement::Continue);
+        return Ok(Statement::Continue(label));
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::While) {
         tokens.remove(0); // consume while
@@ -138,28 +212,50 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume )
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume {
-        let body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume }
+        // Body may be a block (`{ ... }`) or a single statement (e.g. `while (...) stmt;`)
+        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            tokens.remove(0); // consume {
+            let b = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+            b
+        } else {
+            // Single-statement body: parse one statement and remove a trailing semicolon if present.
+            let s = parse_statement(tokens)?;
+            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                tokens.remove(0);
+            }
+            vec![s]
+        };
         return Ok(Statement::While(condition, body));
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Do) {
         tokens.remove(0); // consume do
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
+        // Do body may be a block or a single statement
+        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            tokens.remove(0); // consume {
+            let b = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+            b
+        } else {
+            // Single-statement body: parse one statement and remove trailing semicolon if present
+            let s = parse_statement(tokens)?;
+            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                tokens.remove(0);
+            }
+            vec![s]
+        };
+        // Allow intervening line terminators between the do-body and the `while`
+        // keyword, e.g. `do\nwhile (...)`.
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
         }
-        tokens.remove(0); // consume {
-        let body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume }
+
         if tokens.is_empty() || !matches!(tokens[0], Token::While) {
             return Err(JSError::ParseError);
         }
@@ -173,7 +269,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume )
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume ;
@@ -196,6 +292,13 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume {
         let mut cases = Vec::new();
         while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+            // Skip any blank lines inside switch body (LineTerminators coming from tokenizer)
+            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                tokens.remove(0);
+            }
+            if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+                break;
+            }
             if matches!(tokens[0], Token::Case) {
                 tokens.remove(0); // consume case
                 let case_value = parse_expression(tokens)?;
@@ -209,9 +312,25 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     && !matches!(tokens[0], Token::Default)
                     && !matches!(tokens[0], Token::RBrace)
                 {
+                    // Skip blank lines inside a case body before parsing the next
+                    // statement so cases like `case X: \n` fall through properly
+                    // rather than trying to parse `}` as a statement.
+                    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                        tokens.remove(0);
+                    }
+                    // If skipping blank lines lands us at a case/default/rbrace
+                    // there's no statement to parse — break out of the case loop.
+                    if tokens.is_empty()
+                        || matches!(tokens[0], Token::Case)
+                        || matches!(tokens[0], Token::Default)
+                        || matches!(tokens[0], Token::RBrace)
+                    {
+                        break;
+                    }
+                    log::trace!("switch case parsing stmt, next token = {:?}", tokens.first());
                     let stmt = parse_statement(tokens)?;
                     case_stmts.push(stmt);
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
                         tokens.remove(0);
                     }
                 }
@@ -224,9 +343,18 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 tokens.remove(0); // consume :
                 let mut default_stmts = Vec::new();
                 while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+                    // Skip leading blank lines inside default branch to avoid
+                    // attempting to parse a closing brace as a statement.
+                    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                        tokens.remove(0);
+                    }
+                    if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+                        break;
+                    }
+                    log::trace!("switch default parsing stmt, next token = {:?}", tokens.first());
                     let stmt = parse_statement(tokens)?;
                     default_stmts.push(stmt);
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
                         tokens.remove(0);
                     }
                 }
@@ -246,7 +374,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         let expr = parse_expression(tokens)?;
         // Accept an explicit semicolon, or allow ASI-ish omission when next token
         // ends the block or begins a catch/finally block.
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0); // consume ;
         } else if !tokens.is_empty()
             && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
@@ -307,8 +435,17 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
+        log::trace!(
+            "parse_statement: entered Function branch; next tokens: {:?}",
+            tokens.iter().take(12).collect::<Vec<_>>()
+        );
         if let Some(Token::Identifier(name)) = tokens.first().cloned() {
             tokens.remove(0);
+            log::trace!(
+                "parse_statement: function name parsed: {} ; remaining: {:?}",
+                name,
+                tokens.iter().take(12).collect::<Vec<_>>()
+            );
             if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                 tokens.remove(0); // consume (
                 let mut params = Vec::new();
@@ -339,8 +476,17 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                     return Err(JSError::ParseError);
                 }
+                log::trace!(
+                    "parse_statement: function params parsed; entering body parse; remaining tokens: {:?}",
+                    tokens.iter().take(12).collect::<Vec<_>>()
+                );
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
+                log::trace!(
+                    "parse_statement: parsed function body, stmt count {} ; remaining tokens: {:?}",
+                    body.len(),
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
                     return Err(JSError::ParseError);
                 }
@@ -360,28 +506,58 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume )
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume {
-        let then_body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume }
-
-        let else_body = if !tokens.is_empty() && matches!(tokens[0], Token::Else) {
-            tokens.remove(0); // consume else
-            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(JSError::ParseError);
-            }
+        // Allow either a block (`{ ... }`) or a single statement as the
+        // then-body of an `if` (e.g. `if (cond) stmt;`), matching JavaScript.
+        let then_body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
             tokens.remove(0); // consume {
             let body = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
                 return Err(JSError::ParseError);
             }
             tokens.remove(0); // consume }
-            Some(body)
+            body
+        } else {
+            // Single-statement body: parse a single statement and wrap it.
+            let stmt = parse_statement(tokens)?;
+            // Consume trailing semicolon after the inner statement if present so
+            // `if (cond) stmt; else ...` is handled correctly.
+            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                tokens.remove(0);
+            }
+            vec![stmt]
+        };
+
+        // Allow newline(s) between then-body and `else` so `else` can be on the
+        // following line (real-world JS commonly formats code like this).
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
+
+        let else_body = if !tokens.is_empty() && matches!(tokens[0], Token::Else) {
+            tokens.remove(0); // consume else
+            // Support both `else { ... }` and `else if (...) { ... }` forms.
+            if !tokens.is_empty() && matches!(tokens[0], Token::If) {
+                // `else if` form — parse the nested if statement and wrap it
+                // as a single-item body.
+                let nested_if = parse_statement(tokens)?;
+                Some(vec![nested_if])
+            } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                // Block body for else
+                tokens.remove(0); // consume {
+                let body = parse_statements(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                    return Err(JSError::ParseError);
+                }
+                tokens.remove(0); // consume }
+                Some(body)
+            } else {
+                // Single-statement else body (e.g. `else stmt;`)
+                let stmt = parse_statement(tokens)?;
+                if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                    tokens.remove(0);
+                }
+                Some(vec![stmt])
+            }
         } else {
             None
         };
@@ -404,6 +580,12 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         let mut catch_param = String::new();
         let mut catch_body: Vec<Statement> = Vec::new();
         let mut finally_body: Option<Vec<Statement>> = None;
+
+        // Skip any intervening line terminators before checking for `catch`
+        // so patterns like `}\ncatch (e) { ... }` are accepted.
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
 
         if !tokens.is_empty() && matches!(tokens[0], Token::Catch) {
             tokens.remove(0); // consume catch
@@ -432,6 +614,11 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 return Err(JSError::ParseError);
             }
             tokens.remove(0); // consume }
+        }
+
+        // Optional finally — allow line terminators between catch and finally
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
         }
 
         // Optional finally
@@ -473,15 +660,22 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         return Err(JSError::ParseError);
                     }
                     tokens.remove(0); // consume )
-                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume {
-                    let body = parse_statements(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                        return Err(JSError::ParseError);
-                    }
-                    tokens.remove(0); // consume }
+                    // For-of body may be a block or a single statement
+                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                        tokens.remove(0); // consume {
+                        let b = parse_statements(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume }
+                        b
+                    } else {
+                        let s = parse_statement(tokens)?;
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        vec![s]
+                    };
                     return Ok(Statement::ForOf(var_name, iterable, body));
                 } else {
                     // This is a regular for loop with variable declaration, put tokens back
@@ -497,25 +691,25 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         // Parse initialization (regular for loop)
         let init = if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
             Some(Box::new(parse_statement(tokens)?))
-        } else if !matches!(tokens[0], Token::Semicolon) {
+        } else if !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
         } else {
             None
         };
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume first ;
 
         // Parse condition
-        let condition = if !matches!(tokens[0], Token::Semicolon) {
+        let condition = if !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             Some(parse_expression(tokens)?)
         } else {
             None
         };
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             return Err(JSError::ParseError);
         }
         tokens.remove(0); // consume second ;
@@ -532,23 +726,28 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
         tokens.remove(0); // consume )
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume {
-
-        let body = parse_statements(tokens)?;
-
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
-        }
-        tokens.remove(0); // consume }
+        // For-loop body may be a block or a single statement
+        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            tokens.remove(0); // consume {
+            let b = parse_statements(tokens)?;
+            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                return Err(JSError::ParseError);
+            }
+            tokens.remove(0); // consume }
+            b
+        } else {
+            let s = parse_statement(tokens)?;
+            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                tokens.remove(0);
+            }
+            vec![s]
+        };
 
         return Ok(Statement::For(init, condition, increment, body));
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Return) {
         tokens.remove(0); // consume return
-        if tokens.is_empty() || matches!(tokens[0], Token::Semicolon) {
+        if tokens.is_empty() || matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
             return Ok(Statement::Return(None));
         }
         let expr = parse_expression(tokens)?;
@@ -558,6 +757,10 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         let is_const = matches!(tokens[0], Token::Const);
         let is_var = matches!(tokens[0], Token::Var);
         tokens.remove(0); // consume let/var/const
+        log::trace!(
+            "parse_statement: after consuming declaration keyword; next tokens (first 8): {:?}",
+            tokens.iter().take(8).collect::<Vec<_>>()
+        );
 
         // Check for destructuring
         if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
@@ -590,10 +793,49 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             // Regular variable declaration
             if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                 tokens.remove(0);
+                log::trace!(
+                    "parse_statement: consumed identifier {}; next tokens (first 8): {:?}",
+                    name,
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 // Handle optional initializer (e.g., var x = 1)
                 if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
                     tokens.remove(0);
-                    let expr = parse_expression(tokens)?;
+                    log::trace!(
+                        "parse_statement: consumed '='; next tokens (first 8): {:?}",
+                        tokens.iter().take(8).collect::<Vec<_>>()
+                    );
+                    // Debug: log a short snapshot of tokens before attempting to
+                    // parse a potentially large/complex initializer. This helps
+                    // triage failures in big merged harness files where
+                    // parse_expression may fail silently after consuming tokens.
+                    log::trace!(
+                        "parse_statement: parsing initializer for '{}' ; next tokens (first 40): {:?}",
+                        name,
+                        tokens.iter().take(40).collect::<Vec<_>>()
+                    );
+                    // parse initializer with debug: if parsing fails, print a short token context
+                    let expr = match parse_expression(tokens) {
+                        Ok(e) => {
+                            log::trace!(
+                                "parse_statement: succeeded parsing initializer for '{}' ; remaining tokens after init (first 40): {:?}",
+                                name,
+                                tokens.iter().take(40).collect::<Vec<_>>()
+                            );
+                            e
+                        }
+                        Err(err) => {
+                            // Provide a clearer debug dump on failure so we can
+                            // see whether parse_expression failed mid-consumption
+                            // or returned an error without consuming tokens.
+                            log::error!(
+                                "parse_statement: failed parsing initializer for '{}' ; remaining tokens (first 40): {:?}",
+                                name,
+                                tokens.iter().take(40).collect::<Vec<_>>()
+                            );
+                            return Err(err);
+                        }
+                    };
                     if is_const {
                         return Ok(Statement::Const(name, expr));
                     } else if is_var {
@@ -680,6 +922,16 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
             let mut members = Vec::new();
             while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+                // Skip blank lines or stray semicolons in class body (tokenizer
+                // emits LineTerminator tokens). This allows class members to be
+                // separated by newlines or semicolons without confusing the
+                // parser which expects identifiers/static/get/set/paren next.
+                while !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                    tokens.remove(0);
+                }
+                if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+                    break;
+                }
                 let is_static = if !tokens.is_empty() && matches!(tokens[0], Token::Static) {
                     tokens.remove(0);
                     true
@@ -769,7 +1021,7 @@ fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             // This is a property
                             tokens.remove(0); // consume =
                             let value = parse_expression(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon) {
+                            if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
                                 return Err(JSError::ParseError);
                             }
                             tokens.remove(0); // consume ;

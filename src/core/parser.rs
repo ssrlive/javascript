@@ -126,8 +126,36 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     }
 }
 
-fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+fn parse_logical_and(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_comparison(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::LogicalAnd) {
+        tokens.remove(0);
+        let right = parse_logical_and(tokens)?;
+        Ok(Expr::LogicalAnd(Box::new(left), Box::new(right)))
+    } else {
+        Ok(left)
+    }
+}
+
+fn parse_logical_or(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    let left = parse_logical_and(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::LogicalOr) {
+        tokens.remove(0);
+        let right = parse_logical_or(tokens)?;
+        Ok(Expr::LogicalOr(Box::new(left), Box::new(right)))
+    } else {
+        Ok(left)
+    }
+}
+
+fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    let left = parse_logical_or(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
@@ -374,6 +402,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
             expr
         }
+        Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
         Token::Super => {
             // Check if followed by ( for super() call
@@ -457,15 +486,31 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Object(properties));
             }
             loop {
+                log::trace!(
+                    "parse_primary: object literal loop; next tokens (first 8): {:?}",
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 // Skip blank lines that may appear between properties.
                 while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
                     tokens.remove(0);
+                }
+
+                // If we hit the closing brace after skipping blank lines,
+                // consume it and finish the object literal. This handles
+                // trailing commas followed by whitespace/newlines before `}`.
+                if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
+                    tokens.remove(0); // consume }
+                    break;
                 }
                 if tokens.is_empty() {
                     return Err(JSError::ParseError);
                 }
                 // Check for spread
                 if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
+                    log::trace!(
+                        "parse_primary: object property is spread; next tokens (first 8): {:?}",
+                        tokens.iter().take(8).collect::<Vec<_>>()
+                    );
                     tokens.remove(0); // consume ...
                     let expr = parse_expression(tokens)?;
                     properties.push(("".to_string(), Expr::Spread(Box::new(expr))));
@@ -475,20 +520,237 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     // an opening parenthesis (no colon). This avoids confusing a
                     // regular property named 'get'/'set' (e.g. `set: function(...)`) with
                     // the getter/setter syntax.
-                    let is_getter = tokens.len() >= 3
-                        && matches!(tokens[0], Token::Identifier(ref id) if id == "get")
-                        && (matches!(tokens[1], Token::Identifier(_))
-                            || matches!(tokens[1], Token::StringLit(_))
-                            || matches!(tokens[1], Token::LBracket))
-                        && matches!(tokens[2], Token::LParen);
-                    let is_setter = tokens.len() >= 3
-                        && matches!(tokens[0], Token::Identifier(ref id) if id == "set")
-                        && (matches!(tokens[1], Token::Identifier(_))
-                            || matches!(tokens[1], Token::StringLit(_))
-                            || matches!(tokens[1], Token::LBracket))
-                        && matches!(tokens[2], Token::LParen);
+                    // Recognize getter/setter signatures including computed keys
+                    let is_getter = if tokens.len() >= 2 && matches!(tokens[0], Token::Identifier(ref id) if id == "get") {
+                        if matches!(tokens[1], Token::Identifier(_) | Token::StringLit(_)) {
+                            tokens.len() >= 3 && matches!(tokens[2], Token::LParen)
+                        } else if matches!(tokens[1], Token::LBracket) {
+                            // find matching RBracket and ensure '(' follows
+                            let mut depth = 0i32;
+                            let mut idx_after = None;
+                            for (i, t) in tokens.iter().enumerate().skip(1) {
+                                match t {
+                                    Token::LBracket => depth += 1,
+                                    Token::RBracket => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            idx_after = Some(i + 1);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(next_i) = idx_after {
+                                next_i < tokens.len() && matches!(tokens[next_i], Token::LParen)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    let is_setter = if tokens.len() >= 2 && matches!(tokens[0], Token::Identifier(ref id) if id == "set") {
+                        if matches!(tokens[1], Token::Identifier(_) | Token::StringLit(_)) {
+                            tokens.len() >= 3 && matches!(tokens[2], Token::LParen)
+                        } else if matches!(tokens[1], Token::LBracket) {
+                            let mut depth = 0i32;
+                            let mut idx_after = None;
+                            for (i, t) in tokens.iter().enumerate().skip(1) {
+                                match t {
+                                    Token::LBracket => depth += 1,
+                                    Token::RBracket => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            idx_after = Some(i + 1);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            if let Some(next_i) = idx_after {
+                                next_i < tokens.len() && matches!(tokens[next_i], Token::LParen)
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    // Support method shorthand e.g. `foo() { ... }` or computed
+                    // methods like `[Symbol.toPrimitive]() { ... }` in object
+                    // literals. Handle these before parsing key:value pairs.
+                    if !tokens.is_empty() {
+                        // Computed method: starts with [ ... ] followed by (
+                        if matches!(tokens[0], Token::LBracket) {
+                            // Capture the computed key tokens (until matching RBracket)
+                            let mut depth: i32 = 0;
+                            let mut inner: Vec<Token> = Vec::new();
+                            // consume '['
+                            tokens.remove(0);
+                            depth += 1;
+                            while !tokens.is_empty() {
+                                match tokens[0] {
+                                    Token::LBracket => depth += 1,
+                                    Token::RBracket => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            tokens.remove(0);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                inner.push(tokens.remove(0));
+                            }
+                            // If next is '(', this is a method definition
+                            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                                // Create a simple printed key for storage (e.g. "[Symbol.toPrimitive]")
+                                let mut key_str = String::new();
+                                key_str.push('[');
+                                for t in &inner {
+                                    match t {
+                                        Token::Identifier(n) => {
+                                            key_str.push_str(n);
+                                        }
+                                        Token::Dot => {
+                                            key_str.push('.');
+                                        }
+                                        Token::StringLit(s) => key_str.push_str(&String::from_utf16_lossy(s)),
+                                        _ => {}
+                                    }
+                                }
+                                key_str.push(']');
+
+                                // parse parameters
+                                tokens.remove(0); // consume '('
+                                let mut params = Vec::new();
+                                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                                    loop {
+                                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
+                                            tokens.remove(0);
+                                            params.push(param);
+                                            if tokens.is_empty() {
+                                                return Err(JSError::ParseError);
+                                            }
+                                            if matches!(tokens[0], Token::RParen) {
+                                                break;
+                                            }
+                                            if !matches!(tokens[0], Token::Comma) {
+                                                return Err(JSError::ParseError);
+                                            }
+                                            tokens.remove(0);
+                                        } else {
+                                            return Err(JSError::ParseError);
+                                        }
+                                    }
+                                }
+                                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume ')'
+                                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume '{'
+                                let body = parse_statements(tokens)?;
+                                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume '}'
+                                properties.push((key_str, Expr::Function(params, body)));
+                                // After adding method, skip any newline/semicolons and handle comma/end in outer loop
+                                while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                                    tokens.remove(0);
+                                }
+                                if tokens.is_empty() {
+                                    return Err(JSError::ParseError);
+                                }
+                                if matches!(tokens[0], Token::RBrace) {
+                                    tokens.remove(0);
+                                    break;
+                                }
+                                if matches!(tokens[0], Token::Comma) {
+                                    tokens.remove(0);
+                                    continue;
+                                }
+                            } else {
+                                return Err(JSError::ParseError);
+                            }
+                        }
+
+                        // Identifier followed by '(' indicates a concise method: name(...) { ... }
+                        if tokens.len() >= 2
+                            && matches!(tokens[0], Token::Identifier(_))
+                            && matches!(tokens[1], Token::LParen)
+                            && let Token::Identifier(name) = tokens.remove(0)
+                        {
+                            // tokens[0] is '('
+                            tokens.remove(0);
+                            let mut params = Vec::new();
+                            if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                                loop {
+                                    if let Some(Token::Identifier(param)) = tokens.first().cloned() {
+                                        tokens.remove(0);
+                                        params.push(param);
+                                        if tokens.is_empty() {
+                                            return Err(JSError::ParseError);
+                                        }
+                                        if matches!(tokens[0], Token::RParen) {
+                                            break;
+                                        }
+                                        if !matches!(tokens[0], Token::Comma) {
+                                            return Err(JSError::ParseError);
+                                        }
+                                        tokens.remove(0);
+                                    } else {
+                                        return Err(JSError::ParseError);
+                                    }
+                                }
+                            }
+                            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume ')'
+                            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume '{'
+                            let body = parse_statements(tokens)?;
+                            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                                return Err(JSError::ParseError);
+                            }
+                            tokens.remove(0); // consume '}'
+                            properties.push((name, Expr::Function(params, body)));
+                            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                                tokens.remove(0);
+                            }
+                            if tokens.is_empty() {
+                                return Err(JSError::ParseError);
+                            }
+                            if matches!(tokens[0], Token::RBrace) {
+                                tokens.remove(0);
+                                break;
+                            }
+                            if matches!(tokens[0], Token::Comma) {
+                                tokens.remove(0);
+                                continue;
+                            }
+                        }
+                    }
 
                     if is_getter || is_setter {
+                        log::trace!(
+                            "parse_primary: object property is getter/setter; next tokens (first 8): {:?}",
+                            tokens.iter().take(8).collect::<Vec<_>>()
+                        );
                         tokens.remove(0); // consume get/set
                     }
 
@@ -496,6 +758,49 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     let key = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                         tokens.remove(0);
                         name
+                    } else if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
+                        // Computed key (e.g., get [Symbol.toPrimitive]())
+                        // Capture the inner tokens up to the matching ']'
+                        let mut depth: i32 = 0;
+                        let mut inner: Vec<Token> = Vec::new();
+                        // consume '['
+                        tokens.remove(0);
+                        depth += 1;
+                        while !tokens.is_empty() {
+                            match tokens[0] {
+                                Token::LBracket => depth += 1,
+                                Token::RBracket => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        tokens.remove(0);
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                            inner.push(tokens.remove(0));
+                        }
+                        // Build a printable representation for the computed key
+                        let mut key_str = String::new();
+                        key_str.push('[');
+                        for t in &inner {
+                            match t {
+                                Token::Identifier(n) => {
+                                    key_str.push_str(n);
+                                }
+                                Token::Dot => {
+                                    key_str.push('.');
+                                }
+                                Token::StringLit(s) => key_str.push_str(&String::from_utf16_lossy(s)),
+                                _ => {}
+                            }
+                        }
+                        key_str.push(']');
+                        key_str
+                    } else if let Some(Token::Default) = tokens.first().cloned() {
+                        // allow the reserved word `default` as an object property key
+                        tokens.remove(0);
+                        "default".to_string()
                     } else if let Some(Token::StringLit(s)) = tokens.first().cloned() {
                         tokens.remove(0);
                         String::from_utf16_lossy(&s)
@@ -554,6 +859,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         tokens.remove(0); // consume :
 
                         // Parse value
+                        log::trace!(
+                            "parse_primary: parsing value for key '{}' ; next tokens (first 8): {:?}",
+                            key,
+                            tokens.iter().take(8).collect::<Vec<_>>()
+                        );
                         let value = parse_expression(tokens)?;
                         properties.push((key, value));
                     }
@@ -592,6 +902,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 return Ok(Expr::Array(elements));
             }
             loop {
+                // Skip leading blank lines inside array literals to avoid
+                // attempting to parse a `]` or other tokens as elements.
+                while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
+                    tokens.remove(0);
+                }
                 // If next token is a closing bracket then the array is complete
                 // This handles trailing commas like `[1, 2,]` correctly — we should
                 // stop and not attempt to parse a non-existent element.

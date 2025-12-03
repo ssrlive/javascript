@@ -10,6 +10,8 @@ pub enum Token {
     Minus,
     Multiply,
     Divide,
+    /// Regex literal with pattern and flags (e.g. /pattern/flags)
+    Regex(String, String),
     Mod,
     LParen,
     RParen,
@@ -206,8 +208,68 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         return Err(JSError::TokenizationError); // Unterminated comment
                     }
                 } else {
-                    tokens.push(Token::Divide);
-                    i += 1;
+                    // Heuristic: when '/' occurs in a position that cannot end an
+                    // expression, it's likely the start of a regex literal (e.g.
+                    // `foo(/a/)` or `if(x) /a/.test(y)`). If the previous token
+                    // can end an expression (like an Identifier, Number, String,
+                    // true/false, or a closing punctuation), treat this as a
+                    // division operator instead.
+                    let mut prev_end_expr = false;
+                    if let Some(
+                        Token::Number(_)
+                        | Token::StringLit(_)
+                        | Token::Identifier(_)
+                        | Token::RBracket
+                        | Token::RParen
+                        | Token::RBrace
+                        | Token::True
+                        | Token::False
+                        | Token::Increment
+                        | Token::Decrement,
+                    ) = tokens.iter().rev().find(|t| !matches!(t, Token::LineTerminator))
+                    {
+                        prev_end_expr = true;
+                    }
+
+                    if prev_end_expr {
+                        tokens.push(Token::Divide);
+                        i += 1;
+                    } else {
+                        // Parse regex literal: /.../flags
+                        let mut j = i + 1;
+                        let mut in_class = false;
+                        while j < chars.len() {
+                            if chars[j] == '\\' {
+                                // escape, skip next char
+                                j += 2;
+                                continue;
+                            }
+                            if !in_class && chars[j] == '/' {
+                                break;
+                            }
+                            if chars[j] == '[' {
+                                in_class = true;
+                            } else if chars[j] == ']' {
+                                in_class = false;
+                            }
+                            j += 1;
+                        }
+                        if j >= chars.len() || chars[j] != '/' {
+                            return Err(JSError::TokenizationError); // unterminated regex
+                        }
+                        // pattern is between i+1 and j-1
+                        let pattern: String = chars[i + 1..j].iter().collect();
+                        j += 1; // skip closing '/'
+
+                        // parse flags (letters only)
+                        let mut flags = String::new();
+                        while j < chars.len() && chars[j].is_alphabetic() {
+                            flags.push(chars[j]);
+                            j += 1;
+                        }
+                        tokens.push(Token::Regex(pattern, flags));
+                        i = j;
+                    }
                 }
             }
             '%' => {

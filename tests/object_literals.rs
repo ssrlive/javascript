@@ -127,4 +127,31 @@ mod object_literal_tests {
             _ => panic!("Expected number 30.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_concise_method_parsing() {
+        let script = r#"
+            let obj = { foo() { return 7; } };
+            obj.foo();
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 7.0),
+            _ => panic!("Expected number 7.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_computed_getter_parsing() {
+        let script = r#"
+            function CustomError() {}
+            let obj = { get [Symbol.toPrimitive]() { return 42; } };
+            42
+        "#;
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected number 42.0, got {:?}", result),
+        }
+    }
 }

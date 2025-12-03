@@ -1450,6 +1450,14 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Delete(expr) => evaluate_delete(env, expr),
         Expr::Void(expr) => evaluate_void(env, expr),
         Expr::Binary(left, op, right) => evaluate_binary(env, left, op, right),
+        Expr::LogicalAnd(left, right) => {
+            let l = evaluate_expr(env, left)?;
+            if is_truthy(&l) { evaluate_expr(env, right) } else { Ok(l) }
+        }
+        Expr::LogicalOr(left, right) => {
+            let l = evaluate_expr(env, left)?;
+            if is_truthy(&l) { Ok(l) } else { evaluate_expr(env, right) }
+        }
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
         Expr::Call(func_expr, args) => evaluate_call(env, func_expr, args),
@@ -1526,6 +1534,14 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             }
         }
         Expr::Value(value) => Ok(value.clone()),
+        Expr::Regex(pattern, flags) => {
+            // Build temporary Expr list to reuse the existing RegExp constructor
+            // helper which expects one or two expressions for pattern and flags.
+            let p = crate::unicode::utf8_to_utf16(pattern);
+            let f = crate::unicode::utf8_to_utf16(flags);
+            let args = vec![Expr::StringLit(p), Expr::StringLit(f)];
+            crate::js_regexp::handle_regexp_constructor(&args, env)
+        }
         Expr::Conditional(condition, true_expr, false_expr) => {
             let cond_val = evaluate_expr(env, condition)?;
             if is_truthy(&cond_val) {

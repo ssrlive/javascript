@@ -171,7 +171,12 @@ pub enum Expr {
     ArrayDestructuring(Vec<DestructuringElement>),        // array destructuring: [a, b, ...rest]
     ObjectDestructuring(Vec<ObjectDestructuringElement>), // object destructuring: {a, b: c, ...rest}
     Conditional(Box<Expr>, Box<Expr>, Box<Expr>),         // conditional expression: condition ? trueExpr : falseExpr
-    Value(Value),                                         // literal value
+    /// Regular expression literal: pattern, flags
+    Regex(String, String),
+    /// Logical operators with short-circuit semantics
+    LogicalAnd(Box<Expr>, Box<Expr>),
+    LogicalOr(Box<Expr>, Box<Expr>),
+    Value(Value), // literal value
 }
 
 #[derive(Debug, Clone)]

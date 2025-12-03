@@ -836,6 +836,107 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             return Err(err);
                         }
                     };
+
+                    // If there's a comma after this initialized declarator, we
+                    // need to handle the rest of the comma-separated list. The
+                    // parser represents single-declarator statements as
+                    // `Statement::Var/Let/Const`, so we convert each following
+                    // declarator into its own standalone declaration token
+                    // sequence and insert them at the front of the token
+                    // stream (reverse insertion to preserve order) so they
+                    // get parsed on subsequent iterations.
+                    let mut follow_decls: Vec<Vec<Token>> = Vec::new();
+                    loop {
+                        // Skip any blank lines between the comma and next ident
+                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+
+                        if tokens.is_empty() || !matches!(tokens[0], Token::Comma) {
+                            break;
+                        }
+
+                        tokens.remove(0); // consume comma
+
+                        // Skip blank lines after comma
+                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+
+                        // Next must be an identifier
+                        let next_name = if let Some(Token::Identifier(n)) = tokens.first().cloned() {
+                            tokens.remove(0);
+                            n
+                        } else {
+                            return Err(JSError::ParseError);
+                        };
+
+                        // Capture initializer tokens if present (we'll build a
+                        // separate statement for this declarator later).
+                        let mut init_tokens: Vec<Token> = Vec::new();
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                            tokens.remove(0); // consume '='
+                            // Grab tokens into init_tokens until top-level comma/semicolon
+                            let mut depth: i32 = 0;
+                            while !tokens.is_empty() {
+                                if depth == 0 && (matches!(tokens[0], Token::Comma) || matches!(tokens[0], Token::Semicolon)) {
+                                    break;
+                                }
+                                match tokens[0] {
+                                    Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                                    Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
+                                    _ => {}
+                                }
+                                init_tokens.push(tokens.remove(0));
+                            }
+                        }
+
+                        // Build a token sequence for the standalone declaration
+                        // in left-to-right order: <var/let/const> <ident> [= <init>];
+                        let mut decl_tokens: Vec<Token> = Vec::new();
+                        if is_var {
+                            decl_tokens.push(Token::Var);
+                        } else if is_const {
+                            decl_tokens.push(Token::Const);
+                        } else {
+                            decl_tokens.push(Token::Let);
+                        }
+                        // keep a copy for debug logging (we'll move the original into the token list)
+                        let next_name_for_log = next_name.clone();
+                        decl_tokens.push(Token::Identifier(next_name));
+                        if !init_tokens.is_empty() {
+                            decl_tokens.push(Token::Assign);
+                            decl_tokens.extend(init_tokens);
+                        }
+                        decl_tokens.push(Token::Semicolon);
+
+                        log::trace!(
+                            "parse_statement: collected follow-declarator '{}' ({} tokens)",
+                            next_name_for_log,
+                            decl_tokens.len()
+                        );
+                        follow_decls.push(decl_tokens);
+
+                        // If the next token is a semicolon that terminates the
+                        // whole declaration, consume it and stop extracting more
+                        // declarators.
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                            tokens.remove(0);
+                            break;
+                        }
+                    }
+
+                    // Insert the collected following declarations back into
+                    // the token stream so they will be parsed as standalone
+                    // statements in left-to-right order on subsequent
+                    // iterations.
+                    log::trace!("parse_statement: reinserting {} following declarator(s)", follow_decls.len());
+                    for decl in follow_decls.into_iter().rev() {
+                        for t in decl.into_iter().rev() {
+                            tokens.insert(0, t);
+                        }
+                    }
+
                     if is_const {
                         return Ok(Statement::Const(name, expr));
                     } else if is_var {
@@ -853,6 +954,10 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         // Collect following identifiers separated by commas
                         while !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
                             tokens.remove(0); // consume comma
+                            // Skip blank lines between comma and identifier
+                            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                                tokens.remove(0);
+                            }
                             if let Some(Token::Identifier(n)) = tokens.first().cloned() {
                                 tokens.remove(0);
                                 // If there is an initializer on the later decl, bail out (not supported here)

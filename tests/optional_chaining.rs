@@ -81,4 +81,51 @@ mod optional_chaining_tests {
             _ => panic!("Expected undefined, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_optional_chaining_assignment_lhs_errors() {
+        // Using optional chaining on LHS for direct assignment should be invalid / parse error
+        let code1 = "let o = {}; o?.prop = 5";
+        let res1 = evaluate_script(code1);
+        assert!(
+            res1.is_err(),
+            "expected parse error for optional chaining on LHS assignment: {:?}",
+            res1
+        );
+
+        let code2 = "let o = {}; o?.['a'] = 3";
+        let res2 = evaluate_script(code2);
+        assert!(
+            res2.is_err(),
+            "expected parse error for optional computed LHS assignment: {:?}",
+            res2
+        );
+
+        // Using optional chaining with nullish assignment should be invalid too
+        let code3 = "let o = {}; o?.['a'] ??= 7";
+        let res3 = evaluate_script(code3);
+        assert!(
+            res3.is_err(),
+            "expected parse error for optional computed LHS nullish-assignment: {:?}",
+            res3
+        );
+    }
+
+    #[test]
+    fn test_nullish_assign_on_property_and_index() {
+        // non-optional property/index should work with ??=
+        let code1 = "let o = {}; o.x ??= 9; o.x";
+        let res1 = evaluate_script(code1).unwrap();
+        match res1 {
+            Value::Number(n) => assert_eq!(n, 9.0),
+            _ => panic!("expected number 9.0, got {:?}", res1),
+        }
+
+        let code2 = "let o = {}; o['x'] ??= 11; o['x']";
+        let res2 = evaluate_script(code2).unwrap();
+        match res2 {
+            Value::Number(n) => assert_eq!(n, 11.0),
+            _ => panic!("expected number 11.0, got {:?}", res2),
+        }
+    }
 }

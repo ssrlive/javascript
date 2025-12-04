@@ -80,6 +80,39 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     if tokens.is_empty() {
         return Ok(left);
     }
+    // Helper: assignment targets must not contain optional-chaining (obj?.prop or obj?.[expr])
+    fn contains_optional_chain(e: &Expr) -> bool {
+        match e {
+            Expr::OptionalProperty(_, _) | Expr::OptionalIndex(_, _) | Expr::OptionalCall(_, _) => true,
+            Expr::Property(obj, _) => contains_optional_chain(obj.as_ref()),
+            Expr::Index(obj, idx) => contains_optional_chain(obj.as_ref()) || contains_optional_chain(idx.as_ref()),
+            Expr::Call(obj, _) => contains_optional_chain(obj.as_ref()),
+            // the optional forms are already handled above, so no-op here
+            _ => false,
+        }
+    }
+
+    // Reject assignment forms where the left-hand side contains optional chaining
+    if !tokens.is_empty() {
+        match &tokens[0] {
+            Token::Assign
+            | Token::LogicalAndAssign
+            | Token::LogicalOrAssign
+            | Token::NullishAssign
+            | Token::AddAssign
+            | Token::SubAssign
+            | Token::PowAssign
+            | Token::MulAssign
+            | Token::DivAssign
+            | Token::ModAssign => {
+                if contains_optional_chain(&left) {
+                    return Err(JSError::ParseError);
+                }
+            }
+            _ => {}
+        }
+    }
+
     match &tokens[0] {
         Token::Assign => {
             tokens.remove(0);

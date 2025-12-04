@@ -1794,7 +1794,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         obj_set_value(&json_obj, &"stringify".into(), Value::Function("JSON.stringify".to_string()))?;
         Ok(Value::Object(json_obj))
     } else if name == "Object" {
-        // Return Object constructor function, not an object with methods
+        // Return the Object constructor (we store it in the global environment as an object)
+        if let Some(val_rc) = obj_get_value(env, &"Object".into())? {
+            return Ok(val_rc.borrow().clone());
+        }
         Ok(Value::Function("Object".to_string()))
     } else if name == "parseInt" {
         Ok(Value::Function("parseInt".to_string()))
@@ -2395,6 +2398,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             } else {
                 r.clone()
             };
+            // '+' should throw when a Symbol is encountered during implicit coercion
+            if matches!(l_prim, Value::Symbol(_)) || matches!(r_prim, Value::Symbol(_)) {
+                return Err(JSError::TypeError {
+                    message: "Cannot convert Symbol to primitive".to_string(),
+                });
+            }
             match (l_prim, r_prim) {
                 (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
                 (Value::BigInt(la), Value::BigInt(rb)) => {
@@ -2663,7 +2672,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(JSError::TypeError {
+                            message: "Cannot convert Symbol to number".to_string(),
+                        }),
                         _ => Err(eval_error_here!("error")),
                     }
                 };
@@ -2745,7 +2756,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(JSError::TypeError {
+                            message: "Cannot convert Symbol to number".to_string(),
+                        }),
                         _ => Err(eval_error_here!("error")),
                     }
                 };
@@ -2824,7 +2837,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(JSError::TypeError {
+                            message: "Cannot convert Symbol to number".to_string(),
+                        }),
                         _ => Err(eval_error_here!("error")),
                     }
                 };
@@ -2905,7 +2920,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(JSError::TypeError {
+                            message: "Cannot convert Symbol to number".to_string(),
+                        }),
                         _ => Err(eval_error_here!("error")),
                     }
                 };
@@ -3044,6 +3061,15 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
         // Accessing other properties on string primitives should return undefined
         Value::String(_) => Ok(Value::Undefined),
         Value::Object(obj_map) => {
+            // Special-case the `__proto__` accessor so property reads return the
+            // object's current prototype object when present.
+            if prop == "__proto__" {
+                if let Some(proto) = obj_map.borrow().prototype.clone() {
+                    return Ok(Value::Object(proto));
+                } else {
+                    return Ok(Value::Undefined);
+                }
+            }
             if let Some(val) = obj_get_value(&obj_map, &prop.into())? {
                 Ok(val.borrow().clone())
             } else {
@@ -3203,29 +3229,16 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::Object(obj_map), "log") if obj_map.borrow().contains_key(&"log".into()) => {
                 handle_console_method(method_name, args, env)
             }
-            (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
-            (obj_val, "valueOf") => crate::js_object::handle_value_of_method(&obj_val, args),
+            // Handle toString/valueOf for primitive Symbol values here (they
+            // don't go through the object-path below). For other cases (objects)
+            // normal property lookup is used so user overrides take precedence
+            // and Object.prototype functions act as fallbacks.
+            (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args),
+            (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
             (Value::Object(obj_map), method) => {
-                // Provide a built-in hasOwnProperty on object instances even if
-                // the property is not defined on the object itself. This keeps
-                // simple tests that call obj.hasOwnProperty(key) working when
-                // we don't provide a full Object.prototype implementation.
-                if method == "hasOwnProperty" {
-                    if args.len() != 1 {
-                        return Err(eval_error_here!("hasOwnProperty requires one argument"));
-                    }
-                    // Evaluate the key argument
-                    let key_val = evaluate_expr(env, &args[0])?;
-                    let key_str = match key_val {
-                        Value::String(s) => String::from_utf16_lossy(&s),
-                        Value::Number(n) => n.to_string(),
-                        Value::Boolean(b) => b.to_string(),
-                        Value::Undefined => "undefined".to_string(),
-                        other => value_to_string(&other),
-                    };
-                    let exists = obj_map.borrow().contains_key(&key_str.into());
-                    return Ok(Value::Boolean(exists));
-                }
+                // Object prototype methods are supplied on `Object.prototype`.
+                // Lookups will find user-defined (own) methods before inherited
+                // ones, so no evaluator fallback is required here.
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
                 if obj_map.borrow().contains_key(&"sprintf".into()) {
                     match method {
@@ -3314,7 +3327,91 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // Execute function body
                                 evaluate_statements(&func_env, &body)
                             }
-                            Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
+                            Value::Function(func_name) => {
+                                // Special-case Object.prototype.* built-ins so they can
+                                // operate on the receiver (`this`), which is the
+                                // object we fetched the method from (obj_map).
+                                if func_name.starts_with("Object.prototype.") {
+                                    match func_name.as_str() {
+                                        "Object.prototype.hasOwnProperty" => {
+                                            // hasOwnProperty takes one argument; evaluate it in caller env
+                                            if args.len() != 1 {
+                                                return Err(eval_error_here!("hasOwnProperty requires one argument"));
+                                            }
+                                            let key_val = evaluate_expr(env, &args[0])?;
+                                            let exists = match key_val {
+                                                Value::String(s) => obj_map.borrow().contains_key(&String::from_utf16_lossy(&s).into()),
+                                                Value::Number(n) => obj_map.borrow().contains_key(&n.to_string().into()),
+                                                Value::Boolean(b) => obj_map.borrow().contains_key(&b.to_string().into()),
+                                                Value::Undefined => obj_map.borrow().contains_key(&"undefined".into()),
+                                                Value::Symbol(sd) => {
+                                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                                                    obj_map.borrow().contains_key(&sym_key)
+                                                }
+                                                other => obj_map.borrow().contains_key(&value_to_string(&other).into()),
+                                            };
+                                            Ok(Value::Boolean(exists))
+                                        }
+                                        "Object.prototype.isPrototypeOf" => {
+                                            if args.len() != 1 {
+                                                return Err(eval_error_here!("isPrototypeOf requires one argument"));
+                                            }
+                                            let target_val = evaluate_expr(env, &args[0])?;
+                                            match target_val {
+                                                Value::Object(target_map) => {
+                                                    let mut current_opt = target_map.borrow().prototype.clone();
+                                                    let mut found = false;
+                                                    while let Some(parent) = current_opt {
+                                                        if Rc::ptr_eq(&parent, &obj_map) {
+                                                            found = true;
+                                                            break;
+                                                        }
+                                                        current_opt = parent.borrow().prototype.clone();
+                                                    }
+                                                    Ok(Value::Boolean(found))
+                                                }
+                                                _ => Ok(Value::Boolean(false)),
+                                            }
+                                        }
+                                        "Object.prototype.toLocaleString" => {
+                                            // Delegate Object.prototype.toLocaleString to the
+                                            // same handler as toString (defaults to toString)
+                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args)
+                                        }
+                                        "Object.prototype.propertyIsEnumerable" => {
+                                            if args.len() != 1 {
+                                                return Err(eval_error_here!("propertyIsEnumerable requires one argument"));
+                                            }
+                                            let key_val = evaluate_expr(env, &args[0])?;
+                                            let exists = match key_val {
+                                                Value::String(s) => obj_map.borrow().contains_key(&String::from_utf16_lossy(&s).into()),
+                                                Value::Number(n) => obj_map.borrow().contains_key(&n.to_string().into()),
+                                                Value::Boolean(b) => obj_map.borrow().contains_key(&b.to_string().into()),
+                                                Value::Undefined => obj_map.borrow().contains_key(&"undefined".into()),
+                                                Value::Symbol(sd) => {
+                                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                                                    obj_map.borrow().contains_key(&sym_key)
+                                                }
+                                                other => obj_map.borrow().contains_key(&value_to_string(&other).into()),
+                                            };
+                                            Ok(Value::Boolean(exists))
+                                        }
+                                        "Object.prototype.toString" => {
+                                            // Delegate the built-in toString behavior to js_object::handle_to_string_method
+                                            // which handles wrapped primitives, arrays, and Symbol.toStringTag
+                                            // The function is invoked with `this` bound to obj_map (receiver)
+                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args)
+                                        }
+                                        "Object.prototype.valueOf" => {
+                                            // Delegate to handle_value_of_method
+                                            crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args)
+                                        }
+                                        _ => crate::js_function::handle_global_function(&func_name, args, env),
+                                    }
+                                } else {
+                                    crate::js_function::handle_global_function(&func_name, args, env)
+                                }
+                            }
                             _ => Err(eval_error_here!(format!("Property '{method}' is not a function"))),
                         }
                     } else {
@@ -3542,7 +3639,39 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
 
 fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
     let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    // Attempt to set the default prototype for object literals to Object.prototype
+    // by finding the global 'Object' constructor and using its 'prototype' property.
+    // Walk to the top-level environment
+    let mut root_env_opt = Some(env.clone());
+    while let Some(r) = root_env_opt.clone() {
+        if r.borrow().prototype.is_some() {
+            root_env_opt = r.borrow().prototype.clone();
+        } else {
+            break;
+        }
+    }
+    if let Some(root_env) = root_env_opt
+        && let Some(obj_ctor_rc) = obj_get_value(&root_env, &"Object".into())?
+        && let Value::Object(ctor_map) = &*obj_ctor_rc.borrow()
+        && let Some(proto_val_rc) = obj_get_value(ctor_map, &"prototype".into())?
+        && let Value::Object(proto_map) = &*proto_val_rc.borrow()
+    {
+        obj.borrow_mut().prototype = Some(proto_map.clone());
+    }
+
     for (key, value_expr) in properties {
+        // helper: convert parser-produced computed keys like "[Symbol.toPrimitive]"
+        fn key_to_property_key(key: &str) -> PropertyKey {
+            if key.starts_with('[') && key.ends_with(']') {
+                let inner = &key[1..key.len() - 1];
+                if let Some(sym_name) = inner.strip_prefix("Symbol.")
+                    && let Some(sym_rc) = get_well_known_symbol_rc(sym_name)
+                {
+                    return PropertyKey::Symbol(sym_rc.clone());
+                }
+            }
+            PropertyKey::String(key.to_string())
+        }
         if key.is_empty() && matches!(value_expr, Expr::Spread(_)) {
             // Spread operator: evaluate the expression and spread its properties
             if let Expr::Spread(expr) = value_expr {
@@ -3561,7 +3690,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Getter(func_expr) => {
                     if let Expr::Function(_params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(&key.into());
+                        let pk = key_to_property_key(key);
+                        let existing_opt = obj.borrow().get(&pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3572,8 +3702,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             {
                                 // Update getter
                                 getter.replace((body.clone(), env.clone()));
-                                obj.borrow_mut()
-                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
+                                obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
                                 let prop = Value::Property {
@@ -3581,8 +3710,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                     getter: Some((body.clone(), env.clone())),
                                     setter: None,
                                 };
-                                obj.borrow_mut()
-                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
+                                obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                             }
                         } else {
                             // Create new property descriptor with getter
@@ -3591,8 +3719,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 getter: Some((body.clone(), env.clone())),
                                 setter: None,
                             };
-                            obj.borrow_mut()
-                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
                         return Err(eval_error_here!("Getter must be a function"));
@@ -3601,7 +3728,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 Expr::Setter(func_expr) => {
                     if let Expr::Function(params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let existing_opt = obj.borrow().get(&key.into());
+                        let pk = key_to_property_key(key);
+                        let existing_opt = obj.borrow().get(&pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -3612,8 +3740,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                             {
                                 // Update setter
                                 setter.replace((params.clone(), body.clone(), env.clone()));
-                                obj.borrow_mut()
-                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
+                                obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(val)));
                             } else {
                                 // Create new property descriptor
                                 let prop = Value::Property {
@@ -3621,8 +3748,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                     getter: None,
                                     setter: Some((params.clone(), body.clone(), env.clone())),
                                 };
-                                obj.borrow_mut()
-                                    .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
+                                obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                             }
                         } else {
                             // Create new property descriptor with setter
@@ -3641,7 +3767,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                 _ => {
                     let value = evaluate_expr(env, value_expr)?;
                     // Check if property already exists
-                    let existing_rc = obj.borrow().get(&key.into());
+                    let pk = key_to_property_key(key);
+                    let existing_rc = obj.borrow().get(&pk);
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
                         if let Value::Property {
@@ -3652,8 +3779,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                         {
                             // Update value
                             prop_value.replace(Rc::new(RefCell::new(value)));
-                            obj.borrow_mut()
-                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(existing_val)));
+                            obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(existing_val)));
                         } else {
                             // Create new property descriptor
                             let prop = Value::Property {
@@ -3661,11 +3787,11 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 getter: None,
                                 setter: None,
                             };
-                            obj.borrow_mut()
-                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        obj_set_value(&obj, &key.into(), value)?;
+                        let pk = key_to_property_key(key);
+                        obj_set_value(&obj, &pk, value)?;
                     }
                 }
             }
@@ -3676,6 +3802,23 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
 
 fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
     let arr = Rc::new(RefCell::new(JSObjectData::new()));
+    // Give arrays a default prototype (Object.prototype) until Array.prototype exists
+    let mut root_env_opt = Some(env.clone());
+    while let Some(r) = root_env_opt.clone() {
+        if r.borrow().prototype.is_some() {
+            root_env_opt = r.borrow().prototype.clone();
+        } else {
+            break;
+        }
+    }
+    if let Some(root_env) = root_env_opt
+        && let Some(obj_ctor_rc) = obj_get_value(&root_env, &"Object".into())?
+        && let Value::Object(ctor_map) = &*obj_ctor_rc.borrow()
+        && let Some(proto_val_rc) = obj_get_value(ctor_map, &"prototype".into())?
+        && let Value::Object(proto_map) = &*proto_val_rc.borrow()
+    {
+        arr.borrow_mut().prototype = Some(proto_map.clone());
+    }
     let mut index = 0;
     for elem_expr in elements {
         if let Expr::Spread(spread_expr) = elem_expr {

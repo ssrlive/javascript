@@ -898,20 +898,26 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             properties.push((key, Expr::Setter(Box::new(Expr::Function(params, body)))));
                         }
                     } else {
-                        // Regular property
-                        if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
+                        // Regular property: support both key: value and shorthand `key` forms.
+                        if tokens.is_empty() {
                             return Err(JSError::ParseError);
                         }
-                        tokens.remove(0); // consume :
+                        if matches!(tokens[0], Token::Colon) {
+                            tokens.remove(0); // consume :
 
-                        // Parse value
-                        log::trace!(
-                            "parse_primary: parsing value for key '{}' ; next tokens (first 8): {:?}",
-                            key,
-                            tokens.iter().take(8).collect::<Vec<_>>()
-                        );
-                        let value = parse_expression(tokens)?;
-                        properties.push((key, value));
+                            // Parse value
+                            log::trace!(
+                                "parse_primary: parsing value for key '{}' ; next tokens (first 8): {:?}",
+                                key,
+                                tokens.iter().take(8).collect::<Vec<_>>()
+                            );
+                            let value = parse_expression(tokens)?;
+                            properties.push((key, value));
+                        } else {
+                            // Shorthand property: `{ key }` means `key: key` where the value
+                            // is the variable named by the key.
+                            properties.push((key.clone(), Expr::Var(key.clone())));
+                        }
                     }
                 }
 
@@ -1301,6 +1307,45 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         expr = Expr::OptionalProperty(Box::new(expr), prop);
                     } else {
                         return Err(JSError::ParseError);
+                    }
+                } else if matches!(tokens[0], Token::LBracket) {
+                    // Optional computed property access: obj?.[expr]
+                    tokens.remove(0); // consume '['
+                    let index_expr = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RBracket) {
+                        return Err(JSError::ParseError);
+                    }
+                    tokens.remove(0); // consume ']'
+                    // If the bracket access is immediately followed by a call,
+                    // e.g. `obj?.[expr](...)`, this is an optional call on the
+                    // computed property. Parse the call arguments and build an
+                    // OptionalCall around the computed access.
+                    if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                        tokens.remove(0); // consume '('
+                        let mut args = Vec::new();
+                        if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
+                            loop {
+                                let arg = parse_expression(tokens)?;
+                                args.push(arg);
+                                if tokens.is_empty() {
+                                    return Err(JSError::ParseError);
+                                }
+                                if matches!(tokens[0], Token::RParen) {
+                                    break;
+                                }
+                                if !matches!(tokens[0], Token::Comma) {
+                                    return Err(JSError::ParseError);
+                                }
+                                tokens.remove(0); // consume ','
+                            }
+                        }
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                            return Err(JSError::ParseError);
+                        }
+                        tokens.remove(0); // consume ')'
+                        expr = Expr::OptionalCall(Box::new(Expr::Index(Box::new(expr), Box::new(index_expr))), args);
+                    } else {
+                        expr = Expr::OptionalIndex(Box::new(expr), Box::new(index_expr));
                     }
                 } else {
                     return Err(JSError::ParseError);

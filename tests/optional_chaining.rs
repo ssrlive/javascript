@@ -61,4 +61,24 @@ mod optional_chaining_tests {
             _ => panic!("Expected string 'nested called', got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_optional_computed_property_access() {
+        let script = "let obj = {a: 'value'}; obj?.['a']";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "value"),
+            _ => panic!("Expected string 'value', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_optional_computed_property_null_object() {
+        let script = "let obj = null; obj?.['a']";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Undefined) => {}
+            _ => panic!("Expected undefined, got {:?}", result),
+        }
+    }
 }

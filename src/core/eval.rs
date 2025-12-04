@@ -1756,6 +1756,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         }),
         Expr::OptionalProperty(obj, prop) => evaluate_optional_property(env, obj, prop),
         Expr::OptionalCall(func_expr, args) => evaluate_optional_call(env, func_expr, args),
+        Expr::OptionalIndex(obj, idx) => evaluate_optional_index(env, obj, idx),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => evaluate_new(env, constructor, args),
         Expr::Super => evaluate_super(env),
@@ -3013,6 +3014,34 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
                 Ok(Value::Undefined)
             }
         }
+        // Support indexing into function (constructor) values like RegExp[property]
+        (Value::Function(_func_name), Value::Number(_n)) => {
+            // Functions do not have numeric-indexed properties in our simple value model
+            Ok(Value::Undefined)
+        }
+        (Value::Function(func_name), Value::String(s)) => {
+            // Special-case some function constructors that expose static properties by name.
+            // For Symbol constructor, map well-known symbol names (keeps parity with evaluate_property).
+            if func_name == "Symbol" {
+                return WELL_KNOWN_SYMBOLS.with(|wk| {
+                    let map = wk.borrow();
+                    if let Some(sym_rc) = map.get(&String::from_utf16_lossy(&s))
+                        && let Value::Symbol(sd) = &*sym_rc.borrow()
+                    {
+                        Ok(Value::Symbol(sd.clone()))
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                });
+            }
+
+            // Other constructor/function names currently don't carry properties in this model.
+            Ok(Value::Undefined)
+        }
+        (Value::Function(_func_name), Value::Symbol(_sym)) => {
+            // No symbol-keyed properties available on Function values in the current model
+            Ok(Value::Undefined)
+        }
         _ => Err(JSError::EvaluationError {
             message: "Invalid index type".to_string(),
         }), // other types of indexing not supported yet
@@ -3100,6 +3129,72 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
         }
         _ => Err(JSError::EvaluationError {
             message: format!("Property not found for prop={prop}"),
+        }),
+    }
+}
+
+fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
+    let obj_val = evaluate_expr(env, obj)?;
+    // If the base is undefined, optional chaining returns undefined
+    if let Value::Undefined = obj_val {
+        return Ok(Value::Undefined);
+    }
+
+    let idx_val = evaluate_expr(env, idx)?;
+    match (obj_val, idx_val) {
+        (Value::String(s), Value::Number(n)) => {
+            let idx = n as usize;
+            if let Some(ch) = utf16_char_at(&s, idx) {
+                Ok(Value::String(vec![ch]))
+            } else {
+                Ok(Value::String(Vec::new()))
+            }
+        }
+        (Value::Object(obj_map), Value::Number(n)) => {
+            let key = PropertyKey::String(n.to_string());
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        (Value::Object(obj_map), Value::String(s)) => {
+            let key = PropertyKey::String(String::from_utf16_lossy(&s));
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        (Value::Object(obj_map), Value::Symbol(sym)) => {
+            let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+            if let Some(val) = obj_get_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        (Value::Function(func_name), Value::String(s)) => {
+            // follow same rules as evaluate_index for function/index access
+            if func_name == "Symbol" {
+                return WELL_KNOWN_SYMBOLS.with(|wk| {
+                    let map = wk.borrow();
+                    if let Some(sym_rc) = map.get(&String::from_utf16_lossy(&s))
+                        && let Value::Symbol(sd) = &*sym_rc.borrow()
+                    {
+                        Ok(Value::Symbol(sd.clone()))
+                    } else {
+                        Ok(Value::Undefined)
+                    }
+                });
+            }
+            Ok(Value::Undefined)
+        }
+        (Value::Function(_f), Value::Number(_n)) => Ok(Value::Undefined),
+        (Value::Function(_f), Value::Symbol(_sym)) => Ok(Value::Undefined),
+        // If obj isn't undefined and index types aren't supported, propagate as error
+        _ => Err(JSError::EvaluationError {
+            message: "Invalid index type".to_string(),
         }),
     }
 }

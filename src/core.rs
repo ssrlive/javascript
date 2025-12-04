@@ -164,6 +164,7 @@ pub enum Expr {
     Spread(Box<Expr>),                                    // spread operator: ...expr
     OptionalProperty(Box<Expr>, String),                  // optional property access: obj?.prop
     OptionalCall(Box<Expr>, Vec<Expr>),                   // optional call: obj?.method(args)
+    OptionalIndex(Box<Expr>, Box<Expr>),                  // optional bracket access: obj?.[expr]
     Await(Box<Expr>),                                     // await expression
     This,                                                 // this keyword
     New(Box<Expr>, Vec<Expr>),                            // new expression: new Constructor(args)

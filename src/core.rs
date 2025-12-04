@@ -143,6 +143,7 @@ pub enum Expr {
     NullishAssign(Box<Expr>, Box<Expr>),    // target, value
     AddAssign(Box<Expr>, Box<Expr>),        // target, value
     SubAssign(Box<Expr>, Box<Expr>),        // target, value
+    PowAssign(Box<Expr>, Box<Expr>),        // target, value
     MulAssign(Box<Expr>, Box<Expr>),        // target, value
     DivAssign(Box<Expr>, Box<Expr>),        // target, value
     ModAssign(Box<Expr>, Box<Expr>),        // target, value
@@ -199,6 +200,7 @@ pub enum BinaryOp {
     InstanceOf,
     In,
     NullishCoalescing,
+    Pow,
 }
 
 #[derive(Debug, Clone)]

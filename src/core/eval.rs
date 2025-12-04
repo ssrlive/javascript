@@ -1718,6 +1718,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::AddAssign(target, value) => evaluate_add_assign(env, target, value),
         Expr::SubAssign(target, value) => evaluate_sub_assign(env, target, value),
         Expr::MulAssign(target, value) => evaluate_mul_assign(env, target, value),
+        Expr::PowAssign(target, value) => evaluate_pow_assign(env, target, value),
         Expr::DivAssign(target, value) => evaluate_div_assign(env, target, value),
         Expr::ModAssign(target, value) => evaluate_mod_assign(env, target, value),
         Expr::Increment(expr) => evaluate_increment(env, expr),
@@ -2032,6 +2033,67 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     };
     let Value::Number(n) = result else { unreachable!() };
     evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    Ok(result)
+}
+
+fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a **= b is equivalent to a = a ** b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => Value::Number(ln.powf(rn)),
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                message: "invalid bigint".to_string(),
+            })?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                message: "invalid bigint".to_string(),
+            })?;
+            if b < BigInt::from(0) {
+                return Err(JSError::EvaluationError {
+                    message: "negative exponent for bigint".to_string(),
+                });
+            }
+            let exp = b.to_u32().ok_or(JSError::EvaluationError {
+                message: "exponent too large".to_string(),
+            })?;
+            Value::BigInt(a.pow(exp).to_string())
+        }
+        (Value::BigInt(la), Value::Number(rn)) => {
+            if rn < 0.0 || rn.fract() != 0.0 {
+                return Err(JSError::EvaluationError {
+                    message: "invalid exponent for bigint".to_string(),
+                });
+            }
+            let exp_u = rn as u32;
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                message: "invalid bigint".to_string(),
+            })?;
+            Value::BigInt(a.pow(exp_u).to_string())
+        }
+        (Value::Number(ln), Value::BigInt(rb)) => {
+            if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                Value::Number(ln.powf(rv))
+            } else {
+                return Err(JSError::EvaluationError {
+                    message: "invalid exponent".to_string(),
+                });
+            }
+        }
+        _ => {
+            return Err(JSError::EvaluationError {
+                message: "Invalid operands for **=".to_string(),
+            });
+        }
+    };
+
+    // update assignment target
+    let assignment_expr = match &result {
+        Value::Number(n) => Expr::Number(*n),
+        Value::BigInt(s) => Expr::BigInt(s.clone()),
+        _ => unreachable!(),
+    };
+    evaluate_assignment_expr(env, target, &assignment_expr)?;
     Ok(result)
 }
 
@@ -2560,6 +2622,52 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     message: "invalid bigint".to_string(),
                 })?;
                 Ok(Value::BigInt((a * b).to_string()))
+            }
+            _ => Err(JSError::EvaluationError {
+                message: "error".to_string(),
+            }),
+        },
+        BinaryOp::Pow => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln.powf(rn))),
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                // exponent must be non-negative and fit into u32 for pow
+                if b < BigInt::from(0) {
+                    return Err(JSError::EvaluationError {
+                        message: "negative exponent for bigint".to_string(),
+                    });
+                }
+                let exp = b.to_u32().ok_or(JSError::EvaluationError {
+                    message: "exponent too large".to_string(),
+                })?;
+                Ok(Value::BigInt(a.pow(exp).to_string()))
+            }
+            (Value::BigInt(la), Value::Number(rn)) => {
+                if rn < 0.0 || rn.fract() != 0.0 {
+                    return Err(JSError::EvaluationError {
+                        message: "invalid exponent for bigint".to_string(),
+                    });
+                }
+                let exp_u = rn as u32;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
+                    message: "invalid bigint".to_string(),
+                })?;
+                Ok(Value::BigInt(a.pow(exp_u).to_string()))
+            }
+            // number ** bigint -> try converting bigint to number if possible
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                    Ok(Value::Number(ln.powf(rv)))
+                } else {
+                    Err(JSError::EvaluationError {
+                        message: "invalid exponent".to_string(),
+                    })
+                }
             }
             _ => Err(JSError::EvaluationError {
                 message: "error".to_string(),

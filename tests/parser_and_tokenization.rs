@@ -55,3 +55,33 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
     // and the tokens left should be empty
     assert!(tokens.is_empty());
 }
+
+#[test]
+fn exponentiation_and_numeric_separators_supported() {
+    // Exponentiation for numbers
+    let res = evaluate_script("2 ** 3;");
+    match res {
+        Ok(crate::Value::Number(n)) => assert_eq!(n, 8.0),
+        _ => panic!("expected numeric result for 2 ** 3"),
+    }
+
+    let res2 = evaluate_script("2 ** 3 ** 2;");
+    match res2 {
+        Ok(crate::Value::Number(n)) => assert_eq!(n, 512.0),
+        _ => panic!("expected numeric result for 2 ** 3 ** 2"),
+    }
+
+    // Numeric separators
+    let res3 = evaluate_script("1_000_000 + 2000;");
+    match res3 {
+        Ok(crate::Value::Number(n)) => assert_eq!(n, 1_002_000.0),
+        _ => panic!("expected numeric result for 1_000_000 + 2000"),
+    }
+
+    // BigInt with separators and exponentiation
+    let res4 = evaluate_script("1_000n ** 2n;");
+    match res4 {
+        Ok(crate::Value::BigInt(s)) => assert_eq!(s, "1000000".to_string()),
+        _ => panic!("expected bigint result for 1_000n ** 2n"),
+    }
+}

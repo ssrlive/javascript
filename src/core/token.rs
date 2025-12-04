@@ -11,6 +11,8 @@ pub enum Token {
     Plus,
     Minus,
     Multiply,
+    /// Exponentiation operator `**`
+    Exponent,
     Divide,
     /// Regex literal with pattern and flags (e.g. /pattern/flags)
     Regex(String, String),
@@ -87,6 +89,8 @@ pub enum Token {
     Async,
     Await,
     LineTerminator,
+    /// Exponentiation assignment (`**=`)
+    PowAssign,
 }
 
 impl Token {
@@ -175,7 +179,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 }
             }
             '*' => {
-                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                // Handle exponentiation '**' and '**=' first, then '*='
+                if i + 2 < chars.len() && chars[i + 1] == '*' && chars[i + 2] == '=' {
+                    tokens.push(Token::PowAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    tokens.push(Token::Exponent);
+                    i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::MulAssign);
                     i += 2;
                 } else {
@@ -424,14 +435,18 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             }
             '0'..='9' => {
                 let start = i;
-                // integer part
-                while i < chars.len() && chars[i].is_ascii_digit() {
+                // integer part (allow underscores as numeric separators)
+                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                     i += 1;
                 }
 
-                // BigInt literal: digits followed by 'n' (no decimal/exponent allowed)
+                // BigInt literal: digits (possibly with underscores) followed by 'n' (no decimal/exponent allowed)
                 if i < chars.len() && chars[i] == 'n' {
-                    let num_str: String = chars[start..i].iter().collect();
+                    let mut num_str: String = chars[start..i].iter().collect();
+                    num_str.retain(|c| c != '_');
+                    if num_str.is_empty() || !num_str.chars().all(|c| c.is_ascii_digit()) {
+                        return Err(JSError::TokenizationError);
+                    }
                     tokens.push(Token::BigInt(num_str));
                     i += 1; // consume trailing 'n'
                     continue;
@@ -440,7 +455,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 // fractional part
                 if i < chars.len() && chars[i] == '.' {
                     i += 1;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
+                    while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                         i += 1;
                     }
                 }
@@ -452,20 +467,24 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
                         j += 1;
                     }
-                    // require at least one digit in exponent
-                    if j >= chars.len() || !chars[j].is_ascii_digit() {
+                    // require at least one digit in exponent (underscores allowed inside digits)
+                    if j >= chars.len() || !(chars[j].is_ascii_digit()) {
                         return Err(JSError::TokenizationError);
                     }
-                    // consume exponent digits
-                    while j < chars.len() && chars[j].is_ascii_digit() {
+                    while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
                         j += 1;
                     }
                     i = j;
                 }
 
-                let num_str: String = chars[start..i].iter().collect();
-                let num = num_str.parse::<f64>().map_err(|_| JSError::TokenizationError)?;
-                tokens.push(Token::Number(num));
+                // Build numeric string and remove numeric separators
+                let mut num_str: String = chars[start..i].iter().collect();
+                num_str.retain(|c| c != '_');
+                // Convert to f64
+                match num_str.parse::<f64>() {
+                    Ok(n) => tokens.push(Token::Number(n)),
+                    Err(_) => return Err(JSError::TokenizationError),
+                }
             }
             '"' => {
                 i += 1; // skip opening quote

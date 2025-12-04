@@ -111,6 +111,11 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let right = parse_assignment(tokens)?;
             Ok(Expr::SubAssign(Box::new(left), Box::new(right)))
         }
+        Token::PowAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::PowAssign(Box::new(left), Box::new(right)))
+        }
         Token::MulAssign => {
             tokens.remove(0);
             let right = parse_assignment(tokens)?;
@@ -253,7 +258,7 @@ fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_primary(tokens)?;
+    let left = parse_exponentiation(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
@@ -274,6 +279,21 @@ fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             Ok(Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(right)))
         }
         _ => Ok(left),
+    }
+}
+
+fn parse_exponentiation(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    // Right-associative exponentiation operator: a ** b ** c -> a ** (b ** c)
+    let left = parse_primary(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::Exponent) {
+        tokens.remove(0);
+        let right = parse_exponentiation(tokens)?; // right-associative
+        Ok(Expr::Binary(Box::new(left), BinaryOp::Pow, Box::new(right)))
+    } else {
+        Ok(left)
     }
 }
 

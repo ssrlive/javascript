@@ -1,6 +1,7 @@
 use crate::core::JSObjectDataPtr;
 use crate::core::{Expr, Value, evaluate_expr};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
@@ -12,9 +13,7 @@ pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
     let format_str = match format_val {
         Value::String(s) => utf16_to_utf8(&s),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "sprintf format must be a string".to_string(),
-            });
+            return Err(eval_error_here!("sprintf format must be a string"));
         }
     };
     let result = sprintf_impl(env, &format_str, &args[1..])?;
@@ -120,9 +119,7 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
             // Parse conversion specifier
             if let Some(specifier) = chars.next() {
                 if arg_index >= args.len() {
-                    return Err(JSError::EvaluationError {
-                        message: "Not enough arguments for sprintf".to_string(),
-                    });
+                    return Err(eval_error_here!("Not enough arguments for sprintf"));
                 }
 
                 // Get the argument value

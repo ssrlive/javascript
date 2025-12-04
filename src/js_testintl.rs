@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -88,18 +89,14 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
     match method {
         "testWithIntlConstructors" => {
             if args.len() != 1 {
-                return Err(JSError::EvaluationError {
-                    message: "testWithIntlConstructors requires exactly 1 argument".to_string(),
-                });
+                return Err(eval_error_here!("testWithIntlConstructors requires exactly 1 argument"));
             }
 
             let callback = evaluate_expr(env, &args[0])?;
             let callback_func = match callback {
                 Value::Closure(params, body, captured_env) => (params, body, captured_env),
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "testWithIntlConstructors requires a function as argument".to_string(),
-                    });
+                    return Err(eval_error_here!("testWithIntlConstructors requires a function as argument"));
                 }
             };
 
@@ -118,8 +115,6 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
 
             Ok(Value::Undefined)
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("testIntl method {method} not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("testIntl method {method} not implemented"))),
     }
 }

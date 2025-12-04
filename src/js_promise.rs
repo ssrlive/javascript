@@ -25,6 +25,7 @@
 
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -364,18 +365,14 @@ pub fn handle_promise_constructor(args: &[crate::core::Expr], env: &JSObjectData
 /// * `Result<Value, JSError>` - The promise object or construction error
 pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
-        return Err(JSError::EvaluationError {
-            message: "Promise constructor requires an executor function".to_string(),
-        });
+        return Err(eval_error_here!("Promise constructor requires an executor function"));
     }
 
     let executor = evaluate_expr(env, &args[0])?;
     let (params, captured_env) = match &executor {
         Value::Closure(p, _b, c) => (p.clone(), c.clone()),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Promise constructor requires a function as executor".to_string(),
-            });
+            return Err(eval_error_here!("Promise constructor requires a function as executor"));
         }
     };
 
@@ -487,16 +484,12 @@ pub fn handle_promise_then(promise_obj: &JSObjectDataPtr, args: &[crate::core::E
             match &*val {
                 Value::Promise(p) => p.clone(),
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Invalid promise object".to_string(),
-                    });
+                    return Err(eval_error_here!("Invalid promise object"));
                 }
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid promise object".to_string(),
-            });
+            return Err(eval_error_here!("Invalid promise object"));
         }
     };
 
@@ -630,16 +623,12 @@ pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::
             match &*val {
                 Value::Promise(p) => p.clone(),
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Invalid promise object".to_string(),
-                    });
+                    return Err(eval_error_here!("Invalid promise object"));
                 }
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid promise object".to_string(),
-            });
+            return Err(eval_error_here!("Invalid promise object"));
         }
     };
 
@@ -758,16 +747,12 @@ pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core
             match &*val {
                 Value::Promise(p) => p.clone(),
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Invalid promise object".to_string(),
-                    });
+                    return Err(eval_error_here!("Invalid promise object"));
                 }
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid promise object".to_string(),
-            });
+            return Err(eval_error_here!("Invalid promise object"));
         }
     };
 
@@ -1013,9 +998,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
         "all" => {
             // Promise.all(iterable) - resolves when all promises resolve, rejects on first rejection
             if args.is_empty() {
-                return Err(JSError::EvaluationError {
-                    message: "Promise.all requires at least one argument".to_string(),
-                });
+                return Err(eval_error_here!("Promise.all requires at least one argument"));
             }
 
             let iterable = evaluate_expr(env, &args[0])?;
@@ -1036,9 +1019,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     promises
                 }
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Promise.all argument must be iterable".to_string(),
-                    });
+                    return Err(eval_error_here!("Promise.all argument must be iterable"));
                 }
             };
 
@@ -1225,9 +1206,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             // Promise.allSettled(iterable) - resolves when all promises settle (fulfill or reject)
             // PHASE 2: Now using dedicated AllSettledState struct for better type safety
             if args.is_empty() {
-                return Err(JSError::EvaluationError {
-                    message: "Promise.allSettled requires at least one argument".to_string(),
-                });
+                return Err(eval_error_here!("Promise.allSettled requires at least one argument"));
             }
 
             let iterable = evaluate_expr(env, &args[0])?;
@@ -1248,9 +1227,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     promises
                 }
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Promise.allSettled argument must be iterable".to_string(),
-                    });
+                    return Err(eval_error_here!("Promise.allSettled argument must be iterable"));
                 }
             };
 
@@ -1321,9 +1298,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
         "any" => {
             // Promise.any(iterable)
             if args.is_empty() {
-                return Err(JSError::EvaluationError {
-                    message: "Promise.any requires at least one argument".to_string(),
-                });
+                return Err(eval_error_here!("Promise.any requires at least one argument"));
             }
 
             let iterable = evaluate_expr(env, &args[0])?;
@@ -1343,9 +1318,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     promises
                 }
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Promise.any argument must be iterable".to_string(),
-                    });
+                    return Err(eval_error_here!("Promise.any argument must be iterable"));
                 }
             };
 
@@ -1451,9 +1424,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
         "race" => {
             // Promise.race(iterable) - asynchronous implementation
             if args.is_empty() {
-                return Err(JSError::EvaluationError {
-                    message: "Promise.race requires at least one argument".to_string(),
-                });
+                return Err(eval_error_here!("Promise.race requires at least one argument"));
             }
 
             let iterable = evaluate_expr(env, &args[0])?;
@@ -1473,9 +1444,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                     promises
                 }
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "Promise.race argument must be iterable".to_string(),
-                    });
+                    return Err(eval_error_here!("Promise.race argument must be iterable"));
                 }
             };
 
@@ -1608,9 +1577,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             crate::core::obj_set_value(&result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
             Ok(Value::Object(result_promise_obj))
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Promise has no static method '{}'", method),
-        }),
+        _ => Err(eval_error_here!(format!("Promise has no static method '{method}'"))),
     }
 }
 
@@ -1620,9 +1587,7 @@ pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Ex
         "then" => crate::js_promise::handle_promise_then(obj_map, args, env),
         "catch" => crate::js_promise::handle_promise_catch(obj_map, args, env),
         "finally" => crate::js_promise::handle_promise_finally(obj_map, args, env),
-        _ => Err(JSError::EvaluationError {
-            message: format!("Promise has no method '{}'", method),
-        }),
+        _ => Err(eval_error_here!(format!("Promise has no method '{method}'"))),
     }
 }
 

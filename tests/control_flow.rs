@@ -169,7 +169,7 @@ mod control_flow_tests {
         let script = "break;";
         let result = evaluate_script(script);
         match result {
-            Err(JSError::EvaluationError { message }) => {
+            Err(JSError::EvaluationError { message, .. }) => {
                 assert!(message.contains("break statement not in loop or switch"));
             }
             _ => panic!("Expected EvaluationError for break, got {:?}", result),
@@ -191,7 +191,7 @@ mod control_flow_tests {
         let script = "continue;";
         let result = evaluate_script(script);
         match result {
-            Err(JSError::EvaluationError { message }) => {
+            Err(JSError::EvaluationError { message, .. }) => {
                 assert!(message.contains("continue statement not in loop"));
             }
             _ => panic!("Expected EvaluationError for continue, got {:?}", result),

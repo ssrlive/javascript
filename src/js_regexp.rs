@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use regex::RegexBuilder;
 use std::cell::RefCell;
@@ -354,8 +355,6 @@ pub(crate) fn handle_regexp_method(
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("RegExp.prototype.{method} is not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("RegExp.prototype.{method} is not implemented"))),
     }
 }

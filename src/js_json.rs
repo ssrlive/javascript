@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::js_array::{is_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
@@ -15,19 +16,13 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                         let json_str = utf16_to_utf8(&s);
                         match serde_json::from_str::<serde_json::Value>(&json_str) {
                             Ok(json_value) => json_value_to_js_value(json_value),
-                            Err(_) => Err(JSError::EvaluationError {
-                                message: "Invalid JSON".to_string(),
-                            }),
+                            Err(_) => Err(eval_error_here!("Invalid JSON")),
                         }
                     }
-                    _ => Err(JSError::EvaluationError {
-                        message: "JSON.parse expects a string".to_string(),
-                    }),
+                    _ => Err(eval_error_here!("JSON.parse expects a string")),
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "JSON.parse expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("JSON.parse expects exactly one argument"))
             }
         }
         "stringify" => {
@@ -41,14 +36,10 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     None => Ok(Value::Undefined),
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "JSON.stringify expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("JSON.stringify expects exactly one argument"))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("JSON.{} is not implemented", method),
-        }),
+        _ => Err(eval_error_here!(format!("JSON.{method} is not implemented"))),
     }
 }
 

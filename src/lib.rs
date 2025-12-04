@@ -5,6 +5,7 @@
 // pub mod libunicode;
 // pub mod libunicode_table;
 pub(crate) mod core;
+#[macro_use]
 pub(crate) mod error;
 pub(crate) mod js_array;
 pub(crate) mod js_assert;

@@ -5,6 +5,7 @@ use crate::{
         parse_object_destructuring_pattern, parse_parameters, parse_statement_block,
     },
     js_class::ClassMember,
+    parse_error_here,
 };
 
 #[derive(Clone, Debug)]
@@ -156,7 +157,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         tokens.remove(0); // consume {
         let body = parse_statements(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume }
         return Ok(Statement::Block(body));
@@ -186,7 +187,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         {
             // semicolon omitted but next token terminates the statement; accept
         } else {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         return Ok(Statement::Break(label));
     }
@@ -204,7 +205,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             None
         };
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume ;
         return Ok(Statement::Continue(label));
@@ -212,12 +213,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::While) {
         tokens.remove(0); // consume while
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume )
         // Body may be a block (`{ ... }`) or a single statement (e.g. `while (...) stmt;`)
@@ -225,7 +226,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
             b
@@ -246,7 +247,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
             b
@@ -265,20 +266,20 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
 
         if tokens.is_empty() || !matches!(tokens[0], Token::While) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume while
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume )
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume ;
         return Ok(Statement::DoWhile(body, condition));
@@ -286,16 +287,16 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::Switch) {
         tokens.remove(0); // consume switch
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume (
         let expr = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume )
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume {
         let mut cases = Vec::new();
@@ -311,7 +312,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 tokens.remove(0); // consume case
                 let case_value = parse_expression(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 tokens.remove(0); // consume :
                 let mut case_stmts = Vec::new();
@@ -346,7 +347,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             } else if matches!(tokens[0], Token::Default) {
                 tokens.remove(0); // consume default
                 if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 tokens.remove(0); // consume :
                 let mut default_stmts = Vec::new();
@@ -368,11 +369,11 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 }
                 cases.push(SwitchCase::Default(default_stmts));
             } else {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
         }
         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume }
         return Ok(Statement::Switch(expr, cases));
@@ -389,7 +390,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         {
             // semicolon omitted but next token terminates the statement; accept
         } else {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         return Ok(Statement::Throw(expr));
     }
@@ -408,38 +409,38 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                                 tokens.remove(0);
                                 params.push(param);
                                 if tokens.is_empty() {
-                                    return Err(JSError::ParseError);
+                                    return Err(parse_error_here!());
                                 }
                                 if matches!(tokens[0], Token::RParen) {
                                     break;
                                 }
                                 if !matches!(tokens[0], Token::Comma) {
-                                    return Err(JSError::ParseError);
+                                    return Err(parse_error_here!());
                                 }
                                 tokens.remove(0); // consume ,
                             } else {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                         }
                     }
                     if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume )
                     if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume {
                     let body = parse_statements(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume }
                     return Ok(Statement::Let(name, Some(Expr::AsyncFunction(params, body))));
                 }
             }
         }
-        return Err(JSError::ParseError);
+        return Err(parse_error_here!());
     }
     if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
         tokens.remove(0); // consume function
@@ -463,26 +464,26 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             tokens.remove(0);
                             params.push(param);
                             if tokens.is_empty() {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             if matches!(tokens[0], Token::RParen) {
                                 break;
                             }
                             if !matches!(tokens[0], Token::Comma) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             tokens.remove(0); // consume ,
                         } else {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 tokens.remove(0); // consume )
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 log::trace!(
                     "parse_statement: function params parsed; entering body parse; remaining tokens: {:?}",
@@ -496,7 +497,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 tokens.remove(0); // consume }
                 return Ok(Statement::Let(name, Some(Expr::Function(params, body))));
@@ -506,12 +507,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::If) {
         tokens.remove(0); // consume if
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume )
         // Allow either a block (`{ ... }`) or a single statement as the
@@ -520,7 +521,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             tokens.remove(0); // consume {
             let body = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
             body
@@ -554,7 +555,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
                 tokens.remove(0); // consume }
                 Some(body)
@@ -575,12 +576,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::Try) {
         tokens.remove(0); // consume try
         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume {
         let try_body = parse_statements(tokens)?;
         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume }
 
@@ -598,28 +599,28 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         if !tokens.is_empty() && matches!(tokens[0], Token::Catch) {
             tokens.remove(0); // consume catch
             if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume (
             if tokens.is_empty() {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             if let Token::Identifier(name) = tokens.remove(0) {
                 catch_param = name;
             } else {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume )
             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume {
             catch_body = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
         }
@@ -633,12 +634,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         if !tokens.is_empty() && matches!(tokens[0], Token::Finally) {
             tokens.remove(0); // consume finally
             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume {
             let fb = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
             finally_body = Some(fb);
@@ -649,7 +650,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if !tokens.is_empty() && matches!(tokens[0], Token::For) {
         tokens.remove(0); // consume for
         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume (
 
@@ -665,7 +666,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume )
                     // For-of body may be a block or a single statement
@@ -673,7 +674,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
                         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         tokens.remove(0); // consume }
                         b
@@ -701,7 +702,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume )
                     // parse body
@@ -709,7 +710,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
                         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         tokens.remove(0); // consume }
                         b
@@ -736,7 +737,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(JSError::ParseError);
+                        return Err(parse_error_here!());
                     }
                     tokens.remove(0); // consume )
                     // parse body
@@ -744,7 +745,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
                         if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         tokens.remove(0); // consume }
                         b
@@ -776,7 +777,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume first ;
 
@@ -788,7 +789,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume second ;
 
@@ -800,7 +801,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         };
 
         if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(JSError::ParseError);
+            return Err(parse_error_here!());
         }
         tokens.remove(0); // consume )
 
@@ -809,7 +810,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
             b
@@ -845,7 +846,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             // Array destructuring
             let pattern = parse_array_destructuring_pattern(tokens)?;
             if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume =
             let expr = parse_expression(tokens)?;
@@ -866,7 +867,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     "parse_statement: expected '=' after object pattern but found (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume =
             let expr = parse_expression(tokens)?;
@@ -954,7 +955,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             tokens.remove(0);
                             n
                         } else {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         };
 
                         // Capture initializer tokens if present (we'll build a
@@ -1048,11 +1049,11 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                                 tokens.remove(0);
                                 // If there is an initializer on the later decl, bail out (not supported here)
                                 if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
-                                    return Err(JSError::ParseError);
+                                    return Err(parse_error_here!());
                                 }
                                 extra_names.push(n);
                             } else {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                         }
 
@@ -1104,7 +1105,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
             // Parse class body
             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume {
 
@@ -1133,12 +1134,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         tokens.remove(0);
                         // Parse constructor
                         if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         tokens.remove(0); // consume (
                         let params = parse_parameters(tokens)?;
                         if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         tokens.remove(0); // consume {
                         let body = parse_statement_block(tokens)?;
@@ -1146,7 +1147,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     } else {
                         tokens.remove(0);
                         if tokens.is_empty() {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                         // Check for getter/setter
                         let is_getter = matches!(tokens[0], Token::Identifier(ref id) if id == "get");
@@ -1154,26 +1155,26 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         if is_getter || is_setter {
                             tokens.remove(0); // consume get/set
                             if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             let prop_name = if let Token::Identifier(name) = tokens.remove(0) {
                                 name
                             } else {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             };
                             if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             tokens.remove(0); // consume (
                             let params = parse_parameters(tokens)?;
                             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             tokens.remove(0); // consume {
                             let body = parse_statement_block(tokens)?;
                             if is_getter {
                                 if !params.is_empty() {
-                                    return Err(JSError::ParseError); // getters should have no parameters
+                                    return Err(parse_error_here!()); // getters should have no parameters
                                 }
                                 if is_static {
                                     members.push(ClassMember::StaticGetter(prop_name, body));
@@ -1183,7 +1184,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             } else {
                                 // setter
                                 if params.len() != 1 {
-                                    return Err(JSError::ParseError); // setters should have exactly one parameter
+                                    return Err(parse_error_here!()); // setters should have exactly one parameter
                                 }
                                 if is_static {
                                     members.push(ClassMember::StaticSetter(prop_name, params, body));
@@ -1196,7 +1197,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             tokens.remove(0); // consume (
                             let params = parse_parameters(tokens)?;
                             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             tokens.remove(0); // consume {
                             let body = parse_statement_block(tokens)?;
@@ -1210,7 +1211,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             tokens.remove(0); // consume =
                             let value = parse_expression(tokens)?;
                             if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-                                return Err(JSError::ParseError);
+                                return Err(parse_error_here!());
                             }
                             tokens.remove(0); // consume ;
                             if is_static {
@@ -1219,16 +1220,16 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                                 members.push(ClassMember::Property(method_name, value));
                             }
                         } else {
-                            return Err(JSError::ParseError);
+                            return Err(parse_error_here!());
                         }
                     }
                 } else {
-                    return Err(JSError::ParseError);
+                    return Err(parse_error_here!());
                 }
             }
 
             if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(JSError::ParseError);
+                return Err(parse_error_here!());
             }
             tokens.remove(0); // consume }
 

@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::js_array::set_array_length;
 use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
@@ -13,9 +14,8 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             if args.is_empty() {
                 Ok(Value::String(s.to_vec()))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("toString method expects no arguments, got {}", args.len()),
-                })
+                let msg = format!("toString method expects no arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "substring" => {
@@ -28,22 +28,17 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     if start_idx <= end_idx && end_idx <= utf16_len(s) {
                         Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
                     } else {
-                        Err(JSError::EvaluationError {
-                            message: format!(
-                                "substring: invalid indices start={start_idx}, end={end_idx}, string length={}",
-                                utf16_len(s)
-                            ),
-                        })
+                        let len = utf16_len(s);
+                        Err(eval_error_here!(format!(
+                            "substring: invalid indices start={start_idx}, end={end_idx}, length={len}",
+                        )))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "substring: both arguments must be numbers".to_string(),
-                    })
+                    Err(eval_error_here!("substring: both arguments must be numbers"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("substring method expects 2 arguments, got {}", args.len()),
-                })
+                let msg = format!("substring method expects 2 arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "slice" => {
@@ -81,18 +76,16 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             if args.is_empty() {
                 Ok(Value::String(utf16_to_uppercase(s)))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("toUpperCase method expects no arguments, got {}", args.len()),
-                })
+                let msg = format!("toUpperCase method expects no arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "toLowerCase" => {
             if args.is_empty() {
                 Ok(Value::String(utf16_to_lowercase(s)))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("toLowerCase method expects no arguments, got {}", args.len()),
-                })
+                let msg = format!("toLowerCase method expects no arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "indexOf" => {
@@ -105,14 +98,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         Ok(Value::Number(-1.0))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "indexOf: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("indexOf: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("indexOf method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("indexOf method expects 1 argument, got {}", args.len())))
             }
         }
         "lastIndexOf" => {
@@ -125,14 +114,11 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         Ok(Value::Number(-1.0))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "lastIndexOf: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("lastIndexOf: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("lastIndexOf method expects 1 argument, got {}", args.len()),
-                })
+                let msg = format!("lastIndexOf method expects 1 argument, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "replace" => {
@@ -142,14 +128,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
                     Ok(Value::String(utf16_replace(s, &search, &replace)))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "replace: both arguments must be strings".to_string(),
-                    })
+                    Err(eval_error_here!("replace: both arguments must be strings"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("replace method expects 2 arguments, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("replace method expects 2 arguments, got {}", args.len())))
             }
         }
         "split" => {
@@ -187,14 +169,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     set_array_length(&arr, len)?;
                     Ok(Value::Object(arr))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "split: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("split: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("split method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("split method expects 1 argument, got {}", args.len())))
             }
         }
         "charAt" => {
@@ -214,14 +192,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         Ok(Value::String(Vec::new()))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "charAt: argument must be a number".to_string(),
-                    })
+                    Err(eval_error_here!("charAt: argument must be a number"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("charAt method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("charAt method expects 1 argument, got {}", args.len())))
             }
         }
         "trim" => {
@@ -230,9 +204,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 let trimmed = str_val.trim();
                 Ok(Value::String(utf8_to_utf16(trimmed)))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("trim method expects no arguments, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("trim method expects no arguments, got {}", args.len())))
             }
         }
         "startsWith" => {
@@ -242,14 +214,11 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     let starts = s.len() >= search.len() && s[..search.len()] == search[..];
                     Ok(Value::Boolean(starts))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "startsWith: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("startsWith: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("startsWith method expects 1 argument, got {}", args.len()),
-                })
+                let msg = format!("startsWith method expects 1 argument, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "endsWith" => {
@@ -259,14 +228,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
                     Ok(Value::Boolean(ends))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "endsWith: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("endsWith: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("endsWith method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("endsWith method expects 1 argument, got {}", args.len())))
             }
         }
         "includes" => {
@@ -276,14 +241,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     let includes = utf16_find(s, &search).is_some();
                     Ok(Value::Boolean(includes))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "includes: argument must be a string".to_string(),
-                    })
+                    Err(eval_error_here!("includes: argument must be a string"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("includes method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("includes method expects 1 argument, got {}", args.len())))
             }
         }
         "repeat" => {
@@ -297,14 +258,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     }
                     Ok(Value::String(repeated))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "repeat: argument must be a number".to_string(),
-                    })
+                    Err(eval_error_here!("repeat: argument must be a number"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("repeat method expects 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("repeat method expects 1 argument, got {}", args.len())))
             }
         }
         "concat" => {
@@ -351,14 +308,11 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         Ok(Value::String(padded))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "padStart: first argument must be a number".to_string(),
-                    })
+                    Err(eval_error_here!("padStart: first argument must be a number"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("padStart method expects at least 1 argument, got {}", args.len()),
-                })
+                let msg = format!("padStart method expects at least 1 argument, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "padEnd" => {
@@ -386,18 +340,15 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         Ok(Value::String(padded))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "padEnd: first argument must be a number".to_string(),
-                    })
+                    Err(eval_error_here!("padEnd: first argument must be a number"))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("padEnd method expects at least 1 argument, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!(
+                    "padEnd method expects at least 1 argument, got {}",
+                    args.len()
+                )))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Unknown string method: {method}"),
-        }), // method not found
+        _ => Err(eval_error_here!(format!("Unknown string method: {method}"))), // method not found
     }
 }

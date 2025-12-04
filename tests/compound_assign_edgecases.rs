@@ -44,7 +44,7 @@ fn test_exponent_literal_parsing() {
 fn test_div_assign_by_zero_error() {
     let res = eval("let i = 5; i /= 0");
     match res {
-        Err(JSError::EvaluationError { message }) => assert!(message.contains("Division by zero") || message == "Division by zero"),
+        Err(JSError::EvaluationError { message, .. }) => assert!(message.contains("Division by zero") || message == "Division by zero"),
         other => panic!("Expected Division by zero error, got {:?}", other),
     }
 }
@@ -53,7 +53,7 @@ fn test_div_assign_by_zero_error() {
 fn test_mod_assign_by_zero_error() {
     let res = eval("let i = 5; i %= 0");
     match res {
-        Err(JSError::EvaluationError { message }) => assert!(message.contains("Division by zero") || message == "Division by zero"),
+        Err(JSError::EvaluationError { message, .. }) => assert!(message.contains("Division by zero") || message == "Division by zero"),
         other => panic!("Expected Division by zero error, got {:?}", other),
     }
 }
@@ -71,7 +71,7 @@ fn test_assign_to_const_error() {
 fn test_sub_assign_non_number_error() {
     let res = eval("let s = 'a'; s -= 1");
     match res {
-        Err(JSError::EvaluationError { message }) => assert!(message.contains("Invalid operands") || message.contains("error")),
+        Err(JSError::EvaluationError { message, .. }) => assert!(message.contains("Invalid operands") || message.contains("error")),
         other => panic!("Expected EvaluationError for non-number -=, got {:?}", other),
     }
 }
@@ -80,7 +80,7 @@ fn test_sub_assign_non_number_error() {
 fn test_mul_assign_non_number_error() {
     let res = eval("let s = 'a'; s *= 2");
     match res {
-        Err(JSError::EvaluationError { message }) => assert!(message.contains("Invalid operands") || message.contains("error")),
+        Err(JSError::EvaluationError { message, .. }) => assert!(message.contains("Invalid operands") || message.contains("error")),
         other => panic!("Expected EvaluationError for non-number *=, got {:?}", other),
     }
 }

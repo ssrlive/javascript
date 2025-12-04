@@ -2,6 +2,7 @@ use crate::core::{
     Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, obj_get_value, obj_set_value,
 };
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
@@ -275,9 +276,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Object.{} is not implemented", method),
-        }),
+        _ => Err(eval_error_here!(format!("Object.{method} is not implemented"))),
     }
 }
 

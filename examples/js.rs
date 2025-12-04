@@ -43,7 +43,7 @@ fn main() {
         match evaluate_script(script) {
             Ok(result) => print_eval_result(&result),
             Err(err) => {
-                eprintln!("Evaluation failed: {:?}", err);
+                eprintln!("Evaluation failed: {err}");
                 process::exit(1);
             }
         }

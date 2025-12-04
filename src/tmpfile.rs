@@ -7,6 +7,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 static FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -52,9 +53,7 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             obj_set_value(&tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
-        Err(e) => Err(JSError::EvaluationError {
-            message: format!("Failed to create temporary file: {}", e),
-        }),
+        Err(e) => Err(eval_error_here!(format!("Failed to create temporary file: {e}"))),
     }
 }
 
@@ -66,9 +65,7 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
         let file_id = match file_id_val {
             Value::Number(n) => n as u64,
             _ => {
-                return Err(JSError::EvaluationError {
-                    message: "Invalid file object".to_string(),
-                });
+                return Err(eval_error_here!("Invalid file object"));
             }
         };
 
@@ -76,9 +73,7 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
         let file = match file_store.get_mut(&file_id) {
             Some(f) => f,
             None => {
-                return Err(JSError::EvaluationError {
-                    message: "File not found".to_string(),
-                });
+                return Err(eval_error_here!("File not found"));
             }
         };
 
@@ -219,7 +214,5 @@ pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: 
         }
     }
 
-    Err(JSError::EvaluationError {
-        message: format!("File method {method} not implemented"),
-    })
+    Err(eval_error_here!(format!("File method {method} not implemented")))
 }

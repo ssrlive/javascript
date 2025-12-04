@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -61,9 +62,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.isNaN expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.isNaN expects exactly one argument"))
             }
         }
         "isFinite" => {
@@ -75,9 +74,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.isFinite expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.isFinite expects exactly one argument"))
             }
         }
         "isInteger" => {
@@ -89,9 +86,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.isInteger expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.isInteger expects exactly one argument"))
             }
         }
         "isSafeInteger" => {
@@ -105,9 +100,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.isSafeInteger expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.isSafeInteger expects exactly one argument"))
             }
         }
         "parseFloat" => {
@@ -125,9 +118,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.parseFloat expects exactly one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.parseFloat expects exactly one argument"))
             }
         }
         "parseInt" => {
@@ -195,14 +186,10 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {
-                Err(JSError::EvaluationError {
-                    message: "Number.parseInt expects at least one argument".to_string(),
-                })
+                Err(eval_error_here!("Number.parseInt expects at least one argument"))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Number.{method} is not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("Number.{method} is not implemented"))),
     }
 }
 
@@ -213,18 +200,15 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
             if args.is_empty() {
                 Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("toString method expects no arguments, got {}", args.len()),
-                })
+                let msg = format!("toString method expects no arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
         "valueOf" => {
             if args.is_empty() {
                 Ok(Value::Number(*n))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("valueOf method expects no arguments, got {}", args.len()),
-                })
+                Err(eval_error_here!(format!("valueOf method expects no arguments, got {}", args.len())))
             }
         }
         "toLocaleString" => {
@@ -232,14 +216,11 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
                 // For now, same as toString
                 Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
-                Err(JSError::EvaluationError {
-                    message: format!("toLocaleString method expects no arguments, got {}", args.len()),
-                })
+                let msg = format!("toLocaleString method expects no arguments, got {}", args.len());
+                Err(eval_error_here!(msg))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Number.prototype.{method} is not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("Number.prototype.{method} is not implemented"))),
     }
 }
 
@@ -257,19 +238,13 @@ pub fn handle_number_object_method(
                 "toString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                 "valueOf" => Ok(Value::Number(n)),
                 "toLocaleString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))), // For now, same as toString
-                _ => Err(JSError::EvaluationError {
-                    message: format!("Number.prototype.{method} is not implemented"),
-                }),
+                _ => Err(eval_error_here!(format!("Number.prototype.{method} is not implemented"))),
             }
         } else {
-            Err(JSError::EvaluationError {
-                message: "Invalid __value__ for Number instance".to_string(),
-            })
+            Err(eval_error_here!("Invalid __value__ for Number instance"))
         }
     } else {
-        Err(JSError::EvaluationError {
-            message: "__value__ not found on Number instance".to_string(),
-        })
+        Err(eval_error_here!("__value__ not found on Number instance"))
     }
 }
 

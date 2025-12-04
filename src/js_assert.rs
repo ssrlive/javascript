@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,9 +16,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
     match method {
         "sameValue" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(JSError::EvaluationError {
-                    message: "assert.sameValue requires 2 or 3 arguments".to_string(),
-                });
+                return Err(eval_error_here!("assert.sameValue requires 2 or 3 arguments"));
             }
 
             let actual = evaluate_expr(env, &args[0])?;
@@ -42,15 +41,11 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             };
 
             if !equal {
-                return Err(JSError::EvaluationError {
-                    message: format!("{}: expected {:?}, got {:?}", message, expected, actual),
-                });
+                return Err(eval_error_here!(format!("{message}: expected {expected:?}, got {actual:?}")));
             }
 
             Ok(Value::Undefined)
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Assert method {method} not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("Assert method {method} not implemented"))),
     }
 }

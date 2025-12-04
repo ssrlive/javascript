@@ -5,6 +5,7 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::js_array::set_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
@@ -68,9 +69,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.open filename must be a string".to_string(),
-                            });
+                            return Err(eval_error_here!("os.open filename must be a string"));
                         }
                     };
                     log::trace!("os.open called with filename={} args={}", filename, args.len());
@@ -109,9 +108,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         }
                         Err(e) => {
                             log::debug!("os.open failed: {e}");
-                            return Err(JSError::EvaluationError {
-                                message: format!("Failed to open file: {e}"),
-                            });
+                            return Err(eval_error_here!(format!("Failed to open file: {e}")));
                         }
                     }
                 }
@@ -123,9 +120,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.close fd must be a number".to_string(),
-                            });
+                            return Err(eval_error_here!("os.close fd must be a number"));
                         }
                     };
                     let mut store = OS_FILE_STORE.lock().unwrap();
@@ -144,9 +139,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.read fd must be a number".to_string(),
-                            });
+                            return Err(eval_error_here!("os.read fd must be a number"));
                         }
                     };
                     let size = match size_val {
@@ -174,9 +167,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.write fd must be a number".to_string(),
-                            });
+                            return Err(eval_error_here!("os.write fd must be a number"));
                         }
                     };
                     let data = match data_val {
@@ -205,9 +196,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.seek fd must be a number".to_string(),
-                            });
+                            return Err(eval_error_here!("os.seek fd must be a number"));
                         }
                     };
                     let offset = match offset_val {
@@ -240,9 +229,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.remove filename must be a string".to_string(),
-                            });
+                            return Err(eval_error_here!("os.remove filename must be a string"));
                         }
                     };
                     match std::fs::remove_file(&filename) {
@@ -258,9 +245,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.mkdir dirname must be a string".to_string(),
-                            });
+                            return Err(eval_error_here!("os.mkdir dirname must be a string"));
                         }
                     };
                     match std::fs::create_dir(&dirname) {
@@ -276,9 +261,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "os.readdir dirname must be a string".to_string(),
-                            });
+                            return Err(eval_error_here!("os.readdir dirname must be a string"));
                         }
                     };
                     match std::fs::read_dir(&dirname) {
@@ -449,9 +432,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
         }
     }
 
-    Err(JSError::EvaluationError {
-        message: format!("OS method {method} not implemented"),
-    })
+    Err(eval_error_here!(format!("OS method {method} not implemented")))
 }
 
 /// Create the OS object with all OS-related functions and constants

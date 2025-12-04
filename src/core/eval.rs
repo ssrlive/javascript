@@ -5,6 +5,7 @@ use crate::{
         WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, is_truthy, obj_delete, obj_set_value,
         to_primitive, value_to_string, values_equal,
     },
+    eval_error_here,
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
     js_class::{
@@ -40,12 +41,8 @@ pub enum ControlFlow {
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
     match evaluate_statements_with_context(env, statements)? {
         ControlFlow::Normal(val) => Ok(val),
-        ControlFlow::Break(_) => Err(JSError::EvaluationError {
-            message: "break statement not in loop or switch".to_string(),
-        }),
-        ControlFlow::Continue(_) => Err(JSError::EvaluationError {
-            message: "continue statement not in loop".to_string(),
-        }),
+        ControlFlow::Break(_) => Err(eval_error_here!("break statement not in loop or switch")),
+        ControlFlow::Continue(_) => Err(eval_error_here!("continue statement not in loop")),
         ControlFlow::Return(val) => Ok(val),
     }
 }
@@ -201,7 +198,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             "Cannot destructure non-object value".to_string()
                         };
 
-                        return Err(JSError::EvaluationError { message });
+                        return Err(eval_error_here!(message));
                     }
 
                     perform_object_destructuring(env, pattern, &val, false)?;
@@ -234,7 +231,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             "Cannot destructure non-object value".to_string()
                         };
 
-                        return Err(JSError::EvaluationError { message });
+                        return Err(eval_error_here!(message));
                     }
 
                     perform_object_destructuring(env, pattern, &val, true)?;
@@ -253,10 +250,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 // engine/internal errors at error level.
                 match &e {
                     JSError::Throw { .. } => {
-                        log::debug!("evaluate_statements_with_context thrown value at statement {i}: {e:?} stmt={stmt:?}");
+                        log::debug!("evaluate_statements_with_context thrown value at statement {i}: {e}, stmt={stmt:?}");
                     }
                     _ => {
-                        log::error!("evaluate_statements_with_context error at statement {i}: {e:?} stmt={stmt:?}");
+                        log::error!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
                     }
                 }
                 return Err(e);
@@ -352,9 +349,7 @@ fn statement_for_init_condition_increment(
                 evaluate_expr(&for_env, expr)?;
             }
             _ => {
-                return Err(JSError::EvaluationError {
-                    message: "error".to_string(),
-                });
+                return Err(eval_error_here!("error"));
             } // For now, only support let and expr in init
         }
     }
@@ -400,9 +395,7 @@ fn statement_for_init_condition_increment(
                     }
                 },
                 _ => {
-                    return Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    });
+                    return Err(eval_error_here!("error"));
                 } // For now, only support expr in increment
             }
         }
@@ -565,9 +558,7 @@ fn perform_statement_label(
                         evaluate_expr(&for_env, expr)?;
                     }
                     _ => {
-                        return Err(JSError::EvaluationError {
-                            message: "error".to_string(),
-                        });
+                        return Err(eval_error_here!("error"));
                     }
                 }
             }
@@ -620,9 +611,7 @@ fn perform_statement_label(
                             }
                         },
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "error".to_string(),
-                            });
+                            return Err(eval_error_here!("error"));
                         }
                     }
                 }
@@ -677,9 +666,7 @@ fn perform_statement_label(
                         }
                     }
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "for-of loop requires an iterable".to_string(),
-                }),
+                _ => Err(eval_error_here!("for-of loop requires an iterable")),
             }
         }
         Statement::ForOfDestructuringObject(pattern, iterable, body) => {
@@ -828,9 +815,7 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                 obj_set_value(map, &key, v.clone())?;
                                 *last_value = v;
                             } else {
-                                return Err(JSError::EvaluationError {
-                                    message: "Cannot assign to property of non-object".to_string(),
-                                });
+                                return Err(eval_error_here!("Cannot assign to property of non-object"));
                             }
                         } else {
                             // Fall back: evaluate object expression and set symbol key
@@ -842,17 +827,13 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                     *last_value = v;
                                 }
                                 _ => {
-                                    return Err(JSError::EvaluationError {
-                                        message: "Cannot assign to property of non-object".to_string(),
-                                    });
+                                    return Err(eval_error_here!("Cannot assign to property of non-object"));
                                 }
                             }
                         }
                     }
                     _ => {
-                        return Err(JSError::EvaluationError {
-                            message: "Invalid index type".to_string(),
-                        });
+                        return Err(eval_error_here!("Invalid index type"));
                     }
                 }
             }
@@ -907,9 +888,7 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                     obj_set_value(map, &key, v.clone())?;
                                     *last_value = v;
                                 } else {
-                                    return Err(JSError::EvaluationError {
-                                        message: "Cannot assign to property of non-object".to_string(),
-                                    });
+                                    return Err(eval_error_here!("Cannot assign to property of non-object"));
                                 }
                             } else {
                                 let obj_val = evaluate_expr(env, obj_expr)?;
@@ -920,17 +899,13 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                         *last_value = v;
                                     }
                                     _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Cannot assign to property of non-object".to_string(),
-                                        });
+                                        return Err(eval_error_here!("Cannot assign to property of non-object"));
                                     }
                                 }
                             }
                         }
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "Invalid index type".to_string(),
-                            });
+                            return Err(eval_error_here!("Invalid index type"));
                         }
                     }
                 }
@@ -986,9 +961,7 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                     obj_set_value(map, &key, v.clone())?;
                                     *last_value = v;
                                 } else {
-                                    return Err(JSError::EvaluationError {
-                                        message: "Cannot assign to property of non-object".to_string(),
-                                    });
+                                    return Err(eval_error_here!("Cannot assign to property of non-object"));
                                 }
                             } else {
                                 let obj_val = evaluate_expr(env, obj_expr)?;
@@ -999,17 +972,13 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                         *last_value = v;
                                     }
                                     _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Cannot assign to property of non-object".to_string(),
-                                        });
+                                        return Err(eval_error_here!("Cannot assign to property of non-object"));
                                     }
                                 }
                             }
                         }
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "Invalid index type".to_string(),
-                            });
+                            return Err(eval_error_here!("Invalid index type"));
                         }
                     }
                 }
@@ -1065,9 +1034,7 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                     obj_set_value(map, &key, v.clone())?;
                                     *last_value = v;
                                 } else {
-                                    return Err(JSError::EvaluationError {
-                                        message: "Cannot assign to property of non-object".to_string(),
-                                    });
+                                    return Err(eval_error_here!("Cannot assign to property of non-object"));
                                 }
                             } else {
                                 let obj_val = evaluate_expr(env, obj_expr)?;
@@ -1078,17 +1045,13 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                                         *last_value = v;
                                     }
                                     _ => {
-                                        return Err(JSError::EvaluationError {
-                                            message: "Cannot assign to property of non-object".to_string(),
-                                        });
+                                        return Err(eval_error_here!("Cannot assign to property of non-object"));
                                     }
                                 }
                             }
                         }
                         _ => {
-                            return Err(JSError::EvaluationError {
-                                message: "Invalid index type".to_string(),
-                            });
+                            return Err(eval_error_here!("Invalid index type"));
                         }
                     }
                 }
@@ -1201,9 +1164,7 @@ fn perform_array_destructuring(
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Cannot destructure non-array value".to_string(),
-            });
+            return Err(eval_error_here!("Cannot destructure non-array value"));
         }
     }
     Ok(())
@@ -1261,9 +1222,7 @@ fn perform_object_destructuring(
                             }
                             _ => {
                                 // Rest in property value not supported in object destructuring
-                                return Err(JSError::EvaluationError {
-                                    message: "Invalid destructuring pattern".to_string(),
-                                });
+                                return Err(eval_error_here!("Invalid destructuring pattern"));
                             }
                         }
                     }
@@ -1299,9 +1258,7 @@ fn perform_object_destructuring(
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Cannot destructure non-object value".to_string(),
-            });
+            return Err(eval_error_here!("Cannot destructure non-object value"));
         }
     }
     Ok(())
@@ -1365,14 +1322,10 @@ fn for_of_destructuring_object_iter(
                 }
                 Ok(None)
             } else {
-                Err(JSError::EvaluationError {
-                    message: "for-of loop requires an iterable".to_string(),
-                })
+                Err(eval_error_here!("for-of loop requires an iterable"))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "for-of loop requires an iterable".to_string(),
-        }),
+        _ => Err(eval_error_here!("for-of loop requires an iterable")),
     }
 }
 
@@ -1431,14 +1384,10 @@ fn for_of_destructuring_array_iter(
                 }
                 Ok(None)
             } else {
-                Err(JSError::EvaluationError {
-                    message: "for-of loop requires an iterable".to_string(),
-                })
+                Err(eval_error_here!("for-of loop requires an iterable"))
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "for-of loop requires an iterable".to_string(),
-        }),
+        _ => Err(eval_error_here!("for-of loop requires an iterable")),
     }
 }
 
@@ -1497,9 +1446,7 @@ fn statement_for_of_var_iter(
                             }
                             Value::Object(iter_obj) => Value::Object(iter_obj.clone()),
                             _ => {
-                                return Err(JSError::EvaluationError {
-                                    message: "iterator property is not callable".to_string(),
-                                });
+                                return Err(eval_error_here!("iterator property is not callable"));
                             }
                         };
 
@@ -1516,9 +1463,7 @@ fn statement_for_of_var_iter(
                                         }
                                         Value::Function(func_name) => crate::js_function::handle_global_function(func_name, &[], env)?,
                                         _ => {
-                                            return Err(JSError::EvaluationError {
-                                                message: "next is not callable".to_string(),
-                                            });
+                                            return Err(eval_error_here!("next is not callable"));
                                         }
                                     };
 
@@ -1558,31 +1503,21 @@ fn statement_for_of_var_iter(
                                             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                         }
                                     } else {
-                                        return Err(JSError::EvaluationError {
-                                            message: "iterator.next() must return an object".to_string(),
-                                        });
+                                        return Err(eval_error_here!("iterator.next() must return an object"));
                                     }
                                 } else {
-                                    return Err(JSError::EvaluationError {
-                                        message: "iterator object missing next()".to_string(),
-                                    });
+                                    return Err(eval_error_here!("iterator object missing next()"));
                                 }
                             }
                             Ok(None)
                         } else {
-                            Err(JSError::EvaluationError {
-                                message: "iterator method did not return an object".to_string(),
-                            })
+                            Err(eval_error_here!("iterator method did not return an object"))
                         }
                     } else {
-                        Err(JSError::EvaluationError {
-                            message: "for-of loop requires an iterable".to_string(),
-                        })
+                        Err(eval_error_here!("for-of loop requires an iterable"))
                     }
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "for-of loop requires an iterable".to_string(),
-                    })
+                    Err(eval_error_here!("for-of loop requires an iterable"))
                 }
             }
         }
@@ -1606,9 +1541,7 @@ fn statement_for_of_var_iter(
             }
             Ok(None)
         }
-        _ => Err(JSError::EvaluationError {
-            message: "for-of loop requires an iterable".to_string(),
-        }),
+        _ => Err(eval_error_here!("for-of loop requires an iterable")),
     }
 }
 
@@ -1751,9 +1684,9 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
         Expr::Setter(func_expr) => evaluate_expr(env, func_expr),
-        Expr::Spread(_expr) => Err(JSError::EvaluationError {
-            message: "Spread operator must be used in array, object, or function call context".to_string(),
-        }),
+        Expr::Spread(_expr) => Err(eval_error_here!(
+            "Spread operator must be used in array, object, or function call context"
+        )),
         Expr::OptionalProperty(obj, prop) => evaluate_optional_property(env, obj, prop),
         Expr::OptionalCall(func_expr, args) => evaluate_optional_call(env, func_expr, args),
         Expr::OptionalIndex(obj, idx) => evaluate_optional_index(env, obj, idx),
@@ -1777,9 +1710,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                         match &promise_borrow.state {
                             PromiseState::Fulfilled(val) => return Ok(val.clone()),
                             PromiseState::Rejected(reason) => {
-                                return Err(JSError::EvaluationError {
-                                    message: format!("Promise rejected: {}", value_to_string(reason)),
-                                });
+                                return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
                             }
                             PromiseState::Pending => {
                                 // Continue running the event loop
@@ -1799,9 +1730,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                             match &promise_borrow.state {
                                 PromiseState::Fulfilled(val) => return Ok(val.clone()),
                                 PromiseState::Rejected(reason) => {
-                                    return Err(JSError::EvaluationError {
-                                        message: format!("Promise rejected: {}", value_to_string(reason)),
-                                    });
+                                    return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
                                 }
                                 PromiseState::Pending => {
                                     // Continue running the event loop
@@ -1809,13 +1738,9 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                             }
                         }
                     }
-                    Err(JSError::EvaluationError {
-                        message: "await can only be used with promises".to_string(),
-                    })
+                    Err(eval_error_here!("await can only be used with promises"))
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "await can only be used with promises".to_string(),
-                }),
+                _ => Err(eval_error_here!("await can only be used with promises")),
             }
         }
         Expr::Value(value) => Ok(value.clone()),
@@ -1989,9 +1914,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             Value::String(result)
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for +=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for +="));
         }
     };
     let assignment_expr = match &result {
@@ -2010,9 +1933,7 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln - rn),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for -=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for -="));
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2027,9 +1948,7 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln * rn),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for *=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for *="));
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2044,47 +1963,31 @@ fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln.powf(rn)),
         (Value::BigInt(la), Value::BigInt(rb)) => {
-            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                message: "invalid bigint".to_string(),
-            })?;
-            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                message: "invalid bigint".to_string(),
-            })?;
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
             if b < BigInt::from(0) {
-                return Err(JSError::EvaluationError {
-                    message: "negative exponent for bigint".to_string(),
-                });
+                return Err(eval_error_here!("negative exponent for bigint"));
             }
-            let exp = b.to_u32().ok_or(JSError::EvaluationError {
-                message: "exponent too large".to_string(),
-            })?;
+            let exp = b.to_u32().ok_or(eval_error_here!("exponent too large"))?;
             Value::BigInt(a.pow(exp).to_string())
         }
         (Value::BigInt(la), Value::Number(rn)) => {
             if rn < 0.0 || rn.fract() != 0.0 {
-                return Err(JSError::EvaluationError {
-                    message: "invalid exponent for bigint".to_string(),
-                });
+                return Err(eval_error_here!("invalid exponent for bigint"));
             }
             let exp_u = rn as u32;
-            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                message: "invalid bigint".to_string(),
-            })?;
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
             Value::BigInt(a.pow(exp_u).to_string())
         }
         (Value::Number(ln), Value::BigInt(rb)) => {
             if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
                 Value::Number(ln.powf(rv))
             } else {
-                return Err(JSError::EvaluationError {
-                    message: "invalid exponent".to_string(),
-                });
+                return Err(eval_error_here!("invalid exponent for bigint"));
             }
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for **=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for **="));
         }
     };
 
@@ -2105,16 +2008,12 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => {
             if rn == 0.0 {
-                return Err(JSError::EvaluationError {
-                    message: "Division by zero".to_string(),
-                });
+                return Err(eval_error_here!("Division by zero"));
             }
             Value::Number(ln / rn)
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for /=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for /="));
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2129,16 +2028,12 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => {
             if rn == 0.0 {
-                return Err(JSError::EvaluationError {
-                    message: "Division by zero".to_string(),
-                });
+                return Err(eval_error_here!("Division by zero"));
             }
             Value::Number(ln % rn)
         }
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Invalid operands for %=".to_string(),
-            });
+            return Err(eval_error_here!("Invalid operands for %="));
         }
     };
     let Value::Number(n) = result else { unreachable!() };
@@ -2160,9 +2055,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                     obj_set_value(&obj_map, &prop.into(), val.clone())?;
                     Ok(val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Cannot assign to property of non-object".to_string(),
-                }),
+                _ => Err(eval_error_here!("Cannot assign to property of non-object")),
             }
         }
         Expr::Index(obj, idx) => {
@@ -2184,14 +2077,10 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                     obj_set_value(&obj_map, &key, val.clone())?;
                     Ok(val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Invalid index assignment".to_string(),
-                }),
+                _ => Err(eval_error_here!("Invalid index assignment")),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid assignment target".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid assignment target")),
     }
 }
 
@@ -2201,9 +2090,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     let new_val = match current_val {
         Value::Number(n) => Value::Number(n + 1.0),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Increment operand must be a number".to_string(),
-            });
+            return Err(eval_error_here!("Increment operand must be a number"));
         }
     };
     // Assign back
@@ -2219,9 +2106,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
                     obj_set_value(&obj_map, &prop.into(), new_val.clone())?;
                     Ok(new_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Cannot increment property of non-object".to_string(),
-                }),
+                _ => Err(eval_error_here!("Cannot increment property of non-object")),
             }
         }
         Expr::Index(obj, idx) => {
@@ -2243,14 +2128,10 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Invalid index increment".to_string(),
-                }),
+                _ => Err(eval_error_here!("Invalid index increment")),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid increment target".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid increment target")),
     }
 }
 
@@ -2260,9 +2141,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     let new_val = match current_val {
         Value::Number(n) => Value::Number(n - 1.0),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Decrement operand must be a number".to_string(),
-            });
+            return Err(eval_error_here!("Decrement operand must be a number"));
         }
     };
     // Assign back
@@ -2278,9 +2157,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
                     obj_set_value(&obj_map, &prop.into(), new_val.clone())?;
                     Ok(new_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Cannot decrement property of non-object".to_string(),
-                }),
+                _ => Err(eval_error_here!("Cannot decrement property of non-object")),
             }
         }
         Expr::Index(obj, idx) => {
@@ -2302,14 +2179,10 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
                     obj_set_value(&obj_map, &key, new_val.clone())?;
                     Ok(new_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Invalid index decrement".to_string(),
-                }),
+                _ => Err(eval_error_here!("Invalid index decrement")),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid decrement target".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid decrement target")),
     }
 }
 
@@ -2320,9 +2193,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     let new_val = match current_val {
         Value::Number(n) => Value::Number(n + 1.0),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Increment operand must be a number".to_string(),
-            });
+            return Err(eval_error_here!("Increment operand must be a number"));
         }
     };
     // Assign back
@@ -2338,9 +2209,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
                     obj_set_value(&obj_map, &prop.into(), new_val)?;
                     Ok(old_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Cannot increment property of non-object".to_string(),
-                }),
+                _ => Err(eval_error_here!("Cannot increment property of non-object")),
             }
         }
         Expr::Index(obj, idx) => {
@@ -2362,14 +2231,10 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Invalid index increment".to_string(),
-                }),
+                _ => Err(eval_error_here!("Invalid index increment")),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid increment target".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid increment target")),
     }
 }
 
@@ -2380,9 +2245,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     let new_val = match current_val {
         Value::Number(n) => Value::Number(n - 1.0),
         _ => {
-            return Err(JSError::EvaluationError {
-                message: "Decrement operand must be a number".to_string(),
-            });
+            return Err(eval_error_here!("Decrement operand must be a number"));
         }
     };
     // Assign back
@@ -2398,9 +2261,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
                     obj_set_value(&obj_map, &prop.into(), new_val)?;
                     Ok(old_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Cannot decrement property of non-object".to_string(),
-                }),
+                _ => Err(eval_error_here!("Cannot decrement property of non-object")),
             }
         }
         Expr::Index(obj, idx) => {
@@ -2422,14 +2283,10 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
                     obj_set_value(&obj_map, &key, new_val)?;
                     Ok(old_val)
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "Invalid index decrement".to_string(),
-                }),
+                _ => Err(eval_error_here!("Invalid index decrement")),
             }
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid decrement target".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid decrement target")),
     }
 }
 
@@ -2437,9 +2294,7 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     let val = evaluate_expr(env, expr)?;
     match val {
         Value::Number(n) => Ok(Value::Number(-n)),
-        _ => Err(JSError::EvaluationError {
-            message: "error".to_string(),
-        }),
+        _ => Err(eval_error_here!("error")),
     }
 }
 
@@ -2537,12 +2392,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
                 (Value::BigInt(la), Value::BigInt(rb)) => {
                     // BigInt + BigInt -> BigInt
-                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                        message: "invalid bigint".to_string(),
-                    })?;
-                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                        message: "invalid bigint".to_string(),
-                    })?;
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                     Ok(Value::BigInt((a + b).to_string()))
                 }
                 (Value::String(ls), Value::String(rs)) => {
@@ -2593,71 +2444,45 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     result.extend_from_slice(&rs);
                     Ok(Value::String(result))
                 }
-                _ => Err(JSError::EvaluationError {
-                    message: "error".to_string(),
-                }),
+                _ => Err(eval_error_here!("error")),
             }
         }
         BinaryOp::Sub => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::BigInt((a - b).to_string()))
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Mul => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::BigInt((a * b).to_string()))
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Pow => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln.powf(rn))),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 // exponent must be non-negative and fit into u32 for pow
                 if b < BigInt::from(0) {
-                    return Err(JSError::EvaluationError {
-                        message: "negative exponent for bigint".to_string(),
-                    });
+                    return Err(eval_error_here!("negative exponent for bigint"));
                 }
-                let exp = b.to_u32().ok_or(JSError::EvaluationError {
-                    message: "exponent too large".to_string(),
-                })?;
+                let exp = b.to_u32().ok_or(eval_error_here!("exponent too large"))?;
                 Ok(Value::BigInt(a.pow(exp).to_string()))
             }
             (Value::BigInt(la), Value::Number(rn)) => {
                 if rn < 0.0 || rn.fract() != 0.0 {
-                    return Err(JSError::EvaluationError {
-                        message: "invalid exponent for bigint".to_string(),
-                    });
+                    return Err(eval_error_here!("invalid exponent for bigint"));
                 }
                 let exp_u = rn as u32;
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::BigInt(a.pow(exp_u).to_string()))
             }
             // number ** bigint -> try converting bigint to number if possible
@@ -2665,43 +2490,29 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
                     Ok(Value::Number(ln.powf(rv)))
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "invalid exponent".to_string(),
-                    })
+                    Err(eval_error_here!("invalid exponent"))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Div => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => {
                 if rn == 0.0 {
-                    Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    })
+                    Err(eval_error_here!("error"))
                 } else {
                     Ok(Value::Number(ln / rn))
                 }
             }
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 if b == BigInt::from(0) {
-                    Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    })
+                    Err(eval_error_here!("error"))
                 } else {
                     Ok(Value::BigInt((a / b).to_string()))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Equal => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
@@ -2714,9 +2525,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if rn.fract() == 0.0
                     && let Some(i) = rn.to_i128()
                 {
-                    let b = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                        message: "invalid bigint".to_string(),
-                    })?;
+                    let b = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                     return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
                 }
                 // otherwise compare numeric conversion (may lose precision)
@@ -2733,9 +2542,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if ln.fract() == 0.0
                     && let Some(i) = ln.to_i128()
                 {
-                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                        message: "invalid bigint".to_string(),
-                    })?;
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                     return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
                 }
                 if let Some(bf) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
@@ -2779,12 +2586,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::Number(if a < b { 1.0 } else { 0.0 }))
             }
             (Value::BigInt(la), Value::Number(rn)) => {
@@ -2807,20 +2610,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(0.0))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::GreaterThan => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::Number(if a > b { 1.0 } else { 0.0 }))
             }
             (Value::BigInt(la), Value::Number(rn)) => {
@@ -2843,20 +2640,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(0.0))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::LessEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::Number(if a <= b { 1.0 } else { 0.0 }))
             }
             (Value::BigInt(la), Value::Number(rn)) => {
@@ -2879,20 +2670,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(0.0))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::GreaterEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::Number(if a >= b { 1.0 } else { 0.0 }))
             }
             (Value::BigInt(la), Value::Number(rn)) => {
@@ -2915,38 +2700,26 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(0.0))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Mod => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => {
                 if rn == 0.0 {
-                    Err(JSError::EvaluationError {
-                        message: "Division by zero".to_string(),
-                    })
+                    Err(eval_error_here!("Division by zero"))
                 } else {
                     Ok(Value::Number(ln % rn))
                 }
             }
             (Value::BigInt(la), Value::BigInt(rb)) => {
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
-                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(JSError::EvaluationError {
-                    message: "invalid bigint".to_string(),
-                })?;
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 if b == BigInt::from(0) {
-                    Err(JSError::EvaluationError {
-                        message: "Division by zero".to_string(),
-                    })
+                    Err(eval_error_here!("Division by zero"))
                 } else {
                     Ok(Value::BigInt((a % b).to_string()))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "Modulo operation only supported for numbers".to_string(),
-            }),
+            _ => Err(eval_error_here!("Modulo operation only supported for numbers")),
         },
         BinaryOp::InstanceOf => {
             // Check if left is an instance of right (constructor)
@@ -3042,9 +2815,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
             // No symbol-keyed properties available on Function values in the current model
             Ok(Value::Undefined)
         }
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid index type".to_string(),
-        }), // other types of indexing not supported yet
+        _ => Err(eval_error_here!("Invalid index type")), // other types of indexing not supported yet
     }
 }
 
@@ -3078,23 +2849,19 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                     {
                         return Ok(Value::Symbol(sd.clone()));
                     }
-                    Err(JSError::EvaluationError {
-                        message: format!("Property not found for Symbol constructor property: {prop}"),
-                    })
+                    Err(eval_error_here!(format!(
+                        "Property not found for Symbol constructor property: {prop}"
+                    )))
                 });
             }
 
-            Err(JSError::EvaluationError {
-                message: format!("Property not found for prop={prop}"),
-            })
+            Err(eval_error_here!(format!("Property not found for prop={prop}")))
         }
         // For boolean and other primitive types, property access should usually
         // coerce to a primitive wrapper or return undefined if not found. To
         // keep things simple, return undefined for boolean properties.
         Value::Boolean(_) => Ok(Value::Undefined),
-        _ => Err(JSError::EvaluationError {
-            message: format!("Property not found for prop={prop}"),
-        }),
+        _ => Err(eval_error_here!(format!("Property not found for prop={prop}"))),
     }
 }
 
@@ -3127,9 +2894,7 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
                 Ok(Value::Undefined)
             })
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Property not found for prop={prop}"),
-        }),
+        _ => Err(eval_error_here!(format!("Property not found for prop={prop}"))),
     }
 }
 
@@ -3193,9 +2958,7 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
         (Value::Function(_f), Value::Number(_n)) => Ok(Value::Undefined),
         (Value::Function(_f), Value::Symbol(_sym)) => Ok(Value::Undefined),
         // If obj isn't undefined and index types aren't supported, propagate as error
-        _ => Err(JSError::EvaluationError {
-            message: "Invalid index type".to_string(),
-        }),
+        _ => Err(eval_error_here!("Invalid index type")),
     }
 }
 
@@ -3315,14 +3078,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 evaluate_statements(&func_env, &body)
                             }
                             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-                            _ => Err(JSError::EvaluationError {
-                                message: format!("Property '{}' is not a function", method),
-                            }),
+                            _ => Err(eval_error_here!(format!("Property '{method}' is not a function"))),
                         }
                     } else {
-                        Err(JSError::EvaluationError {
-                            message: format!("Method {method} not found on object"),
-                        })
+                        Err(eval_error_here!(format!("Method {method} not found on object")))
                     }
                 }
             }
@@ -3333,16 +3092,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method, args, env),
                     "Date" => crate::js_date::handle_date_static_method(method, args, env),
-                    _ => Err(JSError::EvaluationError {
-                        message: format!("{} has no static method '{}'", func_name, method),
-                    }),
+                    _ => Err(eval_error_here!(format!("{func_name} has no static method '{method}'"))),
                 }
             }
             (Value::String(s), method) => crate::js_string::handle_string_method(&s, method, args, env),
             (Value::Number(n), method) => crate::js_number::handle_number_instance_method(&n, method, args, env),
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         }
     } else if let Expr::OptionalProperty(obj_expr, method_name) = func_expr {
         // Optional method call
@@ -3356,16 +3111,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method_name, args, env),
-                    _ => Err(JSError::EvaluationError {
-                        message: format!("{} has no static method '{}'", func_name, method_name),
-                    }),
+                    _ => Err(eval_error_here!(format!("{func_name} has no static method '{method_name}'"))),
                 }
             }
             Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
             Value::Number(n) => crate::js_number::handle_number_instance_method(&n, method_name, args, env),
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         }
     } else {
         // Regular function call
@@ -3396,14 +3147,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: "error".to_string(),
-                    })
+                    Err(eval_error_here!("error"))
                 }
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         }
     }
 }
@@ -3481,9 +3228,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 } else if is_class_instance(&obj_map)? {
                     call_class_method(&obj_map, method_name, args, env)
                 } else {
-                    Err(JSError::EvaluationError {
-                        message: format!("Method {method_name} not found on object"),
-                    })
+                    Err(eval_error_here!(format!("Method {method_name} not found on object")))
                 }
             }
             Value::Function(func_name) => {
@@ -3492,16 +3237,12 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
                     "Date" => crate::js_date::handle_date_static_method(method_name, args, env),
-                    _ => Err(JSError::EvaluationError {
-                        message: format!("{} has no static method '{}'", func_name, method_name),
-                    }),
+                    _ => Err(eval_error_here!(format!("{func_name} has no static method '{method_name}'"))),
                 }
             }
             Value::String(s) => crate::js_string::handle_string_method(&s, method_name, args, env),
             Value::Number(n) => crate::js_number::handle_number_instance_method(&n, method_name, args, env),
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         }
     } else {
         // Regular function call - check if base is null/undefined
@@ -3527,9 +3268,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Execute function body
                 evaluate_statements(&func_env, &body)
             }
-            _ => Err(JSError::EvaluationError {
-                message: "error".to_string(),
-            }),
+            _ => Err(eval_error_here!("error")),
         }
     }
 }
@@ -3547,9 +3286,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                         obj.borrow_mut().insert(prop_key.clone(), prop_val.clone());
                     }
                 } else {
-                    return Err(JSError::EvaluationError {
-                        message: "Spread operator can only be applied to objects".to_string(),
-                    });
+                    return Err(eval_error_here!("Spread operator can only be applied to objects"));
                 }
             }
         } else {
@@ -3591,9 +3328,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        return Err(JSError::EvaluationError {
-                            message: "Getter must be a function".to_string(),
-                        });
+                        return Err(eval_error_here!("Getter must be a function"));
                     }
                 }
                 Expr::Setter(func_expr) => {
@@ -3633,9 +3368,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                                 .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        return Err(JSError::EvaluationError {
-                            message: "Setter must be a function".to_string(),
-                        });
+                        return Err(eval_error_here!("Setter must be a function"));
                     }
                 }
                 _ => {
@@ -3695,9 +3428,7 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
                     }
                 }
             } else {
-                return Err(JSError::EvaluationError {
-                    message: "Spread operator can only be applied to arrays".to_string(),
-                });
+                return Err(eval_error_here!("Spread operator can only be applied to arrays"));
             }
         } else {
             let value = evaluate_expr(env, elem_expr)?;
@@ -3712,16 +3443,12 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
 
 fn evaluate_array_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<DestructuringElement>) -> Result<Value, JSError> {
     // Array destructuring is handled at the statement level, not as an expression
-    Err(JSError::EvaluationError {
-        message: "Array destructuring should not be evaluated as an expression".to_string(),
-    })
+    Err(eval_error_here!("Array destructuring should not be evaluated as an expression"))
 }
 
 fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDestructuringElement>) -> Result<Value, JSError> {
     // Object destructuring is handled at the statement level, not as an expression
-    Err(JSError::EvaluationError {
-        message: "Object destructuring should not be evaluated as an expression".to_string(),
-    })
+    Err(eval_error_here!("Object destructuring should not be evaluated as an expression"))
 }
 
 fn collect_var_names(statements: &[Statement], names: &mut std::collections::HashSet<String>) {
@@ -3907,9 +3634,7 @@ fn handle_optional_method_call(
                             evaluate_statements(&func_env, &body)
                         }
                         Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-                        _ => Err(JSError::EvaluationError {
-                            message: format!("Property '{}' is not a function", method),
-                        }),
+                        _ => Err(eval_error_here!(format!("Property '{method}' is not a function"))),
                     }
                 } else {
                     Ok(Value::Undefined)
@@ -4002,9 +3727,7 @@ fn expand_spread_in_call_args(env: &JSObjectDataPtr, args: &[Expr], evaluated_ar
                     }
                 }
             } else {
-                return Err(JSError::EvaluationError {
-                    message: "Spread operator can only be applied to arrays in function calls".to_string(),
-                });
+                return Err(eval_error_here!("Spread operator can only be applied to arrays in function calls"));
             }
         } else {
             let arg_val = evaluate_expr(env, arg_expr)?;
@@ -4086,8 +3809,6 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
             obj_set_value(&obj, &prop.into(), val)?;
             Ok(Some(Value::Object(obj)))
         }
-        _ => Err(JSError::EvaluationError {
-            message: "not an object".to_string(),
-        }),
+        _ => Err(eval_error_here!("not an object")),
     }
 }

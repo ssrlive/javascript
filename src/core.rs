@@ -2,6 +2,7 @@
 #![allow(non_camel_case_types)]
 
 use crate::error::JSError;
+use crate::eval_error_here;
 use crate::js_promise::{PromiseState, run_event_loop};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
@@ -102,9 +103,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
                     match &promise_borrow.state {
                         PromiseState::Fulfilled(val) => return Ok(val.clone()),
                         PromiseState::Rejected(reason) => {
-                            return Err(JSError::EvaluationError {
-                                message: format!("Promise rejected: {}", value_to_string(reason)),
-                            });
+                            return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
                         }
                         PromiseState::Pending => {
                             // Continue running the event loop

@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
+use crate::eval_error_here;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -108,8 +109,6 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             println!();
             Ok(Value::Undefined)
         }
-        _ => Err(JSError::EvaluationError {
-            message: format!("Console method {method} not implemented"),
-        }),
+        _ => Err(eval_error_here!(format!("Console method {method} not implemented"))),
     }
 }

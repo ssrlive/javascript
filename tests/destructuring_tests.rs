@@ -71,7 +71,7 @@ mod destructuring_tests {
 
         let res = evaluate_script(script);
         match res {
-            Err(JSError::EvaluationError { message }) => {
+            Err(JSError::EvaluationError { message, .. }) => {
                 assert!(message.contains("Cannot destructure property"));
                 assert!(message.contains("seconds"));
             }

@@ -45,7 +45,7 @@ mod std_tests {
         match result {
             Ok(Value::String(s)) => {
                 let out = String::from_utf16_lossy(&s);
-                assert!(out.contains("Evaluation failed") || out.contains("ParseError"));
+                assert!(out.contains("Evaluation failed") || out.contains("Parsing failed"));
             }
             _ => panic!("Expected error string in catch body, got {:?}", result),
         }

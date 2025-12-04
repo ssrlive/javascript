@@ -191,7 +191,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     } else {
                         None
                     };
-                    return crate::js_testintl::create_mock_intl_instance(locale_arg);
+                    return crate::js_testintl::create_mock_intl_instance(locale_arg, env);
                 }
                 _ => {
                     log::warn!("evaluate_new - constructor is not an object or closure: Function({func_name})",);

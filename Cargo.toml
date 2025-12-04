@@ -13,7 +13,7 @@ categories = ["development-tools", "parsing"]
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
-function_name = "0.3"
+fancy-regex = "0.16.2"
 libc = "0.2.178"
 log = "0.4.29"
 num-bigint = "0.4.6"

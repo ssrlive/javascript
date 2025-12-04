@@ -5,6 +5,7 @@ use crate::js_array::set_array_length;
 use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
 };
+use fancy_regex::Regex;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -168,8 +169,80 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     let len = arr.borrow().properties.len();
                     set_array_length(&arr, len)?;
                     Ok(Value::Object(arr))
+                } else if let Value::Object(obj_map) = sep_val {
+                    // Separator is a RegExp-like object
+                    let pattern = match obj_map.borrow().get(&"__regex".into()) {
+                        Some(val) => match &*val.borrow() {
+                            Value::String(s) => String::from_utf16_lossy(s),
+                            _ => return Err(eval_error_here!("split: invalid regex pattern")),
+                        },
+                        None => return Err(eval_error_here!("split: invalid regex object")),
+                    };
+
+                    let flags = match obj_map.borrow().get(&"__flags".into()) {
+                        Some(val) => match &*val.borrow() {
+                            Value::String(s) => String::from_utf16_lossy(s),
+                            _ => String::new(),
+                        },
+                        None => String::new(),
+                    };
+
+                    // Build fancy-regex with inline flags
+                    let mut inline = String::new();
+                    if flags.contains('i') {
+                        inline.push('i');
+                    }
+                    if flags.contains('m') {
+                        inline.push('m');
+                    }
+                    if flags.contains('s') {
+                        inline.push('s');
+                    }
+                    let eff_pat = if inline.is_empty() {
+                        pattern
+                    } else {
+                        format!("(?{}){}", inline, pattern)
+                    };
+
+                    let regex = Regex::new(&eff_pat).map_err(|e| JSError::SyntaxError {
+                        message: format!("Invalid RegExp: {}", e),
+                    })?;
+
+                    // Use UTF-8 slices for splitting — test files use ASCII so this is safe
+                    let input_utf8 = String::from_utf16_lossy(s);
+                    let mut parts_utf8: Vec<String> = Vec::new();
+                    let mut start_byte = 0usize;
+                    while start_byte <= input_utf8.len() {
+                        match regex.find(&input_utf8[start_byte..]) {
+                            Ok(Some(mat)) => {
+                                let match_start = start_byte + mat.start();
+                                parts_utf8.push(input_utf8[start_byte..match_start].to_string());
+                                start_byte = start_byte + mat.end();
+                                if start_byte > input_utf8.len() {
+                                    break;
+                                }
+                            }
+                            Ok(None) => {
+                                parts_utf8.push(input_utf8[start_byte..].to_string());
+                                break;
+                            }
+                            Err(e) => {
+                                return Err(JSError::SyntaxError {
+                                    message: format!("Invalid RegExp: {}", e),
+                                });
+                            }
+                        }
+                    }
+
+                    let arr = Rc::new(RefCell::new(JSObjectData::new()));
+                    for (i, part) in parts_utf8.into_iter().enumerate() {
+                        obj_set_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
+                    }
+                    let len = arr.borrow().properties.len();
+                    set_array_length(&arr, len)?;
+                    Ok(Value::Object(arr))
                 } else {
-                    Err(eval_error_here!("split: argument must be a string"))
+                    Err(eval_error_here!("split: argument must be a string or RegExp"))
                 }
             } else {
                 Err(eval_error_here!(format!("split method expects 1 argument, got {}", args.len())))

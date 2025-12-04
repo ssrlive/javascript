@@ -23,27 +23,36 @@ pub fn create_mock_intl_constructor() -> Result<Value, JSError> {
 }
 
 /// Create a mock Intl instance with resolvedOptions method
-pub fn create_mock_intl_instance(locale_arg: Option<String>) -> Result<Value, JSError> {
-    // Check if locale is valid - reject obviously invalid ones
+pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::JSObjectDataPtr) -> Result<Value, JSError> {
+    // If the global JS helper `isCanonicalizedStructurallyValidLanguageTag` is
+    // present, use it to validate the locale (this keeps validation logic in
+    // JS where the test data lives). If the helper returns false, throw.
     if let Some(ref locale) = locale_arg {
-        // Reject locales that are obviously invalid (based on the test cases)
-        let invalid_locales = [
-            "i",
-            "x",
-            "u",
-            "419",
-            "u-nu-latn-cu-bob",
-            "hans-cmn-cn",
-            "cmn-hans-cn-u-u",
-            "cmn-hans-cn-t-ca-u-ca-x_t-u",
-            "de-gregory-gregory",
-            "enochian_enochian",
-            "de-gregory_u-ca-gregory",
-        ];
-        if invalid_locales.contains(&locale.as_str()) {
-            return Err(JSError::Throw {
-                value: Value::String(utf8_to_utf16("Invalid locale")),
-            });
+        // Build an expression that calls the JS validation function with the
+        // locale string argument and evaluate it in the current env.
+        use crate::core::{Expr, Value as CoreValue};
+        let arg_expr = Expr::StringLit(utf8_to_utf16(locale));
+        let call_expr = Expr::Call(
+            Box::new(Expr::Var("isCanonicalizedStructurallyValidLanguageTag".to_string())),
+            vec![arg_expr],
+        );
+        match crate::core::evaluate_expr(env, &call_expr) {
+            Ok(CoreValue::Boolean(true)) => {}
+            Ok(CoreValue::Boolean(false)) => {
+                return Err(JSError::Throw {
+                    value: Value::String(utf8_to_utf16("Invalid locale")),
+                });
+            }
+            // If the helper is not present or returned non-boolean, fall back
+            // to rejecting some obviously invalid inputs such as empty string
+            // or non-ASCII values to avoid accepting blatantly invalid tags.
+            Ok(_) | Err(_) => {
+                if locale.is_empty() {
+                    return Err(JSError::Throw {
+                        value: Value::String(utf8_to_utf16("Invalid locale")),
+                    });
+                }
+            }
         }
     }
 

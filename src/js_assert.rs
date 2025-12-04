@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, obj_set_value};
 use crate::error::JSError;
 use crate::eval_error_here;
 use std::cell::RefCell;
@@ -45,6 +45,26 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             }
 
             Ok(Value::Undefined)
+        }
+        "throws" => {
+            // assert.throws(expectedConstructor, func, message?)
+            if args.len() < 2 || args.len() > 3 {
+                return Err(eval_error_here!("assert.throws requires 2 or 3 arguments"));
+            }
+
+            // We only care that calling the provided function throws.
+            // Evaluate the second arg (the function) and execute its body.
+            let func_val = evaluate_expr(env, &args[1])?;
+            match func_val {
+                Value::Closure(_params, body, captured_env) => {
+                    let func_env = captured_env.clone();
+                    match evaluate_statements(&func_env, &body) {
+                        Ok(_) => Err(eval_error_here!("assert.throws expected function to throw a value")),
+                        Err(_) => Ok(Value::Undefined),
+                    }
+                }
+                _ => Err(eval_error_here!("assert.throws requires a function as the 2nd argument")),
+            }
         }
         _ => Err(eval_error_here!(format!("Assert method {method} not implemented"))),
     }

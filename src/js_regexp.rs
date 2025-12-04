@@ -2,7 +2,7 @@ use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj
 use crate::error::JSError;
 use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use regex::RegexBuilder;
+use fancy_regex::Regex;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -57,7 +57,6 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 
     // Build regex with flags
     let regex_pattern = pattern.clone();
-    let _regex_flags = regex::RegexBuilder::new("");
 
     // Parse flags
     let mut global = false;
@@ -89,16 +88,25 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
     }
 
-    // Validate the regex pattern by trying to compile it
-    if let Err(e) = RegexBuilder::new(&regex_pattern)
-        .case_insensitive(case_insensitive)
-        .multi_line(multiline)
-        .dot_matches_new_line(dot_matches_new_line)
-        .swap_greed(swap_greed)
-        .crlf(crlf)
-        .unicode(unicode)
-        .build()
-    {
+    // Combine inline flags so fancy-regex can parse features like backreferences
+    let mut inline_flags = String::new();
+    if case_insensitive {
+        inline_flags.push('i');
+    }
+    if multiline {
+        inline_flags.push('m');
+    }
+    if dot_matches_new_line {
+        inline_flags.push('s');
+    }
+    let effective_pattern = if inline_flags.is_empty() {
+        regex_pattern.clone()
+    } else {
+        format!("(?{}){}", inline_flags, regex_pattern)
+    };
+
+    // Validate the regex pattern by trying to compile it via fancy-regex
+    if let Err(e) = Regex::new(&effective_pattern) {
         return Err(JSError::SyntaxError {
             message: format!("Invalid RegExp: {}", e),
         });
@@ -180,19 +188,24 @@ pub(crate) fn handle_regexp_method(
                 None => "".to_string(),
             };
 
-            // Build regex
-            let mut regex_builder = regex::RegexBuilder::new(&pattern);
+            // Build regex using inline flags so fancy-regex supports backrefs etc.
+            let mut inline = String::new();
             if flags.contains('i') {
-                regex_builder.case_insensitive(true);
+                inline.push('i');
             }
             if flags.contains('m') {
-                regex_builder.multi_line(true);
+                inline.push('m');
             }
             if flags.contains('s') {
-                regex_builder.dot_matches_new_line(true);
+                inline.push('s');
             }
+            let eff_pat = if inline.is_empty() {
+                pattern.clone()
+            } else {
+                format!("(?{}){}", inline, pattern)
+            };
 
-            let regex = regex_builder.build().map_err(|e| JSError::SyntaxError {
+            let regex = Regex::new(&eff_pat).map_err(|e| JSError::SyntaxError {
                 message: format!("Invalid RegExp: {e}"),
             })?;
 
@@ -207,48 +220,56 @@ pub(crate) fn handle_regexp_method(
             }
 
             // Execute regex
-            if let Some(captures) = regex.captures(&input[last_index..]) {
-                // Create result array
-                let result_array = Rc::new(RefCell::new(JSObjectData::new()));
+            match regex.captures(&input[last_index..]) {
+                Ok(Some(captures)) => {
+                    // Create result array
+                    let result_array = Rc::new(RefCell::new(JSObjectData::new()));
 
-                // Add matched string
-                if let Some(matched) = captures.get(0) {
-                    obj_set_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
-                    obj_set_value(&result_array, &"index".into(), Value::Number((last_index + matched.start()) as f64))?;
-                    obj_set_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
-                }
-
-                // Add capture groups
-                let mut group_index = 1;
-                for capture in captures.iter().skip(1) {
-                    if let Some(capture_match) = capture {
-                        obj_set_value(
-                            &result_array,
-                            &group_index.to_string().into(),
-                            Value::String(utf8_to_utf16(capture_match.as_str())),
-                        )?;
-                    } else {
-                        obj_set_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                    // Add matched string
+                    if let Some(matched) = captures.get(0) {
+                        obj_set_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
+                        obj_set_value(&result_array, &"index".into(), Value::Number((last_index + matched.start()) as f64))?;
+                        obj_set_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
                     }
-                    group_index += 1;
-                }
 
-                // Set length
-                obj_set_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+                    // Add capture groups
+                    let mut group_index = 1;
+                    for capture in captures.iter().skip(1) {
+                        if let Some(capture_match) = capture {
+                            obj_set_value(
+                                &result_array,
+                                &group_index.to_string().into(),
+                                Value::String(utf8_to_utf16(capture_match.as_str())),
+                            )?;
+                        } else {
+                            obj_set_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                        }
+                        group_index += 1;
+                    }
 
-                // Update lastIndex for global regex
-                if global && let Some(matched) = captures.get(0) {
-                    let new_last_index = last_index + matched.end();
-                    obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
-                }
+                    // Set length
+                    obj_set_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
 
-                Ok(Value::Object(result_array))
-            } else {
-                // Reset lastIndex for global regex on no match
-                if global {
-                    obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                    // Update lastIndex for global regex
+                    if global && let Some(matched) = captures.get(0) {
+                        let new_last_index = last_index + matched.end();
+                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                    }
+
+                    return Ok(Value::Object(result_array));
                 }
-                Ok(Value::Undefined) // RegExp.exec returns null on no match, but we use Undefined
+                Ok(None) => {
+                    // Reset lastIndex for global regex on no match
+                    if global {
+                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                    }
+                    return Ok(Value::Undefined); // RegExp.exec returns null on no match, but we use Undefined
+                }
+                Err(e) => {
+                    return Err(JSError::SyntaxError {
+                        message: format!("Invalid RegExp: {e}"),
+                    });
+                }
             }
         }
         "test" => {
@@ -293,19 +314,23 @@ pub(crate) fn handle_regexp_method(
                 None => "".to_string(),
             };
 
-            // Build regex
-            let mut regex_builder = regex::RegexBuilder::new(&pattern);
+            // Build regex (with inline flags for fancy-regex)
+            let mut inline = String::new();
             if flags.contains('i') {
-                regex_builder.case_insensitive(true);
+                inline.push('i');
             }
             if flags.contains('m') {
-                regex_builder.multi_line(true);
+                inline.push('m');
             }
             if flags.contains('s') {
-                regex_builder.dot_matches_new_line(true);
+                inline.push('s');
             }
-
-            let regex = regex_builder.build().map_err(|e| JSError::SyntaxError {
+            let eff_pat = if inline.is_empty() {
+                pattern.clone()
+            } else {
+                format!("(?{}){}", inline, pattern)
+            };
+            let regex = Regex::new(&eff_pat).map_err(|e| JSError::SyntaxError {
                 message: format!("Invalid RegExp: {}", e),
             })?;
 
@@ -320,13 +345,28 @@ pub(crate) fn handle_regexp_method(
             }
 
             // Test regex
-            let is_match = regex.is_match(&input[last_index..]);
+            let is_match = match regex.is_match(&input[last_index..]) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(JSError::SyntaxError {
+                        message: format!("Invalid RegExp: {e}"),
+                    });
+                }
+            };
 
             // Update lastIndex for global regex
             if global && is_match {
-                if let Some(mat) = regex.find(&input[last_index..]) {
-                    let new_last_index = last_index + mat.end();
-                    obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                match regex.find(&input[last_index..]) {
+                    Ok(Some(mat)) => {
+                        let new_last_index = last_index + mat.end();
+                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        return Err(JSError::SyntaxError {
+                            message: format!("Invalid RegExp: {e}"),
+                        });
+                    }
                 }
             } else if global && !is_match {
                 obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;

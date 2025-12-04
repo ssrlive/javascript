@@ -1,7 +1,7 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
 use crate::eval_error_here;
-use crate::js_array::{is_array, set_array_length};
+use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -30,7 +30,10 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match js_value_to_json_value(arg_val) {
                     Some(json_value) => match serde_json::to_string(&json_value) {
-                        Ok(json_str) => Ok(Value::String(utf8_to_utf16(&json_str))),
+                        Ok(json_str) => {
+                            log::debug!("JSON.stringify produced: {}", json_str);
+                            Ok(Value::String(utf8_to_utf16(&json_str)))
+                        }
                         Err(_) => Ok(Value::Undefined),
                     },
                     None => Ok(Value::Undefined),
@@ -98,16 +101,23 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
         }
         Value::Object(obj) => {
             if is_array(&obj) {
-                let len = obj.borrow().properties.len();
+                let len = get_array_length(&obj).unwrap_or(obj.borrow().properties.len());
+                log::debug!("js_value_to_json_value: array with properties.len() = {}", len);
                 let mut arr = Vec::new();
                 for i in 0..len {
                     if let Some(val) = obj.borrow().get(&i.to_string().into()) {
                         if let Some(json_val) = js_value_to_json_value(val.borrow().clone()) {
                             arr.push(json_val);
                         } else {
+                            log::debug!(
+                                "js_value_to_json_value: array element {} could not be serialized: {:?}",
+                                i,
+                                val.borrow().clone()
+                            );
                             return None;
                         }
                     } else {
+                        log::debug!("js_value_to_json_value: array element {} missing", i);
                         return None;
                     }
                 }

@@ -1644,7 +1644,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::StringLit(s) => evaluate_string_lit(s),
         Expr::Boolean(b) => evaluate_boolean(*b),
         Expr::Var(name) => evaluate_var(env, name),
-        Expr::Assign(_target, value) => evaluate_assign(env, value),
+        Expr::Assign(target, value) => evaluate_assign(env, target, value),
         Expr::LogicalAndAssign(target, value) => evaluate_logical_and_assign(env, target, value),
         Expr::LogicalOrAssign(target, value) => evaluate_logical_or_assign(env, target, value),
         Expr::NullishAssign(target, value) => evaluate_nullish_assign(env, target, value),
@@ -1840,17 +1840,23 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(Value::Number(f64::NAN))
     } else if name == "Infinity" {
         Ok(Value::Number(f64::INFINITY))
-    } else if let Some(val_rc) = obj_get_value(env, &name.into())? {
-        log::trace!("evaluate_var - {name} (found)");
-        Ok(val_rc.borrow().clone())
     } else {
+        // Walk up the prototype chain (scope chain) to find the variable binding.
+        let mut current_opt = Some(env.clone());
+        while let Some(current_env) = current_opt {
+            if let Some(val_rc) = obj_get_value(&current_env, &name.into())? {
+                log::trace!("evaluate_var - {name} (found)");
+                return Ok(val_rc.borrow().clone());
+            }
+            current_opt = current_env.borrow().prototype.clone();
+        }
         Ok(Value::Undefined)
     }
 }
 
-fn evaluate_assign(env: &JSObjectDataPtr, value: &Expr) -> Result<Value, JSError> {
-    // Assignment is handled at statement level, just evaluate the value
-    evaluate_expr(env, value)
+fn evaluate_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // Evaluate an assignment expression: perform the assignment and return the assigned value
+    evaluate_assignment_expr(env, target, value)
 }
 
 fn evaluate_logical_and_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
@@ -2045,6 +2051,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
     let val = evaluate_expr(env, value)?;
     match target {
         Expr::Var(name) => {
+            log::debug!("evaluate_assignment_expr: assigning Var '{}' = {:?}", name, val);
             env_set_recursive(env, name, val.clone())?;
             Ok(val)
         }
@@ -2577,9 +2584,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::StrictNotEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la != rb { 1.0 } else { 0.0 })),
             (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb != rb { 1.0 } else { 0.0 })),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Number(0.0)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 0.0 } else { 1.0 })),
             _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
         },
         BinaryOp::LessThan => match (l, r) {
@@ -2751,6 +2761,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
 fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
     let idx_val = evaluate_expr(env, idx)?;
+    log::trace!("evaluate_index: obj_val={obj_val:?} idx_val={idx_val:?}");
     match (obj_val, idx_val) {
         (Value::String(s), Value::Number(n)) => {
             let idx = n as usize;
@@ -3142,6 +3153,36 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 evaluate_statements(&func_env, &body)
             }
             Value::Object(obj_map) => {
+                // Support calling the `assert` testing object as a function as well
+                // Many tests use `assert(condition, message)` in addition to
+                // `assert.sameValue(...)`. If this object appears to be the
+                // assert object (it exposes `sameValue`), treat a direct call
+                // as an assertion: evaluate the first argument for truthiness
+                // and throw an EvaluationError with the given message when
+                // the assertion fails.
+                if obj_map.borrow().contains_key(&"sameValue".into()) {
+                    if args.is_empty() {
+                        return Err(eval_error_here!("assert requires at least one argument"));
+                    }
+                    // Evaluate the condition
+                    let cond_val = evaluate_expr(env, &args[0])?;
+                    if is_truthy(&cond_val) {
+                        return Ok(Value::Undefined);
+                    }
+
+                    // Build a message from the optional second argument
+                    let message = if args.len() > 1 {
+                        let msg_val = evaluate_expr(env, &args[1])?;
+                        match msg_val {
+                            Value::String(s) => String::from_utf16_lossy(&s),
+                            other => value_to_string(&other),
+                        }
+                    } else {
+                        "Assertion failed".to_string()
+                    };
+
+                    return Err(eval_error_here!(format!("{message}")));
+                }
                 // Check if this is a built-in constructor object
                 if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     // Number constructor call

@@ -45,9 +45,10 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
             }
             // If the helper is not present or returned non-boolean, fall back
             // to rejecting some obviously invalid inputs such as empty string
-            // or non-ASCII values to avoid accepting blatantly invalid tags.
+            // or very short tags like single-character tags (e.g. 'i') which
+            // the tests expect to be considered invalid.
             Ok(_) | Err(_) => {
-                if locale.is_empty() {
+                if locale.is_empty() || locale.len() < 2 {
                     return Err(JSError::Throw {
                         value: Value::String(utf8_to_utf16("Invalid locale")),
                     });

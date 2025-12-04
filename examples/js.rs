@@ -52,10 +52,10 @@ fn main() {
 
 fn print_eval_result(result: &Value) {
     match result {
-        Value::Number(n) => println!("{}", n),
+        Value::Number(n) => println!("{n}"),
         Value::String(s) => println!("{}", String::from_utf16_lossy(s)),
-        Value::Boolean(b) => println!("{}", b),
-        Value::Undefined => println!("undefined"),
+        Value::Boolean(b) => println!("{b}"),
+        Value::Undefined => {} // println!("undefined"),
         Value::Object(_) => println!("[object Object]"),
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),
@@ -65,7 +65,7 @@ fn print_eval_result(result: &Value) {
         Value::Property { .. } => println!("[Property]"),
         Value::Promise(_) => println!("[object Promise]"),
         Value::Symbol(_) => println!("[object Symbol]"),
-        Value::BigInt(s) => println!("{}", s),
+        Value::BigInt(s) => println!("{s}"),
     }
 }
 

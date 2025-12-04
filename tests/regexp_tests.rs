@@ -150,4 +150,130 @@ mod regexp_tests {
             _ => panic!("expected array/object result"),
         }
     }
+
+    #[test]
+    fn test_regexp_sticky_behavior() {
+        let script = r#"
+        (function(){
+            var s = 'abc 123 xyz';
+            var r = new RegExp('\\d+','y');
+            r.__lastIndex = 4; // position of '1'
+            var m = r.exec(s);
+            return m ? m[0] : 'nomatch';
+        })()
+        "#;
+
+        let result = evaluate_script(script).unwrap();
+        match result {
+            Value::String(s) => {
+                let s0 = String::from_utf16_lossy(&s);
+                assert_eq!(s0, "123");
+            }
+            _ => panic!("Expected string result for sticky match"),
+        }
+    }
+
+    #[test]
+    fn test_regexp_swap_greed_behavior() {
+        // 'U' flag should swap default greediness (greedy -> lazy), so first match is minimal
+        let script = r#"
+        (function(){
+            var s = 'a111b222b';
+            var r = new RegExp('a.*b','gU');
+            var m = r.exec(s);
+            return m ? m[0] : 'nomatch';
+        })()
+        "#;
+
+        let result = evaluate_script(script).unwrap();
+        match result {
+            Value::String(s) => {
+                let val = String::from_utf16_lossy(&s);
+                // With swap_greed, '.*' should match lazily -> 'a111b'
+                assert_eq!(val, "a111b");
+            }
+            _ => panic!("Expected string result for swap_greed match"),
+        }
+    }
+
+    #[test]
+    fn test_regexp_crlf_normalization() {
+        // 'R' flag should allow patterns expecting '\n' to match CRLF sequences in the original string
+        let script = r#"
+        (function(){
+            var s = 'o\r\nw';
+            var r = new RegExp('o\\nw','gR');
+            var m = r.exec(s);
+            return m ? m[0] : 'nomatch';
+        })()
+        "#;
+
+        let result = evaluate_script(script).unwrap();
+        match result {
+            Value::String(s) => {
+                let val = String::from_utf16_lossy(&s);
+                // Expect the returned match to reflect the original string with CRLF
+                assert_eq!(val, "o\r\nw");
+            }
+            _ => panic!("Expected string result for CRLF match"),
+        }
+    }
+
+    #[test]
+    fn test_regexp_unicode_lastindex_u_flag() {
+        // Ensure lastIndex and returned index behave correctly with surrogate pairs
+        // construct a string containing a surrogate pair (emoji) between ascii chars
+        let script = r#"
+        (function(){
+            var s = 'a\uD83D\uDE00b'; // 'a' + 😀 + 'b'
+            var r = new RegExp('.', 'gu');
+            var matches = [];
+            var m;
+            while ((m = r.exec(s)) !== null) {
+                matches.push(m[0]);
+                matches.push(r.__lastIndex);
+            }
+            // matches will be alternating values [match0, idx0, match1, idx1, ...]
+            return JSON.stringify(matches);
+        })()
+        "#;
+
+        let result = evaluate_script(script).unwrap();
+        match result {
+            Value::String(s) => {
+                let s0 = String::from_utf16_lossy(&s);
+                // Expect three matches: 'a', surrogate pair (as one code point), 'b'
+                // lastIndex returns UTF-16 code-unit index after match. After 'a' index is 1, after emoji index should be 3, and after 'b' index should be 4
+                // JSON.stringify produced an array like ["a",1,"😀",3,"b",4]
+                assert!(s0.contains("\"a\",1"));
+                assert!(s0.contains("\"😀\",3"));
+                assert!(s0.contains("\"b\",4"));
+            }
+            _ => panic!("Expected stringified results for unicode lastIndex test"),
+        }
+    }
+
+    #[test]
+    fn test_regexp_swap_greed_complex_patterns() {
+        // Test nested quantifiers and brace ranges that could be tricky for swapping greediness
+        let script = r#"
+        (function(){
+            var s = 'abcccxbcc';
+            // complex nested pattern: 'a(bc+)+x' - greedy normally grabs as much as possible
+            var r = new RegExp('a(bc+)+x','U');
+            var m = r.exec(s);
+            return m ? m[0] : 'nomatch';
+        })()
+        "#;
+
+        let result = evaluate_script(script).unwrap();
+        match result {
+            Value::String(s) => {
+                let val = String::from_utf16_lossy(&s);
+                // With U flag (swap greed), the match should be minimal and stop at the first bc sequence -> 'abcccx'
+                assert_eq!(val, "abcccx");
+            }
+            _ => panic!("Expected string result for complex swap_greed test"),
+        }
+    }
 }

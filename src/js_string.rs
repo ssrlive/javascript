@@ -217,7 +217,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                             Ok(Some(mat)) => {
                                 let match_start = start_byte + mat.start();
                                 parts_utf8.push(input_utf8[start_byte..match_start].to_string());
-                                start_byte = start_byte + mat.end();
+                                start_byte += mat.end();
                                 if start_byte > input_utf8.len() {
                                     break;
                                 }

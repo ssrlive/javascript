@@ -89,37 +89,30 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     // Initialize global built-in constructors
     initialize_global_constructors(&env);
 
-    match evaluate_statements(&env, &statements) {
-        Ok(v) => {
-            // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
-            if let Value::Object(obj) = &v
-                && let Some(promise_val_rc) = obj_get_value(obj, &"__promise".into())?
-                && let Value::Promise(promise) = &*promise_val_rc.borrow()
-            {
-                // Run the event loop until the promise is resolved
-                loop {
-                    run_event_loop()?;
-                    let promise_borrow = promise.borrow();
-                    match &promise_borrow.state {
-                        PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                        PromiseState::Rejected(reason) => {
-                            return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
-                        }
-                        PromiseState::Pending => {
-                            // Continue running the event loop
-                        }
-                    }
+    let v = evaluate_statements(&env, &statements)?;
+    // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
+    if let Value::Object(obj) = &v
+        && let Some(promise_val_rc) = obj_get_value(obj, &"__promise".into())?
+        && let Value::Promise(promise) = &*promise_val_rc.borrow()
+    {
+        // Run the event loop until the promise is resolved
+        loop {
+            run_event_loop()?;
+            let promise_borrow = promise.borrow();
+            match &promise_borrow.state {
+                PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                PromiseState::Rejected(reason) => {
+                    return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
+                }
+                PromiseState::Pending => {
+                    // Continue running the event loop
                 }
             }
-            // Run the event loop to process any queued asynchronous tasks
-            run_event_loop()?;
-            Ok(v)
-        }
-        Err(e) => {
-            log::debug!("evaluate_statements error: {e:?}");
-            Err(e)
         }
     }
+    // Run the event loop to process any queued asynchronous tasks
+    run_event_loop()?;
+    Ok(v)
 }
 
 #[derive(Debug, Clone)]

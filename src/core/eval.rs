@@ -1907,6 +1907,11 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            Value::BigInt((a + b).to_string())
+        }
         (Value::String(ls), Value::String(rs)) => {
             let mut result = ls.clone();
             result.extend_from_slice(&rs);
@@ -1922,6 +1927,12 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             result.extend_from_slice(&utf8_to_utf16(&rn.to_string()));
             Value::String(result)
         }
+        // Disallow mixing BigInt and Number for arithmetic
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
+        }
         _ => {
             return Err(eval_error_here!("Invalid operands for +="));
         }
@@ -1929,6 +1940,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let assignment_expr = match &result {
         Value::Number(n) => Expr::Number(*n),
         Value::String(s) => Expr::StringLit(s.clone()),
+        Value::BigInt(s) => Expr::BigInt(s.clone()),
         _ => unreachable!(),
     };
     evaluate_assignment_expr(env, target, &assignment_expr)?;
@@ -1941,12 +1953,29 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln - rn),
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            Value::BigInt((a - b).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
+        }
         _ => {
             return Err(eval_error_here!("Invalid operands for -="));
         }
     };
-    let Value::Number(n) = result else { unreachable!() };
-    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
     Ok(result)
 }
 
@@ -1956,12 +1985,29 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln * rn),
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            Value::BigInt((a * b).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
+        }
         _ => {
             return Err(eval_error_here!("Invalid operands for *="));
         }
     };
-    let Value::Number(n) = result else { unreachable!() };
-    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
     Ok(result)
 }
 
@@ -1980,33 +2026,27 @@ fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let exp = b.to_u32().ok_or(eval_error_here!("exponent too large"))?;
             Value::BigInt(a.pow(exp).to_string())
         }
-        (Value::BigInt(la), Value::Number(rn)) => {
-            if rn < 0.0 || rn.fract() != 0.0 {
-                return Err(eval_error_here!("invalid exponent for bigint"));
-            }
-            let exp_u = rn as u32;
-            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-            Value::BigInt(a.pow(exp_u).to_string())
-        }
-        (Value::Number(ln), Value::BigInt(rb)) => {
-            if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                Value::Number(ln.powf(rv))
-            } else {
-                return Err(eval_error_here!("invalid exponent for bigint"));
-            }
+        // Mixing BigInt and Number is disallowed for exponentiation
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
         }
         _ => {
             return Err(eval_error_here!("Invalid operands for **="));
         }
     };
 
-    // update assignment target
-    let assignment_expr = match &result {
-        Value::Number(n) => Expr::Number(*n),
-        Value::BigInt(s) => Expr::BigInt(s.clone()),
+    // update assignment target (store result back into target)
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
         _ => unreachable!(),
-    };
-    evaluate_assignment_expr(env, target, &assignment_expr)?;
+    }
     Ok(result)
 }
 
@@ -2021,12 +2061,32 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             }
             Value::Number(ln / rn)
         }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            if b == BigInt::from(0) {
+                return Err(eval_error_here!("Division by zero"));
+            }
+            Value::BigInt((a / b).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
+        }
         _ => {
             return Err(eval_error_here!("Invalid operands for /="));
         }
     };
-    let Value::Number(n) = result else { unreachable!() };
-    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
     Ok(result)
 }
 
@@ -2041,12 +2101,32 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             }
             Value::Number(ln % rn)
         }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            if b == BigInt::from(0) {
+                return Err(eval_error_here!("Division by zero"));
+            }
+            Value::BigInt((a % b).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            });
+        }
         _ => {
             return Err(eval_error_here!("Invalid operands for %="));
         }
     };
-    let Value::Number(n) = result else { unreachable!() };
-    evaluate_assignment_expr(env, target, &Expr::Number(n))?;
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
     Ok(result)
 }
 
@@ -2304,6 +2384,12 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     let val = evaluate_expr(env, expr)?;
     match val {
         Value::Number(n) => Ok(Value::Number(-n)),
+        Value::BigInt(s) => {
+            // Negate BigInt
+            let a = BigInt::parse_bytes(s.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+            let neg = -a;
+            Ok(Value::BigInt(neg.to_string()))
+        }
         _ => Err(eval_error_here!("error")),
     }
 }
@@ -2470,6 +2556,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::BigInt((a - b).to_string()))
             }
+            // Mixing BigInt and Number is not allowed for arithmetic
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            }),
             _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Mul => match (l, r) {
@@ -2479,6 +2569,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 Ok(Value::BigInt((a * b).to_string()))
             }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            }),
             _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Pow => match (l, r) {
@@ -2493,22 +2586,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let exp = b.to_u32().ok_or(eval_error_here!("exponent too large"))?;
                 Ok(Value::BigInt(a.pow(exp).to_string()))
             }
-            (Value::BigInt(la), Value::Number(rn)) => {
-                if rn < 0.0 || rn.fract() != 0.0 {
-                    return Err(eval_error_here!("invalid exponent for bigint"));
-                }
-                let exp_u = rn as u32;
-                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                Ok(Value::BigInt(a.pow(exp_u).to_string()))
-            }
-            // number ** bigint -> try converting bigint to number if possible
-            (Value::Number(ln), Value::BigInt(rb)) => {
-                if let Some(rv) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(ln.powf(rv)))
-                } else {
-                    Err(eval_error_here!("invalid exponent"))
-                }
-            }
+            // Mixing BigInt and Number is disallowed for exponentiation
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            }),
             _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Div => match (l, r) {
@@ -2528,6 +2609,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::BigInt((a / b).to_string()))
                 }
             }
+            // Mixing BigInt and Number is not allowed
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            }),
             _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Equal => match (l, r) {
@@ -2952,6 +3037,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::BigInt((a % b).to_string()))
                 }
             }
+            // Mixing BigInt and Number is not allowed
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => Err(JSError::TypeError {
+                message: "Cannot mix BigInt and other types".to_string(),
+            }),
             _ => Err(eval_error_here!("Modulo operation only supported for numbers")),
         },
         BinaryOp::InstanceOf => {

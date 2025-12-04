@@ -62,7 +62,7 @@ fn test_mod_assign_by_zero_error() {
 fn test_assign_to_const_error() {
     let res = eval("const x = 1; x += 2");
     match res {
-        Err(JSError::TypeError { message }) => assert!(message.contains("Assignment to constant") || message.contains("constant")),
+        Err(JSError::TypeError { message, .. }) => assert!(message.contains("Assignment to constant") || message.contains("constant")),
         other => panic!("Expected TypeError for assignment to const, got {:?}", other),
     }
 }

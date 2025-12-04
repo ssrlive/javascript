@@ -20,8 +20,13 @@ pub enum JSError {
     #[error("Variable '{name}' not found")]
     VariableNotFound { name: String },
 
-    #[error("Type error: {message}")]
-    TypeError { message: String },
+    #[error("Type error: {message} at {method} {file}:{line}")]
+    TypeError {
+        message: String,
+        file: String,
+        line: usize,
+        method: String,
+    },
 
     #[error("Syntax error: {message}")]
     SyntaxError { message: String },
@@ -67,6 +72,20 @@ macro_rules! parse_error_here {
 macro_rules! eval_error_here {
     ($msg:expr) => {
         $crate::JSError::EvaluationError {
+            message: $msg.to_string(),
+            file: file!().to_string(),
+            line: line!() as usize,
+            method: $crate::function_name!().to_string(),
+        }
+    };
+}
+
+// Macro that constructs a TypeError using the compile-time caller
+// location and the provided message.
+#[macro_export]
+macro_rules! make_type_error {
+    ($msg:expr) => {
+        $crate::JSError::TypeError {
             message: $msg.to_string(),
             file: file!().to_string(),
             line: line!() as usize,

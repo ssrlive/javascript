@@ -117,24 +117,16 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
         match arg_val {
             Value::Number(n) => {
                 if n.is_nan() {
-                    return Err(JSError::TypeError {
-                        message: "Invalid array length".to_string(),
-                    });
+                    return Err(make_type_error!("Invalid array length"));
                 }
                 if n.fract() != 0.0 {
-                    return Err(JSError::TypeError {
-                        message: "Array length must be an integer".to_string(),
-                    });
+                    return Err(make_type_error!("Array length must be an integer"));
                 }
                 if n < 0.0 {
-                    return Err(JSError::TypeError {
-                        message: "Array length cannot be negative".to_string(),
-                    });
+                    return Err(make_type_error!("Array length cannot be negative"));
                 }
                 if n > u32::MAX as f64 {
-                    return Err(JSError::TypeError {
-                        message: "Array length too large".to_string(),
-                    });
+                    return Err(make_type_error!("Array length too large"));
                 }
                 // Array(length) - create array with specified length
                 let array_obj = Rc::new(RefCell::new(JSObjectData::new()));

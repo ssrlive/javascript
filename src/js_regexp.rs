@@ -1,6 +1,5 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
 use crate::unicode::{utf8_to_utf16, utf16_slice, utf16_to_utf8};
 use fancy_regex::Regex;
 
@@ -148,9 +147,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(JSError::TypeError {
-                    message: "Invalid RegExp pattern".to_string(),
-                });
+                return Err(make_type_error!("Invalid RegExp pattern"));
             }
         };
         (pattern, "".to_string())
@@ -164,9 +161,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(JSError::TypeError {
-                    message: "Invalid RegExp pattern".to_string(),
-                });
+                return Err(make_type_error!("Invalid RegExp pattern"));
             }
         };
 
@@ -175,9 +170,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(JSError::TypeError {
-                    message: "Invalid RegExp flags".to_string(),
-                });
+                return Err(make_type_error!("Invalid RegExp flags"));
             }
         };
 
@@ -281,18 +274,14 @@ pub(crate) fn handle_regexp_method(
     match method {
         "exec" => {
             if args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "RegExp.prototype.exec requires a string argument".to_string(),
-                });
+                return Err(make_type_error!("RegExp.prototype.exec requires a string argument"));
             }
 
             let input_val = evaluate_expr(env, &args[0])?;
             let input = match input_val {
                 Value::String(s) => utf16_to_utf8(&s),
                 _ => {
-                    return Err(JSError::TypeError {
-                        message: "RegExp.prototype.exec requires a string argument".to_string(),
-                    });
+                    return Err(make_type_error!("RegExp.prototype.exec requires a string argument"));
                 }
             };
 
@@ -301,15 +290,11 @@ pub(crate) fn handle_regexp_method(
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => {
-                        return Err(JSError::TypeError {
-                            message: "Invalid regex pattern".to_string(),
-                        });
+                        return Err(make_type_error!("Invalid regex pattern"));
                     }
                 },
                 None => {
-                    return Err(JSError::TypeError {
-                        message: "Invalid regex object".to_string(),
-                    });
+                    return Err(make_type_error!("Invalid regex object"));
                 }
             };
 
@@ -521,18 +506,14 @@ pub(crate) fn handle_regexp_method(
         }
         "test" => {
             if args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "RegExp.prototype.test requires a string argument".to_string(),
-                });
+                return Err(make_type_error!("RegExp.prototype.test requires a string argument"));
             }
 
             let input_val = evaluate_expr(env, &args[0])?;
             let input = match input_val {
                 Value::String(s) => utf16_to_utf8(&s),
                 _ => {
-                    return Err(JSError::TypeError {
-                        message: "RegExp.prototype.test requires a string argument".to_string(),
-                    });
+                    return Err(make_type_error!("RegExp.prototype.test requires a string argument"));
                 }
             };
 
@@ -541,15 +522,11 @@ pub(crate) fn handle_regexp_method(
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => {
-                        return Err(JSError::TypeError {
-                            message: "Invalid regex pattern".to_string(),
-                        });
+                        return Err(make_type_error!("Invalid regex pattern"));
                     }
                 },
                 None => {
-                    return Err(JSError::TypeError {
-                        message: "Invalid regex object".to_string(),
-                    });
+                    return Err(make_type_error!("Invalid regex object"));
                 }
             };
 

@@ -27,7 +27,7 @@ mod const_tests {
         let script = "const x = 42; x = 24";
         let result = evaluate_script(script);
         assert!(result.is_err());
-        if let Err(JSError::TypeError { message }) = result {
+        if let Err(JSError::TypeError { message, .. }) = result {
             assert!(message.contains("Assignment to constant variable"));
         } else {
             panic!("Expected TypeError, got {:?}", result);

@@ -110,9 +110,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
                 if let Some(timestamp) = parse_date_string(&date_str) {
                     timestamp
                 } else {
-                    return Err(JSError::TypeError {
-                        message: "Invalid date".to_string(),
-                    });
+                    return Err(make_type_error!("Invalid date"));
                 }
             }
             Value::Number(n) => {
@@ -120,9 +118,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
                 n
             }
             _ => {
-                return Err(JSError::TypeError {
-                    message: "Invalid date".to_string(),
-                });
+                return Err(make_type_error!("Invalid date"));
             }
         }
     } else {
@@ -133,9 +129,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
             match arg_val {
                 Value::Number(n) => components.push(n),
                 _ => {
-                    return Err(JSError::TypeError {
-                        message: "Date constructor arguments must be numbers".to_string(),
-                    });
+                    return Err(make_type_error!("Date constructor arguments must be numbers"));
                 }
             }
         }
@@ -143,9 +137,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
         if let Some(timestamp) = construct_date_from_components(&components) {
             timestamp
         } else {
-            return Err(JSError::TypeError {
-                message: "Invalid date".to_string(),
-            });
+            return Err(make_type_error!("Invalid date"));
         }
     };
 
@@ -162,9 +154,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
     match method {
         "toString" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -179,61 +169,43 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getTime" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getTime() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getTime() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "valueOf" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.valueOf() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.valueOf() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
                     Ok(Value::Number(timestamp))
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getFullYear" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getFullYear() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getFullYear() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -243,21 +215,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getMonth" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getMonth() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getMonth() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -268,21 +234,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getDate" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getDate() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getDate() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -292,21 +252,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getHours" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getHours() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getHours() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -316,21 +270,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getMinutes" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getMinutes() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getMinutes() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -340,21 +288,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getSeconds" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getSeconds() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getSeconds() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -364,21 +306,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "getMilliseconds" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.getMilliseconds() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.getMilliseconds() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -388,21 +324,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Number(f64::NAN))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toDateString" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toDateString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toDateString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -414,21 +344,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toTimeString" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toTimeString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toTimeString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -440,21 +364,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toISOString" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toISOString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toISOString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -462,26 +380,18 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         let formatted = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                         Ok(Value::String(utf8_to_utf16(&formatted)))
                     } else {
-                        Err(JSError::TypeError {
-                            message: "Invalid time value".to_string(),
-                        })
+                        Err(make_type_error!("Invalid time value"))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toUTCString" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toUTCString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toUTCString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -492,21 +402,15 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toJSON" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toJSON() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toJSON() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -519,23 +423,17 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::Undefined)
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toLocaleString" => {
             // For simplicity, we'll use the same format as toString()
             // In a real implementation, this would use locale-specific formatting
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toLocaleString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toLocaleString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -547,22 +445,16 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toLocaleDateString" => {
             // For simplicity, we'll use the same format as toDateString()
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toLocaleDateString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toLocaleDateString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -574,22 +466,16 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         "toLocaleTimeString" => {
             // For simplicity, we'll use the same format as toTimeString()
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.toLocaleTimeString() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.toLocaleTimeString() takes no arguments"));
             }
             if let Some(timestamp_val) = obj_map.borrow().get(&"__timestamp".into()) {
                 if let Value::Number(timestamp) = *timestamp_val.borrow() {
@@ -601,14 +487,10 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                         Ok(Value::String(utf8_to_utf16("Invalid Date")))
                     }
                 } else {
-                    Err(JSError::TypeError {
-                        message: "Invalid Date object".to_string(),
-                    })
+                    Err(make_type_error!("Invalid Date object"))
                 }
             } else {
-                Err(JSError::TypeError {
-                    message: "Invalid Date object".to_string(),
-                })
+                Err(make_type_error!("Invalid Date object"))
             }
         }
         _ => Err(eval_error_here!(format!("Date has no method '{method}'"))),
@@ -620,9 +502,7 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
     match method {
         "now" => {
             if !args.is_empty() {
-                return Err(JSError::TypeError {
-                    message: "Date.now() takes no arguments".to_string(),
-                });
+                return Err(make_type_error!("Date.now() takes no arguments"));
             }
             use std::time::{SystemTime, UNIX_EPOCH};
             let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();

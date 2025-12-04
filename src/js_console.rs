@@ -16,7 +16,8 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
     match method {
         "log" => {
             // console.log call
-            for arg in args {
+            let count = args.len();
+            for (i, arg) in args.iter().enumerate() {
                 let arg_val = evaluate_expr(env, arg)?;
                 match arg_val {
                     Value::Number(n) => print!("{}", n),
@@ -104,6 +105,9 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
                     Value::Promise(_) => print!("[object Promise]"),
                     Value::Symbol(_) => print!("[object Symbol]"),
+                }
+                if i < count - 1 {
+                    print!(" ");
                 }
             }
             println!();

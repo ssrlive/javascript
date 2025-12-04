@@ -20,12 +20,21 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             }
         }
         "substring" => {
-            if args.len() == 2 {
+            // substring(start, end?) - end is optional and defaults to length
+            if args.len() == 1 || args.len() == 2 {
                 let start_val = evaluate_expr(env, &args[0])?;
-                let end_val = evaluate_expr(env, &args[1])?;
-                if let (Value::Number(start), Value::Number(end)) = (start_val, end_val) {
+                let end_val = if args.len() == 2 {
+                    Some(evaluate_expr(env, &args[1])?)
+                } else {
+                    None
+                };
+                if let Value::Number(start) = start_val {
                     let start_idx = start as usize;
-                    let end_idx = end as usize;
+                    let end_idx = if let Some(Value::Number(e)) = end_val {
+                        e as usize
+                    } else {
+                        utf16_len(s)
+                    };
                     if start_idx <= end_idx && end_idx <= utf16_len(s) {
                         Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
                     } else {
@@ -35,10 +44,10 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         )))
                     }
                 } else {
-                    Err(eval_error_here!("substring: both arguments must be numbers"))
+                    Err(eval_error_here!("substring: first argument must be a number"))
                 }
             } else {
-                let msg = format!("substring method expects 2 arguments, got {}", args.len());
+                let msg = format!("substring method expects 1 or 2 arguments, got {}", args.len());
                 Err(eval_error_here!(msg))
             }
         }

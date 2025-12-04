@@ -2592,126 +2592,332 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 0.0 } else { 1.0 })),
             _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
         },
-        BinaryOp::LessThan => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => {
+        BinaryOp::LessThan => {
+            // Follow JS abstract relational comparison with ToPrimitive(Number) hint
+            let l_prim = if matches!(l, Value::Object(_)) {
+                to_primitive(&l, "number")?
+            } else {
+                l.clone()
+            };
+            let r_prim = if matches!(r, Value::Object(_)) {
+                to_primitive(&r, "number")?
+            } else {
+                r.clone()
+            };
+
+            // If both are strings, do lexicographic comparison
+            if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
+                return Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 }));
+            }
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                Ok(Value::Number(if a < b { 1.0 } else { 0.0 }))
+                return Ok(Value::Number(if a < b { 1.0 } else { 0.0 }));
             }
-            (Value::BigInt(la), Value::Number(rn)) => {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
+                let rn = *rn;
                 if rn.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if a_num < rn { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if a_num < rn { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            (Value::Number(ln), Value::BigInt(rb)) => {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                let ln = *ln;
                 if ln.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if ln < b_num { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if ln < b_num { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            _ => Err(eval_error_here!("error")),
-        },
-        BinaryOp::GreaterThan => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => {
+            // Fallback: convert values to numbers and compare. Non-coercible symbols/types will error.
+            {
+                // Helper to convert a value to f64 for comparison (ToNumber semantics simplified)
+                let to_num = |v: &Value| -> Result<f64, JSError> {
+                    match v {
+                        Value::Number(n) => Ok(*n),
+                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
+                        Value::BigInt(s) => {
+                            if let Some(f) = BigInt::parse_bytes(s.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                                Ok(f)
+                            } else {
+                                Ok(f64::NAN)
+                            }
+                        }
+                        Value::String(s) => {
+                            let sstr = String::from_utf16_lossy(s);
+                            let t = sstr.trim();
+                            if t.is_empty() {
+                                Ok(0.0)
+                            } else {
+                                match t.parse::<f64>() {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Ok(f64::NAN),
+                                }
+                            }
+                        }
+                        Value::Undefined => Ok(f64::NAN),
+                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        _ => Err(eval_error_here!("error")),
+                    }
+                };
+
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
+                if ln.is_nan() || rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 }))
+            }
+        }
+        BinaryOp::GreaterThan => {
+            // Abstract relational comparison with ToPrimitive(Number) hint
+            let l_prim = if matches!(l, Value::Object(_)) {
+                to_primitive(&l, "number")?
+            } else {
+                l.clone()
+            };
+            let r_prim = if matches!(r, Value::Object(_)) {
+                to_primitive(&r, "number")?
+            } else {
+                r.clone()
+            };
+
+            // If both strings, lexicographic compare
+            if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
+                return Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 }));
+            }
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                Ok(Value::Number(if a > b { 1.0 } else { 0.0 }))
+                return Ok(Value::Number(if a > b { 1.0 } else { 0.0 }));
             }
-            (Value::BigInt(la), Value::Number(rn)) => {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
+                let rn = *rn;
                 if rn.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if a_num > rn { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if a_num > rn { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            (Value::Number(ln), Value::BigInt(rb)) => {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                let ln = *ln;
                 if ln.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if ln > b_num { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if ln > b_num { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            _ => Err(eval_error_here!("error")),
-        },
-        BinaryOp::LessEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => {
+            {
+                let to_num = |v: &Value| -> Result<f64, JSError> {
+                    match v {
+                        Value::Number(n) => Ok(*n),
+                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
+                        Value::BigInt(s) => {
+                            if let Some(f) = BigInt::parse_bytes(s.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                                Ok(f)
+                            } else {
+                                Ok(f64::NAN)
+                            }
+                        }
+                        Value::String(s) => {
+                            let sstr = String::from_utf16_lossy(s);
+                            let t = sstr.trim();
+                            if t.is_empty() {
+                                Ok(0.0)
+                            } else {
+                                match t.parse::<f64>() {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Ok(f64::NAN),
+                                }
+                            }
+                        }
+                        Value::Undefined => Ok(f64::NAN),
+                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        _ => Err(eval_error_here!("error")),
+                    }
+                };
+
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
+                if ln.is_nan() || rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 }))
+            }
+        }
+        BinaryOp::LessEqual => {
+            // Use ToPrimitive(Number) hint then compare, strings compare lexicographically
+            let l_prim = if matches!(l, Value::Object(_)) {
+                to_primitive(&l, "number")?
+            } else {
+                l.clone()
+            };
+            let r_prim = if matches!(r, Value::Object(_)) {
+                to_primitive(&r, "number")?
+            } else {
+                r.clone()
+            };
+
+            if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
+                return Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 }));
+            }
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                Ok(Value::Number(if a <= b { 1.0 } else { 0.0 }))
+                return Ok(Value::Number(if a <= b { 1.0 } else { 0.0 }));
             }
-            (Value::BigInt(la), Value::Number(rn)) => {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 if rn.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if a_num <= rn { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if a_num <= *rn { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            (Value::Number(ln), Value::BigInt(rb)) => {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 if ln.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if ln <= b_num { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if *ln <= b_num { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            _ => Err(eval_error_here!("error")),
-        },
-        BinaryOp::GreaterEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => {
+            {
+                let to_num = |v: &Value| -> Result<f64, JSError> {
+                    match v {
+                        Value::Number(n) => Ok(*n),
+                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
+                        Value::BigInt(s) => {
+                            if let Some(f) = BigInt::parse_bytes(s.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                                Ok(f)
+                            } else {
+                                Ok(f64::NAN)
+                            }
+                        }
+                        Value::String(s) => {
+                            let sstr = String::from_utf16_lossy(s);
+                            let t = sstr.trim();
+                            if t.is_empty() {
+                                Ok(0.0)
+                            } else {
+                                match t.parse::<f64>() {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Ok(f64::NAN),
+                                }
+                            }
+                        }
+                        Value::Undefined => Ok(f64::NAN),
+                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        _ => Err(eval_error_here!("error")),
+                    }
+                };
+
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
+                if ln.is_nan() || rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 }))
+            }
+        }
+        BinaryOp::GreaterEqual => {
+            // ToPrimitive(Number) hint with fallback to numeric comparison; strings compare lexicographically
+            let l_prim = if matches!(l, Value::Object(_)) {
+                to_primitive(&l, "number")?
+            } else {
+                l.clone()
+            };
+            let r_prim = if matches!(r, Value::Object(_)) {
+                to_primitive(&r, "number")?
+            } else {
+                r.clone()
+            };
+
+            if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
+                return Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 }));
+            }
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                Ok(Value::Number(if a >= b { 1.0 } else { 0.0 }))
+                return Ok(Value::Number(if a >= b { 1.0 } else { 0.0 }));
             }
-            (Value::BigInt(la), Value::Number(rn)) => {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
+                let rn = *rn;
                 if rn.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if a_num >= rn { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if a_num >= rn { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            (Value::Number(ln), Value::BigInt(rb)) => {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                let ln = *ln;
                 if ln.is_nan() {
                     return Ok(Value::Number(0.0));
                 }
                 if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if ln >= b_num { 1.0 } else { 0.0 }))
+                    return Ok(Value::Number(if ln >= b_num { 1.0 } else { 0.0 }));
                 } else {
-                    Ok(Value::Number(0.0))
+                    return Ok(Value::Number(0.0));
                 }
             }
-            _ => Err(eval_error_here!("error")),
-        },
+            {
+                let to_num = |v: &Value| -> Result<f64, JSError> {
+                    match v {
+                        Value::Number(n) => Ok(*n),
+                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
+                        Value::BigInt(s) => {
+                            if let Some(f) = BigInt::parse_bytes(s.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
+                                Ok(f)
+                            } else {
+                                Ok(f64::NAN)
+                            }
+                        }
+                        Value::String(s) => {
+                            let sstr = String::from_utf16_lossy(s);
+                            let t = sstr.trim();
+                            if t.is_empty() {
+                                Ok(0.0)
+                            } else {
+                                match t.parse::<f64>() {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Ok(f64::NAN),
+                                }
+                            }
+                        }
+                        Value::Undefined => Ok(f64::NAN),
+                        Value::Symbol(_) => Err(eval_error_here!("TypeError: Cannot convert Symbol to number")),
+                        _ => Err(eval_error_here!("error")),
+                    }
+                };
+
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
+                if ln.is_nan() || rn.is_nan() {
+                    return Ok(Value::Number(0.0));
+                }
+                Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 }))
+            }
+        }
         BinaryOp::Mod => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => {
                 if rn == 0.0 {
@@ -3000,6 +3206,26 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (obj_val, "toString") => crate::js_object::handle_to_string_method(&obj_val, args),
             (obj_val, "valueOf") => crate::js_object::handle_value_of_method(&obj_val, args),
             (Value::Object(obj_map), method) => {
+                // Provide a built-in hasOwnProperty on object instances even if
+                // the property is not defined on the object itself. This keeps
+                // simple tests that call obj.hasOwnProperty(key) working when
+                // we don't provide a full Object.prototype implementation.
+                if method == "hasOwnProperty" {
+                    if args.len() != 1 {
+                        return Err(eval_error_here!("hasOwnProperty requires one argument"));
+                    }
+                    // Evaluate the key argument
+                    let key_val = evaluate_expr(env, &args[0])?;
+                    let key_str = match key_val {
+                        Value::String(s) => String::from_utf16_lossy(&s),
+                        Value::Number(n) => n.to_string(),
+                        Value::Boolean(b) => b.to_string(),
+                        Value::Undefined => "undefined".to_string(),
+                        other => value_to_string(&other),
+                    };
+                    let exists = obj_map.borrow().contains_key(&key_str.into());
+                    return Ok(Value::Boolean(exists));
+                }
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
                 if obj_map.borrow().contains_key(&"sprintf".into()) {
                     match method {

@@ -285,188 +285,193 @@ pub fn value_to_sort_string(val: &Value) -> String {
 
 // Helper accessors for objects and environments
 pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
-    let obj = js_obj.borrow().get(key);
-    if let Some(val) = obj {
-        // Check if this is a property descriptor
-        let val_clone = val.borrow().clone();
-        match val_clone {
-            Value::Property { value, getter, .. } => {
-                log::trace!("obj_get_value - property descriptor found for key {}", key);
-                if let Some((body, env)) = getter {
-                    // Create a new environment with this bound to the object
+    // Search own properties and then walk the prototype chain until we find
+    // a matching property or run out of prototypes.
+    let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
+    while let Some(cur) = current {
+        if let Some(val) = cur.borrow().get(key) {
+            // Found an own/inherited value on `cur`. For getters we bind `this` to
+            // the original object (`js_obj`) as per JS semantics.
+            let val_clone = val.borrow().clone();
+            match val_clone {
+                Value::Property { value, getter, .. } => {
+                    log::trace!("obj_get_value - property descriptor found for key {}", key);
+                    if let Some((body, env)) = getter {
+                        // Create a new environment with this bound to the original object
+                        let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        getter_env.borrow_mut().prototype = Some(env);
+                        env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
+                        let result = evaluate_statements(&getter_env, &body)?;
+                        return Ok(Some(Rc::new(RefCell::new(result))));
+                    } else if let Some(val_rc) = value {
+                        return Ok(Some(val_rc));
+                    } else {
+                        return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
+                    }
+                }
+                Value::Getter(body, env) => {
+                    log::trace!("obj_get_value - getter found for key {}", key);
                     let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
                     getter_env.borrow_mut().prototype = Some(env);
                     env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                     let result = evaluate_statements(&getter_env, &body)?;
-                    Ok(Some(Rc::new(RefCell::new(result))))
-                } else if let Some(val_rc) = value {
-                    Ok(Some(val_rc))
-                } else {
-                    Ok(Some(Rc::new(RefCell::new(Value::Undefined))))
+                    return Ok(Some(Rc::new(RefCell::new(result))));
                 }
-            }
-            Value::Getter(body, env) => {
-                log::trace!("obj_get_value - getter found for key {}", key);
-                // Create a new environment with this bound to the object
-                let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
-                getter_env.borrow_mut().prototype = Some(env);
-                env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
-                let result = evaluate_statements(&getter_env, &body)?;
-                Ok(Some(Rc::new(RefCell::new(result))))
-            }
-            _ => {
-                log::trace!("obj_get_value - raw value found for key {}", key);
-                Ok(Some(val.clone()))
-            }
-        }
-    } else {
-        // Provide default well-known symbol fallbacks (non-own) for some built-ins.
-        if let PropertyKey::Symbol(sym_rc) = key {
-            // Support default Symbol.iterator for built-ins like Array and wrapped String objects.
-            if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator")
-                && let (Value::Symbol(iter_sd), Value::Symbol(req_sd)) = (&*iter_sym_rc.borrow(), &*sym_rc.borrow())
-                && Rc::ptr_eq(iter_sd, req_sd)
-            {
-                // Array default iterator
-                if is_array(js_obj) {
-                    // next function body
-                    let next_body = vec![
-                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
-                        Statement::If(
-                            Expr::Binary(
-                                Box::new(Expr::Var("idx".to_string())),
-                                BinaryOp::LessThan,
-                                Box::new(Expr::Property(Box::new(Expr::Var("__array".to_string())), "length".to_string())),
-                            ),
-                            vec![
-                                Statement::Let(
-                                    "v".to_string(),
-                                    Some(Expr::Index(
-                                        Box::new(Expr::Var("__array".to_string())),
-                                        Box::new(Expr::Var("idx".to_string())),
-                                    )),
-                                ),
-                                Statement::Expr(Expr::Assign(
-                                    Box::new(Expr::Var("__i".to_string())),
-                                    Box::new(Expr::Binary(
-                                        Box::new(Expr::Var("idx".to_string())),
-                                        BinaryOp::Add,
-                                        Box::new(Expr::Value(Value::Number(1.0))),
-                                    )),
-                                )),
-                                Statement::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("v".to_string())),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
-                                ]))),
-                            ],
-                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
-                                Expr::Value(Value::Boolean(true)),
-                            )])))]),
-                        ),
-                    ];
-
-                    let arr_iter_body = vec![
-                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                        Statement::Return(Some(Expr::Object(vec![(
-                            "next".to_string(),
-                            Expr::Function(Vec::new(), next_body),
-                        )]))),
-                    ];
-
-                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
-                    captured_env.borrow_mut().insert(
-                        PropertyKey::String("__array".to_string()),
-                        Rc::new(RefCell::new(Value::Object(js_obj.clone()))),
-                    );
-                    let closure = Value::Closure(Vec::new(), arr_iter_body, captured_env.clone());
-                    return Ok(Some(Rc::new(RefCell::new(closure))));
-                }
-
-                // Wrapped String iterator (for String objects)
-                if let Some(wrapped) = js_obj.borrow().get(&"__value__".into())
-                    && let Value::String(_) = &*wrapped.borrow()
-                {
-                    let next_body = vec![
-                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
-                        Statement::If(
-                            Expr::Binary(
-                                Box::new(Expr::Var("idx".to_string())),
-                                BinaryOp::LessThan,
-                                Box::new(Expr::Property(Box::new(Expr::Var("__s".to_string())), "length".to_string())),
-                            ),
-                            vec![
-                                Statement::Let(
-                                    "v".to_string(),
-                                    Some(Expr::Index(
-                                        Box::new(Expr::Var("__s".to_string())),
-                                        Box::new(Expr::Var("idx".to_string())),
-                                    )),
-                                ),
-                                Statement::Expr(Expr::Assign(
-                                    Box::new(Expr::Var("__i".to_string())),
-                                    Box::new(Expr::Binary(
-                                        Box::new(Expr::Var("idx".to_string())),
-                                        BinaryOp::Add,
-                                        Box::new(Expr::Value(Value::Number(1.0))),
-                                    )),
-                                )),
-                                Statement::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("v".to_string())),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
-                                ]))),
-                            ],
-                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
-                                Expr::Value(Value::Boolean(true)),
-                            )])))]),
-                        ),
-                    ];
-
-                    let str_iter_body = vec![
-                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                        Statement::Return(Some(Expr::Object(vec![(
-                            "next".to_string(),
-                            Expr::Function(Vec::new(), next_body),
-                        )]))),
-                    ];
-
-                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
-                    captured_env.borrow_mut().insert(
-                        PropertyKey::String("__s".to_string()),
-                        Rc::new(RefCell::new(wrapped.borrow().clone())),
-                    );
-                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
-                    return Ok(Some(Rc::new(RefCell::new(closure))));
-                }
-            }
-            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag")
-                && let (Value::Symbol(tag_sd), Value::Symbol(req_sd)) = (&*tag_sym_rc.borrow(), &*sym_rc.borrow())
-                && Rc::ptr_eq(tag_sd, req_sd)
-            {
-                if is_array(js_obj) {
-                    return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Array"))))));
-                }
-                if let Some(wrapped) = js_obj.borrow().get(&"__value__".into()) {
-                    match &*wrapped.borrow() {
-                        Value::String(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("String")))))),
-                        Value::Number(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Number")))))),
-                        Value::Boolean(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Boolean")))))),
-                        _ => {}
-                    }
-                }
-                if js_obj.borrow().contains_key(&"__timestamp".into()) {
-                    return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Date"))))));
+                _ => {
+                    log::trace!("obj_get_value - raw value found for key {}", key);
+                    return Ok(Some(val.clone()));
                 }
             }
         }
+        // Not found on this object; continue with prototype.
+        current = cur.borrow().prototype.clone();
+    }
 
-        if let Some(ref proto) = js_obj.borrow().prototype {
-            obj_get_value(proto, key)
-        } else {
-            Ok(None)
+    // No own or inherited property found, fall back to special-case handling
+    // (well-known symbol fallbacks, array/string iterator helpers, etc.).
+
+    // Provide default well-known symbol fallbacks (non-own) for some built-ins.
+    if let PropertyKey::Symbol(sym_rc) = key {
+        // Support default Symbol.iterator for built-ins like Array and wrapped String objects.
+        if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator")
+            && let (Value::Symbol(iter_sd), Value::Symbol(req_sd)) = (&*iter_sym_rc.borrow(), &*sym_rc.borrow())
+            && Rc::ptr_eq(iter_sd, req_sd)
+        {
+            // Array default iterator
+            if is_array(js_obj) {
+                // next function body
+                let next_body = vec![
+                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                    Statement::If(
+                        Expr::Binary(
+                            Box::new(Expr::Var("idx".to_string())),
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Property(Box::new(Expr::Var("__array".to_string())), "length".to_string())),
+                        ),
+                        vec![
+                            Statement::Let(
+                                "v".to_string(),
+                                Some(Expr::Index(
+                                    Box::new(Expr::Var("__array".to_string())),
+                                    Box::new(Expr::Var("idx".to_string())),
+                                )),
+                            ),
+                            Statement::Expr(Expr::Assign(
+                                Box::new(Expr::Var("__i".to_string())),
+                                Box::new(Expr::Binary(
+                                    Box::new(Expr::Var("idx".to_string())),
+                                    BinaryOp::Add,
+                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                )),
+                            )),
+                            Statement::Return(Some(Expr::Object(vec![
+                                ("value".to_string(), Expr::Var("v".to_string())),
+                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                            ]))),
+                        ],
+                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                            "done".to_string(),
+                            Expr::Value(Value::Boolean(true)),
+                        )])))]),
+                    ),
+                ];
+
+                let arr_iter_body = vec![
+                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                    Statement::Return(Some(Expr::Object(vec![(
+                        "next".to_string(),
+                        Expr::Function(Vec::new(), next_body),
+                    )]))),
+                ];
+
+                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                captured_env.borrow_mut().insert(
+                    PropertyKey::String("__array".to_string()),
+                    Rc::new(RefCell::new(Value::Object(js_obj.clone()))),
+                );
+                let closure = Value::Closure(Vec::new(), arr_iter_body, captured_env.clone());
+                return Ok(Some(Rc::new(RefCell::new(closure))));
+            }
+
+            // Wrapped String iterator (for String objects)
+            if let Some(wrapped) = js_obj.borrow().get(&"__value__".into())
+                && let Value::String(_) = &*wrapped.borrow()
+            {
+                let next_body = vec![
+                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                    Statement::If(
+                        Expr::Binary(
+                            Box::new(Expr::Var("idx".to_string())),
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Property(Box::new(Expr::Var("__s".to_string())), "length".to_string())),
+                        ),
+                        vec![
+                            Statement::Let(
+                                "v".to_string(),
+                                Some(Expr::Index(
+                                    Box::new(Expr::Var("__s".to_string())),
+                                    Box::new(Expr::Var("idx".to_string())),
+                                )),
+                            ),
+                            Statement::Expr(Expr::Assign(
+                                Box::new(Expr::Var("__i".to_string())),
+                                Box::new(Expr::Binary(
+                                    Box::new(Expr::Var("idx".to_string())),
+                                    BinaryOp::Add,
+                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                )),
+                            )),
+                            Statement::Return(Some(Expr::Object(vec![
+                                ("value".to_string(), Expr::Var("v".to_string())),
+                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                            ]))),
+                        ],
+                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                            "done".to_string(),
+                            Expr::Value(Value::Boolean(true)),
+                        )])))]),
+                    ),
+                ];
+
+                let str_iter_body = vec![
+                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                    Statement::Return(Some(Expr::Object(vec![(
+                        "next".to_string(),
+                        Expr::Function(Vec::new(), next_body),
+                    )]))),
+                ];
+
+                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                captured_env.borrow_mut().insert(
+                    PropertyKey::String("__s".to_string()),
+                    Rc::new(RefCell::new(wrapped.borrow().clone())),
+                );
+                let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
+                return Ok(Some(Rc::new(RefCell::new(closure))));
+            }
+        }
+        if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag")
+            && let (Value::Symbol(tag_sd), Value::Symbol(req_sd)) = (&*tag_sym_rc.borrow(), &*sym_rc.borrow())
+            && Rc::ptr_eq(tag_sd, req_sd)
+        {
+            if is_array(js_obj) {
+                return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Array"))))));
+            }
+            if let Some(wrapped) = js_obj.borrow().get(&"__value__".into()) {
+                match &*wrapped.borrow() {
+                    Value::String(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("String")))))),
+                    Value::Number(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Number")))))),
+                    Value::Boolean(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Boolean")))))),
+                    _ => {}
+                }
+            }
+            if js_obj.borrow().contains_key(&"__timestamp".into()) {
+                return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Date"))))));
+            }
         }
     }
+
+    Ok(None)
 }
 
 pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {

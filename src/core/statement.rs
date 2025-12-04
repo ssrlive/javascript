@@ -691,7 +691,9 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.insert(0, saved_declaration_token);
                 }
             } else if let Some(Token::LBrace) = tokens.first().cloned()
-                && matches!(saved_declaration_token, Token::Var)
+                && (matches!(saved_declaration_token, Token::Var)
+                    || matches!(saved_declaration_token, Token::Let)
+                    || matches!(saved_declaration_token, Token::Const))
             {
                 // var { ... } of iterable
                 let pattern = parse_object_destructuring_pattern(tokens)?;
@@ -724,7 +726,9 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.insert(0, saved_declaration_token);
                 }
             } else if let Some(Token::LBracket) = tokens.first().cloned()
-                && matches!(saved_declaration_token, Token::Var)
+                && (matches!(saved_declaration_token, Token::Var)
+                    || matches!(saved_declaration_token, Token::Let)
+                    || matches!(saved_declaration_token, Token::Const))
             {
                 // var [ ... ] of iterable
                 let pattern = parse_array_destructuring_pattern(tokens)?;
@@ -853,7 +857,15 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
             // Object destructuring
             let pattern = parse_object_destructuring_pattern(tokens)?;
+            log::trace!(
+                "parse_statement: after object pattern parse; next tokens (first 8): {:?}",
+                tokens.iter().take(8).collect::<Vec<_>>()
+            );
             if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
+                log::error!(
+                    "parse_statement: expected '=' after object pattern but found (first 8): {:?}",
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 return Err(JSError::ParseError);
             }
             tokens.remove(0); // consume =

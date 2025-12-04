@@ -1,5 +1,5 @@
-use javascript::Value;
 use javascript::evaluate_script;
+use javascript::{JSError, Value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -59,6 +59,41 @@ mod destructuring_tests {
         match result {
             Value::Number(3.0) => (),
             _ => panic!("Expected 3.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn destructuring_from_undefined_returns_helpful_error() {
+        let script = r#"
+            let duration;
+            let { seconds = 0, milliseconds = 0 } = duration;
+        "#;
+
+        let res = evaluate_script(script);
+        match res {
+            Err(JSError::EvaluationError { message }) => {
+                assert!(message.contains("Cannot destructure property"));
+                assert!(message.contains("seconds"));
+            }
+            _ => panic!("expected EvaluationError for destructuring undefined"),
+        }
+    }
+
+    #[test]
+    fn destructuring_with_nullish_fallback_works() {
+        let script = r#"
+            let duration;
+            let { seconds = 0, milliseconds = 0 } = duration ?? {};
+            seconds;
+        "#;
+
+        let res = evaluate_script(script);
+        assert!(res.is_ok());
+        // Last evaluation should be the `seconds` value (0)
+        let v = res.unwrap();
+        match v {
+            crate::Value::Number(n) => assert_eq!(n, 0.0),
+            _ => panic!("expected numeric result"),
         }
     }
 }

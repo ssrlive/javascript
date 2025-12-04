@@ -49,6 +49,10 @@ pub fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
         tokens.remove(0);
     }
+    log::trace!(
+        "parse_object_destructuring_pattern: tokens after initial skip (first 8): {:?}",
+        tokens.iter().take(8).collect::<Vec<_>>()
+    );
     parse_conditional(tokens)
 }
 
@@ -1354,12 +1358,20 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<
     tokens.remove(0); // consume [
 
     let mut pattern = Vec::new();
+    // Skip initial blank lines inside the pattern
+    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        tokens.remove(0);
+    }
     if !tokens.is_empty() && matches!(tokens[0], Token::RBracket) {
         tokens.remove(0); // consume ]
         return Ok(pattern);
     }
 
     loop {
+        // skip any blank lines at the start of a new property entry
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
         if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
             tokens.remove(0); // consume ...
             if let Some(Token::Identifier(name)) = tokens.first().cloned() {
@@ -1416,6 +1428,11 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec<
             return Err(JSError::ParseError);
         }
 
+        // allow blank lines between last element and closing brace
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
+
         if tokens.is_empty() {
             return Err(JSError::ParseError);
         }
@@ -1439,12 +1456,37 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec
     tokens.remove(0); // consume {
 
     let mut pattern = Vec::new();
+    log::trace!(
+        "parse_object_destructuring_pattern: tokens immediately after '{{' (first 8): {:?}",
+        tokens.iter().take(8).collect::<Vec<_>>()
+    );
+    // Skip leading line terminators inside the pattern so multi-line
+    // object patterns like `{
+    //   a = 0,
+    // }` are accepted.
+    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        tokens.remove(0);
+    }
+
     if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
         tokens.remove(0); // consume }
         return Ok(pattern);
     }
 
     loop {
+        // allow and skip blank lines between elements
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
+        }
+        // If after skipping blanks we immediately hit a closing brace, accept
+        // it. This handles the common formatting where there is a trailing
+        // comma and then a newline before the closing `}` (e.g.
+        // `a = 0,\n}`) which should be treated as the end of the object
+        // pattern instead of expecting another property.
+        if !tokens.is_empty() && matches!(tokens[0], Token::RBrace) {
+            tokens.remove(0); // consume }
+            break;
+        }
         if !tokens.is_empty() && matches!(tokens[0], Token::Spread) {
             tokens.remove(0); // consume ...
             if let Some(Token::Identifier(name)) = tokens.first().cloned() {
@@ -1465,6 +1507,10 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec
                 tokens.remove(0);
                 name
             } else {
+                log::trace!(
+                    "parse_object_destructuring_pattern: expected Identifier for property key but got {:?}",
+                    tokens.first()
+                );
                 return Err(JSError::ParseError);
             };
 
@@ -1533,6 +1579,11 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<Token>) -> Result<Vec
             };
 
             pattern.push(ObjectDestructuringElement::Property { key, value });
+        }
+
+        // allow whitespace / blank lines before separators or closing brace
+        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            tokens.remove(0);
         }
 
         if tokens.is_empty() {

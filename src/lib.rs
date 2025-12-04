@@ -37,6 +37,6 @@ pub use core::{
     JS_GC_OBJ_TYPE_SHAPE, JS_GC_OBJ_TYPE_VAR_REF, JS_TAG_BOOL, JS_TAG_CATCH_OFFSET, JS_TAG_FLOAT64, JS_TAG_INT, JS_TAG_NULL, JS_TAG_OBJECT,
     JS_TAG_SHORT_BIG_INT, JS_TAG_STRING, JS_TAG_STRING_ROPE, JS_TAG_UNDEFINED, JS_UNINITIALIZED,
 };
-pub use core::{Token, parse_expression, parse_statement, parse_statements};
+pub use core::{Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
 pub use error::JSError;
 pub use repl::{Repl, is_complete_input};

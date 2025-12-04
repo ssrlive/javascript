@@ -169,12 +169,74 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::LetDestructuringObject(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
+                    // Provide a clearer error message when the RHS evaluates to
+                    // `undefined` or `null` and destructuring is attempted — this
+                    // mirrors node's behaviour where the specific property name
+                    // and variable are included in the error when possible.
+                    if !matches!(val, Value::Object(_)) {
+                        // Try to extract a helpful identifier and a property
+                        // name to match typical node error messages. We use the
+                        // first property key listed in the pattern, if any.
+                        let first_key = pattern.iter().find_map(|el| {
+                            if let ObjectDestructuringElement::Property { key, .. } = el {
+                                Some(key.clone())
+                            } else {
+                                None
+                            }
+                        });
+
+                        let message = if let Some(first) = first_key {
+                            if let Expr::Var(name) = expr {
+                                // e.g. `Cannot destructure property 'seconds' of 'duration' as it is undefined.`
+                                let value_desc = match val {
+                                    Value::Undefined => "undefined",
+                                    Value::Object(_) => "object",
+                                    _ => "non-object value",
+                                };
+                                format!("Cannot destructure property '{first}' of '{name}' as it is {value_desc}")
+                            } else {
+                                format!("Cannot destructure property '{first}' from non-object value")
+                            }
+                        } else {
+                            "Cannot destructure non-object value".to_string()
+                        };
+
+                        return Err(JSError::EvaluationError { message });
+                    }
+
                     perform_object_destructuring(env, pattern, &val, false)?;
                     last_value = val;
                     Ok(None)
                 }
                 Statement::ConstDestructuringObject(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
+                    if !matches!(val, Value::Object(_)) {
+                        let first_key = pattern.iter().find_map(|el| {
+                            if let ObjectDestructuringElement::Property { key, .. } = el {
+                                Some(key.clone())
+                            } else {
+                                None
+                            }
+                        });
+
+                        let message = if let Some(first) = first_key {
+                            if let Expr::Var(name) = expr {
+                                let value_desc = match val {
+                                    Value::Undefined => "undefined",
+                                    Value::Object(_) => "object",
+                                    _ => "non-object value",
+                                };
+                                format!("Cannot destructure property '{first}' of '{name}' as it is {value_desc}")
+                            } else {
+                                format!("Cannot destructure property '{first}' from non-object value")
+                            }
+                        } else {
+                            "Cannot destructure non-object value".to_string()
+                        };
+
+                        return Err(JSError::EvaluationError { message });
+                    }
+
                     perform_object_destructuring(env, pattern, &val, true)?;
                     last_value = val;
                     Ok(None)

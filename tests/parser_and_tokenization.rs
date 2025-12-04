@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -34,4 +33,25 @@ fn single_line_and_block_comments_ignored() {
         Ok(Value::Number(n)) => assert_eq!(n, 7.0),
         _ => panic!("Expected number 7.0, got {:?}", result),
     }
+}
+
+#[test]
+fn trailing_comma_and_newline_before_rbrace_is_allowed() {
+    // tokens for: { \n seconds = 0, \n }
+    let mut tokens = vec![
+        Token::LBrace,
+        Token::LineTerminator,
+        Token::Identifier("seconds".to_string()),
+        Token::Assign,
+        Token::Number(0.0),
+        Token::Comma,
+        Token::LineTerminator,
+        Token::RBrace,
+    ];
+
+    let pattern = parse_object_destructuring_pattern(&mut tokens).expect("should parse pattern");
+    // pattern should contain one property
+    assert_eq!(pattern.len(), 1);
+    // and the tokens left should be empty
+    assert!(tokens.is_empty());
 }

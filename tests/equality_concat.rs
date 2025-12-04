@@ -11,7 +11,7 @@ fn undefined_equality() {
     let script = "undefined == undefined";
     let result = evaluate_script(script);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+        Ok(Value::Boolean(b)) => assert!(b),
         _ => panic!("Expected equality true as number 1.0, got {:?}", result),
     }
 }
@@ -21,7 +21,7 @@ fn undefined_strict_equality() {
     let script = "undefined === undefined";
     let result = evaluate_script(script);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+        Ok(Value::Boolean(b)) => assert!(b),
         _ => panic!("Expected strict equality true as number 1.0, got {:?}", result),
     }
 }
@@ -31,7 +31,7 @@ fn object_identity_strict_equal() {
     let script = "let a = {}; let b = a; a === b";
     let result = evaluate_script(script);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+        Ok(Value::Boolean(b)) => assert!(b),
         _ => panic!("Expected objects identical to be strict equal (1.0), got {:?}", result),
     }
 }
@@ -41,7 +41,7 @@ fn object_identity_distinct_objects() {
     let script = "let a = {}; a === {}";
     let result = evaluate_script(script);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 0.0),
+        Ok(Value::Boolean(b)) => assert!(!b),
         _ => panic!("Expected different objects to not be strict equal (0.0), got {:?}", result),
     }
 }

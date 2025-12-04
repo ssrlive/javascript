@@ -39,7 +39,7 @@ mod symbol_property_tests {
         "#;
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // true
+            Ok(Value::Boolean(b)) => assert!(b), // true
             _ => panic!("Expected number 1.0 (true), got {:?}", result),
         }
     }

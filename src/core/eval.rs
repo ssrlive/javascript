@@ -2531,8 +2531,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             _ => Err(eval_error_here!("error")),
         },
         BinaryOp::Equal => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la == rb { 1.0 } else { 0.0 })),
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la == rb)),
             (Value::BigInt(la), Value::Number(rn)) => {
                 if rn.is_nan() {
                     return Ok(Value::Number(0.0));
@@ -2542,11 +2542,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     && let Some(i) = rn.to_i128()
                 {
                     let b = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                    return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
+                    return Ok(Value::Boolean(b == BigInt::from(i)));
                 }
                 // otherwise compare numeric conversion (may lose precision)
                 if let Some(bf) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if bf == rn { 1.0 } else { 0.0 }))
+                    Ok(Value::Boolean(bf == rn))
                 } else {
                     Ok(Value::Number(0.0))
                 }
@@ -2559,47 +2559,47 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     && let Some(i) = ln.to_i128()
                 {
                     let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                    return Ok(Value::Number(if b == BigInt::from(i) { 1.0 } else { 0.0 }));
+                    return Ok(Value::Boolean(b == BigInt::from(i)));
                 }
                 if let Some(bf) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Number(if bf == ln { 1.0 } else { 0.0 }))
+                    Ok(Value::Boolean(bf == ln))
                 } else {
                     Ok(Value::Number(0.0))
                 }
             }
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Number(1.0)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 1.0 } else { 0.0 })),
-            _ => Ok(Value::Number(0.0)), // Different types are not equal
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(&sa, &sb))),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(&a, &b))),
+            _ => Ok(Value::Boolean(false)), // Different types are not equal
         },
         BinaryOp::StrictEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln == rn { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la == rb { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls == rs { 1.0 } else { 0.0 })),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb == rb { 1.0 } else { 0.0 })),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Number(1.0)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 1.0 } else { 0.0 })),
-            _ => Ok(Value::Number(0.0)), // Different types are not equal
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la == rb)),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(&sa, &sb))),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(&a, &b))),
+            _ => Ok(Value::Boolean(false)), // Different types are not equal
         },
         BinaryOp::NotEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb != rb { 1.0 } else { 0.0 })),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
-            _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln != rn)),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls != rs)),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb != rb)),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(!Rc::ptr_eq(&sa, &sb))),
+            _ => Ok(Value::Boolean(true)), // Different types are not equal, so not equal is true
         },
         BinaryOp::StrictNotEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(if ln != rn { 1.0 } else { 0.0 })),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Number(if la != rb { 1.0 } else { 0.0 })),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Number(if ls != rs { 1.0 } else { 0.0 })),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Number(if lb != rb { 1.0 } else { 0.0 })),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Number(if !Rc::ptr_eq(&sa, &sb) { 1.0 } else { 0.0 })),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Number(0.0)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Number(if Rc::ptr_eq(&a, &b) { 0.0 } else { 1.0 })),
-            _ => Ok(Value::Number(1.0)), // Different types are not equal, so not equal is true
+            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln != rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la != rb)),
+            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls != rs)),
+            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb != rb)),
+            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(!Rc::ptr_eq(&sa, &sb))),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(false)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(!Rc::ptr_eq(&a, &b))),
+            _ => Ok(Value::Boolean(true)), // Different types are not equal, so not equal is true
         },
         BinaryOp::LessThan => {
             // Follow JS abstract relational comparison with ToPrimitive(Number) hint

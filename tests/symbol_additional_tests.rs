@@ -45,10 +45,10 @@ mod symbol_additional_tests {
                 let b = arr.borrow().get(&"1".into()).unwrap();
                 let c = arr.borrow().get(&"2".into()).unwrap();
                 match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
-                        assert_eq!(*na, 1.0);
-                        assert_eq!(*nb, 1.0);
-                        assert_eq!(*nc, 1.0);
+                    (Value::Boolean(na), Value::Boolean(nb), Value::Boolean(nc)) => {
+                        assert!(na);
+                        assert!(nb);
+                        assert!(nc);
                     }
                     _ => panic!("Expected numeric truthy results for descriptors"),
                 }
@@ -89,7 +89,7 @@ mod symbol_additional_tests {
         "#;
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected true for distinct symbols, got {:?}", result),
         }
     }
@@ -182,7 +182,7 @@ mod symbol_additional_tests {
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected true for valueOf equality, got {:?}", result),
         }
     }
@@ -243,10 +243,10 @@ mod symbol_additional_tests {
                 let b = arr.borrow().get(&"1".into()).unwrap();
                 let c = arr.borrow().get(&"2".into()).unwrap();
                 match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
+                    (Value::Number(na), Value::Number(nb), Value::Boolean(nc)) => {
                         assert_eq!(*na, 0.0);
                         assert_eq!(*nb, 1.0);
-                        assert_eq!(*nc, 1.0);
+                        assert!(nc);
                     }
                     _ => panic!("Expected numeric results for getOwnPropertySymbols test"),
                 }
@@ -272,9 +272,9 @@ mod symbol_additional_tests {
                 let a = arr.borrow().get(&"0".into()).unwrap();
                 let b = arr.borrow().get(&"1".into()).unwrap();
                 match (&*a.borrow(), &*b.borrow()) {
-                    (Value::Number(na), Value::Number(nb)) => {
+                    (Value::Number(na), Value::Boolean(nb)) => {
                         assert_eq!(*na, 1.0);
-                        assert_eq!(*nb, 1.0);
+                        assert!(nb);
                     }
                     _ => panic!("Expected numeric results for getOwnPropertySymbols on object"),
                 }
@@ -301,10 +301,10 @@ mod symbol_additional_tests {
                 let b = arr.borrow().get(&"1".into()).unwrap();
                 let c = arr.borrow().get(&"2".into()).unwrap();
                 match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
-                        assert_eq!(*na, 1.0);
-                        assert_eq!(*nb, 1.0);
-                        assert_eq!(*nc, 1.0);
+                    (Value::Boolean(na), Value::Boolean(nb), Value::Boolean(nc)) => {
+                        assert!(na);
+                        assert!(nb);
+                        assert!(nc);
                     }
                     _ => panic!("Expected numeric truthy results for descriptors"),
                 }

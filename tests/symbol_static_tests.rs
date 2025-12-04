@@ -21,7 +21,7 @@ mod symbol_static_tests {
         "#;
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // true
+            Ok(Value::Boolean(b)) => assert!(b), // true
             _ => panic!("Expected true for same key, got {:?}", result),
         }
     }
@@ -35,7 +35,7 @@ mod symbol_static_tests {
         "#;
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // true
+            Ok(Value::Boolean(b)) => assert!(b), // true
             _ => panic!("Expected true for different keys, got {:?}", result),
         }
     }
@@ -75,7 +75,7 @@ mod symbol_static_tests {
         "#;
         let result = evaluate_script(script);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // true, since toString makes them same
+            Ok(Value::Boolean(b)) => assert!(b), // true, since toString makes them same
             _ => panic!("Expected true for number and string key '123', got {:?}", result),
         }
     }

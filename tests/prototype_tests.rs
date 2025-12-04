@@ -299,10 +299,10 @@ fn test_to_string_override_and_valueof() {
             let pt = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
             let eq = arr.borrow().get(&"2".into()).unwrap().borrow().clone();
             match (t, pt, eq) {
-                (Value::String(ts), Value::String(pts), Value::Number(n)) => {
+                (Value::String(ts), Value::String(pts), Value::Boolean(b)) => {
                     assert_eq!(String::from_utf16_lossy(&ts), "my-toString");
                     assert_eq!(String::from_utf16_lossy(&pts), "[object Object]");
-                    assert_eq!(n, 1.0);
+                    assert!(b);
                 }
                 _ => panic!("Unexpected types from toString/valueOf test"),
             }

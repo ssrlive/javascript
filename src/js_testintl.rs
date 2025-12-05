@@ -153,6 +153,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
     match method {
         "supportedLocalesOf" => {
             // Expect a single argument: an array of locale identifiers
+            log::debug!("MockIntlConstructor.supportedLocalesOf called with {} args", args.len());
             if args.len() != 1 {
                 // Silently return an empty array when inputs aren't as expected
                 let arr = Rc::new(RefCell::new(JSObjectData::new()));
@@ -162,6 +163,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
 
             // Evaluate the provided argument
             let evaluated = evaluate_expr(env, &args[0])?;
+            log::debug!("supportedLocalesOf - evaluated arg = {:?}", evaluated);
 
             // Prepare result array
             let result = Rc::new(RefCell::new(JSObjectData::new()));
@@ -181,6 +183,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                             && let Value::String(s_utf16) = &*elem_rc.borrow()
                         {
                             let candidate = utf16_to_utf8(s_utf16);
+                            log::debug!("supportedLocalesOf - candidate='{}'", candidate);
                             // canonicalize candidate
                             let canon_call = Expr::Call(
                                 Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
@@ -188,6 +191,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                             );
                             if let Ok(Value::String(canon_utf16)) = evaluate_expr(env, &canon_call) {
                                 let canonical = utf16_to_utf8(&canon_utf16);
+                                log::debug!("supportedLocalesOf - canonical='{}'", canonical);
                                 // Check if canonical form is structurally valid / canonicalized
                                 let check_call = Expr::Call(
                                     Box::new(Expr::Var("isCanonicalizedStructurallyValidLanguageTag".to_string())),
@@ -195,8 +199,15 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                                 );
                                 if let Ok(Value::Boolean(true)) = evaluate_expr(env, &check_call) {
                                     crate::core::obj_set_value(&result, &idx.to_string().into(), Value::String(utf8_to_utf16(&canonical)))?;
+                                    // log raw UTF-16 hex for appended canonical
+                                    let hex: Vec<String> = canon_utf16.iter().map(|u| format!("0x{:04x}", u)).collect();
+                                    log::debug!("supportedLocalesOf - appended canonical utf16_hex={}", hex.join(","));
                                     idx += 1;
+                                } else {
+                                    log::debug!("supportedLocalesOf - rejected canonical='{}' by structural check", canonical);
                                 }
+                            } else {
+                                log::debug!("supportedLocalesOf - canonicalizeLanguageTag returned non-string or error for '{}'", candidate);
                             }
                         }
                     }

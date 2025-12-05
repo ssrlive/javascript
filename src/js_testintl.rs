@@ -39,6 +39,29 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         match crate::core::evaluate_expr(env, &call_expr) {
             Ok(CoreValue::Boolean(true)) => {}
             Ok(CoreValue::Boolean(false)) => {
+                // Log canonicalization result to help debugging why the helper
+                // returned false for this locale.
+                let canon_call = Expr::Call(
+                    Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
+                    vec![Expr::StringLit(utf8_to_utf16(locale))],
+                );
+                match crate::core::evaluate_expr(env, &canon_call) {
+                    Ok(CoreValue::String(canon_utf16)) => {
+                        let canon = utf16_to_utf8(&canon_utf16);
+                        log::error!(
+                            "isCanonicalizedStructurallyValidLanguageTag: locale='{}' canonical='{}'",
+                            locale,
+                            canon
+                        );
+                    }
+                    Ok(other) => {
+                        log::error!("canonicalizeLanguageTag returned non-string: {:?}", other);
+                    }
+                    Err(e) => {
+                        log::error!("canonicalizeLanguageTag evaluation error: {:?}", e);
+                    }
+                }
+
                 return Err(JSError::Throw {
                     value: Value::String(utf8_to_utf16("Invalid locale")),
                 });

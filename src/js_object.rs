@@ -179,6 +179,29 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 _ => Err(make_type_error!("Object.getOwnPropertySymbols called on non-object")),
             }
         }
+        "getOwnPropertyNames" => {
+            if args.len() != 1 {
+                return Err(make_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            match obj_val {
+                Value::Object(obj) => {
+                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let mut idx = 0;
+                    for (key, _value) in obj.borrow().properties.iter() {
+                        if let PropertyKey::String(s) = key
+                            && s != "length"
+                        {
+                            obj_set_value(&result_obj, &idx.to_string().into(), Value::String(utf8_to_utf16(s)))?;
+                            idx += 1;
+                        }
+                    }
+                    set_array_length(&result_obj, idx)?;
+                    Ok(Value::Object(result_obj))
+                }
+                _ => Err(make_type_error!("Object.getOwnPropertyNames called on non-object")),
+            }
+        }
         "getOwnPropertyDescriptors" => {
             if args.len() != 1 {
                 return Err(make_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));

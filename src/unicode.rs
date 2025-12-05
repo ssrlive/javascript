@@ -38,16 +38,20 @@ pub fn utf16_find(v: &[u16], pattern: &[u16]) -> Option<usize> {
     if pattern.is_empty() {
         return Some(0);
     }
-    (0..=v.len().saturating_sub(pattern.len())).find(|&i| v[i..i + pattern.len()] == *pattern)
+    if pattern.len() > v.len() {
+        return None;
+    }
+    (0..=v.len() - pattern.len()).find(|&i| v[i..i + pattern.len()] == *pattern)
 }
 
 pub fn utf16_rfind(v: &[u16], pattern: &[u16]) -> Option<usize> {
     if pattern.is_empty() {
         return Some(v.len());
     }
-    (0..=v.len().saturating_sub(pattern.len()))
-        .rev()
-        .find(|&i| v[i..i + pattern.len()] == *pattern)
+    if pattern.len() > v.len() {
+        return None;
+    }
+    (0..=v.len() - pattern.len()).rev().find(|&i| v[i..i + pattern.len()] == *pattern)
 }
 
 pub fn utf16_replace(v: &[u16], search: &[u16], replace: &[u16]) -> Vec<u16> {

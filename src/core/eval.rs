@@ -3709,6 +3709,62 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                         "Assertion failed".to_string()
                     };
 
+                    // Extra diagnostic: when the assertion is of the form
+                    // isCanonicalizedStructurallyValidLanguageTag(x) and it
+                    // failed, log canonicalize/isStructurallyValid results for x.
+                    if let Some(first_arg_expr) = args.first() {
+                        use crate::core::Expr;
+                        if let Expr::Call(func_expr, call_args) = first_arg_expr
+                            && let Expr::Var(fname) = &**func_expr
+                            && fname == "isCanonicalizedStructurallyValidLanguageTag"
+                            && call_args.len() == 1
+                        {
+                            // Try to evaluate the inner argument to a string
+                            if let Ok(val) = evaluate_expr(env, &call_args[0])
+                                && let Value::String(s_utf16) = val
+                            {
+                                let s = String::from_utf16_lossy(&s_utf16);
+                                // Evaluate canonicalizeLanguageTag(s)
+                                let canon_call = Expr::Call(
+                                    Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
+                                    vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
+                                );
+                                match evaluate_expr(env, &canon_call) {
+                                    Ok(Value::String(canon_utf16)) => {
+                                        let canon = String::from_utf16_lossy(&canon_utf16);
+                                        log::error!("Assertion diagnostic: input='{}' canonicalizeLanguageTag='{}'", s, canon);
+                                    }
+                                    Ok(other) => {
+                                        log::error!("Assertion diagnostic: canonicalizeLanguageTag returned non-string: {:?}", other);
+                                    }
+                                    Err(e) => {
+                                        log::error!("Assertion diagnostic: canonicalizeLanguageTag error: {:?}", e);
+                                    }
+                                }
+
+                                // Evaluate isStructurallyValidLanguageTag(s)
+                                let struct_call = Expr::Call(
+                                    Box::new(Expr::Var("isStructurallyValidLanguageTag".to_string())),
+                                    vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
+                                );
+                                match evaluate_expr(env, &struct_call) {
+                                    Ok(Value::Boolean(b)) => {
+                                        log::error!("Assertion diagnostic: isStructurallyValidLanguageTag('{}') = {}", s, b);
+                                    }
+                                    Ok(other) => {
+                                        log::error!(
+                                            "Assertion diagnostic: isStructurallyValidLanguageTag returned non-boolean: {:?}",
+                                            other
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!("Assertion diagnostic: isStructurallyValidLanguageTag error: {:?}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     return Err(eval_error_here!(format!("{message}")));
                 }
                 // Check if this is a built-in constructor object

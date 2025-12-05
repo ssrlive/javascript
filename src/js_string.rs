@@ -280,6 +280,26 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 Err(eval_error_here!(format!("charAt method expects 1 argument, got {}", args.len())))
             }
         }
+        "charCodeAt" => {
+            // charCodeAt(index) - returns the UTF-16 code unit at index as a number
+            if args.len() == 1 {
+                let idx_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = idx_val {
+                    let idx = n as usize;
+                    if let Some(ch) = utf16_char_at(s, idx) {
+                        Ok(Value::Number(ch as f64))
+                    } else {
+                        // In JS, out-of-range charCodeAt returns NaN
+                        Ok(Value::Number(f64::NAN))
+                    }
+                } else {
+                    Err(eval_error_here!("charCodeAt: index must be a number"))
+                }
+            } else {
+                let msg = format!("charCodeAt method expects 1 argument, got {}", args.len());
+                Err(eval_error_here!(msg))
+            }
+        }
         "trim" => {
             if args.is_empty() {
                 let str_val = String::from_utf16_lossy(s);

@@ -88,7 +88,25 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
 
     // Store the locale that was passed to the constructor
     if let Some(locale) = locale_arg {
-        obj_set_value(&instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+        // Try to canonicalize the locale via the JS helper so resolvedOptions().locale
+        // returns a canonicalized tag (some test data expect remapped tags,
+        // e.g. "sgn-GR" -> "gss"). Fall back to the original locale if
+        // canonicalization fails for any reason.
+        use crate::core::{Expr, Value as CoreValue};
+        let canon_call = Expr::Call(
+            Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
+            vec![Expr::StringLit(utf8_to_utf16(&locale))],
+        );
+        match crate::core::evaluate_expr(env, &canon_call) {
+            Ok(CoreValue::String(canon_utf16)) => {
+                let canonical = utf16_to_utf8(&canon_utf16);
+                obj_set_value(&instance, &"__locale".into(), Value::String(utf8_to_utf16(&canonical)))?;
+            }
+            _ => {
+                // On error or non-string result, store the original locale
+                obj_set_value(&instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+            }
+        }
     }
 
     Ok(Value::Object(instance))
@@ -207,7 +225,10 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                                     log::debug!("supportedLocalesOf - rejected canonical='{}' by structural check", canonical);
                                 }
                             } else {
-                                log::debug!("supportedLocalesOf - canonicalizeLanguageTag returned non-string or error for '{}'", candidate);
+                                log::debug!(
+                                    "supportedLocalesOf - canonicalizeLanguageTag returned non-string or error for '{}'",
+                                    candidate
+                                );
                             }
                         }
                     }

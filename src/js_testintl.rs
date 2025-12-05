@@ -151,3 +151,65 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
         _ => Err(eval_error_here!(format!("testIntl method {method} not implemented"))),
     }
 }
+
+/// Handle static methods exposed on the mock Intl constructor
+pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    match method {
+        "supportedLocalesOf" => {
+            // Expect a single argument: an array of locale identifiers
+            if args.len() != 1 {
+                // Silently return an empty array when inputs aren't as expected
+                let arr = Rc::new(RefCell::new(JSObjectData::new()));
+                crate::js_array::set_array_length(&arr, 0)?;
+                return Ok(Value::Object(arr));
+            }
+
+            // Evaluate the provided argument
+            let evaluated = evaluate_expr(env, &args[0])?;
+
+            // Prepare result array
+            let result = Rc::new(RefCell::new(JSObjectData::new()));
+            let mut idx = 0usize;
+
+            if let Value::Object(arr_obj) = evaluated
+                && crate::js_array::is_array(&arr_obj)
+            {
+                // read length property
+                if let Some(len_val_rc) = crate::core::obj_get_value(&arr_obj, &"length".into())?
+                    && let Value::Number(len_num) = &*len_val_rc.borrow()
+                {
+                    let len = *len_num as usize;
+                    for i in 0..len {
+                        let key = i.to_string();
+                        if let Some(elem_rc) = crate::core::obj_get_value(&arr_obj, &key.into())?
+                            && let Value::String(s_utf16) = &*elem_rc.borrow()
+                        {
+                            let candidate = utf16_to_utf8(s_utf16);
+                            // canonicalize candidate
+                            let canon_call = Expr::Call(
+                                Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
+                                vec![Expr::StringLit(utf8_to_utf16(&candidate))],
+                            );
+                            if let Ok(Value::String(canon_utf16)) = evaluate_expr(env, &canon_call) {
+                                let canonical = utf16_to_utf8(&canon_utf16);
+                                // Check if canonical form is structurally valid / canonicalized
+                                let check_call = Expr::Call(
+                                    Box::new(Expr::Var("isCanonicalizedStructurallyValidLanguageTag".to_string())),
+                                    vec![Expr::StringLit(utf8_to_utf16(&canonical))],
+                                );
+                                if let Ok(Value::Boolean(true)) = evaluate_expr(env, &check_call) {
+                                    crate::core::obj_set_value(&result, &idx.to_string().into(), Value::String(utf8_to_utf16(&canonical)))?;
+                                    idx += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            crate::js_array::set_array_length(&result, idx)?;
+            Ok(Value::Object(result))
+        }
+        _ => Err(eval_error_here!(format!("MockIntlConstructor has no static method '{method}'"))),
+    }
+}

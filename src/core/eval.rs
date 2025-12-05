@@ -3628,6 +3628,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method, args, env),
                     "Date" => crate::js_date::handle_date_static_method(method, args, env),
+                    "MockIntlConstructor" => crate::js_testintl::handle_mock_intl_static_method(method, args, env),
                     _ => Err(eval_error_here!(format!("{func_name} has no static method '{method}'"))),
                 }
             }

@@ -116,7 +116,7 @@ fn run_persistent_repl() {
                 }
 
                 // if the input looks incomplete (unclosed brackets/strings/templates/comments), keep reading
-                if !is_complete_input(&buffer) {
+                if !Repl::is_complete_input(&buffer) {
                     continue;
                 }
 

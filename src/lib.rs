@@ -40,4 +40,4 @@ pub use core::{
 };
 pub use core::{Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
 pub use error::JSError;
-pub use repl::{Repl, is_complete_input};
+pub use repl::Repl;

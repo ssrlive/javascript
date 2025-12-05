@@ -87,7 +87,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     }
 
     // Initialize global built-in constructors
-    initialize_global_constructors(&env);
+    initialize_global_constructors(&env)?;
 
     let v = evaluate_statements(&env, &statements)?;
     // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
@@ -369,29 +369,32 @@ pub(crate) fn filter_input_script(script: &str) -> String {
 }
 
 /// Initialize global built-in constructors in the environment
-pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) {
+pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
     let mut env_borrow = env.borrow_mut();
 
     // Object constructor (object with static methods) and Object.prototype
     let object_obj = Rc::new(RefCell::new(JSObjectData::new()));
 
     // Add static Object.* methods (handlers routed by presence of keys)
-    obj_set_value(&object_obj, &"keys".into(), Value::Function("Object.keys".to_string())).unwrap();
-    obj_set_value(&object_obj, &"values".into(), Value::Function("Object.values".to_string())).unwrap();
-    obj_set_value(&object_obj, &"assign".into(), Value::Function("Object.assign".to_string())).unwrap();
-    obj_set_value(&object_obj, &"create".into(), Value::Function("Object.create".to_string())).unwrap();
+    obj_set_value(&object_obj, &"keys".into(), Value::Function("Object.keys".to_string()))?;
+    obj_set_value(&object_obj, &"values".into(), Value::Function("Object.values".to_string()))?;
+    obj_set_value(&object_obj, &"assign".into(), Value::Function("Object.assign".to_string()))?;
+    obj_set_value(&object_obj, &"create".into(), Value::Function("Object.create".to_string()))?;
     obj_set_value(
         &object_obj,
         &"getOwnPropertySymbols".into(),
         Value::Function("Object.getOwnPropertySymbols".to_string()),
-    )
-    .unwrap();
+    )?;
+    obj_set_value(
+        &object_obj,
+        &"getOwnPropertyNames".into(),
+        Value::Function("Object.getOwnPropertyNames".to_string()),
+    )?;
     obj_set_value(
         &object_obj,
         &"getOwnPropertyDescriptors".into(),
         Value::Function("Object.getOwnPropertyDescriptors".to_string()),
-    )
-    .unwrap();
+    )?;
 
     // Create Object.prototype and add prototype-level helpers
     let object_prototype = Rc::new(RefCell::new(JSObjectData::new()));
@@ -399,42 +402,36 @@ pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) {
         &object_prototype,
         &"hasOwnProperty".into(),
         Value::Function("Object.prototype.hasOwnProperty".to_string()),
-    )
-    .unwrap();
+    )?;
     obj_set_value(
         &object_prototype,
         &"isPrototypeOf".into(),
         Value::Function("Object.prototype.isPrototypeOf".to_string()),
-    )
-    .unwrap();
+    )?;
     obj_set_value(
         &object_prototype,
         &"propertyIsEnumerable".into(),
         Value::Function("Object.prototype.propertyIsEnumerable".to_string()),
-    )
-    .unwrap();
+    )?;
     obj_set_value(
         &object_prototype,
         &"toString".into(),
         Value::Function("Object.prototype.toString".to_string()),
-    )
-    .unwrap();
+    )?;
     obj_set_value(
         &object_prototype,
         &"valueOf".into(),
         Value::Function("Object.prototype.valueOf".to_string()),
-    )
-    .unwrap();
+    )?;
     // Add toLocaleString to Object.prototype that delegates to toString/locale handling
     obj_set_value(
         &object_prototype,
         &"toLocaleString".into(),
         Value::Function("Object.prototype.toLocaleString".to_string()),
-    )
-    .unwrap();
+    )?;
 
     // wire prototype reference onto constructor
-    obj_set_value(&object_obj, &"prototype".into(), Value::Object(object_prototype.clone())).unwrap();
+    obj_set_value(&object_obj, &"prototype".into(), Value::Object(object_prototype.clone()))?;
 
     // expose Object constructor as an object with static methods
     env_borrow.insert(
@@ -523,4 +520,5 @@ pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) {
             "__internal_allsettled_state_record_rejected".to_string(),
         ))),
     );
+    Ok(())
 }

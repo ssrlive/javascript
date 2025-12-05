@@ -28,48 +28,48 @@ fn repl_allows_function_persistence() {
 
 #[cfg(test)]
 mod tests {
-    use javascript::is_complete_input;
+    use javascript::Repl;
 
     #[test]
     fn test_balanced_simple() {
-        assert!(is_complete_input("1 + 1"));
-        assert!(is_complete_input("let a = 10;"));
+        assert!(Repl::is_complete_input("1 + 1"));
+        assert!(Repl::is_complete_input("let a = 10;"));
     }
 
     #[test]
     fn test_unbalanced_brackets() {
-        assert!(!is_complete_input("(1 + 2"));
-        assert!(!is_complete_input("function f() {"));
-        assert!(!is_complete_input("[1, 2"));
+        assert!(!Repl::is_complete_input("(1 + 2"));
+        assert!(!Repl::is_complete_input("function f() {"));
+        assert!(!Repl::is_complete_input("[1, 2"));
     }
 
     #[test]
     fn test_strings_and_comments() {
-        assert!(is_complete_input("let s = '\\'not a bracket\\'';"));
-        assert!(is_complete_input("// comment with { [ ( "));
-        assert!(is_complete_input("/* block comment with { [ ( */"));
-        assert!(is_complete_input("'a string with } inside'"));
+        assert!(Repl::is_complete_input("let s = '\\'not a bracket\\'';"));
+        assert!(Repl::is_complete_input("// comment with { [ ( "));
+        assert!(Repl::is_complete_input("/* block comment with { [ ( */"));
+        assert!(Repl::is_complete_input("'a string with } inside'"));
     }
 
     #[test]
     fn test_template_literals() {
         // unterminated template (missing closing backtick) -> incomplete
-        assert!(!is_complete_input("`unterminated template"));
+        assert!(!Repl::is_complete_input("`unterminated template"));
         // closed template -> complete
-        assert!(is_complete_input("`unterminated template`"));
-        assert!(is_complete_input("`simple`"));
+        assert!(Repl::is_complete_input("`unterminated template`"));
+        assert!(Repl::is_complete_input("`simple`"));
         // template with expression
-        assert!(is_complete_input("`a ${1 + 2} b`"));
+        assert!(Repl::is_complete_input("`a ${1 + 2} b`"));
         // incomplete template expression
-        assert!(!is_complete_input("`x ${ {`"));
+        assert!(!Repl::is_complete_input("`x ${ {`"));
     }
 
     #[test]
     fn test_regex_handling() {
-        assert!(is_complete_input("/abc/.test('x')"));
+        assert!(Repl::is_complete_input("/abc/.test('x')"));
         // regex with brackets shouldn't upset brackets counting
-        assert!(is_complete_input("/([a-z]{2})/g"));
+        assert!(Repl::is_complete_input("/([a-z]{2})/g"));
         // division (not regex) combined with open paren
-        assert!(!is_complete_input("(a / 1"));
+        assert!(!Repl::is_complete_input("(a / 1"));
     }
 }

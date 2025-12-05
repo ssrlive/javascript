@@ -244,12 +244,52 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
             Ok(None) => {}
             Err(e) => {
                 // Thrown values (user code `throw`) are expected control flow and
-                // are noisy when logged at error level during batch testing. Lower
-                // their logging to debug so test runs aren't flooded. Keep other
-                // engine/internal errors at error level.
+                // we want to preserve the thrown JS `Value` contents for
+                // diagnostics rather than letting them be masked by generic
+                // EvaluationError messages. Log thrown values at debug level
+                // with a readable rendering; keep other engine/internal errors
+                // at error level.
                 match &e.kind() {
-                    &JSErrorKind::Throw { .. } => {
-                        log::debug!("evaluate_statements_with_context thrown value at statement {i}: {e}, stmt={stmt:?}");
+                    JSErrorKind::Throw { value } => {
+                        // Provide a helpful representation depending on value type
+                        match value {
+                            Value::String(s_utf16) => {
+                                let s = utf16_to_utf8(s_utf16);
+                                log::debug!(
+                                    "evaluate_statements_with_context thrown JS value (String) at statement {i}: '{}' stmt={stmt:?}",
+                                    s
+                                );
+                            }
+                            Value::Object(obj_ptr) => {
+                                log::debug!(
+                                    "evaluate_statements_with_context thrown JS value (Object) at statement {i}: ptr={:p} stmt={stmt:?}",
+                                    Rc::as_ptr(obj_ptr)
+                                );
+                            }
+                            Value::Number(n) => {
+                                log::debug!(
+                                    "evaluate_statements_with_context thrown JS value (Number) at statement {i}: {} stmt={stmt:?}",
+                                    n
+                                );
+                            }
+                            Value::Boolean(b) => {
+                                log::debug!(
+                                    "evaluate_statements_with_context thrown JS value (Boolean) at statement {i}: {} stmt={stmt:?}",
+                                    b
+                                );
+                            }
+                            Value::Undefined => {
+                                log::debug!("evaluate_statements_with_context thrown JS value (Undefined) at statement {i} stmt={stmt:?}");
+                            }
+                            other => {
+                                // Fallback: print Debug and a stringified form
+                                log::debug!(
+                                    "evaluate_statements_with_context thrown JS value at statement {i}: {:?} (toString='{}') stmt={stmt:?}",
+                                    other,
+                                    crate::core::value_to_string(other)
+                                );
+                            }
+                        }
                     }
                     _ => {
                         log::error!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
@@ -1681,7 +1721,17 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         }
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
-        Expr::Call(func_expr, args) => evaluate_call(env, func_expr, args),
+        Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                log::error!(
+                    "evaluate_expr: evaluate_call error for func_expr={:?} args={:?} error={e}",
+                    func_expr,
+                    args
+                );
+                Err(e)
+            }
+        },
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
@@ -1781,82 +1831,146 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     if name == "console" {
-        Ok(Value::Object(make_console_object()?))
+        let v = Value::Object(make_console_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "assert" {
-        Ok(Value::Object(make_assert_object()?))
+        let v = Value::Object(make_assert_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "testIntl" {
-        Ok(Value::Object(make_testintl_object()?))
+        let v = Value::Object(make_testintl_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "testWithIntlConstructors" {
-        Ok(Value::Function("testWithIntlConstructors".to_string()))
+        let v = Value::Function("testWithIntlConstructors".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "String" {
-        Ok(Value::Function("String".to_string()))
+        let v = Value::Function("String".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Math" {
-        Ok(Value::Object(make_math_object()?))
+        let v = Value::Object(make_math_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "JSON" {
         let json_obj = Rc::new(RefCell::new(JSObjectData::new()));
         obj_set_value(&json_obj, &"parse".into(), Value::Function("JSON.parse".to_string()))?;
         obj_set_value(&json_obj, &"stringify".into(), Value::Function("JSON.stringify".to_string()))?;
-        Ok(Value::Object(json_obj))
+        let v = Value::Object(json_obj);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Object" {
         // Return the Object constructor (we store it in the global environment as an object)
         if let Some(val_rc) = obj_get_value(env, &"Object".into())? {
-            return Ok(val_rc.borrow().clone());
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} -> {:?}", name, resolved);
+            return Ok(resolved);
         }
-        Ok(Value::Function("Object".to_string()))
+        let v = Value::Function("Object".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "parseInt" {
-        Ok(Value::Function("parseInt".to_string()))
+        let v = Value::Function("parseInt".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "parseFloat" {
-        Ok(Value::Function("parseFloat".to_string()))
+        let v = Value::Function("parseFloat".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "isNaN" {
-        Ok(Value::Function("isNaN".to_string()))
+        let v = Value::Function("isNaN".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "isFinite" {
-        Ok(Value::Function("isFinite".to_string()))
+        let v = Value::Function("isFinite".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "encodeURIComponent" {
-        Ok(Value::Function("encodeURIComponent".to_string()))
+        let v = Value::Function("encodeURIComponent".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "decodeURIComponent" {
-        Ok(Value::Function("decodeURIComponent".to_string()))
+        let v = Value::Function("decodeURIComponent".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "eval" {
-        Ok(Value::Function("eval".to_string()))
+        let v = Value::Function("eval".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "encodeURI" {
-        Ok(Value::Function("encodeURI".to_string()))
+        let v = Value::Function("encodeURI".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "decodeURI" {
-        Ok(Value::Function("decodeURI".to_string()))
+        let v = Value::Function("decodeURI".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Array" {
-        Ok(Value::Function("Array".to_string()))
+        let v = Value::Function("Array".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Number" {
-        Ok(Value::Object(make_number_object()?))
+        let v = Value::Object(make_number_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Boolean" {
-        Ok(Value::Function("Boolean".to_string()))
+        let v = Value::Function("Boolean".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Date" {
-        Ok(Value::Function("Date".to_string()))
+        let v = Value::Function("Date".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "RegExp" {
-        Ok(Value::Function("RegExp".to_string()))
+        let v = Value::Function("RegExp".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Promise" {
-        Ok(Value::Function("Promise".to_string()))
+        let v = Value::Function("Promise".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "new" {
-        Ok(Value::Function("new".to_string()))
+        let v = Value::Function("new".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "__internal_resolve_promise" {
-        Ok(Value::Function("__internal_resolve_promise".to_string()))
+        let v = Value::Function("__internal_resolve_promise".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "__internal_reject_promise" {
-        Ok(Value::Function("__internal_reject_promise".to_string()))
+        let v = Value::Function("__internal_reject_promise".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "__internal_promise_allsettled_resolve" {
-        Ok(Value::Function("__internal_promise_allsettled_resolve".to_string()))
+        let v = Value::Function("__internal_promise_allsettled_resolve".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "__internal_promise_allsettled_reject" {
-        Ok(Value::Function("__internal_promise_allsettled_reject".to_string()))
+        let v = Value::Function("__internal_promise_allsettled_reject".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "NaN" {
-        Ok(Value::Number(f64::NAN))
+        let v = Value::Number(f64::NAN);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Infinity" {
-        Ok(Value::Number(f64::INFINITY))
+        let v = Value::Number(f64::INFINITY);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else {
         // Walk up the prototype chain (scope chain) to find the variable binding.
         let mut current_opt = Some(env.clone());
         while let Some(current_env) = current_opt {
             if let Some(val_rc) = obj_get_value(&current_env, &name.into())? {
-                log::trace!("evaluate_var - {name} (found)");
-                return Ok(val_rc.borrow().clone());
+                let resolved = val_rc.borrow().clone();
+                log::trace!("evaluate_var - {} (found) -> {:?}", name, resolved);
+                return Ok(resolved);
             }
             current_opt = current_env.borrow().prototype.clone();
         }
+        log::trace!("evaluate_var - {} not found -> Undefined", name);
         Ok(Value::Undefined)
     }
 }
@@ -3786,6 +3900,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
                 } else {
+                    // Log diagnostic context before returning a generic evaluation error
+                    log::error!("evaluate_call - unexpected object method dispatch: obj_map={:?}", obj_map);
                     Err(raise_eval_error!("error"))
                 }
             }

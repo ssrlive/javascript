@@ -65,7 +65,15 @@ fn test_eval_numeric() {
 #[test]
 fn test_tmpfile_puts_tell() {
     // use evaluate_script to inspect Value-level results
-    let src = "import * as std from \"std\";\nlet f = std.tmpfile();\nf.puts(\"hello\");\nf.puts(\"\\n\");\nf.puts(\"world\");\nlet s = f.readAsString();\ns";
+    let src = r#"
+        import * as std from "std";
+        let f = std.tmpfile();
+        f.puts("hello");
+        f.puts("\n");
+        f.puts("world");
+        let s = f.readAsString();
+        s
+    "#;
     match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {

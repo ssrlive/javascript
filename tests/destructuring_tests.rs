@@ -1,5 +1,5 @@
+use javascript::Value;
 use javascript::evaluate_script;
-use javascript::{JSError, Value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -10,6 +10,8 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod destructuring_tests {
+    use javascript::JSErrorKind;
+
     use super::*;
 
     #[test]
@@ -71,11 +73,14 @@ mod destructuring_tests {
 
         let res = evaluate_script(script);
         match res {
-            Err(JSError::EvaluationError { message, .. }) => {
-                assert!(message.contains("Cannot destructure property"));
-                assert!(message.contains("seconds"));
-            }
-            _ => panic!("expected EvaluationError for destructuring undefined"),
+            Err(err) => match err.kind() {
+                JSErrorKind::EvaluationError { message, .. } => {
+                    assert!(message.contains("Cannot destructure property"));
+                    assert!(message.contains("seconds"));
+                }
+                _ => panic!("expected EvaluationError for destructuring undefined, got {:?}", err),
+            },
+            _ => panic!("expected EvaluationError for destructuring undefined, got {:?}", res),
         }
     }
 

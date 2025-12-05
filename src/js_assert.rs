@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
+use crate::raise_eval_error;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -16,7 +16,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
     match method {
         "sameValue" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(eval_error_here!("assert.sameValue requires 2 or 3 arguments"));
+                return Err(raise_eval_error!("assert.sameValue requires 2 or 3 arguments"));
             }
 
             let actual = evaluate_expr(env, &args[0])?;
@@ -41,7 +41,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             };
 
             if !equal {
-                return Err(eval_error_here!(format!("{message}: expected {expected:?}, got {actual:?}")));
+                return Err(raise_eval_error!(format!("{message}: expected {expected:?}, got {actual:?}")));
             }
 
             Ok(Value::Undefined)
@@ -49,7 +49,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         "throws" => {
             // assert.throws(expectedConstructor, func, message?)
             if args.len() < 2 || args.len() > 3 {
-                return Err(eval_error_here!("assert.throws requires 2 or 3 arguments"));
+                return Err(raise_eval_error!("assert.throws requires 2 or 3 arguments"));
             }
 
             // We only care that calling the provided function throws.
@@ -60,13 +60,13 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     match evaluate_statements(&func_env, &body) {
-                        Ok(_) => Err(eval_error_here!("assert.throws expected function to throw a value")),
+                        Ok(_) => Err(raise_eval_error!("assert.throws expected function to throw a value")),
                         Err(_) => Ok(Value::Undefined),
                     }
                 }
-                _ => Err(eval_error_here!("assert.throws requires a function as the 2nd argument")),
+                _ => Err(raise_eval_error!("assert.throws requires a function as the 2nd argument")),
             }
         }
-        _ => Err(eval_error_here!(format!("Assert method {method} not implemented"))),
+        _ => Err(raise_eval_error!(format!("Assert method {method} not implemented"))),
     }
 }

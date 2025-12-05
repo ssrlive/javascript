@@ -1,4 +1,4 @@
-use crate::JSError;
+use crate::{JSError, raise_tokenize_error};
 
 #[derive(Debug, Clone)]
 pub enum Token {
@@ -218,7 +218,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         i += 1;
                     }
                     if i >= chars.len() {
-                        return Err(JSError::TokenizationError); // Unterminated comment
+                        return Err(raise_tokenize_error!()); // Unterminated comment
                     }
                 } else {
                     // Heuristic: when '/' occurs in a position that cannot end an
@@ -268,7 +268,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                             j += 1;
                         }
                         if j >= chars.len() || chars[j] != '/' {
-                            return Err(JSError::TokenizationError); // unterminated regex
+                            return Err(raise_tokenize_error!()); // unterminated regex
                         }
                         // pattern is between i+1 and j-1
                         let pattern: String = chars[i + 1..j].iter().collect();
@@ -418,7 +418,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     tokens.push(Token::LogicalAnd);
                     i += 2;
                 } else {
-                    return Err(JSError::TokenizationError);
+                    return Err(raise_tokenize_error!());
                 }
             }
             '|' => {
@@ -430,7 +430,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     tokens.push(Token::LogicalOr);
                     i += 2;
                 } else {
-                    return Err(JSError::TokenizationError);
+                    return Err(raise_tokenize_error!());
                 }
             }
             '0'..='9' => {
@@ -445,7 +445,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     let mut num_str: String = chars[start..i].iter().collect();
                     num_str.retain(|c| c != '_');
                     if num_str.is_empty() || !num_str.chars().all(|c| c.is_ascii_digit()) {
-                        return Err(JSError::TokenizationError);
+                        return Err(raise_tokenize_error!());
                     }
                     tokens.push(Token::BigInt(num_str));
                     i += 1; // consume trailing 'n'
@@ -469,7 +469,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     }
                     // require at least one digit in exponent (underscores allowed inside digits)
                     if j >= chars.len() || !(chars[j].is_ascii_digit()) {
-                        return Err(JSError::TokenizationError);
+                        return Err(raise_tokenize_error!());
                     }
                     while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
                         j += 1;
@@ -483,7 +483,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 // Convert to f64
                 match num_str.parse::<f64>() {
                     Ok(n) => tokens.push(Token::Number(n)),
-                    Err(_) => return Err(JSError::TokenizationError),
+                    Err(_) => return Err(raise_tokenize_error!()),
                 }
             }
             '"' => {
@@ -525,7 +525,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                             i += 1;
                         }
                         if brace_count != 0 {
-                            return Err(JSError::TokenizationError);
+                            return Err(raise_tokenize_error!());
                         }
                         let expr_str: String = chars[expr_start..i - 1].iter().collect();
                         // Tokenize the expression inside ${}
@@ -537,7 +537,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     }
                 }
                 if i >= chars.len() {
-                    return Err(JSError::TokenizationError);
+                    return Err(raise_tokenize_error!());
                 }
                 // Add remaining string part
                 if current_start < i {
@@ -600,7 +600,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 tokens.push(Token::Semicolon);
                 i += 1;
             }
-            _ => return Err(JSError::TokenizationError),
+            _ => return Err(raise_tokenize_error!()),
         }
     }
     Ok(tokens)
@@ -612,7 +612,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
         if chars[*start] == '\\' {
             *start += 1;
             if *start >= chars.len() {
-                return Err(JSError::TokenizationError);
+                return Err(raise_tokenize_error!());
             }
             match chars[*start] {
                 'n' => result.push('\n' as u16),
@@ -626,7 +626,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                     // Unicode escape sequences: either \uXXXX or \u{HEX...}
                     *start += 1;
                     if *start >= chars.len() {
-                        return Err(JSError::TokenizationError);
+                        return Err(raise_tokenize_error!());
                     }
                     if chars[*start] == '{' {
                         // \u{HEX...}
@@ -637,7 +637,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                             *start += 1;
                         }
                         if *start >= chars.len() || chars[*start] != '}' {
-                            return Err(JSError::TokenizationError); // no closing brace
+                            return Err(raise_tokenize_error!()); // no closing brace
                         }
                         // parse hex as codepoint
                         match u32::from_str_radix(&hex_str, 16) {
@@ -653,13 +653,13 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                                     result.push(low);
                                 }
                             }
-                            _ => return Err(JSError::TokenizationError),
+                            _ => return Err(raise_tokenize_error!()),
                         }
                         // `start` currently at closing '}', the outer loop will increment it further
                     } else {
                         // Unicode escape sequence \uXXXX
                         if *start + 4 > chars.len() {
-                            return Err(JSError::TokenizationError);
+                            return Err(raise_tokenize_error!());
                         }
                         let hex_str: String = chars[*start..*start + 4].iter().collect();
                         *start += 3; // will be incremented by 1 at the end
@@ -667,7 +667,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                             Ok(code) => {
                                 result.push(code);
                             }
-                            Err(_) => return Err(JSError::TokenizationError), // Invalid hex
+                            Err(_) => return Err(raise_tokenize_error!()), // Invalid hex
                         }
                     }
                 }
@@ -675,7 +675,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                     // Hex escape sequence \xHH
                     *start += 1;
                     if *start + 2 > chars.len() {
-                        return Err(JSError::TokenizationError);
+                        return Err(raise_tokenize_error!());
                     }
                     let hex_str: String = chars[*start..*start + 2].iter().collect();
                     *start += 1; // will be incremented by 1 at the end
@@ -683,7 +683,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                         Ok(code) => {
                             result.push(code as u16);
                         }
-                        Err(_) => return Err(JSError::TokenizationError),
+                        Err(_) => return Err(raise_tokenize_error!()),
                     }
                 }
                 // For other escapes (regex escapes like \., \s, \], etc.) keep the backslash
@@ -699,7 +699,7 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
         *start += 1;
     }
     if *start >= chars.len() {
-        return Err(JSError::TokenizationError);
+        return Err(raise_tokenize_error!()); // Unterminated string literal
     }
     Ok(result)
 }

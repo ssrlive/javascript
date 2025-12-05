@@ -1,18 +1,13 @@
 #[derive(thiserror::Error, Debug)]
-pub enum JSError {
+pub enum JSErrorKind {
     #[error("Tokenization failed")]
     TokenizationError,
 
-    #[error("Parsing failed at {method} {file}:{line}")]
-    ParseError { file: String, line: usize, method: String },
+    #[error("Parsing failed")]
+    ParseError,
 
-    #[error("Evaluation failed at {method} {file}:{line}: {message}")]
-    EvaluationError {
-        message: String,
-        file: String,
-        line: usize,
-        method: String,
-    },
+    #[error("Evaluation failed: {message}")]
+    EvaluationError { message: String },
 
     #[error("Infinite loop detected (executed {iterations} iterations)")]
     InfiniteLoopError { iterations: usize },
@@ -20,13 +15,8 @@ pub enum JSError {
     #[error("Variable '{name}' not found")]
     VariableNotFound { name: String },
 
-    #[error("Type error: {message} at {method} {file}:{line}")]
-    TypeError {
-        message: String,
-        file: String,
-        line: usize,
-        method: String,
-    },
+    #[error("Type error: {message}")]
+    TypeError { message: String },
 
     #[error("Syntax error: {message}")]
     SyntaxError { message: String },
@@ -41,59 +31,57 @@ pub enum JSError {
     IoError(#[from] std::io::Error),
 }
 
-impl From<JSError> for std::io::Error {
-    fn from(err: JSError) -> std::io::Error {
-        match err {
-            JSError::IoError(io_err) => io_err,
-            _ => std::io::Error::other(err.to_string()),
+#[derive(Debug)]
+pub struct JSErrorData {
+    pub kind: JSErrorKind,
+    pub file: String,
+    pub line: usize,
+    pub method: String,
+}
+
+#[derive(Debug)]
+pub struct JSError {
+    pub inner: Box<JSErrorData>,
+}
+
+impl JSError {
+    // Provide a constructor for use by macros
+    pub fn new(kind: JSErrorKind, file: String, line: usize, method: String) -> Self {
+        Self {
+            inner: Box::new(JSErrorData { kind, file, line, method }),
         }
+    }
+
+    // convenience method to access the kind
+    pub fn kind(&self) -> &JSErrorKind {
+        &self.inner.kind
     }
 }
 
-// Macro that constructs a ParseError using the compile-time caller
-// location. Using a macro (rather than a function) ensures `file!()` and
-// `line!()` expand to the site where the macro is invoked.
-#[macro_export]
-macro_rules! parse_error_here {
-    () => {
-        $crate::JSError::ParseError {
-            file: file!().to_string(),
-            line: line!() as usize,
-            method: $crate::function_name!().to_string(),
-        }
-    };
+// So that all errors automatically get the format "Error: ... at method file:line"
+impl std::fmt::Display for JSError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = &self.inner;
+        write!(f, "{} at {} {}:{}", data.kind, data.method, data.file, data.line)
+    }
 }
 
-// Macro that constructs an EvaluationError using the compile-time caller
-// location and the provided message. Using a macro (rather than a
-// function) ensures `file!()` and `line!()` expand to the site where the
-// macro is invoked.
-#[macro_export]
-macro_rules! eval_error_here {
-    ($msg:expr) => {
-        $crate::JSError::EvaluationError {
-            message: $msg.to_string(),
-            file: file!().to_string(),
-            line: line!() as usize,
-            method: $crate::function_name!().to_string(),
-        }
-    };
+// Let JSError be used as a standard Error trait
+impl std::error::Error for JSError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.inner.kind.source()
+    }
 }
 
-// Macro that constructs a TypeError using the compile-time caller
-// location and the provided message.
-#[macro_export]
-macro_rules! make_type_error {
-    ($msg:expr) => {
-        $crate::JSError::TypeError {
-            message: $msg.to_string(),
-            file: file!().to_string(),
-            line: line!() as usize,
-            method: $crate::function_name!().to_string(),
-        }
-    };
+// Allow direct conversion from std::io::Error to JSError, but since we lack context,
+// we fill in "<unknown>" for file and method, and set line to 0
+impl From<std::io::Error> for JSError {
+    fn from(err: std::io::Error) -> Self {
+        JSError::new(JSErrorKind::IoError(err), "<unknown>".to_string(), 0, "<unknown>".to_string())
+    }
 }
 
+// Helper macro to get the current function name
 #[macro_export]
 macro_rules! function_name {
     () => {{
@@ -102,7 +90,80 @@ macro_rules! function_name {
             std::any::type_name::<T>()
         }
         let name = type_name_of(f);
-        // remove the trailing "::f"
         &name[..name.len() - 3]
     }};
+}
+
+// Kernel macro: this is the base for all specific error macros
+// It takes a JSErrorKind and auto-fills file, line, method
+#[macro_export]
+macro_rules! make_js_error {
+    ($kind:expr) => {
+        $crate::JSError::new($kind, file!().to_string(), line!() as usize, $crate::function_name!().to_string())
+    };
+}
+
+// --- These macros use make_js_error! to create specific error types ---
+
+#[macro_export]
+macro_rules! raise_tokenize_error {
+    () => {
+        $crate::make_js_error!($crate::JSErrorKind::TokenizationError)
+    };
+}
+
+#[macro_export]
+macro_rules! raise_parse_error {
+    () => {
+        $crate::make_js_error!($crate::JSErrorKind::ParseError)
+    };
+}
+
+#[macro_export]
+macro_rules! raise_eval_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::EvaluationError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+macro_rules! raise_infinite_loop_error {
+    ($iterations:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::InfiniteLoopError { iterations: $iterations })
+    };
+}
+
+#[macro_export]
+macro_rules! raise_variable_not_found_error {
+    ($name:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::VariableNotFound { name: $name.to_string() })
+    };
+}
+
+#[macro_export]
+macro_rules! make_type_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::TypeError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+macro_rules! raise_syntax_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::SyntaxError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+macro_rules! raise_runtime_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::RuntimeError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+macro_rules! raise_throw_error {
+    ($value:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::Throw { value: $value })
+    };
 }

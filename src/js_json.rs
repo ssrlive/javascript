@@ -1,7 +1,7 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
 use crate::js_array::{get_array_length, is_array, set_array_length};
+use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,13 +16,13 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                         let json_str = utf16_to_utf8(&s);
                         match serde_json::from_str::<serde_json::Value>(&json_str) {
                             Ok(json_value) => json_value_to_js_value(json_value),
-                            Err(_) => Err(eval_error_here!("Invalid JSON")),
+                            Err(_) => Err(raise_eval_error!("Invalid JSON")),
                         }
                     }
-                    _ => Err(eval_error_here!("JSON.parse expects a string")),
+                    _ => Err(raise_eval_error!("JSON.parse expects a string")),
                 }
             } else {
-                Err(eval_error_here!("JSON.parse expects exactly one argument"))
+                Err(raise_eval_error!("JSON.parse expects exactly one argument"))
             }
         }
         "stringify" => {
@@ -39,10 +39,10 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     None => Ok(Value::Undefined),
                 }
             } else {
-                Err(eval_error_here!("JSON.stringify expects exactly one argument"))
+                Err(raise_eval_error!("JSON.stringify expects exactly one argument"))
             }
         }
-        _ => Err(eval_error_here!(format!("JSON.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("JSON.{method} is not implemented"))),
     }
 }
 

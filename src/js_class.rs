@@ -1,5 +1,5 @@
-use crate::eval_error_here;
 use crate::js_array::is_array;
+use crate::raise_eval_error;
 use crate::{
     core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value},
     error::JSError,
@@ -233,7 +233,7 @@ pub(crate) fn create_class_object(
                 obj_set_value(&prototype_obj, &"__proto__".into(), Value::Object(parent_proto_obj.clone()))?;
             }
         } else {
-            return Err(eval_error_here!("Parent class expression did not evaluate to a class constructor"));
+            return Err(raise_eval_error!("Parent class expression did not evaluate to a class constructor"));
         }
     }
 
@@ -332,11 +332,11 @@ pub(crate) fn call_static_method(
                 return evaluate_statements(&func_env, body);
             }
             _ => {
-                return Err(eval_error_here!(format!("'{method}' is not a static method")));
+                return Err(raise_eval_error!(format!("'{method}' is not a static method")));
             }
         }
     }
-    Err(eval_error_here!(format!("Static method '{method}' not found on class")))
+    Err(raise_eval_error!(format!("Static method '{method}' not found on class")))
 }
 
 pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -376,7 +376,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
         }
     }
     // Other object methods not implemented
-    Err(eval_error_here!(format!("Method '{method}' not found on class instance")))
+    Err(raise_eval_error!(format!("Method '{method}' not found on class instance")))
 }
 
 pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPtr) -> Result<bool, JSError> {
@@ -413,7 +413,7 @@ pub(crate) fn evaluate_super(env: &JSObjectDataPtr) -> Result<Value, JSError> {
             return Ok(parent_proto_val.borrow().clone());
         }
     }
-    Err(eval_error_here!("super can only be used in class methods or constructors"))
+    Err(raise_eval_error!("super can only be used in class methods or constructors"))
 }
 
 pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
@@ -455,7 +455,7 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
             }
         }
     }
-    Err(eval_error_here!("super() can only be called in class constructors"))
+    Err(raise_eval_error!("super() can only be called in class constructors"))
 }
 
 pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Result<Value, JSError> {
@@ -475,7 +475,7 @@ pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Resu
             }
         }
     }
-    Err(eval_error_here!(format!("Property '{prop}' not found in parent class")))
+    Err(raise_eval_error!(format!("Property '{prop}' not found in parent class")))
 }
 
 pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &[Expr]) -> Result<Value, JSError> {
@@ -511,13 +511,13 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                         return evaluate_statements(&func_env, body);
                     }
                     _ => {
-                        return Err(eval_error_here!(format!("'{method}' is not a method in parent class")));
+                        return Err(raise_eval_error!(format!("'{method}' is not a method in parent class")));
                     }
                 }
             }
         }
     }
-    Err(eval_error_here!(format!("Method '{method}' not found in parent class")))
+    Err(raise_eval_error!(format!("Method '{method}' not found in parent class")))
 }
 
 /// Handle Object constructor calls

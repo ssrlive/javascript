@@ -1,7 +1,7 @@
 use crate::{
     core::{JSObjectData, JSObjectDataPtr, PropertyKey},
     error::JSError,
-    eval_error_here,
+    raise_eval_error,
     unicode::utf8_to_utf16,
 };
 use std::cell::RefCell;
@@ -17,7 +17,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
     match method {
         "isArray" => {
             if args.len() != 1 {
-                return Err(eval_error_here!("Array.isArray requires exactly one argument"));
+                return Err(raise_eval_error!("Array.isArray requires exactly one argument"));
             }
 
             let arg = evaluate_expr(env, &args[0])?;
@@ -30,7 +30,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
         "from" => {
             // Array.from(iterable, mapFn?, thisArg?)
             if args.is_empty() {
-                return Err(eval_error_here!("Array.from requires at least one argument"));
+                return Err(raise_eval_error!("Array.from requires at least one argument"));
             }
 
             let iterable = evaluate_expr(env, &args[0])?;
@@ -67,7 +67,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                             result.push(mapped);
                                         }
                                         _ => {
-                                            return Err(eval_error_here!("Array.from map function must be a function"));
+                                            return Err(raise_eval_error!("Array.from map function must be a function"));
                                         }
                                     }
                                 } else {
@@ -76,11 +76,11 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                             }
                         }
                     } else {
-                        return Err(eval_error_here!("Array.from iterable must be array-like"));
+                        return Err(raise_eval_error!("Array.from iterable must be array-like"));
                     }
                 }
                 _ => {
-                    return Err(eval_error_here!("Array.from iterable must be array-like"));
+                    return Err(raise_eval_error!("Array.from iterable must be array-like"));
                 }
             }
 
@@ -101,7 +101,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
             set_array_length(&new_array, args.len())?;
             Ok(Value::Object(new_array))
         }
-        _ => Err(eval_error_here!(format!("Array.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Array.{method} is not implemented"))),
     }
 }
 
@@ -205,7 +205,7 @@ pub(crate) fn handle_array_instance_method(
                 // Return the array object (chainable)
                 Ok(Value::Object(obj_map.clone()))
             } else {
-                Err(eval_error_here!("Array.push expects at least one argument"))
+                Err(raise_eval_error!("Array.push expects at least one argument"))
             }
         }
         "pop" => {
@@ -317,14 +317,14 @@ pub(crate) fn handle_array_instance_method(
                                 evaluate_statements(&func_env, body)?;
                             }
                             _ => {
-                                return Err(eval_error_here!("Array.forEach expects a function"));
+                                return Err(raise_eval_error!("Array.forEach expects a function"));
                             }
                         }
                     }
                 }
                 Ok(Value::Undefined)
             } else {
-                Err(eval_error_here!("Array.forEach expects at least one argument"))
+                Err(raise_eval_error!("Array.forEach expects at least one argument"))
             }
         }
         "map" => {
@@ -355,7 +355,7 @@ pub(crate) fn handle_array_instance_method(
                                 idx += 1;
                             }
                             _ => {
-                                return Err(eval_error_here!("Array.map expects a function"));
+                                return Err(raise_eval_error!("Array.map expects a function"));
                             }
                         }
                     }
@@ -363,7 +363,7 @@ pub(crate) fn handle_array_instance_method(
                 set_array_length(&new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
-                Err(eval_error_here!("Array.map expects at least one argument"))
+                Err(raise_eval_error!("Array.map expects at least one argument"))
             }
         }
         "filter" => {
@@ -404,7 +404,7 @@ pub(crate) fn handle_array_instance_method(
                                 }
                             }
                             _ => {
-                                return Err(eval_error_here!("Array.filter expects a function"));
+                                return Err(raise_eval_error!("Array.filter expects a function"));
                             }
                         }
                     }
@@ -412,7 +412,7 @@ pub(crate) fn handle_array_instance_method(
                 set_array_length(&new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
-                Err(eval_error_here!("Array.filter expects at least one argument"))
+                Err(raise_eval_error!("Array.filter expects at least one argument"))
             }
         }
         "reduce" => {
@@ -427,7 +427,7 @@ pub(crate) fn handle_array_instance_method(
                 let current_len = get_array_length(obj_map).unwrap_or(0);
 
                 if current_len == 0 && initial_value.is_none() {
-                    return Err(eval_error_here!("Array.reduce called on empty array with no initial value"));
+                    return Err(raise_eval_error!("Array.reduce called on empty array with no initial value"));
                 }
 
                 let mut accumulator: Value = if let Some(ref val) = initial_value {
@@ -462,14 +462,14 @@ pub(crate) fn handle_array_instance_method(
                                 accumulator = res;
                             }
                             _ => {
-                                return Err(eval_error_here!("Array.reduce expects a function"));
+                                return Err(raise_eval_error!("Array.reduce expects a function"));
                             }
                         }
                     }
                 }
                 Ok(accumulator)
             } else {
-                Err(eval_error_here!("Array.reduce expects at least one argument"))
+                Err(raise_eval_error!("Array.reduce expects at least one argument"))
             }
         }
         "find" => {
@@ -514,10 +514,10 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Undefined)
                     }
-                    _ => Err(eval_error_here!("Array.find expects a function")),
+                    _ => Err(raise_eval_error!("Array.find expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.find expects at least one argument"))
+                Err(raise_eval_error!("Array.find expects at least one argument"))
             }
         }
         "findIndex" => {
@@ -562,10 +562,10 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Number(-1.0))
                     }
-                    _ => Err(eval_error_here!("Array.findIndex expects a function")),
+                    _ => Err(raise_eval_error!("Array.findIndex expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.findIndex expects at least one argument"))
+                Err(raise_eval_error!("Array.findIndex expects at least one argument"))
             }
         }
         "some" => {
@@ -610,10 +610,10 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Boolean(false))
                     }
-                    _ => Err(eval_error_here!("Array.some expects a function")),
+                    _ => Err(raise_eval_error!("Array.some expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.some expects at least one argument"))
+                Err(raise_eval_error!("Array.some expects at least one argument"))
             }
         }
         "every" => {
@@ -658,10 +658,10 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Boolean(true))
                     }
-                    _ => Err(eval_error_here!("Array.every expects a function")),
+                    _ => Err(raise_eval_error!("Array.every expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.every expects at least one argument"))
+                Err(raise_eval_error!("Array.every expects at least one argument"))
             }
         }
         "concat" => {
@@ -705,7 +705,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "indexOf" => {
             if args.is_empty() {
-                return Err(eval_error_here!("Array.indexOf expects at least one argument"));
+                return Err(raise_eval_error!("Array.indexOf expects at least one argument"));
             }
 
             let search_element = evaluate_expr(env, &args[0])?;
@@ -738,7 +738,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "includes" => {
             if args.is_empty() {
-                return Err(eval_error_here!("Array.includes expects at least one argument"));
+                return Err(raise_eval_error!("Array.includes expects at least one argument"));
             }
 
             let search_element = evaluate_expr(env, &args[0])?;
@@ -826,7 +826,7 @@ pub(crate) fn handle_array_instance_method(
                         }
                     });
                 } else {
-                    return Err(eval_error_here!("Array.sort expects a function as compare function"));
+                    return Err(raise_eval_error!("Array.sort expects a function as compare function"));
                 }
             }
 
@@ -1170,7 +1170,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "flatMap" => {
             if args.is_empty() {
-                return Err(eval_error_here!("Array.flatMap expects at least one argument"));
+                return Err(raise_eval_error!("Array.flatMap expects at least one argument"));
             }
 
             let callback_val = evaluate_expr(env, &args[0])?;
@@ -1196,7 +1196,7 @@ pub(crate) fn handle_array_instance_method(
                             flatten_single_value(mapped_val, &mut result, 1)?;
                         }
                         _ => {
-                            return Err(eval_error_here!("Array.flatMap expects a function"));
+                            return Err(raise_eval_error!("Array.flatMap expects a function"));
                         }
                     }
                 }
@@ -1337,10 +1337,10 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Undefined)
                     }
-                    _ => Err(eval_error_here!("Array.findLast expects a function")),
+                    _ => Err(raise_eval_error!("Array.findLast expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.findLast expects at least one argument"))
+                Err(raise_eval_error!("Array.findLast expects at least one argument"))
             }
         }
         "findLastIndex" => {
@@ -1386,13 +1386,13 @@ pub(crate) fn handle_array_instance_method(
                         }
                         Ok(Value::Number(-1.0))
                     }
-                    _ => Err(eval_error_here!("Array.findLastIndex expects a function")),
+                    _ => Err(raise_eval_error!("Array.findLastIndex expects a function")),
                 }
             } else {
-                Err(eval_error_here!("Array.findLastIndex expects at least one argument"))
+                Err(raise_eval_error!("Array.findLastIndex expects at least one argument"))
             }
         }
-        _ => Err(eval_error_here!(format!("Array.{method} not found"))),
+        _ => Err(raise_eval_error!(format!("Array.{method} not found"))),
     }
 }
 

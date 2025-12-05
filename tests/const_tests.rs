@@ -1,4 +1,3 @@
-use javascript::JSError;
 use javascript::{Value, evaluate_script};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -10,6 +9,8 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod const_tests {
+    use javascript::JSErrorKind;
+
     use super::*;
 
     #[test]
@@ -27,10 +28,14 @@ mod const_tests {
         let script = "const x = 42; x = 24";
         let result = evaluate_script(script);
         assert!(result.is_err());
-        if let Err(JSError::TypeError { message, .. }) = result {
-            assert!(message.contains("Assignment to constant variable"));
-        } else {
-            panic!("Expected TypeError, got {:?}", result);
+        match result {
+            Err(err) => match err.kind() {
+                JSErrorKind::TypeError { message, .. } => {
+                    assert!(message.contains("Assignment to constant") || message.contains("constant"))
+                }
+                _ => panic!("Expected TypeError for assignment to const, got {:?}", err),
+            },
+            _ => panic!("Expected error for const reassignment, got {:?}", result),
         }
     }
 

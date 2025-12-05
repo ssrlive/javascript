@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
+use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -62,7 +62,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(eval_error_here!("Number.isNaN expects exactly one argument"))
+                Err(raise_eval_error!("Number.isNaN expects exactly one argument"))
             }
         }
         "isFinite" => {
@@ -74,7 +74,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(eval_error_here!("Number.isFinite expects exactly one argument"))
+                Err(raise_eval_error!("Number.isFinite expects exactly one argument"))
             }
         }
         "isInteger" => {
@@ -86,7 +86,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(eval_error_here!("Number.isInteger expects exactly one argument"))
+                Err(raise_eval_error!("Number.isInteger expects exactly one argument"))
             }
         }
         "isSafeInteger" => {
@@ -100,7 +100,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Boolean(false))
                 }
             } else {
-                Err(eval_error_here!("Number.isSafeInteger expects exactly one argument"))
+                Err(raise_eval_error!("Number.isSafeInteger expects exactly one argument"))
             }
         }
         "parseFloat" => {
@@ -118,7 +118,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {
-                Err(eval_error_here!("Number.parseFloat expects exactly one argument"))
+                Err(raise_eval_error!("Number.parseFloat expects exactly one argument"))
             }
         }
         "parseInt" => {
@@ -186,10 +186,10 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {
-                Err(eval_error_here!("Number.parseInt expects at least one argument"))
+                Err(raise_eval_error!("Number.parseInt expects at least one argument"))
             }
         }
-        _ => Err(eval_error_here!(format!("Number.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Number.{method} is not implemented"))),
     }
 }
 
@@ -201,14 +201,17 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
                 Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
                 let msg = format!("toString method expects no arguments, got {}", args.len());
-                Err(eval_error_here!(msg))
+                Err(raise_eval_error!(msg))
             }
         }
         "valueOf" => {
             if args.is_empty() {
                 Ok(Value::Number(*n))
             } else {
-                Err(eval_error_here!(format!("valueOf method expects no arguments, got {}", args.len())))
+                Err(raise_eval_error!(format!(
+                    "valueOf method expects no arguments, got {}",
+                    args.len()
+                )))
             }
         }
         "toLocaleString" => {
@@ -217,10 +220,10 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
                 Ok(Value::String(utf8_to_utf16(&n.to_string())))
             } else {
                 let msg = format!("toLocaleString method expects no arguments, got {}", args.len());
-                Err(eval_error_here!(msg))
+                Err(raise_eval_error!(msg))
             }
         }
-        _ => Err(eval_error_here!(format!("Number.prototype.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),
     }
 }
 
@@ -238,13 +241,13 @@ pub fn handle_number_object_method(
                 "toString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                 "valueOf" => Ok(Value::Number(n)),
                 "toLocaleString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))), // For now, same as toString
-                _ => Err(eval_error_here!(format!("Number.prototype.{method} is not implemented"))),
+                _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),
             }
         } else {
-            Err(eval_error_here!("Invalid __value__ for Number instance"))
+            Err(raise_eval_error!("Invalid __value__ for Number instance"))
         }
     } else {
-        Err(eval_error_here!("__value__ not found on Number instance"))
+        Err(raise_eval_error!("__value__ not found on Number instance"))
     }
 }
 

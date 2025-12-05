@@ -39,5 +39,5 @@ pub use core::{
     JS_TAG_SHORT_BIG_INT, JS_TAG_STRING, JS_TAG_STRING_ROPE, JS_TAG_UNDEFINED, JS_UNINITIALIZED,
 };
 pub use core::{Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
-pub use error::JSError;
+pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;

@@ -10,7 +10,7 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod control_flow_tests {
-    use javascript::JSError;
+    use javascript::JSErrorKind;
 
     use super::*;
 
@@ -169,9 +169,12 @@ mod control_flow_tests {
         let script = "break;";
         let result = evaluate_script(script);
         match result {
-            Err(JSError::EvaluationError { message, .. }) => {
-                assert!(message.contains("break statement not in loop or switch"));
-            }
+            Err(err) => match err.kind() {
+                JSErrorKind::EvaluationError { message, .. } => {
+                    assert!(message.contains("break statement not in loop or switch"));
+                }
+                _ => panic!("Expected EvaluationError for break, got {:?}", err),
+            },
             _ => panic!("Expected EvaluationError for break, got {:?}", result),
         }
     }
@@ -191,9 +194,12 @@ mod control_flow_tests {
         let script = "continue;";
         let result = evaluate_script(script);
         match result {
-            Err(JSError::EvaluationError { message, .. }) => {
-                assert!(message.contains("continue statement not in loop"));
-            }
+            Err(err) => match err.kind() {
+                JSErrorKind::EvaluationError { message, .. } => {
+                    assert!(message.contains("continue statement not in loop"));
+                }
+                _ => panic!("Expected EvaluationError for continue, got {:?}", err),
+            },
             _ => panic!("Expected EvaluationError for continue, got {:?}", result),
         }
     }

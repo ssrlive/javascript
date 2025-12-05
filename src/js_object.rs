@@ -270,7 +270,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 _ => Err(make_type_error!("Object.getOwnPropertyDescriptors called on non-object")),
             }
         }
-        _ => Err(eval_error_here!(format!("Object.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
     }
 }
 

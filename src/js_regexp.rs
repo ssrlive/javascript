@@ -205,9 +205,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             'y' => sticky = true,
             'R' => crlf = true,
             _ => {
-                return Err(JSError::SyntaxError {
-                    message: format!("Invalid RegExp flag: {flag}"),
-                });
+                return Err(raise_syntax_error!(format!("Invalid RegExp flag: {flag}")));
             }
         }
     }
@@ -231,9 +229,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 
     // Validate the regex pattern by trying to compile it via fancy-regex
     if let Err(e) = Regex::new(&effective_pattern) {
-        return Err(JSError::SyntaxError {
-            message: format!("Invalid RegExp: {}", e),
-        });
+        return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
     }
 
     // Create RegExp object
@@ -343,9 +339,7 @@ pub(crate) fn handle_regexp_method(
             };
 
             log::debug!("RegExp.exec: effective_pattern='{}'", eff_pat);
-            let regex = Regex::new(&eff_pat).map_err(|e| JSError::SyntaxError {
-                message: format!("Invalid RegExp: {e}"),
-            })?;
+            let regex = Regex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
             // Get lastIndex for global regex
             // Per ECMAScript, lastIndex is a UTF-16 code unit index. We'll treat it as such.
@@ -499,9 +493,7 @@ pub(crate) fn handle_regexp_method(
                     // RegExp.exec returns null on no match, but we use Undefined
                     Ok(Value::Undefined)
                 }
-                Err(e) => Err(JSError::SyntaxError {
-                    message: format!("Invalid RegExp: {e}"),
-                }),
+                Err(e) => Err(raise_syntax_error!(format!("Invalid RegExp: {e}"))),
             }
         }
         "test" => {
@@ -569,9 +561,7 @@ pub(crate) fn handle_regexp_method(
                 format!("(?{}){}", inline, base_pattern)
             };
             log::debug!("RegExp.test: effective_pattern='{}'", eff_pat);
-            let regex = Regex::new(&eff_pat).map_err(|e| JSError::SyntaxError {
-                message: format!("Invalid RegExp: {}", e),
-            })?;
+            let regex = Regex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
             // Get lastIndex for global regex
             // Per ECMAScript, lastIndex is a UTF-16 code unit index; use if global or sticky.
@@ -617,9 +607,7 @@ pub(crate) fn handle_regexp_method(
             let is_match = match regex.is_match(&working_input[byte_start..]) {
                 Ok(b) => b,
                 Err(e) => {
-                    return Err(JSError::SyntaxError {
-                        message: format!("Invalid RegExp: {e}"),
-                    });
+                    return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
                 }
             };
 
@@ -662,9 +650,7 @@ pub(crate) fn handle_regexp_method(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        return Err(JSError::SyntaxError {
-                            message: format!("Invalid RegExp: {e}"),
-                        });
+                        return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
                     }
                 }
             } else if global && !is_match {
@@ -694,6 +680,6 @@ pub(crate) fn handle_regexp_method(
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))
         }
-        _ => Err(eval_error_here!(format!("RegExp.prototype.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("RegExp.prototype.{method} is not implemented"))),
     }
 }

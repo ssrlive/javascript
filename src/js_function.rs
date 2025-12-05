@@ -1,8 +1,8 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, to_primitive, value_to_string};
 use crate::error::JSError;
-use crate::eval_error_here;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
+use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use std::rc::Rc;
 
@@ -358,11 +358,11 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     "Date" => return crate::js_date::handle_date_constructor(constructor_args, env),
                     "Promise" => return crate::js_promise::handle_promise_constructor(constructor_args, env),
                     _ => {
-                        return Err(eval_error_here!(format!("Constructor {constructor_name} not implemented")));
+                        return Err(raise_eval_error!(format!("Constructor {constructor_name} not implemented")));
                     }
                 }
             }
-            Err(eval_error_here!("Invalid new expression"))
+            Err(raise_eval_error!("Invalid new expression"))
         }
         "eval" => {
             // eval function - execute the code
@@ -601,6 +601,6 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             Ok(Value::Undefined)
         }
 
-        _ => Err(eval_error_here!(format!("Global function {func_name} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Global function {func_name} is not implemented"))),
     }
 }

@@ -1,4 +1,4 @@
-use javascript::{JSError, evaluate_script};
+use javascript::{JSErrorKind, evaluate_script};
 
 #[test]
 fn symbol_to_number_in_relational_should_throw() {
@@ -6,9 +6,11 @@ fn symbol_to_number_in_relational_should_throw() {
     let script = "Symbol() < 5";
     let res = evaluate_script(script);
     match res {
-        Err(JSError::TypeError { message, .. }) => assert!(message.contains("Cannot convert Symbol")),
+        Err(err) => match err.kind() {
+            JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert Symbol")),
+            _ => panic!("Expected TypeError for Symbol to number coercion, got {:?}", err),
+        },
         Ok(v) => panic!("expected TypeError, got {:?}", v),
-        Err(e) => panic!("Expected TypeError but got: {:?}", e),
     }
 }
 
@@ -18,9 +20,11 @@ fn symbol_to_number_in_add_should_throw() {
     let script = "1 + Symbol()";
     let res = evaluate_script(script);
     match res {
-        Err(JSError::TypeError { message, .. }) => assert!(message.contains("Cannot convert Symbol")),
+        Err(err) => match err.kind() {
+            JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot convert Symbol")),
+            _ => panic!("Expected TypeError for Symbol to number coercion, got {:?}", err),
+        },
         Ok(v) => panic!("expected TypeError, got {:?}", v),
-        Err(e) => panic!("Expected TypeError but got: {:?}", e),
     }
 }
 
@@ -33,10 +37,12 @@ fn symbol_to_primitive_method_must_return_primitive() {
     "#;
     let res = evaluate_script(script);
     match res {
-        Err(JSError::TypeError { message, .. }) => {
-            assert!(message.contains("must return a primitive") || message.contains("Cannot convert"))
-        }
+        Err(err) => match err.kind() {
+            JSErrorKind::TypeError { message, .. } => {
+                assert!(message.contains("must return a primitive") || message.contains("Cannot convert"))
+            }
+            _ => panic!("Expected TypeError for Symbol.toPrimitive returning non-primitive, got {:?}", err),
+        },
         Ok(v) => panic!("expected TypeError, got {:?}", v),
-        Err(e) => panic!("Expected TypeError but got: {:?}", e),
     }
 }

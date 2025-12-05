@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
+use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 use std::cell::RefCell;
@@ -493,7 +493,7 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                 Err(make_type_error!("Invalid Date object"))
             }
         }
-        _ => Err(eval_error_here!(format!("Date has no method '{method}'"))),
+        _ => Err(raise_eval_error!(format!("Date has no method '{method}'"))),
     }
 }
 
@@ -508,6 +508,6 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
             let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             Ok(Value::Number(duration.as_millis() as f64))
         }
-        _ => Err(eval_error_here!(format!("Date has no static method '{method}'"))),
+        _ => Err(raise_eval_error!(format!("Date has no static method '{method}'"))),
     }
 }

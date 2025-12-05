@@ -1,4 +1,3 @@
-use javascript::JSError;
 use javascript::evaluate_script;
 
 // Initialize logger for these tests
@@ -17,7 +16,8 @@ fn parse_error_carries_file_and_line_defaults() {
             // Parse error sites now include the originating source file and
             // line number via `file!()` / `line!()`. We assert that the
             // reported file is inside `src/core/` and a non-zero line is set.
-            if let JSError::ParseError { file, line, method } = err {
+            let (file, line, method) = (err.inner.file, err.inner.line, err.inner.method);
+            {
                 // Normalize path separators so test passes whether running on Windows (backslashes)
                 // or Unix-like systems (forward slashes).
                 let normalized = file.replace("\\", "/");

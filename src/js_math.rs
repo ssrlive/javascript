@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
+use crate::raise_eval_error;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -33,10 +33,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.floor()))
                 } else {
-                    Err(eval_error_here!("Math.floor expects a number"))
+                    Err(raise_eval_error!("Math.floor expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.floor expects exactly one argument"))
+                Err(raise_eval_error!("Math.floor expects exactly one argument"))
             }
         }
         "ceil" => {
@@ -45,10 +45,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.ceil()))
                 } else {
-                    Err(eval_error_here!("Math.ceil expects a number"))
+                    Err(raise_eval_error!("Math.ceil expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.ceil expects exactly one argument"))
+                Err(raise_eval_error!("Math.ceil expects exactly one argument"))
             }
         }
         "round" => {
@@ -57,10 +57,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.round()))
                 } else {
-                    Err(eval_error_here!("Math.round expects a number"))
+                    Err(raise_eval_error!("Math.round expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.round expects exactly one argument"))
+                Err(raise_eval_error!("Math.round expects exactly one argument"))
             }
         }
         "abs" => {
@@ -69,10 +69,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.abs()))
                 } else {
-                    Err(eval_error_here!("Math.abs expects a number"))
+                    Err(raise_eval_error!("Math.abs expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.abs expects exactly one argument"))
+                Err(raise_eval_error!("Math.abs expects exactly one argument"))
             }
         }
         "sqrt" => {
@@ -81,10 +81,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.sqrt()))
                 } else {
-                    Err(eval_error_here!("Math.sqrt expects a number"))
+                    Err(raise_eval_error!("Math.sqrt expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.sqrt expects exactly one argument"))
+                Err(raise_eval_error!("Math.sqrt expects exactly one argument"))
             }
         }
         "pow" => {
@@ -94,10 +94,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let (Value::Number(base), Value::Number(exp)) = (base_val, exp_val) {
                     Ok(Value::Number(base.powf(exp)))
                 } else {
-                    Err(eval_error_here!("Math.pow expects two numbers"))
+                    Err(raise_eval_error!("Math.pow expects two numbers"))
                 }
             } else {
-                Err(eval_error_here!("Math.pow expects exactly two arguments"))
+                Err(raise_eval_error!("Math.pow expects exactly two arguments"))
             }
         }
         "sin" => {
@@ -106,10 +106,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.sin()))
                 } else {
-                    Err(eval_error_here!("Math.sin expects a number"))
+                    Err(raise_eval_error!("Math.sin expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.sin expects exactly one argument"))
+                Err(raise_eval_error!("Math.sin expects exactly one argument"))
             }
         }
         "cos" => {
@@ -118,10 +118,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.cos()))
                 } else {
-                    Err(eval_error_here!("Math.cos expects a number"))
+                    Err(raise_eval_error!("Math.cos expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.cos expects exactly one argument"))
+                Err(raise_eval_error!("Math.cos expects exactly one argument"))
             }
         }
         "tan" => {
@@ -130,10 +130,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.tan()))
                 } else {
-                    Err(eval_error_here!("Math.tan expects a number"))
+                    Err(raise_eval_error!("Math.tan expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.tan expects exactly one argument"))
+                Err(raise_eval_error!("Math.tan expects exactly one argument"))
             }
         }
         "random" => {
@@ -149,7 +149,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 let random_f64 = random_u32 as f64 / m as f64;
                 Ok(Value::Number(random_f64))
             } else {
-                Err(eval_error_here!("Math.random expects no arguments"))
+                Err(raise_eval_error!("Math.random expects no arguments"))
             }
         }
         "clz32" => {
@@ -161,10 +161,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     let leading_zeros = u32_val.leading_zeros();
                     Ok(Value::Number(leading_zeros as f64))
                 } else {
-                    Err(eval_error_here!("Math.clz32 expects a number"))
+                    Err(raise_eval_error!("Math.clz32 expects a number"))
                 }
             } else {
-                Err(eval_error_here!("Math.clz32 expects exactly one argument"))
+                Err(raise_eval_error!("Math.clz32 expects exactly one argument"))
             }
         }
         "imul" => {
@@ -178,12 +178,12 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     let result_i32 = a_i32.wrapping_mul(b_i32);
                     Ok(Value::Number(result_i32 as f64))
                 } else {
-                    Err(eval_error_here!("Math.imul expects two numbers"))
+                    Err(raise_eval_error!("Math.imul expects two numbers"))
                 }
             } else {
-                Err(eval_error_here!("Math.imul expects exactly two arguments"))
+                Err(raise_eval_error!("Math.imul expects exactly two arguments"))
             }
         }
-        _ => Err(eval_error_here!(format!("Math.{method} is not implemented"))),
+        _ => Err(raise_eval_error!(format!("Math.{method} is not implemented"))),
     }
 }

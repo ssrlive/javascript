@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, obj_set_value};
 use crate::error::JSError;
-use crate::eval_error_here;
+use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -62,9 +62,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                     }
                 }
 
-                return Err(JSError::Throw {
-                    value: Value::String(utf8_to_utf16("Invalid locale")),
-                });
+                return Err(raise_throw_error!(Value::String(utf8_to_utf16("Invalid locale"))));
             }
             // If the helper is not present or returned non-boolean, fall back
             // to rejecting some obviously invalid inputs such as empty string
@@ -72,9 +70,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
             // the tests expect to be considered invalid.
             Ok(_) | Err(_) => {
                 if locale.is_empty() || locale.len() < 2 {
-                    return Err(JSError::Throw {
-                        value: Value::String(utf8_to_utf16("Invalid locale")),
-                    });
+                    return Err(raise_throw_error!(Value::String(utf8_to_utf16("Invalid locale"))));
                 }
             }
         }
@@ -122,14 +118,14 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
     match method {
         "testWithIntlConstructors" => {
             if args.len() != 1 {
-                return Err(eval_error_here!("testWithIntlConstructors requires exactly 1 argument"));
+                return Err(raise_eval_error!("testWithIntlConstructors requires exactly 1 argument"));
             }
 
             let callback = evaluate_expr(env, &args[0])?;
             let callback_func = match callback {
                 Value::Closure(params, body, captured_env) => (params, body, captured_env),
                 _ => {
-                    return Err(eval_error_here!("testWithIntlConstructors requires a function as argument"));
+                    return Err(raise_eval_error!("testWithIntlConstructors requires a function as argument"));
                 }
             };
 
@@ -148,7 +144,7 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
 
             Ok(Value::Undefined)
         }
-        _ => Err(eval_error_here!(format!("testIntl method {method} not implemented"))),
+        _ => Err(raise_eval_error!(format!("testIntl method {method} not implemented"))),
     }
 }
 
@@ -210,6 +206,6 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
             crate::js_array::set_array_length(&result, idx)?;
             Ok(Value::Object(result))
         }
-        _ => Err(eval_error_here!(format!("MockIntlConstructor has no static method '{method}'"))),
+        _ => Err(raise_eval_error!(format!("MockIntlConstructor has no static method '{method}'"))),
     }
 }

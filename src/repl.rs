@@ -4,8 +4,8 @@ use crate::{
         JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors,
         obj_get_value, obj_set_value, parse_statements, tokenize, value_to_string,
     },
-    eval_error_here,
     js_promise::{PromiseState, run_event_loop},
+    raise_eval_error,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -84,7 +84,7 @@ impl Repl {
                         match &promise_borrow.state {
                             PromiseState::Fulfilled(val) => return Ok(val.clone()),
                             PromiseState::Rejected(reason) => {
-                                return Err(eval_error_here!(format!("Promise rejected: {}", value_to_string(reason))));
+                                return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
                             }
                             PromiseState::Pending => {
                                 // Continue running the event loop

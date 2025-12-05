@@ -1435,7 +1435,11 @@ fn statement_for_of_var_iter(
                         let iterator_val = match &*method_rc.borrow() {
                             Value::Closure(_params, body, captured_env) => {
                                 // Call closure with 'this' bound to the object
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                // mark this as a function scope so var-hoisting and
+                                // env_set_var bind into this frame rather than parent
+                                func_env.borrow_mut().is_function_scope = true;
                                 obj_set_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
                                 // Execute body to produce iterator result
                                 evaluate_statements(&func_env, body)?
@@ -1457,7 +1461,8 @@ fn statement_for_of_var_iter(
                                 if let Some(next_rc) = obj_get_value(&iter_obj, &"next".into())? {
                                     let next_val = match &*next_rc.borrow() {
                                         Value::Closure(_params, body, captured_env) => {
-                                            let func_env = captured_env.clone();
+                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                                             obj_set_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
                                             evaluate_statements(&func_env, body)?
                                         }
@@ -3383,7 +3388,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 let mut evaluated_args = Vec::new();
                                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                 // Create new environment starting with captured environment
-                                let func_env = captured_env.clone();
+                                // Use a fresh environment frame whose prototype points to the captured environment
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 // Bind parameters: assign provided args, set missing params to undefined
                                 for (i, param) in params.iter().enumerate() {
                                     if i < evaluated_args.len() {
@@ -3530,8 +3537,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                // Create new environment starting with captured environment
-                let func_env = captured_env.clone();
+                // Create new environment starting with captured environment (fresh frame)
+                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                // ensure this env is a proper function scope
+                func_env.borrow_mut().is_function_scope = true;
                 // Bind parameters: provide provided args, set missing params to undefined
                 for (i, param) in params.iter().enumerate() {
                     if i < evaluated_args.len() {
@@ -3687,8 +3697,9 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                // Create new environment starting with captured environment
-                let func_env = captured_env.clone();
+                // Create new environment starting with captured environment (fresh frame)
+                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // Bind parameters: provide provided args, set missing params to undefined
                 for (i, param) in params.iter().enumerate() {
                     if i < evaluated_args.len() {
@@ -4098,8 +4109,9 @@ fn handle_optional_method_call(
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                            // Create new environment starting with captured environment
-                            let func_env = captured_env.clone();
+                            // Create new environment starting with captured environment (fresh frame)
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                             // Bind parameters: provide provided args, set missing params to undefined
                             for (i, param) in params.iter().enumerate() {
                                 if i < evaluated_args.len() {

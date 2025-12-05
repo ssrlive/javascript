@@ -122,7 +122,8 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
         Value::Closure(params, body, captured_env) => {
             // Handle function constructors
             let instance = Rc::new(RefCell::new(JSObjectData::new()));
-            let func_env = captured_env.clone();
+            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+            func_env.borrow_mut().prototype = Some(captured_env.clone());
 
             // Bind 'this' to the instance
             obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
@@ -348,7 +349,8 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 log::trace!("Method is a closure with {} params", params.len());
                 // Use the closure's captured environment as the base for the
                 // function environment so outer-scope lookups work as expected.
-                let func_env = captured_env.clone();
+                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
 
                 // Bind 'this' to the instance (use env_set to avoid invoking setters)
                 crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;

@@ -93,7 +93,8 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
                         Value::Closure(params, body, captured_env) => {
-                            let func_env = captured_env.clone();
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                             if !params.is_empty() {
                                 env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
                             }
@@ -122,7 +123,8 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
                         Value::Closure(params, body, captured_env) => {
-                            let func_env = captured_env.clone();
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                             if !params.is_empty() {
                                 env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
                             }

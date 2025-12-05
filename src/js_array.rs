@@ -55,7 +55,8 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 if let Some(ref fn_val) = map_fn {
                                     match fn_val {
                                         Value::Closure(params, body, captured_env) => {
-                                            let func_env = captured_env.clone();
+                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                                             if !params.is_empty() {
                                                 env_set(&func_env, params[0].as_str(), element)?;
                                             }
@@ -301,7 +302,8 @@ pub(crate) fn handle_array_instance_method(
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 // Prepare function environment
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 // Map params: (element, index, array)
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
@@ -337,7 +339,8 @@ pub(crate) fn handle_array_instance_method(
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
                                 // Prepare function environment
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                                 }
@@ -374,7 +377,8 @@ pub(crate) fn handle_array_instance_method(
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                                 }
@@ -439,7 +443,8 @@ pub(crate) fn handle_array_instance_method(
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
                         match &callback_val {
                             Value::Closure(params, body, captured_env) => {
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 // build args for callback: first acc, then current element
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), accumulator.clone())?;
@@ -480,7 +485,8 @@ pub(crate) fn handle_array_instance_method(
                                 let index_val = Value::Number(i as f64);
 
                                 // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
@@ -527,7 +533,8 @@ pub(crate) fn handle_array_instance_method(
                                 let index_val = Value::Number(i as f64);
 
                                 // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
@@ -573,8 +580,9 @@ pub(crate) fn handle_array_instance_method(
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                // Create new environment for callback (fresh frame whose prototype is captured_env)
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
@@ -620,8 +628,9 @@ pub(crate) fn handle_array_instance_method(
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                // Create new environment for callback (fresh frame whose prototype is captured_env)
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
@@ -788,8 +797,9 @@ pub(crate) fn handle_array_instance_method(
                 let compare_fn = evaluate_expr(env, &args[0])?;
                 if let Value::Closure(params, body, captured_env) = compare_fn {
                     elements.sort_by(|a, b| {
-                        // Create function environment for comparison
-                        let func_env = captured_env.clone();
+                        // Create function environment for comparison (fresh frame whose prototype is captured_env)
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
                         let mut param_set = true;
                         if !params.is_empty() && env_set(&func_env, params[0].as_str(), a.1.clone()).is_err() {
                             param_set = false;
@@ -1171,7 +1181,8 @@ pub(crate) fn handle_array_instance_method(
                 if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
                     match &callback_val {
                         Value::Closure(params, body, captured_env) => {
-                            let func_env = captured_env.clone();
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
                             if !params.is_empty() {
                                 env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                             }
@@ -1296,8 +1307,9 @@ pub(crate) fn handle_array_instance_method(
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                // Create new environment for callback (fresh frame whose prototype is captured_env)
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }
@@ -1344,8 +1356,9 @@ pub(crate) fn handle_array_instance_method(
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = captured_env.clone();
+                                // Create new environment for callback (fresh frame whose prototype is captured_env)
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if !params.is_empty() {
                                     env_set(&func_env, params[0].as_str(), element.clone())?;
                                 }

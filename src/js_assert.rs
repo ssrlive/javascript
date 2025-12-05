@@ -57,7 +57,8 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let func_val = evaluate_expr(env, &args[1])?;
             match func_val {
                 Value::Closure(_params, body, captured_env) => {
-                    let func_env = captured_env.clone();
+                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    func_env.borrow_mut().prototype = Some(captured_env.clone());
                     match evaluate_statements(&func_env, &body) {
                         Ok(_) => Err(eval_error_here!("assert.throws expected function to throw a value")),
                         Err(_) => Ok(Value::Undefined),

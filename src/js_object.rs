@@ -11,10 +11,10 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
     match method {
         "keys" => {
             if args.is_empty() {
-                return Err(make_type_error!("Object.keys requires at least one argument"));
+                return Err(raise_type_error!("Object.keys requires at least one argument"));
             }
             if args.len() > 1 {
-                return Err(make_type_error!("Object.keys accepts only one argument"));
+                return Err(raise_type_error!("Object.keys accepts only one argument"));
             }
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
@@ -37,7 +37,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
-                Value::Undefined => Err(make_type_error!("Object.keys called on undefined")),
+                Value::Undefined => Err(raise_type_error!("Object.keys called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -48,10 +48,10 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "values" => {
             if args.is_empty() {
-                return Err(make_type_error!("Object.values requires at least one argument"));
+                return Err(raise_type_error!("Object.values requires at least one argument"));
             }
             if args.len() > 1 {
-                return Err(make_type_error!("Object.values accepts only one argument"));
+                return Err(raise_type_error!("Object.values accepts only one argument"));
             }
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
@@ -74,7 +74,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
-                Value::Undefined => Err(make_type_error!("Object.values called on undefined")),
+                Value::Undefined => Err(raise_type_error!("Object.values called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
                     let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
@@ -85,13 +85,13 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "assign" => {
             if args.is_empty() {
-                return Err(make_type_error!("Object.assign requires at least one argument"));
+                return Err(raise_type_error!("Object.assign requires at least one argument"));
             }
             let target_val = evaluate_expr(env, &args[0])?;
             let target_obj = match target_val {
                 Value::Object(obj) => obj,
                 _ => {
-                    return Err(make_type_error!("Object.assign target must be an object"));
+                    return Err(raise_type_error!("Object.assign target must be an object"));
                 }
             };
 
@@ -113,14 +113,14 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "create" => {
             if args.is_empty() {
-                return Err(make_type_error!("Object.create requires at least one argument"));
+                return Err(raise_type_error!("Object.create requires at least one argument"));
             }
             let proto_val = evaluate_expr(env, &args[0])?;
             let proto_obj = match proto_val {
                 Value::Object(obj) => Some(obj),
                 Value::Undefined => None,
                 _ => {
-                    return Err(make_type_error!("Object.create prototype must be an object or undefined"));
+                    return Err(raise_type_error!("Object.create prototype must be an object or undefined"));
                 }
             };
 
@@ -157,7 +157,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "getOwnPropertySymbols" => {
             if args.len() != 1 {
-                return Err(make_type_error!("Object.getOwnPropertySymbols requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertySymbols requires exactly one argument"));
             }
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
@@ -176,12 +176,12 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     set_array_length(&result_obj, idx)?;
                     Ok(Value::Object(result_obj))
                 }
-                _ => Err(make_type_error!("Object.getOwnPropertySymbols called on non-object")),
+                _ => Err(raise_type_error!("Object.getOwnPropertySymbols called on non-object")),
             }
         }
         "getOwnPropertyNames" => {
             if args.len() != 1 {
-                return Err(make_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
             }
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
@@ -199,12 +199,12 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     set_array_length(&result_obj, idx)?;
                     Ok(Value::Object(result_obj))
                 }
-                _ => Err(make_type_error!("Object.getOwnPropertyNames called on non-object")),
+                _ => Err(raise_type_error!("Object.getOwnPropertyNames called on non-object")),
             }
         }
         "getOwnPropertyDescriptors" => {
             if args.len() != 1 {
-                return Err(make_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));
+                return Err(raise_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));
             }
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
@@ -267,7 +267,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
                     Ok(Value::Object(result_obj))
                 }
-                _ => Err(make_type_error!("Object.getOwnPropertyDescriptors called on non-object")),
+                _ => Err(raise_type_error!("Object.getOwnPropertyDescriptors called on non-object")),
             }
         }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
@@ -276,7 +276,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
 pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
     if !args.is_empty() {
-        return Err(make_type_error!(format!(
+        return Err(raise_type_error!(format!(
             "{}.toString() takes no arguments, but {} were provided",
             match obj_val {
                 Value::Number(_) => "Number",
@@ -302,7 +302,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(s))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-        Value::Undefined => Err(make_type_error!("Cannot convert undefined to object")),
+        Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, &"__value__".into())? {
@@ -368,7 +368,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
 
 pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
     if !args.is_empty() {
-        return Err(make_type_error!(format!(
+        return Err(raise_type_error!(format!(
             "{}.valueOf() takes no arguments, but {} were provided",
             match obj_val {
                 Value::Number(_) => "Number",
@@ -394,7 +394,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::BigInt(s) => Ok(Value::BigInt(s.clone())),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
-        Value::Undefined => Err(make_type_error!("Cannot convert undefined to object")),
+        Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, &"__value__".into())? {

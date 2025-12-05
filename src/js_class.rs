@@ -49,7 +49,7 @@ pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjec
     {
         return Ok(proto_obj.clone());
     }
-    Err(make_type_error!("Prototype object not found"))
+    Err(raise_type_error!("Prototype object not found"))
 }
 
 pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -202,7 +202,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
         }
     }
 
-    Err(make_type_error!("Constructor is not callable"))
+    Err(raise_type_error!("Constructor is not callable"))
 }
 
 pub(crate) fn create_class_object(

@@ -141,7 +141,7 @@ macro_rules! raise_variable_not_found_error {
 }
 
 #[macro_export]
-macro_rules! make_type_error {
+macro_rules! raise_type_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::TypeError { message: $msg.to_string() })
     };

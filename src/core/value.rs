@@ -6,7 +6,7 @@ use crate::{
     js_array::is_array,
     js_class::ClassDefinition,
     js_promise::JSPromise,
-    make_type_error,
+    raise_type_error,
 };
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
@@ -210,7 +210,7 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                             match result {
                                 Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_) => return Ok(result),
                                 _ => {
-                                    return Err(make_type_error!("[Symbol.toPrimitive] must return a primitive"));
+                                    return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
                                 }
                             }
                         }
@@ -244,7 +244,7 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                 }
             }
 
-            Err(make_type_error!("Cannot convert object to primitive"))
+            Err(raise_type_error!("Cannot convert object to primitive"))
         }
         _ => Ok(val.clone()),
     }
@@ -525,7 +525,7 @@ pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCel
 pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {
     let key = key.as_ref();
     if env.borrow().is_const(key) {
-        return Err(make_type_error!(format!("Assignment to constant variable '{key}'")));
+        return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
     env.borrow_mut()
         .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));

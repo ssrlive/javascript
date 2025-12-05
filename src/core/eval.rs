@@ -16,7 +16,7 @@ use crate::{
     js_number::make_number_object,
     js_promise::{PromiseState, handle_promise_method, run_event_loop},
     js_testintl::make_testintl_object,
-    make_type_error, obj_get_value, raise_eval_error, raise_throw_error,
+    obj_get_value, raise_eval_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
     unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_to_utf8},
@@ -1933,7 +1933,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         }
         // Disallow mixing BigInt and Number for arithmetic
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for +="));
@@ -1961,7 +1961,7 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             Value::BigInt((a - b).to_string())
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
 
         _ => {
@@ -1992,7 +1992,7 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             Value::BigInt((a * b).to_string())
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for *="));
@@ -2027,7 +2027,7 @@ fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         }
         // Mixing BigInt and Number is disallowed for exponentiation
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for **="));
@@ -2067,7 +2067,7 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             Value::BigInt((a / b).to_string())
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for /="));
@@ -2105,7 +2105,7 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             Value::BigInt((a % b).to_string())
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-            return Err(make_type_error!("Cannot mix BigInt and other types"));
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for %="));
@@ -2479,7 +2479,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             };
             // '+' should throw when a Symbol is encountered during implicit coercion
             if matches!(l_prim, Value::Symbol(_)) || matches!(r_prim, Value::Symbol(_)) {
-                return Err(make_type_error!("Cannot convert Symbol to primitive"));
+                return Err(raise_type_error!("Cannot convert Symbol to primitive"));
             }
             match (l_prim, r_prim) {
                 (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
@@ -2549,7 +2549,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             // Mixing BigInt and Number is not allowed for arithmetic
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(make_type_error!("Cannot mix BigInt and other types"))
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
             _ => Err(raise_eval_error!("error")),
         },
@@ -2561,7 +2561,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 Ok(Value::BigInt((a * b).to_string()))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(make_type_error!("Cannot mix BigInt and other types"))
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
             _ => Err(raise_eval_error!("error")),
         },
@@ -2579,7 +2579,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             // Mixing BigInt and Number is disallowed for exponentiation
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(make_type_error!("Cannot mix BigInt and other types"))
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
             _ => Err(raise_eval_error!("error")),
         },
@@ -2602,7 +2602,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             // Mixing BigInt and Number is not allowed
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(make_type_error!("Cannot mix BigInt and other types"))
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
             _ => Err(raise_eval_error!("error")),
         },
@@ -2808,7 +2808,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(make_type_error!("Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
                         _ => Err(raise_eval_error!("error")),
                     }
                 };
@@ -2913,7 +2913,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(make_type_error!("Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
                         _ => Err(raise_eval_error!("error")),
                     }
                 };
@@ -3014,7 +3014,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(make_type_error!("Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
                         _ => Err(raise_eval_error!("error")),
                     }
                 };
@@ -3117,7 +3117,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                             }
                         }
                         Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(make_type_error!("Cannot convert Symbol to number")),
+                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
                         _ => Err(raise_eval_error!("error")),
                     }
                 };
@@ -3149,7 +3149,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             // Mixing BigInt and Number is not allowed
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(make_type_error!("Cannot mix BigInt and other types"))
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
             _ => Err(raise_eval_error!("Modulo operation only supported for numbers")),
         },
@@ -4336,7 +4336,7 @@ fn handle_symbol_static_method(method: &str, args: &[Expr], env: &JSObjectDataPt
         "for" => {
             // Symbol.for(key) - returns a symbol from the global registry
             if args.len() != 1 {
-                return Err(make_type_error!("Symbol.for requires exactly one argument"));
+                return Err(raise_type_error!("Symbol.for requires exactly one argument"));
             }
             let key_expr = &args[0];
             let key_val = evaluate_expr(env, key_expr)?;
@@ -4363,7 +4363,7 @@ fn handle_symbol_static_method(method: &str, args: &[Expr], env: &JSObjectDataPt
         "keyFor" => {
             // Symbol.keyFor(symbol) - returns the key for a symbol in the global registry
             if args.len() != 1 {
-                return Err(make_type_error!("Symbol.keyFor requires exactly one argument"));
+                return Err(raise_type_error!("Symbol.keyFor requires exactly one argument"));
             }
             let symbol_expr = &args[0];
             let symbol_val = evaluate_expr(env, symbol_expr)?;
@@ -4381,10 +4381,10 @@ fn handle_symbol_static_method(method: &str, args: &[Expr], env: &JSObjectDataPt
                     Ok(Value::Undefined)
                 })
             } else {
-                Err(make_type_error!("Symbol.keyFor requires a symbol as argument"))
+                Err(raise_type_error!("Symbol.keyFor requires a symbol as argument"))
             }
         }
-        _ => Err(make_type_error!(format!("Symbol has no static method '{method}'"))),
+        _ => Err(raise_type_error!(format!("Symbol has no static method '{method}'"))),
     }
 }
 

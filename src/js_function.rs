@@ -11,7 +11,7 @@ use std::rc::Rc;
 fn extract_internal_args(args: &[Expr], env: &JSObjectDataPtr, expected_count: usize) -> Result<Vec<Value>, JSError> {
     if args.len() != expected_count {
         let msg = format!("Internal function requires exactly {expected_count} arguments, got {}", args.len());
-        return Err(make_type_error!(msg));
+        return Err(raise_type_error!(msg));
     }
 
     let mut evaluated_args = Vec::with_capacity(expected_count);
@@ -24,7 +24,7 @@ fn extract_internal_args(args: &[Expr], env: &JSObjectDataPtr, expected_count: u
 /// Helper function to validate that first N arguments are numbers
 fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSError> {
     if args.len() < count {
-        return Err(make_type_error!(format!("Expected at least {count} arguments")));
+        return Err(raise_type_error!(format!("Expected at least {count} arguments")));
     }
 
     let mut numbers = Vec::with_capacity(count);
@@ -32,7 +32,7 @@ fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSErro
         match args[i] {
             Value::Number(n) => numbers.push(n),
             _ => {
-                return Err(make_type_error!(format!("Argument {i} must be a number")));
+                return Err(raise_type_error!(format!("Argument {i} must be a number")));
             }
         }
     }
@@ -85,7 +85,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
         "parseInt" => {
             if args.is_empty() {
-                return Err(make_type_error!("parseInt requires at least one argument"));
+                return Err(raise_type_error!("parseInt requires at least one argument"));
             }
             let arg_val = evaluate_expr(env, &args[0])?;
             match arg_val {
@@ -139,7 +139,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "parseFloat" => {
             if args.is_empty() {
-                return Err(make_type_error!("parseFloat requires at least one argument"));
+                return Err(raise_type_error!("parseFloat requires at least one argument"));
             }
             let arg_val = evaluate_expr(env, &args[0])?;
             match arg_val {
@@ -174,7 +174,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "isNaN" => {
             if args.is_empty() {
-                return Err(make_type_error!("isNaN requires at least one argument"));
+                return Err(raise_type_error!("isNaN requires at least one argument"));
             }
             let arg_val = evaluate_expr(env, &args[0])?;
             match arg_val {
@@ -193,7 +193,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         }
         "isFinite" => {
             if args.is_empty() {
-                return Err(make_type_error!("isFinite requires at least one argument"));
+                return Err(raise_type_error!("isFinite requires at least one argument"));
             }
             let arg_val = evaluate_expr(env, &args[0])?;
             match arg_val {
@@ -435,7 +435,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     crate::js_promise::resolve_promise(promise, args[1].clone());
                     Ok(Value::Undefined)
                 }
-                _ => Err(make_type_error!("First argument must be a promise")),
+                _ => Err(raise_type_error!("First argument must be a promise")),
             }
         }
         "__internal_reject_promise" => {
@@ -448,7 +448,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     crate::js_promise::reject_promise(promise, args[1].clone());
                     Ok(Value::Undefined)
                 }
-                _ => Err(make_type_error!("First argument must be a promise")),
+                _ => Err(raise_type_error!("First argument must be a promise")),
             }
         }
         "__internal_promise_allsettled_resolve" => {
@@ -499,14 +499,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     crate::js_promise::__internal_promise_any_resolve(args[0].clone(), result_promise.clone());
                     Ok(Value::Undefined)
                 }
-                _ => Err(make_type_error!("Second argument must be a promise")),
+                _ => Err(raise_type_error!("Second argument must be a promise")),
             }
         }
         "__internal_promise_any_reject" => {
             // Internal function for Promise.any reject - requires 6 args: (idx, reason, rejections, rejected_count, total, result_promise)
             // Note: This function has complex Rc<RefCell<>> parameters that cannot be easily reconstructed from JS values
             // It should only be called from within closures, not directly
-            Err(make_type_error!(
+            Err(raise_type_error!(
                 "__internal_promise_any_reject cannot be called directly - use Promise.any instead"
             ))
         }
@@ -518,7 +518,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     crate::js_promise::__internal_promise_race_resolve(args[0].clone(), result_promise.clone());
                     Ok(Value::Undefined)
                 }
-                _ => Err(make_type_error!("Second argument must be a promise")),
+                _ => Err(raise_type_error!("Second argument must be a promise")),
             }
         }
         "__internal_promise_all_resolve" => {
@@ -575,13 +575,13 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "testWithIntlConstructors" => {
             // testWithIntlConstructors function - used for testing Intl constructors
             if args.len() != 1 {
-                return Err(make_type_error!("testWithIntlConstructors requires exactly 1 argument"));
+                return Err(raise_type_error!("testWithIntlConstructors requires exactly 1 argument"));
             }
             let callback = evaluate_expr(env, &args[0])?;
             let callback_func = match callback {
                 Value::Closure(params, body, captured_env) => (params, body, captured_env),
                 _ => {
-                    return Err(make_type_error!("testWithIntlConstructors requires a function as argument"));
+                    return Err(raise_type_error!("testWithIntlConstructors requires a function as argument"));
                 }
             };
 

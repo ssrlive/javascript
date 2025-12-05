@@ -24,7 +24,7 @@ use crate::{
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr};
 
 thread_local! {
     static SYMBOL_REGISTRY: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
@@ -2611,38 +2611,42 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
             (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la == rb)),
             (Value::BigInt(la), Value::Number(rn)) => {
-                if rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                // If Number is NaN or infinite, it's never equal to a BigInt
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                // If number is integral, compare as BigInt where possible
-                if rn.fract() == 0.0
-                    && let Some(i) = rn.to_i128()
-                {
-                    let b = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                    return Ok(Value::Boolean(b == BigInt::from(i)));
+                // Only integral numbers can equal a BigInt. If the number has a fractional
+                // part it cannot equal a BigInt.
+                if rn.fract() != 0.0 {
+                    return Ok(Value::Boolean(false));
                 }
-                // otherwise compare numeric conversion (may lose precision)
-                if let Some(bf) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Boolean(bf == rn))
-                } else {
-                    Ok(Value::Number(0.0))
+
+                // Convert the Number's integer value to a decimal string and parse as BigInt
+                // so we perform an exact integer comparison without floating-point precision pitfalls.
+                let num_str = format!("{:.0}", rn);
+                if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a == num_bi));
                 }
+
+                Ok(Value::Boolean(false))
             }
             (Value::Number(ln), Value::BigInt(rb)) => {
-                if ln.is_nan() {
-                    return Ok(Value::Number(0.0));
+                // If Number is NaN or infinite, it's never equal to a BigInt
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if ln.fract() == 0.0
-                    && let Some(i) = ln.to_i128()
-                {
+                if ln.fract() != 0.0 {
+                    return Ok(Value::Boolean(false));
+                }
+
+                let num_str = format!("{:.0}", ln);
+                if let Ok(num_bi) = BigInt::from_str(&num_str) {
                     let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                    return Ok(Value::Boolean(b == BigInt::from(i)));
+                    return Ok(Value::Boolean(b == num_bi));
                 }
-                if let Some(bf) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    Ok(Value::Boolean(bf == ln))
-                } else {
-                    Ok(Value::Number(0.0))
-                }
+
+                Ok(Value::Boolean(false))
             }
             (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
@@ -2663,9 +2667,41 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::NotEqual => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln != rn)),
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la != rb)),
+            (Value::BigInt(la), Value::Number(rn)) => {
+                // reuse equality rules: invert them
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(true));
+                }
+                if rn.fract() != 0.0 {
+                    return Ok(Value::Boolean(true));
+                }
+                let num_str = format!("{:.0}", rn);
+                if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a != num_bi));
+                }
+                Ok(Value::Boolean(true))
+            }
+            (Value::Number(ln), Value::BigInt(rb)) => {
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(true));
+                }
+                if ln.fract() != 0.0 {
+                    return Ok(Value::Boolean(true));
+                }
+                let num_str = format!("{:.0}", ln);
+                if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(b != num_bi));
+                }
+                Ok(Value::Boolean(true))
+            }
             (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls != rs)),
             (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb != rb)),
             (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(!Rc::ptr_eq(&sa, &sb))),
+            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(false)),
+            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(!Rc::ptr_eq(&a, &b))),
             _ => Ok(Value::Boolean(true)), // Different types are not equal, so not equal is true
         },
         BinaryOp::StrictNotEqual => match (l, r) {
@@ -2693,34 +2729,58 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
 
             // If both are strings, do lexicographic comparison
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
-                return Ok(Value::Number(if ls < rs { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(ls < rs));
             }
             if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                return Ok(Value::Number(if a < b { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(a < b));
             }
             if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
-                if rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                // NaN / infinite are always false for relational comparisons with BigInt
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if a_num < rn { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                // If number is integer, compare as BigInt exactly
+                if rn.fract() == 0.0 {
+                    let num_str = format!("{:.0}", rn);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(a < num_bi));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // Non-integer number: compare BigInt <= floor(number)
+                let floor = rn.floor();
+                let floor_str = format!("{:.0}", floor);
+                if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a <= floor_bi));
+                }
+                return Ok(Value::Boolean(false));
             }
             if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
-                if ln.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if ln < b_num { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if ln.fract() == 0.0 {
+                    let num_str = format!("{:.0}", ln);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(num_bi < b));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // Non-integer: ln < bigint <-> floor(ln) < bigint
+                let floor = ln.floor();
+                let floor_str = format!("{:.0}", floor);
+                if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(floor_bi < b));
+                }
+                return Ok(Value::Boolean(false));
             }
             // Fallback: convert values to numbers and compare. Non-coercible symbols/types will error.
             {
@@ -2757,9 +2817,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ln = to_num(&l_prim)?;
                 let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                    return Ok(Value::Boolean(false));
                 }
-                Ok(Value::Number(if ln < rn { 1.0 } else { 0.0 }))
+                Ok(Value::Boolean(ln < rn))
             }
         }
         BinaryOp::GreaterThan => {
@@ -2777,34 +2837,57 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
 
             // If both strings, lexicographic compare
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
-                return Ok(Value::Number(if ls > rs { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(ls > rs));
             }
             if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                return Ok(Value::Number(if a > b { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(a > b));
             }
             if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
-                if rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if a_num > rn { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                // integer -> exact BigInt compare
+                if rn.fract() == 0.0 {
+                    let num_str = format!("{:.0}", rn);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(a > num_bi));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // non-integer -> compare against ceil(rn): a > rn <=> a >= ceil(rn)
+                let ceil = rn.ceil();
+                let ceil_str = format!("{:.0}", ceil);
+                if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a >= ceil_bi));
+                }
+                return Ok(Value::Boolean(false));
             }
             if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
-                if ln.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if ln > b_num { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if ln.fract() == 0.0 {
+                    let num_str = format!("{:.0}", ln);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(num_bi > b));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // ln > bigint <=> ceil(ln) > bigint
+                let ceil = ln.ceil();
+                let ceil_str = format!("{:.0}", ceil);
+                if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(ceil_bi > b));
+                }
+                return Ok(Value::Boolean(false));
             }
             {
                 let to_num = |v: &Value| -> Result<f64, JSError> {
@@ -2839,9 +2922,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ln = to_num(&l_prim)?;
                 let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                    return Ok(Value::Boolean(false));
                 }
-                Ok(Value::Number(if ln > rn { 1.0 } else { 0.0 }))
+                Ok(Value::Boolean(ln > rn))
             }
         }
         BinaryOp::LessEqual => {
@@ -2858,32 +2941,54 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             };
 
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
-                return Ok(Value::Number(if ls <= rs { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(ls <= rs));
             }
             if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                return Ok(Value::Number(if a <= b { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(a <= b));
             }
             if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
-                if rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if a_num <= *rn { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if rn.fract() == 0.0 {
+                    let num_str = format!("{:.0}", rn);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(a <= num_bi));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // non-integer number: compare a <= floor(rn)
+                let floor = rn.floor();
+                let floor_str = format!("{:.0}", floor);
+                if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a <= floor_bi));
+                }
+                return Ok(Value::Boolean(false));
             }
             if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
-                if ln.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if *ln <= b_num { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if ln.fract() == 0.0 {
+                    let num_str = format!("{:.0}", ln);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(num_bi <= b));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // non-integer number: ln <= bigint <=> floor(ln) < bigint
+                let floor = ln.floor();
+                let floor_str = format!("{:.0}", floor);
+                if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(floor_bi < b));
+                }
+                return Ok(Value::Boolean(false));
             }
             {
                 let to_num = |v: &Value| -> Result<f64, JSError> {
@@ -2918,9 +3023,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ln = to_num(&l_prim)?;
                 let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                    return Ok(Value::Boolean(false));
                 }
-                Ok(Value::Number(if ln <= rn { 1.0 } else { 0.0 }))
+                Ok(Value::Boolean(ln <= rn))
             }
         }
         BinaryOp::GreaterEqual => {
@@ -2937,34 +3042,56 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             };
 
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
-                return Ok(Value::Number(if ls >= rs { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(ls >= rs));
             }
             if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
                 let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
-                return Ok(Value::Number(if a >= b { 1.0 } else { 0.0 }));
+                return Ok(Value::Boolean(a >= b));
             }
             if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
-                if rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if rn.is_nan() || !rn.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(a_num) = BigInt::parse_bytes(la.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if a_num >= rn { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if rn.fract() == 0.0 {
+                    let num_str = format!("{:.0}", rn);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(a >= num_bi));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // non-integer rn: a >= ceil(rn)
+                let ceil = rn.ceil();
+                let ceil_str = format!("{:.0}", ceil);
+                if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
+                    let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(a >= ceil_bi));
+                }
+                return Ok(Value::Boolean(false));
             }
             if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
-                if ln.is_nan() {
-                    return Ok(Value::Number(0.0));
+                if ln.is_nan() || !ln.is_finite() {
+                    return Ok(Value::Boolean(false));
                 }
-                if let Some(b_num) = BigInt::parse_bytes(rb.as_bytes(), 10).and_then(|bi| bi.to_f64()) {
-                    return Ok(Value::Number(if ln >= b_num { 1.0 } else { 0.0 }));
-                } else {
-                    return Ok(Value::Number(0.0));
+                if ln.fract() == 0.0 {
+                    let num_str = format!("{:.0}", ln);
+                    if let Ok(num_bi) = BigInt::from_str(&num_str) {
+                        let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                        return Ok(Value::Boolean(num_bi >= b));
+                    }
+                    return Ok(Value::Boolean(false));
                 }
+                // non-integer ln: ln >= b <=> ceil(ln) > b
+                let ceil = ln.ceil();
+                let ceil_str = format!("{:.0}", ceil);
+                if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
+                    let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(eval_error_here!("invalid bigint"))?;
+                    return Ok(Value::Boolean(ceil_bi > b));
+                }
+                return Ok(Value::Boolean(false));
             }
             {
                 let to_num = |v: &Value| -> Result<f64, JSError> {
@@ -2999,9 +3126,9 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ln = to_num(&l_prim)?;
                 let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
-                    return Ok(Value::Number(0.0));
+                    return Ok(Value::Boolean(false));
                 }
-                Ok(Value::Number(if ln >= rn { 1.0 } else { 0.0 }))
+                Ok(Value::Boolean(ln >= rn))
             }
         }
         BinaryOp::Mod => match (l, r) {

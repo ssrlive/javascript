@@ -3733,6 +3733,20 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     Ok(Value::String(canon_utf16)) => {
                                         let canon = String::from_utf16_lossy(&canon_utf16);
                                         log::error!("Assertion diagnostic: input='{}' canonicalizeLanguageTag='{}'", s, canon);
+                                        // Raw UTF-16 buffer dump for deeper diagnostics
+                                        log::error!(
+                                            "Assertion diagnostic RAW UTF-16: input_vec={:?} canonical_vec={:?}",
+                                            s_utf16,
+                                            canon_utf16
+                                        );
+                                        // Also print hex codepoints for easier visual diff
+                                        let input_hex: Vec<String> = s_utf16.iter().map(|u| format!("0x{:04x}", u)).collect();
+                                        let canon_hex: Vec<String> = canon_utf16.iter().map(|u| format!("0x{:04x}", u)).collect();
+                                        log::error!(
+                                            "Assertion diagnostic RAW HEX: input_hex={} canonical_hex={}",
+                                            input_hex.join(","),
+                                            canon_hex.join(",")
+                                        );
                                     }
                                     Ok(other) => {
                                         log::error!("Assertion diagnostic: canonicalizeLanguageTag returned non-string: {:?}", other);

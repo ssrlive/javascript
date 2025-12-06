@@ -105,6 +105,9 @@ pub enum Token {
     RightShift,
     RightShiftAssign,
     UnsignedRightShiftAssign,
+    As,
+    Import,
+    Export,
 }
 
 impl Token {
@@ -126,6 +129,9 @@ impl Token {
             Token::In => Some("in".to_string()),
             Token::Delete => Some("delete".to_string()),
             Token::Void => Some("void".to_string()),
+            Token::As => Some("as".to_string()),
+            Token::Import => Some("import".to_string()),
+            Token::Export => Some("export".to_string()),
             Token::Function => Some("function".to_string()),
             Token::Return => Some("return".to_string()),
             Token::If => Some("if".to_string()),
@@ -623,6 +629,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "delete" => tokens.push(Token::Delete),
                     "void" => tokens.push(Token::Void),
                     "in" => tokens.push(Token::In),
+                    "as" => tokens.push(Token::As),
+                    "import" => tokens.push(Token::Import),
+                    "export" => tokens.push(Token::Export),
                     "try" => tokens.push(Token::Try),
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),

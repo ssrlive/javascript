@@ -237,6 +237,77 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     last_value = val;
                     Ok(None)
                 }
+                Statement::Import(specifiers, module_name) => {
+                    // Load the module
+                    let module_value = crate::js_module::load_module(module_name, None)?;
+
+                    // Import the specifiers into the current environment
+                    for specifier in specifiers {
+                        match specifier {
+                            crate::core::statement::ImportSpecifier::Default(name) => {
+                                // For default import, check if the module has a default export (file modules)
+                                // or import the entire module (built-in modules)
+                                match crate::js_module::import_from_module(&module_value, "default") {
+                                    Ok(default_value) => {
+                                        // Module has a default export (file module)
+                                        env_set(env, name, default_value)?;
+                                    }
+                                    Err(_) => {
+                                        // Module doesn't have a default export (built-in module)
+                                        env_set(env, name, module_value.clone())?;
+                                    }
+                                }
+                            }
+                            crate::core::statement::ImportSpecifier::Named(name, alias) => {
+                                // Import specific named export
+                                let imported_value = crate::js_module::import_from_module(&module_value, name)?;
+                                let import_name = alias.as_ref().unwrap_or(name);
+                                env_set(env, import_name, imported_value)?;
+                            }
+                            crate::core::statement::ImportSpecifier::Namespace(name) => {
+                                // Import entire module as namespace
+                                env_set(env, name, module_value.clone())?;
+                            }
+                        }
+                    }
+
+                    last_value = Value::Undefined;
+                    Ok(None)
+                }
+                Statement::Export(specifiers) => {
+                    // Handle exports in module context
+                    if let Some(exports_val) = env.borrow().get(&crate::core::PropertyKey::String("exports".to_string()))
+                        && let Value::Object(exports_obj) = &*exports_val.borrow()
+                    {
+                        for specifier in specifiers {
+                            match specifier {
+                                crate::core::statement::ExportSpecifier::Named(name, alias) => {
+                                    // For named exports, we need to find the value in current scope
+                                    // For now, assume it's a variable in the environment
+                                    if let Some(var_val) = env.borrow().get(&crate::core::PropertyKey::String(name.clone())) {
+                                        let export_name = alias.as_ref().unwrap_or(name).clone();
+                                        exports_obj.borrow_mut().insert(
+                                            crate::core::PropertyKey::String(export_name),
+                                            Rc::new(RefCell::new(var_val.borrow().clone())),
+                                        );
+                                    } else {
+                                        return Err(crate::raise_eval_error!(format!("Export '{}' not found in scope", name)));
+                                    }
+                                }
+                                crate::core::statement::ExportSpecifier::Default(expr) => {
+                                    // Evaluate the default export expression
+                                    let val = evaluate_expr(env, expr)?;
+                                    exports_obj
+                                        .borrow_mut()
+                                        .insert(crate::core::PropertyKey::String("default".to_string()), Rc::new(RefCell::new(val)));
+                                }
+                            }
+                        }
+                    }
+                    log::debug!("Export statement: specifiers={:?}", specifiers);
+                    last_value = Value::Undefined;
+                    Ok(None)
+                }
             }
         })();
         match eval_res {
@@ -1984,6 +2055,11 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(v)
     } else if name == "parseFloat" {
         let v = Value::Function("parseFloat".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
+    } else if name == "import" {
+        // Dynamic import function
+        let v = Value::Function("import".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "isNaN" {
@@ -3894,6 +3970,36 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
 
 fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
+
+    // Special case for dynamic import: import("module")
+    if let Expr::Var(func_name) = func_expr
+        && func_name == "import"
+        && args.len() == 1
+    {
+        // Evaluate the module name argument
+        let module_name_val = evaluate_expr(env, &args[0])?;
+        let module_name = match module_name_val {
+            Value::String(s) => String::from_utf16(&s).map_err(|_| raise_eval_error!("Invalid module name"))?,
+            _ => return Err(raise_eval_error!("Module name must be a string")),
+        };
+
+        // Load the module
+        let module_value = crate::js_module::load_module(&module_name, None)?;
+
+        // Create a Promise that resolves to the module
+        let promise = Rc::new(RefCell::new(JSPromise {
+            state: PromiseState::Fulfilled(module_value.clone()),
+            value: Some(module_value),
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        }));
+
+        // Wrap the promise in an object with __promise property
+        let promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
+        obj_set_value(&promise_obj, &"__promise".into(), Value::Promise(promise))?;
+
+        return Ok(Value::Object(promise_obj));
+    }
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods

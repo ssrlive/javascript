@@ -535,6 +535,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
             expr
         }
+        Token::Import => Expr::Var("import".to_string()),
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
         Token::Super => {

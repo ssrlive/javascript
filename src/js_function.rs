@@ -4,6 +4,7 @@ use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Helper function to extract and validate arguments for internal functions
@@ -41,6 +42,39 @@ fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSErro
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
+        "console.log" => {
+            // Handle console.log calls
+            crate::js_console::handle_console_method("log", args, env)
+        }
+        "import" => {
+            // Dynamic import() function
+            if args.len() != 1 {
+                return Err(raise_type_error!("import() requires exactly one argument"));
+            }
+            let module_specifier = evaluate_expr(env, &args[0])?;
+            let module_name = match module_specifier {
+                Value::String(s) => String::from_utf16_lossy(&s),
+                _ => return Err(raise_type_error!("import() argument must be a string")),
+            };
+
+            // Load the module dynamically
+            let module_value = crate::js_module::load_module(&module_name, None)?;
+
+            // Return a Promise that resolves to the module
+            let promise = Rc::new(RefCell::new(crate::js_promise::JSPromise {
+                state: crate::js_promise::PromiseState::Fulfilled(module_value.clone()),
+                value: Some(module_value),
+                on_fulfilled: Vec::new(),
+                on_rejected: Vec::new(),
+            }));
+
+            let promise_obj = Value::Object(Rc::new(RefCell::new(crate::JSObjectData::new())));
+            if let Value::Object(obj) = &promise_obj {
+                obj.borrow_mut()
+                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise))));
+            }
+            Ok(promise_obj)
+        }
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
         "String" => {
             // String() constructor

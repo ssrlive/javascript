@@ -459,6 +459,155 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                 return Ok(Some(Rc::new(RefCell::new(closure))));
             }
 
+            // Map default iterator
+            if let Some(map_val) = js_obj.borrow().get(&"__map__".into())
+                && let Value::Map(map_rc) = &*map_val.borrow()
+            {
+                let map_entries = map_rc.borrow().entries.clone();
+
+                // next function body for Map iteration (returns [key, value] pairs)
+                let next_body = vec![
+                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                    Statement::If(
+                        Expr::Binary(
+                            Box::new(Expr::Var("idx".to_string())),
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Value(Value::Number(map_entries.len() as f64))),
+                        ),
+                        vec![
+                            Statement::Let(
+                                "entry".to_string(),
+                                Some(Expr::Array(vec![
+                                    Expr::Property(
+                                        Box::new(Expr::Index(
+                                            Box::new(Expr::Var("__entries".to_string())),
+                                            Box::new(Expr::Var("idx".to_string())),
+                                        )),
+                                        "0".to_string(),
+                                    ),
+                                    Expr::Property(
+                                        Box::new(Expr::Index(
+                                            Box::new(Expr::Var("__entries".to_string())),
+                                            Box::new(Expr::Var("idx".to_string())),
+                                        )),
+                                        "1".to_string(),
+                                    ),
+                                ])),
+                            ),
+                            Statement::Expr(Expr::Assign(
+                                Box::new(Expr::Var("__i".to_string())),
+                                Box::new(Expr::Binary(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    BinaryOp::Add,
+                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                )),
+                            )),
+                            Statement::Return(Some(Expr::Object(vec![
+                                ("value".to_string(), Expr::Var("entry".to_string())),
+                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                            ]))),
+                        ],
+                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                            "done".to_string(),
+                            Expr::Value(Value::Boolean(true)),
+                        )])))]),
+                    ),
+                ];
+
+                let map_iter_body = vec![
+                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                    Statement::Return(Some(Expr::Object(vec![(
+                        "next".to_string(),
+                        Expr::Function(Vec::new(), next_body),
+                    )]))),
+                ];
+
+                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                // Store map entries in the closure environment
+                let mut entries_obj = JSObjectData::new();
+                for (i, (key, value)) in map_entries.iter().enumerate() {
+                    let mut entry_obj = JSObjectData::new();
+                    entry_obj.insert("0".into(), Rc::new(RefCell::new(key.clone())));
+                    entry_obj.insert("1".into(), Rc::new(RefCell::new(value.clone())));
+                    entries_obj.insert(
+                        i.to_string().into(),
+                        Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entry_obj))))),
+                    );
+                }
+                captured_env.borrow_mut().insert(
+                    "__entries".into(),
+                    Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entries_obj))))),
+                );
+
+                let closure = Value::Closure(Vec::new(), map_iter_body, captured_env.clone());
+                return Ok(Some(Rc::new(RefCell::new(closure))));
+            }
+
+            // Set default iterator
+            if let Some(set_val) = js_obj.borrow().get(&"__set__".into())
+                && let Value::Set(set_rc) = &*set_val.borrow()
+            {
+                let set_values = set_rc.borrow().values.clone();
+                // next function body for Set iteration (returns values)
+                let next_body = vec![
+                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                    Statement::If(
+                        Expr::Binary(
+                            Box::new(Expr::Var("idx".to_string())),
+                            BinaryOp::LessThan,
+                            Box::new(Expr::Value(Value::Number(set_values.len() as f64))),
+                        ),
+                        vec![
+                            Statement::Let(
+                                "value".to_string(),
+                                Some(Expr::Index(
+                                    Box::new(Expr::Var("__values".to_string())),
+                                    Box::new(Expr::Var("idx".to_string())),
+                                )),
+                            ),
+                            Statement::Expr(Expr::Assign(
+                                Box::new(Expr::Var("__i".to_string())),
+                                Box::new(Expr::Binary(
+                                    Box::new(Expr::Var("idx".to_string())),
+                                    BinaryOp::Add,
+                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                )),
+                            )),
+                            Statement::Return(Some(Expr::Object(vec![
+                                ("value".to_string(), Expr::Var("value".to_string())),
+                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                            ]))),
+                        ],
+                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                            "done".to_string(),
+                            Expr::Value(Value::Boolean(true)),
+                        )])))]),
+                    ),
+                ];
+
+                let set_iter_body = vec![
+                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                    Statement::Return(Some(Expr::Object(vec![(
+                        "next".to_string(),
+                        Expr::Function(Vec::new(), next_body),
+                    )]))),
+                ];
+
+                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                // Store set values in the closure environment
+                let mut values_obj = JSObjectData::new();
+                for (i, value) in set_values.iter().enumerate() {
+                    values_obj.insert(i.to_string().into(), Rc::new(RefCell::new(value.clone())));
+                }
+                captured_env.borrow_mut().insert(
+                    "__values".into(),
+                    Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(values_obj))))),
+                );
+
+                let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone());
+                return Ok(Some(Rc::new(RefCell::new(closure))));
+            }
+
             // Wrapped String iterator (for String objects)
             if let Some(wrapped) = js_obj.borrow().get(&"__value__".into())
                 && let Value::String(_) = &*wrapped.borrow()

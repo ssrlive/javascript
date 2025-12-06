@@ -49,7 +49,14 @@ pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
         }
     }
 
-    Ok(Value::Map(map))
+    // Create a wrapper object for the Map
+    let map_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    // Store the actual map data
+    map_obj
+        .borrow_mut()
+        .insert(PropertyKey::String("__map__".to_string()), Rc::new(RefCell::new(Value::Map(map))));
+
+    Ok(Value::Object(map_obj))
 }
 
 /// Handle Map instance method calls

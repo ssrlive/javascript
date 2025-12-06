@@ -46,7 +46,14 @@ pub(crate) fn handle_set_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
         }
     }
 
-    Ok(Value::Set(set))
+    // Create a wrapper object for the Set
+    let set_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    // Store the actual set data
+    set_obj
+        .borrow_mut()
+        .insert(PropertyKey::String("__set__".to_string()), Rc::new(RefCell::new(Value::Set(set))));
+
+    Ok(Value::Object(set_obj))
 }
 
 /// Handle Set instance method calls

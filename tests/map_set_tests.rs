@@ -11,7 +11,7 @@ fn __init_test_logger() {
 #[test]
 fn test_map_constructor() {
     let result = evaluate_script("new Map()").unwrap();
-    assert!(matches!(result, Value::Map(_)));
+    assert!(matches!(result, Value::Object(_)));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_map_clear() {
 #[test]
 fn test_set_constructor() {
     let result = evaluate_script("new Set()").unwrap();
-    assert!(matches!(result, Value::Set(_)));
+    assert!(matches!(result, Value::Object(_)));
 }
 
 #[test]

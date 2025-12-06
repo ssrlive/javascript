@@ -1423,7 +1423,97 @@ fn for_of_destructuring_array_iter(
                 }
                 Ok(None)
             } else {
-                Err(raise_eval_error!("for-of loop requires an iterable"))
+                // Try iterator protocol for non-array objects
+                if let Some(sym_rc) = get_well_known_symbol_rc("iterator") {
+                    let iterator_key = PropertyKey::Symbol(Rc::new(RefCell::new(sym_rc.borrow().clone())));
+                    if let Some(iterator_val) = obj_get_value(obj_map, &iterator_key)? {
+                        let iterator_factory = iterator_val.borrow().clone();
+                        // Call Symbol.iterator to get the iterator object
+                        let iterator = match iterator_factory {
+                            Value::Closure(_params, body, closure_env) => evaluate_statements(&closure_env, &body)?,
+                            _ => return Err(raise_eval_error!("Symbol.iterator is not a function")),
+                        };
+
+                        if let Value::Object(iterator_obj) = iterator {
+                            if let Some(next_val) = obj_get_value(&iterator_obj, &"next".into())? {
+                                let next_func = next_val.borrow().clone();
+                                loop {
+                                    // Call next()
+                                    let next_result = match &next_func {
+                                        Value::Closure(_params, body, closure_env) => {
+                                            let call_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            call_env.borrow_mut().prototype = Some(closure_env.clone());
+                                            evaluate_statements(&call_env, body)?
+                                        }
+                                        Value::Function(_func_name) => {
+                                            // Handle built-in functions if needed
+                                            return Err(raise_eval_error!("Iterator next function not implemented"));
+                                        }
+                                        _ => return Err(raise_eval_error!("Iterator next is not a function")),
+                                    };
+
+                                    if let Value::Object(result_obj) = next_result {
+                                        // Check if done
+                                        if let Some(done_val) = obj_get_value(&result_obj, &"done".into())?
+                                            && let Value::Boolean(true) = *done_val.borrow()
+                                        {
+                                            break; // Iteration complete
+                                        }
+
+                                        // Get value
+                                        if let Some(value_val) = obj_get_value(&result_obj, &"value".into())? {
+                                            let element = value_val.borrow().clone();
+                                            // perform array destructuring into env (var semantics)
+                                            perform_array_destructuring(env, pattern, &element, false)?;
+                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            block_env.borrow_mut().prototype = Some(env.clone());
+                                            block_env.borrow_mut().is_function_scope = false;
+                                            match evaluate_statements_with_context(&block_env, body)? {
+                                                ControlFlow::Normal(val) => *last_value = val,
+                                                ControlFlow::Break(None) => break,
+                                                ControlFlow::Break(Some(lbl)) => {
+                                                    if let Some(ln) = label_name {
+                                                        if lbl == ln {
+                                                            break;
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                        }
+                                                    } else {
+                                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                    }
+                                                }
+                                                ControlFlow::Continue(None) => {}
+                                                ControlFlow::Continue(Some(lbl)) => {
+                                                    if let Some(ln) = label_name {
+                                                        if lbl == ln {
+                                                            continue;
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                        }
+                                                    } else {
+                                                        return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                    }
+                                                }
+                                                ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                            }
+                                        }
+                                    } else {
+                                        return Err(raise_eval_error!("Iterator next() did not return an object"));
+                                    }
+                                }
+                                Ok(None)
+                            } else {
+                                Err(raise_eval_error!("Iterator does not have next method"))
+                            }
+                        } else {
+                            Err(raise_eval_error!("Symbol.iterator did not return an iterator object"))
+                        }
+                    } else {
+                        Err(raise_eval_error!("Object does not have Symbol.iterator"))
+                    }
+                } else {
+                    Err(raise_eval_error!("for-of loop requires an iterable"))
+                }
             }
         }
         _ => Err(raise_eval_error!("for-of loop requires an iterable")),
@@ -3617,6 +3707,25 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         // Accessing other properties on string primitives should return undefined
         Value::String(_) => Ok(Value::Undefined),
+        // Special cases for wrapped Map and Set objects
+        Value::Object(obj_map) if obj_map.borrow().contains_key(&"__map__".into()) && prop == "size" => {
+            if let Some(map_val) = obj_map.borrow().get(&"__map__".into())
+                && let Value::Map(map) = &*map_val.borrow()
+            {
+                Ok(Value::Number(map.borrow().entries.len() as f64))
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        Value::Object(obj_map) if obj_map.borrow().contains_key(&"__set__".into()) && prop == "size" => {
+            if let Some(set_val) = obj_map.borrow().get(&"__set__".into())
+                && let Value::Set(set) = &*set_val.borrow()
+            {
+                Ok(Value::Number(set.borrow().values.len() as f64))
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
         Value::Object(obj_map) => {
             // Special-case the `__proto__` accessor so property reads return the
             // object's current prototype object when present.
@@ -3794,6 +3903,24 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             // and Object.prototype functions act as fallbacks.
             (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args),
             (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
+            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__map__".into()) => {
+                if let Some(map_val) = obj_map.borrow().get(&"__map__".into())
+                    && let Value::Map(map) = &*map_val.borrow()
+                {
+                    crate::js_map::handle_map_instance_method(map, method, args, env)
+                } else {
+                    Err(raise_eval_error!("Invalid Map object"))
+                }
+            }
+            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__set__".into()) => {
+                if let Some(set_val) = obj_map.borrow().get(&"__set__".into())
+                    && let Value::Set(set) = &*set_val.borrow()
+                {
+                    crate::js_set::handle_set_instance_method(set, method, args, env)
+                } else {
+                    Err(raise_eval_error!("Invalid Set object"))
+                }
+            }
             (Value::Map(map), method) => crate::js_map::handle_map_instance_method(&map, method, args, env),
             (Value::Set(set), method) => crate::js_set::handle_set_instance_method(&set, method, args, env),
             (Value::WeakMap(weakmap), method) => crate::js_weakmap::handle_weakmap_instance_method(&weakmap, method, args, env),

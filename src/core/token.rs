@@ -93,6 +93,15 @@ pub enum Token {
     LineTerminator,
     /// Exponentiation assignment (`**=`)
     PowAssign,
+    BitAnd,
+    BitAndAssign,
+    BitOr,
+    BitOrAssign,
+    LeftShift,
+    LeftShiftAssign,
+    RightShift,
+    RightShiftAssign,
+    UnsignedRightShiftAssign,
 }
 
 impl Token {
@@ -397,6 +406,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::LessEqual);
                     i += 2;
+                } else if i + 2 < chars.len() && chars[i + 1] == '<' && chars[i + 2] == '=' {
+                    // Recognize '<<=' (left shift assignment)
+                    tokens.push(Token::LeftShiftAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '<' {
+                    tokens.push(Token::LeftShift);
+                    i += 2;
                 } else {
                     tokens.push(Token::LessThan);
                     i += 1;
@@ -405,6 +421,17 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
             '>' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     tokens.push(Token::GreaterEqual);
+                    i += 2;
+                } else if i + 3 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '>' && chars[i + 3] == '=' {
+                    // Recognize '>>>=' (unsigned right shift assignment)
+                    tokens.push(Token::UnsignedRightShiftAssign);
+                    i += 4;
+                } else if i + 2 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '=' {
+                    // Recognize '>>=' (right shift assignment)
+                    tokens.push(Token::RightShiftAssign);
+                    i += 3;
+                } else if i + 1 < chars.len() && chars[i + 1] == '>' {
+                    tokens.push(Token::RightShift);
                     i += 2;
                 } else {
                     tokens.push(Token::GreaterThan);
@@ -419,8 +446,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 } else if i + 1 < chars.len() && chars[i + 1] == '&' {
                     tokens.push(Token::LogicalAnd);
                     i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    // Bitwise AND assignment '&='
+                    tokens.push(Token::BitAndAssign);
+                    i += 2;
                 } else {
-                    return Err(raise_tokenize_error!());
+                    tokens.push(Token::BitAnd);
+                    i += 1;
                 }
             }
             '|' => {
@@ -431,8 +463,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 } else if i + 1 < chars.len() && chars[i + 1] == '|' {
                     tokens.push(Token::LogicalOr);
                     i += 2;
+                } else if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    // Bitwise OR assignment '|='
+                    tokens.push(Token::BitOrAssign);
+                    i += 2;
                 } else {
-                    return Err(raise_tokenize_error!());
+                    tokens.push(Token::BitOr);
+                    i += 1;
                 }
             }
             '^' => {

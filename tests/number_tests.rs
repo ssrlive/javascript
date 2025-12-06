@@ -316,6 +316,95 @@ mod number_tests {
     }
 
     #[test]
+    fn test_shift_edge_cases_and_bigint_mixing() {
+        // Left shift with large shift amount (masked by 0x1f)
+        let res = evaluate_script("let a = 1; a <<= 33; a").unwrap();
+        match res {
+            Value::Number(n) => assert_eq!(n, 2.0),
+            _ => panic!("Expected 2.0 for 1 <<= 33, got {:?}", res),
+        }
+
+        // Left shift with negative shift amount -> ToUint32(-1) & 0x1f == 31
+        let res = evaluate_script("let a = 1; a <<= -1; a").unwrap();
+        match res {
+            Value::Number(n) => assert_eq!(n, -2147483648.0),
+            _ => panic!("Expected -2147483648.0 for 1 <<= -1, got {:?}", res),
+        }
+
+        // Unsigned right shift on negative number
+        let res = evaluate_script("let a = -1; a >>>= 1; a").unwrap();
+        match res {
+            Value::Number(n) => assert_eq!(n, 2147483647.0),
+            _ => panic!("Expected 2147483647.0 for -1 >>>= 1, got {:?}", res),
+        }
+
+        // Mixing BigInt with Number in shift should throw TypeError
+        let res = evaluate_script("let a = 1n; let b = 2; a <<= b");
+        match res {
+            Err(err) => match err.kind() {
+                javascript::JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot mix BigInt")),
+                _ => panic!("Expected TypeError for mixing BigInt and Number in <<=, got {:?}", err),
+            },
+            other => panic!("Expected TypeError for mixing BigInt and Number in <<=, got {:?}", other),
+        }
+
+        // Unsigned right shift on BigInt should throw TypeError with specific message
+        let res = evaluate_script("let a = 1n; a >>>= 1n");
+        match res {
+            Err(err) => match err.kind() {
+                javascript::JSErrorKind::TypeError { message, .. } => assert!(message.contains("Unsigned right shift")),
+                _ => panic!("Expected TypeError for BigInt >>>=, got {:?}", err),
+            },
+            other => panic!("Expected TypeError for BigInt >>>=, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bigint_shift_and_bitwise_mixing_errors() {
+        // Huge BigInt shift amount should produce an evaluation error (invalid bigint shift)
+        let res = evaluate_script("let a = 1n; a <<= 100000000000000000000000000000000000000n");
+        match res {
+            Err(err) => match err.kind() {
+                javascript::JSErrorKind::EvaluationError { message, .. } => {
+                    assert!(
+                        message.contains("invalid bigint shift") || message.contains("invalid bigint"),
+                        "message={}",
+                        message
+                    )
+                }
+                _ => panic!("Expected EvaluationError for huge BigInt shift, got {:?}", err),
+            },
+            other => panic!("Expected EvaluationError for huge BigInt shift, got {:?}", other),
+        }
+
+        // Negative BigInt shift (e.g. -1n) should also error when converting to usize
+        let res = evaluate_script("let a = 1n; a <<= -1n");
+        match res {
+            Err(err) => match err.kind() {
+                javascript::JSErrorKind::EvaluationError { message, .. } => {
+                    assert!(
+                        message.contains("invalid bigint shift") || message.contains("invalid bigint"),
+                        "message={}",
+                        message
+                    )
+                }
+                _ => panic!("Expected EvaluationError for negative BigInt shift, got {:?}", err),
+            },
+            other => panic!("Expected EvaluationError for negative BigInt shift, got {:?}", other),
+        }
+
+        // Mixing BigInt and Number in bitwise XOR should throw TypeError
+        let res = evaluate_script("let a = 1n; let b = 2; a ^= b");
+        match res {
+            Err(err) => match err.kind() {
+                javascript::JSErrorKind::TypeError { message, .. } => assert!(message.contains("Cannot mix BigInt")),
+                _ => panic!("Expected TypeError for BigInt ^ Number mixing, got {:?}", err),
+            },
+            other => panic!("Expected TypeError for BigInt ^ Number mixing, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_number_parse_int() {
         // Test with valid integer string
         let script = "Number.parseInt('42')";
@@ -499,6 +588,63 @@ mod number_tests {
                 assert_eq!(n, 6.0); // a = 5; a ^= 3; a = 6
             }
             _ => panic!("Expected a ^= 3 to evaluate to 6, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_bitwise_compound_assignments() {
+        // Test bitwise AND assignment (&=)
+        let script1 = "let a = 5; a &= 3; a";
+        let result1 = evaluate_script(script1);
+        assert!(result1.is_ok(), "evaluate_script(script1) failed: {:?}", result1);
+        match result1 {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // 5 & 3 = 1
+            _ => panic!("Expected 1.0, got {:?}", result1),
+        }
+
+        // Test bitwise OR assignment (|=)
+        let script2 = "let b = 5; b |= 3; b";
+        let result2 = evaluate_script(script2);
+        assert!(result2.is_ok(), "evaluate_script(script2) failed: {:?}", result2);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 7.0), // 5 | 3 = 7
+            _ => panic!("Expected 7.0, got {:?}", result2),
+        }
+
+        // Test bitwise XOR assignment (^=)
+        let script3 = "let c = 5; c ^= 3; c";
+        let result3 = evaluate_script(script3);
+        assert!(result3.is_ok(), "evaluate_script(script3) failed: {:?}", result3);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0), // 5 ^ 3 = 6
+            _ => panic!("Expected 6.0, got {:?}", result3),
+        }
+
+        // Test left shift assignment (<<=)
+        let script4 = "let d = 5; d <<= 1; d";
+        let result4 = evaluate_script(script4);
+        assert!(result4.is_ok(), "evaluate_script(script4) failed: {:?}", result4);
+        match result4 {
+            Ok(Value::Number(n)) => assert_eq!(n, 10.0), // 5 << 1 = 10
+            _ => panic!("Expected 10.0, got {:?}", result4),
+        }
+
+        // Test right shift assignment (>>=)
+        let script5 = "let e = 5; e >>= 1; e";
+        let result5 = evaluate_script(script5);
+        assert!(result5.is_ok(), "evaluate_script(script5) failed: {:?}", result5);
+        match result5 {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0), // 5 >> 1 = 2
+            _ => panic!("Expected 2.0, got {:?}", result5),
+        }
+
+        // Test unsigned right shift assignment (>>>=)
+        let script6 = "let f = -5; f >>>= 1; f";
+        let result6 = evaluate_script(script6);
+        assert!(result6.is_ok(), "evaluate_script(script6) failed: {:?}", result6);
+        match result6 {
+            Ok(Value::Number(n)) => assert_eq!(n, 2147483645.0), // -5 >>> 1 = 2147483645
+            _ => panic!("Expected 2147483645.0, got {:?}", result6),
         }
     }
 }

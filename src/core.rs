@@ -24,6 +24,8 @@ pub use statement::*;
 mod token;
 pub use token::*;
 
+mod number;
+
 mod eval;
 pub use eval::*;
 
@@ -129,17 +131,22 @@ pub enum Expr {
     TypeOf(Box<Expr>),
     Delete(Box<Expr>),
     Void(Box<Expr>),
-    Assign(Box<Expr>, Box<Expr>),           // target, value
-    LogicalAndAssign(Box<Expr>, Box<Expr>), // target, value
-    LogicalOrAssign(Box<Expr>, Box<Expr>),  // target, value
-    NullishAssign(Box<Expr>, Box<Expr>),    // target, value
-    AddAssign(Box<Expr>, Box<Expr>),        // target, value
-    SubAssign(Box<Expr>, Box<Expr>),        // target, value
-    PowAssign(Box<Expr>, Box<Expr>),        // target, value
-    MulAssign(Box<Expr>, Box<Expr>),        // target, value
-    DivAssign(Box<Expr>, Box<Expr>),        // target, value
-    ModAssign(Box<Expr>, Box<Expr>),        // target, value
-    BitXorAssign(Box<Expr>, Box<Expr>),     // target, value
+    Assign(Box<Expr>, Box<Expr>),                   // target, value
+    LogicalAndAssign(Box<Expr>, Box<Expr>),         // target, value
+    LogicalOrAssign(Box<Expr>, Box<Expr>),          // target, value
+    NullishAssign(Box<Expr>, Box<Expr>),            // target, value
+    AddAssign(Box<Expr>, Box<Expr>),                // target, value
+    SubAssign(Box<Expr>, Box<Expr>),                // target, value
+    PowAssign(Box<Expr>, Box<Expr>),                // target, value
+    MulAssign(Box<Expr>, Box<Expr>),                // target, value
+    DivAssign(Box<Expr>, Box<Expr>),                // target, value
+    ModAssign(Box<Expr>, Box<Expr>),                // target, value
+    BitXorAssign(Box<Expr>, Box<Expr>),             // target, value
+    BitAndAssign(Box<Expr>, Box<Expr>),             // target, value
+    BitOrAssign(Box<Expr>, Box<Expr>),              // target, value
+    LeftShiftAssign(Box<Expr>, Box<Expr>),          // target, value
+    RightShiftAssign(Box<Expr>, Box<Expr>),         // target, value
+    UnsignedRightShiftAssign(Box<Expr>, Box<Expr>), // target, value
     Increment(Box<Expr>),
     Decrement(Box<Expr>),
     PostIncrement(Box<Expr>),

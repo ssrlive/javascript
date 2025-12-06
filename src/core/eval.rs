@@ -1699,6 +1699,11 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::DivAssign(target, value) => evaluate_div_assign(env, target, value),
         Expr::ModAssign(target, value) => evaluate_mod_assign(env, target, value),
         Expr::BitXorAssign(target, value) => evaluate_bitxor_assign(env, target, value),
+        Expr::BitAndAssign(target, value) => evaluate_bitand_assign(env, target, value),
+        Expr::BitOrAssign(target, value) => evaluate_bitor_assign(env, target, value),
+        Expr::LeftShiftAssign(target, value) => evaluate_left_shift_assign(env, target, value),
+        Expr::RightShiftAssign(target, value) => evaluate_right_shift_assign(env, target, value),
+        Expr::UnsignedRightShiftAssign(target, value) => evaluate_unsigned_right_shift_assign(env, target, value),
         Expr::Increment(expr) => evaluate_increment(env, expr),
         Expr::Decrement(expr) => evaluate_decrement(env, expr),
         Expr::PostIncrement(expr) => evaluate_post_increment(env, expr),
@@ -2245,20 +2250,7 @@ fn evaluate_bitxor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => {
-            let to_int32 = |n: f64| -> i32 {
-                if !n.is_finite() || n == 0.0 {
-                    return 0;
-                }
-                let two32 = 4294967296f64;
-                let int = n.trunc();
-                let int32bit = ((int % two32) + two32) % two32;
-                if int32bit >= 2147483648f64 {
-                    (int32bit - two32) as i32
-                } else {
-                    int32bit as i32
-                }
-            };
-            Value::Number((to_int32(ln) ^ to_int32(rn)) as f64)
+            Value::Number((crate::core::number::to_int32(ln) ^ crate::core::number::to_int32(rn)) as f64)
         }
         (Value::BigInt(la), Value::BigInt(rb)) => {
             let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
@@ -2271,6 +2263,178 @@ fn evaluate_bitxor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for ^="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_bitand_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a &= b is equivalent to a = a & b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            Value::Number((crate::core::number::to_int32(ln) & crate::core::number::to_int32(rn)) as f64)
+        }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            use std::ops::BitAnd;
+            Value::BigInt((a.bitand(&b)).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for &="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_bitor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a |= b is equivalent to a = a | b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            Value::Number((crate::core::number::to_int32(ln) | crate::core::number::to_int32(rn)) as f64)
+        }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            use std::ops::BitOr;
+            Value::BigInt((a.bitor(&b)).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for |="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_left_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a <<= b is equivalent to a = a << b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            let a = crate::core::number::to_int32(ln);
+            let s = crate::core::number::to_uint32(rn) & 0x1f;
+            Value::Number(((a << s) as i32) as f64)
+        }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            use std::ops::Shl;
+            // try to convert shift amount to usize
+            let shift = b.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
+            Value::BigInt(a.shl(shift).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for <<="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a >>= b is equivalent to a = a >> b (arithmetic right shift)
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            let a = crate::core::number::to_int32(ln);
+            let s = crate::core::number::to_uint32(rn) & 0x1f;
+            Value::Number((a >> s) as f64)
+        }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            use std::ops::Shr;
+            let shift = b.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
+            Value::BigInt(a.shr(shift).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for >>="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_unsigned_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a >>>= b is equivalent to a = a >>> b (unsigned right shift)
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            let a = crate::core::number::to_uint32(ln);
+            let s = crate::core::number::to_uint32(rn) & 0x1f;
+            Value::Number((a >> s) as f64)
+        }
+        // BigInt does not support unsigned right shift
+        (Value::BigInt(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Unsigned right shift not supported for BigInt"));
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for >>>="));
         }
     };
     match &result {
@@ -3324,23 +3488,8 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::BitXor => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => {
-                // ToInt32 semantics for Number inputs
-                let to_int32 = |n: f64| -> i32 {
-                    if !n.is_finite() || n == 0.0 {
-                        return 0;
-                    }
-                    let two32 = 4294967296f64;
-                    let int = n.trunc();
-                    // modulo 2^32
-                    let int32bit = ((int % two32) + two32) % two32;
-                    if int32bit >= 2147483648f64 {
-                        (int32bit - two32) as i32
-                    } else {
-                        int32bit as i32
-                    }
-                };
-                let a = to_int32(ln);
-                let b = to_int32(rn);
+                let a = crate::core::number::to_int32(ln);
+                let b = crate::core::number::to_int32(rn);
                 Ok(Value::Number((a ^ b) as f64))
             }
             (Value::BigInt(la), Value::BigInt(rb)) => {

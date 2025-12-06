@@ -171,6 +171,31 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let right = parse_assignment(tokens)?;
             Ok(Expr::BitXorAssign(Box::new(left), Box::new(right)))
         }
+        Token::BitAndAssign => {
+            tokens.remove(0); // consume '&='
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::BitAndAssign(Box::new(left), Box::new(right)))
+        }
+        Token::BitOrAssign => {
+            tokens.remove(0); // consume '|='
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::BitOrAssign(Box::new(left), Box::new(right)))
+        }
+        Token::LeftShiftAssign => {
+            tokens.remove(0); // consume '<<='
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::LeftShiftAssign(Box::new(left), Box::new(right)))
+        }
+        Token::RightShiftAssign => {
+            tokens.remove(0); // consume '>>='
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::RightShiftAssign(Box::new(left), Box::new(right)))
+        }
+        Token::UnsignedRightShiftAssign => {
+            tokens.remove(0); // consume '>>>='
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::UnsignedRightShiftAssign(Box::new(left), Box::new(right)))
+        }
         _ => Ok(left),
     }
 }

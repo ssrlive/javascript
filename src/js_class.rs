@@ -119,7 +119,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 return handle_number_constructor(args, env);
             }
         }
-        Value::Closure(params, body, captured_env) => {
+        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
             // Handle function constructors
             let instance = Rc::new(RefCell::new(JSObjectData::new()));
             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
@@ -312,7 +312,7 @@ pub(crate) fn call_static_method(
     // Look for static method directly on the class object
     if let Some(method_val) = obj_get_value(class_obj, &method.into())? {
         match &*method_val.borrow() {
-            Value::Closure(params, body, _captured_env) => {
+            Value::Closure(params, body, _captured_env) | Value::AsyncClosure(params, body, _captured_env) => {
                 // Create function environment
                 let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
@@ -345,7 +345,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
     if let Some(method_val) = obj_get_value(&proto_obj, &method.into())? {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
-            Value::Closure(params, body, captured_env) => {
+            Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                 log::trace!("Method is a closure with {} params", params.len());
                 // Use the closure's captured environment as the base for the
                 // function environment so outer-scope lookups work as expected.
@@ -492,7 +492,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
             // Look for method in parent prototype
             if let Some(method_val) = obj_get_value(parent_proto_obj, &method.into())? {
                 match &*method_val.borrow() {
-                    Value::Closure(params, body, _captured_env) => {
+                    Value::Closure(params, body, _captured_env) | Value::AsyncClosure(params, body, _captured_env) => {
                         // Create function environment with 'this' bound to instance
                         let func_env = Rc::new(RefCell::new(JSObjectData::new()));
 
@@ -656,7 +656,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Undefined => utf8_to_utf16("undefined"),
             Value::Object(_) => utf8_to_utf16("[object Object]"),
             Value::Function(name) => utf8_to_utf16(&format!("[Function: {}]", name)),
-            Value::Closure(_, _, _) => utf8_to_utf16("[Function]"),
+            Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => utf8_to_utf16("[Function]"),
             Value::ClassDefinition(_) => utf8_to_utf16("[Class]"),
             Value::Getter(_, _) => utf8_to_utf16("[Getter]"),
             Value::Setter(_, _, _) => utf8_to_utf16("[Setter]"),

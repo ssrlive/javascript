@@ -1225,7 +1225,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     // For async arrow functions, we need to create a special async closure
                     // For now, we'll treat them as regular arrow functions but mark them as async
                     // This will need to be handled in evaluation
-                    Expr::ArrowFunction(params, parse_arrow_body(tokens)?)
+                    Expr::AsyncArrowFunction(params, parse_arrow_body(tokens)?)
                 } else {
                     return Err(raise_parse_error!());
                 }

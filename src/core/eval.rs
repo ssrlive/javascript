@@ -14,7 +14,7 @@ use crate::{
     js_console::{handle_console_method, make_console_object},
     js_math::{handle_math_method, make_math_object},
     js_number::make_number_object,
-    js_promise::{PromiseState, handle_promise_method, run_event_loop},
+    js_promise::{JSPromise, PromiseState, handle_promise_method, run_event_loop},
     js_testintl::make_testintl_object,
     obj_get_value, raise_eval_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
@@ -1472,7 +1472,7 @@ fn statement_for_of_var_iter(
                     if let Some(method_rc) = obj_get_value(&obj_map, &key)? {
                         // method can be a function/closure or an object
                         let iterator_val = match &*method_rc.borrow() {
-                            Value::Closure(_params, body, captured_env) => {
+                            Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
                                 // Call closure with 'this' bound to the object
                                 let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -1499,7 +1499,7 @@ fn statement_for_of_var_iter(
                                 // call iter_obj.next()
                                 if let Some(next_rc) = obj_get_value(&iter_obj, &"next".into())? {
                                     let next_val = match &*next_rc.borrow() {
-                                        Value::Closure(_params, body, captured_env) => {
+                                        Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
                                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                                             obj_set_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
@@ -1741,6 +1741,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         },
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
@@ -1759,7 +1760,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::SuperMethod(method, args) => evaluate_super_method(env, method, args),
         Expr::ArrayDestructuring(pattern) => evaluate_array_destructuring(env, pattern),
         Expr::ObjectDestructuring(pattern) => evaluate_object_destructuring(env, pattern),
-        Expr::AsyncFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::AsyncFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
         Expr::Await(expr) => {
             let promise_val = evaluate_expr(env, expr)?;
             match promise_val {
@@ -2723,7 +2724,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::BigInt(_) => "bigint",
         Value::Object(_) => "object",
         Value::Function(_) => "function",
-        Value::Closure(_, _, _) => "function",
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "function",
         Value::ClassDefinition(_) => "function",
         Value::Getter(_, _) => "function",
         Value::Setter(_, _, _) => "function",
@@ -3851,7 +3852,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // Check for user-defined method
                     if let Some(prop_val) = obj_get_value(&obj_map, &method.into())? {
                         match prop_val.borrow().clone() {
-                            Value::Closure(params, body, captured_env) => {
+                            Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                                 // Function call
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
@@ -4022,6 +4023,43 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 }
                 // Execute function body
                 evaluate_statements(&func_env, &body)
+            }
+            Value::AsyncClosure(params, body, captured_env) => {
+                // Function call
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                // Create a Promise object
+                let promise = Rc::new(RefCell::new(JSPromise::default()));
+                let promise_obj = Value::Object(Rc::new(RefCell::new(JSObjectData::new())));
+                if let Value::Object(obj) = &promise_obj {
+                    obj.borrow_mut()
+                        .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                }
+                // Create new environment
+                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                func_env.borrow_mut().is_function_scope = true;
+                // Bind parameters
+                for (i, param) in params.iter().enumerate() {
+                    let val = if i < evaluated_args.len() {
+                        evaluated_args[i].clone()
+                    } else {
+                        Value::Undefined
+                    };
+                    env_set(&func_env, param.as_str(), val)?;
+                }
+                // Execute function body synchronously (for now)
+                let result = evaluate_statements(&func_env, &body);
+                match result {
+                    Ok(val) => {
+                        promise.borrow_mut().state = PromiseState::Fulfilled(val);
+                    }
+                    Err(e) => {
+                        promise.borrow_mut().state = PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
+                    }
+                }
+                Ok(promise_obj)
             }
             Value::Object(obj_map) => {
                 // Support calling the `assert` testing object as a function as well
@@ -4234,7 +4272,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
         match func_val {
             Value::Undefined => Ok(Value::Undefined),
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-            Value::Closure(params, body, captured_env) => {
+            Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
@@ -4646,7 +4684,7 @@ fn handle_optional_method_call(
                 // Check for user-defined method
                 if let Some(prop_val) = obj_get_value(obj_map, &method.into())? {
                     match prop_val.borrow().clone() {
-                        Value::Closure(params, body, captured_env) => {
+                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                             // Function call
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();

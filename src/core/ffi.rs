@@ -932,15 +932,16 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
                 }
             }
             Ok(Value::Undefined) => JS_UNDEFINED,
-            Ok(Value::Object(_)) => JS_UNDEFINED,          // For now
-            Ok(Value::Function(_)) => JS_UNDEFINED,        // For now
-            Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,   // For now
-            Ok(Value::ClassDefinition(_)) => JS_UNDEFINED, // For now
-            Ok(Value::Getter(_, _)) => JS_UNDEFINED,       // For now
-            Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,    // For now
-            Ok(Value::Property { .. }) => JS_UNDEFINED,    // For now
-            Ok(Value::Promise(_)) => JS_UNDEFINED,         // For now
-            Ok(Value::Symbol(_)) => JS_UNDEFINED,          // For now
+            Ok(Value::Object(_)) => JS_UNDEFINED,             // For now
+            Ok(Value::Function(_)) => JS_UNDEFINED,           // For now
+            Ok(Value::Closure(_, _, _)) => JS_UNDEFINED,      // For now
+            Ok(Value::AsyncClosure(_, _, _)) => JS_UNDEFINED, // For now
+            Ok(Value::ClassDefinition(_)) => JS_UNDEFINED,    // For now
+            Ok(Value::Getter(_, _)) => JS_UNDEFINED,          // For now
+            Ok(Value::Setter(_, _, _)) => JS_UNDEFINED,       // For now
+            Ok(Value::Property { .. }) => JS_UNDEFINED,       // For now
+            Ok(Value::Promise(_)) => JS_UNDEFINED,            // For now
+            Ok(Value::Symbol(_)) => JS_UNDEFINED,             // For now
             Ok(Value::BigInt(_)) => JS_UNDEFINED,
             Err(_) => JS_UNDEFINED,
         }

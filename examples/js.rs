@@ -59,6 +59,7 @@ fn print_eval_result(result: &Value) {
         Value::Object(_) => println!("[object Object]"),
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),
+        Value::AsyncClosure(_, _, _) => println!("[Function]"),
         Value::ClassDefinition(_) => println!("[Class]"),
         Value::Getter(_, _) => println!("[Getter]"),
         Value::Setter(_, _, _) => println!("[Setter]"),

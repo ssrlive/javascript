@@ -77,7 +77,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         }
                     }
                     Value::Function(name) => print!("function {}() {{ [native code] }}", name),
-                    Value::Closure(params, _, _) => {
+                    Value::Closure(params, _, _) | Value::AsyncClosure(params, _, _) => {
                         print!("function(");
                         for (i, param) in params.iter().enumerate() {
                             if i > 0 {

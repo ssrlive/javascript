@@ -92,7 +92,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
-                        Value::Closure(params, body, captured_env) => {
+                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             if !params.is_empty() {
@@ -122,7 +122,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     match &callback {
-                        Value::Closure(params, body, captured_env) => {
+                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             if !params.is_empty() {
@@ -372,7 +372,7 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
 
     let executor = evaluate_expr(env, &args[0])?;
     let (params, captured_env) = match &executor {
-        Value::Closure(p, _b, c) => (p.clone(), c.clone()),
+        Value::Closure(p, _b, c) | Value::AsyncClosure(p, _b, c) => (p.clone(), c.clone()),
         _ => {
             return Err(raise_eval_error!("Promise constructor requires a function as executor"));
         }

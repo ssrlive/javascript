@@ -285,7 +285,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::Boolean(_) => "Boolean",
                 Value::Object(_) => "Object",
                 Value::Function(_) => "Function",
-                Value::Closure(_, _, _) => "Function",
+                Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
                 Value::Undefined => "undefined",
                 Value::ClassDefinition(_) => "Class",
                 Value::Getter(_, _) => "Getter",
@@ -353,7 +353,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             Ok(Value::String(utf8_to_utf16("[object Object]")))
         }
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
-        Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
         Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
         Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
         Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
@@ -376,7 +376,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 Value::Boolean(_) => "Boolean",
                 Value::Object(_) => "Object",
                 Value::Function(_) => "Function",
-                Value::Closure(_, _, _) => "Function",
+                Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
                 Value::Undefined => "undefined",
                 Value::ClassDefinition(_) => "Class",
                 &Value::Getter(_, _) => "Getter",
@@ -408,7 +408,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
             Ok(Value::Object(obj_map.clone()))
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
-        Value::Closure(params, body, env) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Value::Closure(params, body, env) | Value::AsyncClosure(params, body, env) => {
+            Ok(Value::Closure(params.clone(), body.clone(), env.clone()))
+        }
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
         Value::Getter(body, env) => Ok(Value::Getter(body.clone(), env.clone())),
         Value::Setter(param, body, env) => Ok(Value::Setter(param.clone(), body.clone(), env.clone())),

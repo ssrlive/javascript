@@ -157,6 +157,7 @@ pub enum Expr {
     Function(Vec<String>, Vec<Statement>),                // parameters, body
     AsyncFunction(Vec<String>, Vec<Statement>),           // parameters, body for async functions
     ArrowFunction(Vec<String>, Vec<Statement>),           // parameters, body
+    AsyncArrowFunction(Vec<String>, Vec<Statement>),      // parameters, body for async arrow functions
     Object(Vec<(String, Expr)>),                          // object literal: key-value pairs
     Array(Vec<Expr>),                                     // array literal: [elem1, elem2, ...]
     Getter(Box<Expr>),                                    // getter function

@@ -79,12 +79,13 @@ pub enum Value {
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
-    Object(JSObjectDataPtr),                               // Object with properties
-    Function(String),                                      // Function name
-    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
-    ClassDefinition(Rc<ClassDefinition>),                  // Class definition
-    Getter(Vec<Statement>, JSObjectDataPtr),               // getter body, captured environment
-    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),  // setter parameter, body, captured environment
+    Object(JSObjectDataPtr),                                    // Object with properties
+    Function(String),                                           // Function name
+    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
+    AsyncClosure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
+    ClassDefinition(Rc<ClassDefinition>),                       // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr),                    // getter body, captured environment
+    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),       // setter parameter, body, captured environment
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
@@ -106,6 +107,7 @@ impl std::fmt::Debug for Value {
             Value::Object(obj) => write!(f, "Object({:p})", Rc::as_ptr(obj)),
             Value::Function(name) => write!(f, "Function({})", name),
             Value::Closure(_, _, _) => write!(f, "Closure"),
+            Value::AsyncClosure(_, _, _) => write!(f, "AsyncClosure"),
             Value::ClassDefinition(_) => write!(f, "ClassDefinition"),
             Value::Getter(_, _) => write!(f, "Getter"),
             Value::Setter(_, _, _) => write!(f, "Setter"),
@@ -140,6 +142,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Object(_) => true,
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
+        Value::AsyncClosure(_, _, _) => true,
         Value::ClassDefinition(_) => true,
         Value::Getter(_, _) => true,
         Value::Setter(_, _, _) => true,
@@ -174,6 +177,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("function {}", name),
         Value::Closure(_, _, _) => "function".to_string(),
+        Value::AsyncClosure(_, _, _) => "function".to_string(),
         Value::ClassDefinition(_) => "class".to_string(),
         Value::Getter(_, _) => "getter".to_string(),
         Value::Setter(_, _, _) => "setter".to_string(),
@@ -197,7 +201,7 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                 if let Some(method_rc) = obj_get_value(obj_map, &key)? {
                     let method_val = method_rc.borrow().clone();
                     match method_val {
-                        Value::Closure(params, body, captured_env) => {
+                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                             // Create a new execution env and bind this
                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -270,7 +274,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Undefined => "undefined".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
-        Value::Closure(_, _, _) => "[function]".to_string(),
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "[function]".to_string(),
         Value::ClassDefinition(_) => "[class]".to_string(),
         Value::Getter(_, _) => "[getter]".to_string(),
         Value::Setter(_, _, _) => "[setter]".to_string(),

@@ -66,7 +66,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         }
                     }
                     Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
-                    Value::Closure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+                    Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
                     Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
                     Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
                     Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
@@ -128,6 +128,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         Value::Object(_) => "[object Object]".to_string(),
                         Value::Function(name) => format!("[Function: {}]", name),
                         Value::Closure(_, _, _) => "[Function]".to_string(),
+                        Value::AsyncClosure(_, _, _) => "[Function]".to_string(),
                         _ => unreachable!(), // All cases covered above
                     };
                     match str_val.parse::<i32>() {
@@ -163,6 +164,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         Value::Object(_) => "[object Object]".to_string(),
                         Value::Function(name) => format!("[Function: {}]", name),
                         Value::Closure(_, _, _) => "[Function]".to_string(),
+                        Value::AsyncClosure(_, _, _) => "[Function]".to_string(),
                         _ => unreachable!(), // All cases covered above
                     };
                     match str_val.parse::<f64>() {
@@ -579,7 +581,9 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
             let callback = evaluate_expr(env, &args[0])?;
             let callback_func = match callback {
-                Value::Closure(params, body, captured_env) => (params, body, captured_env),
+                Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                    (params, body, captured_env)
+                }
                 _ => {
                     return Err(raise_type_error!("testWithIntlConstructors requires a function as argument"));
                 }

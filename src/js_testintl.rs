@@ -77,29 +77,29 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                 // diagnostics rather than causing an evaluation error.
                 let helper_lookup = crate::core::evaluate_expr(&global_env, &Expr::Var("canonicalizeLanguageTag".to_string()));
                 match helper_lookup {
-                    Ok(crate::core::Value::Closure(_, _, _)) | Ok(crate::core::Value::Function(_)) => {
-                        match crate::core::evaluate_expr(&global_env, &canon_call) {
-                            Ok(CoreValue::String(canon_utf16)) => {
-                                let canon = utf16_to_utf8(&canon_utf16);
-                                log::debug!(
-                                    "isCanonicalizedStructurallyValidLanguageTag: locale='{}' canonical='{}'",
-                                    locale,
-                                    canon
-                                );
-                            }
-                            Ok(other) => {
-                                log::debug!("canonicalizeLanguageTag returned non-string: {:?}", other);
-                            }
-                            Err(e) => {
-                                log::debug!(
-                                    "canonicalizeLanguageTag evaluation error: {:?} locale='{}' arg_utf16={:?}",
-                                    e,
-                                    locale,
-                                    arg_utf16
-                                );
-                            }
+                    Ok(crate::core::Value::Closure(_, _, _))
+                    | Ok(crate::core::Value::AsyncClosure(_, _, _))
+                    | Ok(crate::core::Value::Function(_)) => match crate::core::evaluate_expr(&global_env, &canon_call) {
+                        Ok(CoreValue::String(canon_utf16)) => {
+                            let canon = utf16_to_utf8(&canon_utf16);
+                            log::debug!(
+                                "isCanonicalizedStructurallyValidLanguageTag: locale='{}' canonical='{}'",
+                                locale,
+                                canon
+                            );
                         }
-                    }
+                        Ok(other) => {
+                            log::debug!("canonicalizeLanguageTag returned non-string: {:?}", other);
+                        }
+                        Err(e) => {
+                            log::debug!(
+                                "canonicalizeLanguageTag evaluation error: {:?} locale='{}' arg_utf16={:?}",
+                                e,
+                                locale,
+                                arg_utf16
+                            );
+                        }
+                    },
                     _ => {
                         // Helper missing — dump the global environment chain for diagnostics
                         log::debug!("canonicalizeLanguageTag helper not present in global env for locale='{}'", locale);
@@ -172,7 +172,9 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         // the global scope to avoid evaluation errors when it's missing.
         let helper_lookup = crate::core::evaluate_expr(&global_env, &Expr::Var("canonicalizeLanguageTag".to_string()));
         match helper_lookup {
-            Ok(crate::core::Value::Closure(_, _, _)) | Ok(crate::core::Value::Function(_)) => {
+            Ok(crate::core::Value::Closure(_, _, _))
+            | Ok(crate::core::Value::AsyncClosure(_, _, _))
+            | Ok(crate::core::Value::Function(_)) => {
                 match crate::core::evaluate_expr(&global_env, &canon_call) {
                     Ok(CoreValue::String(canon_utf16)) => {
                         let canonical = utf16_to_utf8(&canon_utf16);
@@ -308,7 +310,9 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
 
             let callback = evaluate_expr(env, &args[0])?;
             let callback_func = match callback {
-                Value::Closure(params, body, captured_env) => (params, body, captured_env),
+                Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                    (params, body, captured_env)
+                }
                 _ => {
                     return Err(raise_eval_error!("testWithIntlConstructors requires a function as argument"));
                 }
@@ -385,7 +389,9 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
 
                             let helper_lookup = crate::core::evaluate_expr(&global_env, &Expr::Var("canonicalizeLanguageTag".to_string()));
                             match helper_lookup {
-                                Ok(crate::core::Value::Closure(_, _, _)) | Ok(crate::core::Value::Function(_)) => {
+                                Ok(crate::core::Value::Closure(_, _, _))
+                                | Ok(crate::core::Value::AsyncClosure(_, _, _))
+                                | Ok(crate::core::Value::Function(_)) => {
                                     let canon_call = Expr::Call(
                                         Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
                                         vec![Expr::StringLit(arg_utf16.clone())],

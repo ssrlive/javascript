@@ -69,6 +69,8 @@ fn print_eval_result(result: &Value) {
         Value::BigInt(s) => println!("{s}"),
         Value::Map(_) => println!("[object Map]"),
         Value::Set(_) => println!("[object Set]"),
+        Value::WeakMap(_) => println!("[object WeakMap]"),
+        Value::WeakSet(_) => println!("[object WeakSet]"),
     }
 }
 

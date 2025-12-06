@@ -295,6 +295,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::Symbol(_) => "Symbol",
                 Value::Map(_) => "Map",
                 Value::Set(_) => "Set",
+                Value::WeakMap(_) => "WeakMap",
+                Value::WeakSet(_) => "WeakSet",
             },
             args.len()
         )));
@@ -367,6 +369,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         }
         Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
         Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
+        Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
+        Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
     }
 }
 
@@ -391,6 +395,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 Value::Symbol(_) => "Symbol",
                 Value::Map(_) => "Map",
                 Value::Set(_) => "Set",
+                Value::WeakMap(_) => "WeakMap",
+                Value::WeakSet(_) => "WeakSet",
             },
             args.len()
         )));
@@ -429,5 +435,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::Symbol(symbol_data) => Ok(Value::Symbol(symbol_data.clone())),
         Value::Map(map) => Ok(Value::Map(map.clone())),
         Value::Set(set) => Ok(Value::Set(set.clone())),
+        Value::WeakMap(weakmap) => Ok(Value::WeakMap(weakmap.clone())),
+        Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
     }
 }

@@ -107,6 +107,8 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::Symbol(_) => print!("[object Symbol]"),
                     Value::Map(_) => print!("[object Map]"),
                     Value::Set(_) => print!("[object Set]"),
+                    Value::WeakMap(_) => print!("[object WeakMap]"),
+                    Value::WeakSet(_) => print!("[object WeakSet]"),
                 }
                 if i < count - 1 {
                     print!(" ");

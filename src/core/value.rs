@@ -19,6 +19,16 @@ pub struct JSSet {
     pub values: Vec<Value>,
 }
 
+#[derive(Clone, Debug)]
+pub struct JSWeakMap {
+    pub entries: Vec<(std::rc::Weak<RefCell<JSObjectData>>, Value)>, // weak key-value pairs
+}
+
+#[derive(Clone, Debug)]
+pub struct JSWeakSet {
+    pub values: Vec<std::rc::Weak<RefCell<JSObjectData>>>, // weak values
+}
+
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
 #[derive(Clone, Default)]
@@ -106,6 +116,8 @@ pub enum Value {
     Symbol(Rc<SymbolData>),          // Symbol primitive with description
     Map(Rc<RefCell<JSMap>>),         // Map object
     Set(Rc<RefCell<JSSet>>),         // Set object
+    WeakMap(Rc<RefCell<JSWeakMap>>), // WeakMap object
+    WeakSet(Rc<RefCell<JSWeakSet>>), // WeakSet object
 }
 
 impl std::fmt::Debug for Value {
@@ -128,6 +140,8 @@ impl std::fmt::Debug for Value {
             Value::Symbol(_) => write!(f, "Symbol"),
             Value::Map(m) => write!(f, "Map({:p})", Rc::as_ptr(m)),
             Value::Set(s) => write!(f, "Set({:p})", Rc::as_ptr(s)),
+            Value::WeakMap(wm) => write!(f, "WeakMap({:p})", Rc::as_ptr(wm)),
+            Value::WeakSet(ws) => write!(f, "WeakSet({:p})", Rc::as_ptr(ws)),
         }
     }
 }
@@ -165,6 +179,8 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Symbol(_) => true,
         Value::Map(_) => true,
         Value::Set(_) => true,
+        Value::WeakMap(_) => true,
+        Value::WeakSet(_) => true,
     }
 }
 
@@ -205,6 +221,8 @@ pub fn value_to_string(val: &Value) -> String {
         },
         Value::Map(_) => "[object Map]".to_string(),
         Value::Set(_) => "[object Set]".to_string(),
+        Value::WeakMap(_) => "[object WeakMap]".to_string(),
+        Value::WeakSet(_) => "[object WeakSet]".to_string(),
     }
 }
 
@@ -301,6 +319,8 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Symbol(_) => "[object Symbol]".to_string(),
         Value::Map(_) => "[object Map]".to_string(),
         Value::Set(_) => "[object Set]".to_string(),
+        Value::WeakMap(_) => "[object WeakMap]".to_string(),
+        Value::WeakSet(_) => "[object WeakSet]".to_string(),
     }
 }
 

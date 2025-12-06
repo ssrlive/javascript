@@ -25,6 +25,8 @@ pub(crate) mod js_set;
 pub(crate) mod js_std;
 pub(crate) mod js_string;
 pub(crate) mod js_testintl;
+pub(crate) mod js_weakmap;
+pub(crate) mod js_weakset;
 pub(crate) mod repl;
 pub(crate) mod sprintf;
 pub(crate) mod tmpfile;
@@ -40,6 +42,6 @@ pub use core::{
     JS_GC_OBJ_TYPE_SHAPE, JS_GC_OBJ_TYPE_VAR_REF, JS_TAG_BOOL, JS_TAG_CATCH_OFFSET, JS_TAG_FLOAT64, JS_TAG_INT, JS_TAG_NULL, JS_TAG_OBJECT,
     JS_TAG_SHORT_BIG_INT, JS_TAG_STRING, JS_TAG_STRING_ROPE, JS_TAG_UNDEFINED, JS_UNINITIALIZED,
 };
-pub use core::{Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
+pub use core::{JSObjectData, Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;

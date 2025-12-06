@@ -501,6 +501,18 @@ pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<()
         Rc::new(RefCell::new(Value::Function("Set".to_string()))),
     );
 
+    // WeakMap constructor
+    env_borrow.insert(
+        PropertyKey::String("WeakMap".to_string()),
+        Rc::new(RefCell::new(Value::Function("WeakMap".to_string()))),
+    );
+
+    // WeakSet constructor
+    env_borrow.insert(
+        PropertyKey::String("WeakSet".to_string()),
+        Rc::new(RefCell::new(Value::Function("WeakSet".to_string()))),
+    );
+
     // Create a few well-known symbols and store them in the well-known symbol registry
     WELL_KNOWN_SYMBOLS.with(|wk| {
         let mut map = wk.borrow_mut();

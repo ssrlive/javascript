@@ -2733,6 +2733,8 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Symbol(_) => "symbol",
         Value::Map(_) => "object",
         Value::Set(_) => "object",
+        Value::WeakMap(_) => "object",
+        Value::WeakSet(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -3784,6 +3786,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
             (Value::Map(map), method) => crate::js_map::handle_map_instance_method(&map, method, args, env),
             (Value::Set(set), method) => crate::js_set::handle_set_instance_method(&set, method, args, env),
+            (Value::WeakMap(weakmap), method) => crate::js_weakmap::handle_weakmap_instance_method(&weakmap, method, args, env),
+            (Value::WeakSet(weakset), method) => crate::js_weakset::handle_weakset_instance_method(&weakset, method, args, env),
             (Value::Object(obj_map), method) => {
                 // Object prototype methods are supplied on `Object.prototype`.
                 // Lookups will find user-defined (own) methods before inherited

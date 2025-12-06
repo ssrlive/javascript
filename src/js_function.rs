@@ -79,6 +79,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(&s))),
                     Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
                     Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
+                    Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
+                    Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string

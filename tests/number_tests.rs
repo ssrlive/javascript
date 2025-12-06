@@ -465,4 +465,40 @@ mod number_tests {
             }
         }
     }
+
+    #[test]
+    fn test_bitwise_xor_numbers() {
+        let script = "5 ^ 3";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => {
+                assert_eq!(n, 6.0); // 5 ^ 3 = 6
+            }
+            _ => panic!("Expected 5 ^ 3 to evaluate to 6, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_bitwise_xor_negative_numbers() {
+        let script = "-5 ^ 3";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => {
+                assert_eq!(n, -8.0); // -5 ^ 3 = -8
+            }
+            _ => panic!("Expected -5 ^ 3 to evaluate to -8, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_bitwise_xor_assignment() {
+        let script = "let a = 5; a ^= 3; a";
+        let result = evaluate_script(script);
+        match result {
+            Ok(Value::Number(n)) => {
+                assert_eq!(n, 6.0); // a = 5; a ^= 3; a = 6
+            }
+            _ => panic!("Expected a ^= 3 to evaluate to 6, got {:?}", result),
+        }
+    }
 }

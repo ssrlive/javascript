@@ -99,6 +99,7 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             Token::Assign
             | Token::LogicalAndAssign
             | Token::LogicalOrAssign
+            | Token::BitXorAssign
             | Token::NullishAssign
             | Token::AddAssign
             | Token::SubAssign
@@ -165,7 +166,26 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let right = parse_assignment(tokens)?;
             Ok(Expr::ModAssign(Box::new(left), Box::new(right)))
         }
+        Token::BitXorAssign => {
+            tokens.remove(0);
+            let right = parse_assignment(tokens)?;
+            Ok(Expr::BitXorAssign(Box::new(left), Box::new(right)))
+        }
         _ => Ok(left),
+    }
+}
+
+fn parse_bitwise_xor(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
+    let left = parse_additive(tokens)?;
+    if tokens.is_empty() {
+        return Ok(left);
+    }
+    if matches!(tokens[0], Token::BitXor) {
+        tokens.remove(0);
+        let right = parse_bitwise_xor(tokens)?;
+        Ok(Expr::BitXor(Box::new(left), Box::new(right)))
+    } else {
+        Ok(left)
     }
 }
 
@@ -212,7 +232,7 @@ fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_comparison(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_additive(tokens)?;
+    let left = parse_bitwise_xor(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }

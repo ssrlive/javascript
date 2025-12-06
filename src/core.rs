@@ -139,6 +139,7 @@ pub enum Expr {
     MulAssign(Box<Expr>, Box<Expr>),        // target, value
     DivAssign(Box<Expr>, Box<Expr>),        // target, value
     ModAssign(Box<Expr>, Box<Expr>),        // target, value
+    BitXorAssign(Box<Expr>, Box<Expr>),     // target, value
     Increment(Box<Expr>),
     Decrement(Box<Expr>),
     PostIncrement(Box<Expr>),
@@ -172,6 +173,7 @@ pub enum Expr {
     /// Logical operators with short-circuit semantics
     LogicalAnd(Box<Expr>, Box<Expr>),
     LogicalOr(Box<Expr>, Box<Expr>),
+    BitXor(Box<Expr>, Box<Expr>),
     Value(Value), // literal value
 }
 
@@ -194,6 +196,7 @@ pub enum BinaryOp {
     In,
     NullishCoalescing,
     Pow,
+    BitXor,
 }
 
 #[derive(Debug, Clone)]

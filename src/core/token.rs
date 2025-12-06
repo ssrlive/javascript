@@ -76,8 +76,10 @@ pub enum Token {
     LogicalNot,
     LogicalAnd,
     LogicalOr,
+    BitXor,
     LogicalAndAssign,
     LogicalOrAssign,
+    BitXorAssign,
     NullishAssign,
     AddAssign,
     SubAssign,
@@ -431,6 +433,16 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     i += 2;
                 } else {
                     return Err(raise_tokenize_error!());
+                }
+            }
+            '^' => {
+                // Recognize '^=' (bitwise XOR assignment) and '^' (bitwise XOR)
+                if i + 1 < chars.len() && chars[i + 1] == '=' {
+                    tokens.push(Token::BitXorAssign);
+                    i += 2;
+                } else {
+                    tokens.push(Token::BitXor);
+                    i += 1;
                 }
             }
             '0'..='9' => {

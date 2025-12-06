@@ -1698,6 +1698,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::PowAssign(target, value) => evaluate_pow_assign(env, target, value),
         Expr::DivAssign(target, value) => evaluate_div_assign(env, target, value),
         Expr::ModAssign(target, value) => evaluate_mod_assign(env, target, value),
+        Expr::BitXorAssign(target, value) => evaluate_bitxor_assign(env, target, value),
         Expr::Increment(expr) => evaluate_increment(env, expr),
         Expr::Decrement(expr) => evaluate_decrement(env, expr),
         Expr::PostIncrement(expr) => evaluate_post_increment(env, expr),
@@ -1719,6 +1720,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             let l = evaluate_expr(env, left)?;
             if is_truthy(&l) { Ok(l) } else { evaluate_expr(env, right) }
         }
+        Expr::BitXor(left, right) => evaluate_binary(env, left, &crate::core::BinaryOp::BitXor, right),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
@@ -2223,6 +2225,52 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
         }
         _ => {
             return Err(raise_eval_error!("Invalid operands for %="));
+        }
+    };
+    match &result {
+        Value::Number(n) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
+        }
+        Value::BigInt(s) => {
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.clone()))?;
+        }
+        _ => unreachable!(),
+    }
+    Ok(result)
+}
+
+fn evaluate_bitxor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
+    // a ^= b is equivalent to a = a ^ b
+    let left_val = evaluate_expr(env, target)?;
+    let right_val = evaluate_expr(env, value)?;
+    let result = match (left_val, right_val) {
+        (Value::Number(ln), Value::Number(rn)) => {
+            let to_int32 = |n: f64| -> i32 {
+                if !n.is_finite() || n == 0.0 {
+                    return 0;
+                }
+                let two32 = 4294967296f64;
+                let int = n.trunc();
+                let int32bit = ((int % two32) + two32) % two32;
+                if int32bit >= 2147483648f64 {
+                    (int32bit - two32) as i32
+                } else {
+                    int32bit as i32
+                }
+            };
+            Value::Number((to_int32(ln) ^ to_int32(rn)) as f64)
+        }
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+            use std::ops::BitXor;
+            Value::BigInt(a.bitxor(&b).to_string())
+        }
+        (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+            return Err(raise_type_error!("Cannot mix BigInt and other types"));
+        }
+        _ => {
+            return Err(raise_eval_error!("Invalid operands for ^="));
         }
     };
     match &result {
@@ -3274,6 +3322,38 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(Value::Boolean(false)),
             }
         }
+        BinaryOp::BitXor => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                // ToInt32 semantics for Number inputs
+                let to_int32 = |n: f64| -> i32 {
+                    if !n.is_finite() || n == 0.0 {
+                        return 0;
+                    }
+                    let two32 = 4294967296f64;
+                    let int = n.trunc();
+                    // modulo 2^32
+                    let int32bit = ((int % two32) + two32) % two32;
+                    if int32bit >= 2147483648f64 {
+                        (int32bit - two32) as i32
+                    } else {
+                        int32bit as i32
+                    }
+                };
+                let a = to_int32(ln);
+                let b = to_int32(rn);
+                Ok(Value::Number((a ^ b) as f64))
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                use std::ops::BitXor;
+                Ok(Value::BigInt((a.bitxor(&b)).to_string()))
+            }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Bitwise XOR only supported for numbers or BigInt")),
+        },
         BinaryOp::In => {
             // Check if property exists in object
             match (l, r) {

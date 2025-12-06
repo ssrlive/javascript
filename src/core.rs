@@ -383,7 +383,7 @@ pub(crate) fn filter_input_script(script: &str) -> String {
 }
 
 /// Initialize global built-in constructors in the environment
-pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
+pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
     let mut env_borrow = env.borrow_mut();
 
     // Object constructor (object with static methods) and Object.prototype
@@ -502,6 +502,12 @@ pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<()
     env_borrow.insert(
         PropertyKey::String("Set".to_string()),
         Rc::new(RefCell::new(Value::Function("Set".to_string()))),
+    );
+
+    // Proxy constructor
+    env_borrow.insert(
+        PropertyKey::String("Proxy".to_string()),
+        Rc::new(RefCell::new(Value::Function("Proxy".to_string()))),
     );
 
     // WeakMap constructor

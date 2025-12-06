@@ -170,6 +170,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 }
                 "Map" => return crate::js_map::handle_map_constructor(args, env),
                 "Set" => return crate::js_set::handle_set_constructor(args, env),
+                "Proxy" => return crate::js_proxy::handle_proxy_constructor(args, env),
                 "WeakMap" => return crate::js_weakmap::handle_weakmap_constructor(args, env),
                 "WeakSet" => return crate::js_weakset::handle_weakset_constructor(args, env),
                 "MockIntlConstructor" => {
@@ -674,6 +675,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::WeakSet(_) => utf8_to_utf16("[object WeakSet]"),
             Value::GeneratorFunction(_, _, _) => utf8_to_utf16("[GeneratorFunction]"),
             Value::Generator(_) => utf8_to_utf16("[object Generator]"),
+            Value::Proxy(_) => utf8_to_utf16("[object Proxy]"),
         }
     };
 

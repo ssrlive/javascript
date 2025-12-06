@@ -21,6 +21,7 @@ pub(crate) mod js_number;
 pub(crate) mod js_object;
 pub(crate) mod js_os;
 pub(crate) mod js_promise;
+pub(crate) mod js_proxy;
 pub(crate) mod js_regexp;
 pub(crate) mod js_set;
 pub(crate) mod js_std;
@@ -43,6 +44,9 @@ pub use core::{
     JS_GC_OBJ_TYPE_SHAPE, JS_GC_OBJ_TYPE_VAR_REF, JS_TAG_BOOL, JS_TAG_CATCH_OFFSET, JS_TAG_FLOAT64, JS_TAG_INT, JS_TAG_NULL, JS_TAG_OBJECT,
     JS_TAG_SHORT_BIG_INT, JS_TAG_STRING, JS_TAG_STRING_ROPE, JS_TAG_UNDEFINED, JS_UNINITIALIZED,
 };
-pub use core::{JSObjectData, Token, parse_expression, parse_object_destructuring_pattern, parse_statement, parse_statements};
+pub use core::{
+    JSObjectData, Token, initialize_global_constructors, parse_expression, parse_object_destructuring_pattern, parse_statement,
+    parse_statements,
+};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;

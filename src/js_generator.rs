@@ -28,7 +28,15 @@ pub fn handle_generator_function_call(
         state: crate::core::GeneratorState::NotStarted,
     }));
 
-    Ok(Value::Generator(generator))
+    // Create a wrapper object for the generator
+    let gen_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+    // Store the actual generator data
+    gen_obj.borrow_mut().insert(
+        crate::core::PropertyKey::String("__generator__".to_string()),
+        Rc::new(RefCell::new(Value::Generator(generator))),
+    );
+
+    Ok(Value::Object(gen_obj))
 }
 
 /// Handle generator instance method calls (like `gen.next()`, `gen.return()`, etc.)

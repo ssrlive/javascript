@@ -299,6 +299,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::WeakSet(_) => "WeakSet",
                 Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
                 Value::Generator(_) => "Generator",
+                Value::Proxy(_) => "Proxy",
             },
             args.len()
         )));
@@ -375,6 +376,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
         Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
         Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
+        Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
     }
 }
 
@@ -403,6 +405,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 Value::WeakSet(_) => "WeakSet",
                 &Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
                 &Value::Generator(_) => "Generator",
+                &Value::Proxy(_) => "Proxy",
             },
             args.len()
         )));
@@ -445,5 +448,6 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
         Value::GeneratorFunction(params, body, env) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
         Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
+        Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),
     }
 }

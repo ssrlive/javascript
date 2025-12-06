@@ -83,6 +83,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
                     Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
                     Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
+                    Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string

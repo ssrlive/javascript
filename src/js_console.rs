@@ -111,6 +111,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::WeakSet(_) => print!("[object WeakSet]"),
                     Value::GeneratorFunction(_, _, _) => print!("[GeneratorFunction]"),
                     Value::Generator(_) => print!("[object Generator]"),
+                    Value::Proxy(_) => print!("[object Proxy]"),
                 }
                 if i < count - 1 {
                     print!(" ");

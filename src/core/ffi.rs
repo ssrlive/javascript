@@ -949,6 +949,7 @@ pub unsafe fn JS_Eval(_ctx: *mut JSContext, input: *const i8, input_len: usize, 
             Ok(Value::WeakSet(_)) => JS_UNDEFINED,                 // For now
             Ok(Value::GeneratorFunction(_, _, _)) => JS_UNDEFINED, // For now
             Ok(Value::Generator(_)) => JS_UNDEFINED,               // For now
+            Ok(Value::Proxy(_)) => JS_UNDEFINED,                   // For now
             Err(_) => JS_UNDEFINED,
         }
     }

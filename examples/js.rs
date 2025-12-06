@@ -73,6 +73,7 @@ fn print_eval_result(result: &Value) {
         Value::WeakSet(_) => println!("[object WeakSet]"),
         Value::GeneratorFunction(_, _, _) => println!("[GeneratorFunction]"),
         Value::Generator(_) => println!("[object Generator]"),
+        Value::Proxy(_) => println!("[object Proxy]"),
     }
 }
 

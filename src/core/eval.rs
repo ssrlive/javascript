@@ -2038,6 +2038,16 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         let v = Value::Function("Promise".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
+    } else if name == "Proxy" {
+        // Return the Proxy constructor (we store it in the global environment)
+        if let Some(val_rc) = obj_get_value(env, &"Proxy".into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        let v = Value::Function("Proxy".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "new" {
         let v = Value::Function("new".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
@@ -2835,6 +2845,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::WeakMap(_) => "object",
         Value::WeakSet(_) => "object",
         Value::Generator(_) => "object",
+        Value::Proxy(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -2850,7 +2861,7 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             let obj_val = evaluate_expr(env, obj)?;
             match obj_val {
                 Value::Object(obj_map) => {
-                    let deleted = obj_delete(&obj_map, &prop.into());
+                    let deleted = obj_delete(&obj_map, &prop.into())?;
                     Ok(Value::Boolean(deleted))
                 }
                 _ => Ok(Value::Boolean(false)),
@@ -2863,17 +2874,17 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             match (obj_val, idx_val) {
                 (Value::Object(obj_map), Value::String(s)) => {
                     let key = PropertyKey::String(String::from_utf16_lossy(&s));
-                    let deleted = obj_delete(&obj_map, &key);
+                    let deleted = obj_delete(&obj_map, &key)?;
                     Ok(Value::Boolean(deleted))
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
                     let key = PropertyKey::String(n.to_string());
-                    let deleted = obj_delete(&obj_map, &key);
+                    let deleted = obj_delete(&obj_map, &key)?;
                     Ok(Value::Boolean(deleted))
                 }
                 (Value::Object(obj_map), Value::Symbol(sym)) => {
                     let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                    let deleted = obj_delete(&obj_map, &key);
+                    let deleted = obj_delete(&obj_map, &key)?;
                     Ok(Value::Boolean(deleted))
                 }
                 _ => Ok(Value::Boolean(false)),
@@ -3726,6 +3737,12 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 Ok(Value::Undefined)
             }
         }
+        // Special cases for wrapped Generator objects
+        Value::Object(obj_map)
+            if obj_map.borrow().contains_key(&"__generator__".into()) && (prop == "next" || prop == "return" || prop == "throw") =>
+        {
+            Ok(Value::Function(format!("Generator.prototype.{}", prop)))
+        }
         Value::Object(obj_map) => {
             // Special-case the `__proto__` accessor so property reads return the
             // object's current prototype object when present.
@@ -3762,6 +3779,8 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                         "Property not found for Symbol constructor property: {prop}"
                     )))
                 });
+            } else if func_name == "Proxy" && prop == "revocable" {
+                return Ok(Value::Function("Proxy.revocable".to_string()));
             }
 
             Err(raise_eval_error!(format!("Property not found for prop={prop}")))
@@ -3891,6 +3910,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             return handle_symbol_static_method(method_name, args, env);
         }
 
+        // Special case for Proxy static methods
+        if let Expr::Var(var_name) = &**obj_expr
+            && var_name == "Proxy"
+            && method_name == "revocable"
+        {
+            return crate::js_proxy::handle_proxy_revocable(args, env);
+        }
+
         let obj_val = evaluate_expr(env, obj_expr)?;
         log::trace!("evaluate_call - object evaluated");
         match (obj_val, method_name.as_str()) {
@@ -3926,6 +3953,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::WeakMap(weakmap), method) => crate::js_weakmap::handle_weakmap_instance_method(&weakmap, method, args, env),
             (Value::WeakSet(weakset), method) => crate::js_weakset::handle_weakset_instance_method(&weakset, method, args, env),
             (Value::Generator(generator), method) => crate::js_generator::handle_generator_instance_method(&generator, method, args, env),
+            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__generator__".into()) => {
+                if let Some(gen_val) = obj_map.borrow().get(&"__generator__".into())
+                    && let Value::Generator(generator) = &*gen_val.borrow()
+                {
+                    crate::js_generator::handle_generator_instance_method(generator, method, args, env)
+                } else {
+                    Err(raise_eval_error!("Invalid Generator object"))
+                }
+            }
             (Value::Object(obj_map), method) => {
                 // Object prototype methods are supplied on `Object.prototype`.
                 // Lookups will find user-defined (own) methods before inherited
@@ -4150,6 +4186,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         // Regular function call
         let func_val = evaluate_expr(env, func_expr)?;
         match func_val {
+            Value::Proxy(proxy) => {
+                // Special case: calling a proxy directly (assumed to be revoke function)
+                proxy.borrow_mut().revoked = true;
+                Ok(Value::Undefined)
+            }
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
             Value::GeneratorFunction(params, body, captured_env) => {
                 // Generator function call - return a generator object

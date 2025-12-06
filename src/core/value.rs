@@ -6,7 +6,7 @@ use crate::{
     js_array::is_array,
     js_class::ClassDefinition,
     js_promise::JSPromise,
-    raise_type_error,
+    raise_eval_error, raise_type_error,
 };
 
 #[derive(Clone, Debug)]
@@ -35,6 +35,13 @@ pub struct JSGenerator {
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr, // captured environment
     pub state: GeneratorState,
+}
+
+#[derive(Clone, Debug)]
+pub struct JSProxy {
+    pub target: Value,  // The target object being proxied
+    pub handler: Value, // The handler object with traps
+    pub revoked: bool,  // Whether this proxy has been revoked
 }
 
 #[derive(Clone, Debug)]
@@ -136,6 +143,7 @@ pub enum Value {
     WeakMap(Rc<RefCell<JSWeakMap>>),     // WeakMap object
     WeakSet(Rc<RefCell<JSWeakSet>>),     // WeakSet object
     Generator(Rc<RefCell<JSGenerator>>), // Generator object
+    Proxy(Rc<RefCell<JSProxy>>),         // Proxy object
 }
 
 impl std::fmt::Debug for Value {
@@ -162,6 +170,7 @@ impl std::fmt::Debug for Value {
             Value::WeakMap(wm) => write!(f, "WeakMap({:p})", Rc::as_ptr(wm)),
             Value::WeakSet(ws) => write!(f, "WeakSet({:p})", Rc::as_ptr(ws)),
             Value::Generator(g) => write!(f, "Generator({:p})", Rc::as_ptr(g)),
+            Value::Proxy(p) => write!(f, "Proxy({:p})", Rc::as_ptr(p)),
         }
     }
 }
@@ -203,6 +212,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::WeakMap(_) => true,
         Value::WeakSet(_) => true,
         Value::Generator(_) => true,
+        Value::Proxy(_) => true,
     }
 }
 
@@ -247,6 +257,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::WeakMap(_) => "[object WeakMap]".to_string(),
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
         Value::Generator(_) => "[object Generator]".to_string(),
+        Value::Proxy(_) => "[object Proxy]".to_string(),
     }
 }
 
@@ -346,11 +357,19 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::WeakMap(_) => "[object WeakMap]".to_string(),
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
         Value::Generator(_) => "[object Generator]".to_string(),
+        Value::Proxy(_) => "[object Proxy]".to_string(),
     }
 }
 
 // Helper accessors for objects and environments
 pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+    // Check if this object is a proxy wrapper
+    if let Some(proxy_val) = js_obj.borrow().get(&"__proxy__".into())
+        && let Value::Proxy(proxy) = &*proxy_val.borrow()
+    {
+        return crate::js_proxy::proxy_get_property(proxy, key);
+    }
+
     // Search own properties and then walk the prototype chain until we find
     // a matching property or run out of prototypes.
     let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
@@ -690,6 +709,17 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
 }
 
 pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
+    // Check if this object is a proxy wrapper
+    if let Some(proxy_val) = js_obj.borrow().get(&"__proxy__".into())
+        && let Value::Proxy(proxy) = &*proxy_val.borrow()
+    {
+        let success = crate::js_proxy::proxy_set_property(proxy, key, val)?;
+        if !success {
+            return Err(raise_eval_error!("Proxy set trap returned false"));
+        }
+        return Ok(());
+    }
+
     // Check if there's a setter for this property
     let existing_opt = js_obj.borrow().get(key);
     if let Some(existing) = existing_opt {
@@ -731,9 +761,16 @@ pub fn obj_set_rc(map: &JSObjectDataPtr, key: &PropertyKey, val_rc: Rc<RefCell<V
     map.borrow_mut().insert(key.clone(), val_rc);
 }
 
-pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> bool {
+pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSError> {
+    // Check if this object is a proxy wrapper
+    if let Some(proxy_val) = map.borrow().get(&"__proxy__".into())
+        && let Value::Proxy(proxy) = &*proxy_val.borrow()
+    {
+        return crate::js_proxy::proxy_delete_property(proxy, key);
+    }
+
     map.borrow_mut().remove(key);
-    true // In JavaScript, delete always returns true
+    Ok(true) // In JavaScript, delete always returns true
 }
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {

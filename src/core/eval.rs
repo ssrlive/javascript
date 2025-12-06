@@ -2731,6 +2731,8 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Property { .. } => "undefined",
         Value::Promise(_) => "object",
         Value::Symbol(_) => "symbol",
+        Value::Map(_) => "object",
+        Value::Set(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -3647,6 +3649,8 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
         // coerce to a primitive wrapper or return undefined if not found. To
         // keep things simple, return undefined for boolean properties.
         Value::Boolean(_) => Ok(Value::Undefined),
+        Value::Map(map) if prop == "size" => Ok(Value::Number(map.borrow().entries.len() as f64)),
+        Value::Set(set) if prop == "size" => Ok(Value::Number(set.borrow().values.len() as f64)),
         _ => Err(raise_eval_error!(format!("Property not found for prop={prop}"))),
     }
 }
@@ -3778,6 +3782,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             // and Object.prototype functions act as fallbacks.
             (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args),
             (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
+            (Value::Map(map), method) => crate::js_map::handle_map_instance_method(&map, method, args, env),
+            (Value::Set(set), method) => crate::js_set::handle_set_instance_method(&set, method, args, env),
             (Value::Object(obj_map), method) => {
                 // Object prototype methods are supplied on `Object.prototype`.
                 // Lookups will find user-defined (own) methods before inherited

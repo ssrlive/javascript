@@ -293,6 +293,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::Property { .. } => "Property",
                 Value::Promise(_) => "Promise",
                 Value::Symbol(_) => "Symbol",
+                Value::Map(_) => "Map",
+                Value::Set(_) => "Set",
             },
             args.len()
         )));
@@ -363,6 +365,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             let desc_str = symbol_data.description.as_deref().unwrap_or("");
             Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc_str))))
         }
+        Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
+        Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
     }
 }
 
@@ -385,6 +389,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 &Value::Promise(_) => "Promise",
                 Value::BigInt(_) => "BigInt",
                 Value::Symbol(_) => "Symbol",
+                Value::Map(_) => "Map",
+                Value::Set(_) => "Set",
             },
             args.len()
         )));
@@ -421,5 +427,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         }),
         Value::Promise(promise) => Ok(Value::Promise(promise.clone())),
         Value::Symbol(symbol_data) => Ok(Value::Symbol(symbol_data.clone())),
+        Value::Map(map) => Ok(Value::Map(map.clone())),
+        Value::Set(set) => Ok(Value::Set(set.clone())),
     }
 }

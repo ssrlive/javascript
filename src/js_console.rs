@@ -105,6 +105,8 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
                     Value::Promise(_) => print!("[object Promise]"),
                     Value::Symbol(_) => print!("[object Symbol]"),
+                    Value::Map(_) => print!("[object Map]"),
+                    Value::Set(_) => print!("[object Set]"),
                 }
                 if i < count - 1 {
                     print!(" ");

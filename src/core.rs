@@ -489,6 +489,18 @@ pub(crate) fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<()
         Rc::new(RefCell::new(Value::Function("Symbol".to_string()))),
     );
 
+    // Map constructor
+    env_borrow.insert(
+        PropertyKey::String("Map".to_string()),
+        Rc::new(RefCell::new(Value::Function("Map".to_string()))),
+    );
+
+    // Set constructor
+    env_borrow.insert(
+        PropertyKey::String("Set".to_string()),
+        Rc::new(RefCell::new(Value::Function("Set".to_string()))),
+    );
+
     // Create a few well-known symbols and store them in the well-known symbol registry
     WELL_KNOWN_SYMBOLS.with(|wk| {
         let mut map = wk.borrow_mut();

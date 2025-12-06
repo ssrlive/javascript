@@ -67,6 +67,8 @@ fn print_eval_result(result: &Value) {
         Value::Promise(_) => println!("[object Promise]"),
         Value::Symbol(_) => println!("[object Symbol]"),
         Value::BigInt(s) => println!("{s}"),
+        Value::Map(_) => println!("[object Map]"),
+        Value::Set(_) => println!("[object Set]"),
     }
 }
 

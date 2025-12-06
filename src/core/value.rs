@@ -9,6 +9,16 @@ use crate::{
     raise_type_error,
 };
 
+#[derive(Clone, Debug)]
+pub struct JSMap {
+    pub entries: Vec<(Value, Value)>, // key-value pairs
+}
+
+#[derive(Clone, Debug)]
+pub struct JSSet {
+    pub values: Vec<Value>,
+}
+
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
 #[derive(Clone, Default)]
@@ -94,6 +104,8 @@ pub enum Value {
     },
     Promise(Rc<RefCell<JSPromise>>), // Promise object
     Symbol(Rc<SymbolData>),          // Symbol primitive with description
+    Map(Rc<RefCell<JSMap>>),         // Map object
+    Set(Rc<RefCell<JSSet>>),         // Set object
 }
 
 impl std::fmt::Debug for Value {
@@ -114,6 +126,8 @@ impl std::fmt::Debug for Value {
             Value::Property { .. } => write!(f, "Property"),
             Value::Promise(p) => write!(f, "Promise({:p})", Rc::as_ptr(p)),
             Value::Symbol(_) => write!(f, "Symbol"),
+            Value::Map(m) => write!(f, "Map({:p})", Rc::as_ptr(m)),
+            Value::Set(s) => write!(f, "Set({:p})", Rc::as_ptr(s)),
         }
     }
 }
@@ -149,6 +163,8 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Property { .. } => true,
         Value::Promise(_) => true,
         Value::Symbol(_) => true,
+        Value::Map(_) => true,
+        Value::Set(_) => true,
     }
 }
 
@@ -187,6 +203,8 @@ pub fn value_to_string(val: &Value) -> String {
             Some(d) => format!("Symbol({})", d),
             None => "Symbol()".to_string(),
         },
+        Value::Map(_) => "[object Map]".to_string(),
+        Value::Set(_) => "[object Set]".to_string(),
     }
 }
 
@@ -281,6 +299,8 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Property { .. } => "[property]".to_string(),
         Value::Promise(_) => "[object Promise]".to_string(),
         Value::Symbol(_) => "[object Symbol]".to_string(),
+        Value::Map(_) => "[object Map]".to_string(),
+        Value::Set(_) => "[object Set]".to_string(),
     }
 }
 

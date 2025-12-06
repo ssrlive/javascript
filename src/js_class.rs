@@ -168,6 +168,8 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 "Promise" => {
                     return crate::js_promise::handle_promise_constructor(args, env);
                 }
+                "Map" => return crate::js_map::handle_map_constructor(args, env),
+                "Set" => return crate::js_set::handle_set_constructor(args, env),
                 "MockIntlConstructor" => {
                     // Handle mock Intl constructor for testing
                     let locale_arg = if !args.is_empty() {
@@ -664,6 +666,8 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Promise(_) => utf8_to_utf16("[object Promise]"),
             Value::Symbol(_) => utf8_to_utf16("[object Symbol]"),
             Value::BigInt(s) => utf8_to_utf16(&s),
+            Value::Map(_) => utf8_to_utf16("[object Map]"),
+            Value::Set(_) => utf8_to_utf16("[object Set]"),
         }
     };
 

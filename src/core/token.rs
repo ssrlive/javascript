@@ -90,6 +90,9 @@ pub enum Token {
     Decrement,
     Async,
     Await,
+    Yield,
+    YieldStar,
+    FunctionStar,
     LineTerminator,
     /// Exponentiation assignment (`**=`)
     PowAssign,
@@ -143,6 +146,8 @@ impl Token {
             Token::False => Some("false".to_string()),
             Token::Async => Some("async".to_string()),
             Token::Await => Some("await".to_string()),
+            Token::Yield => Some("yield".to_string()),
+            Token::FunctionStar => Some("function*".to_string()),
             _ => None,
         }
     }
@@ -622,7 +627,15 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "catch" => tokens.push(Token::Catch),
                     "finally" => tokens.push(Token::Finally),
                     "throw" => tokens.push(Token::Throw),
-                    "function" => tokens.push(Token::Function),
+                    "function" => {
+                        // Check if followed by '*'
+                        if i < chars.len() && chars[i] == '*' {
+                            tokens.push(Token::FunctionStar);
+                            i += 1; // consume '*'
+                        } else {
+                            tokens.push(Token::Function);
+                        }
+                    }
                     "return" => tokens.push(Token::Return),
                     "if" => tokens.push(Token::If),
                     "else" => tokens.push(Token::Else),
@@ -638,6 +651,15 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "false" => tokens.push(Token::False),
                     "async" => tokens.push(Token::Async),
                     "await" => tokens.push(Token::Await),
+                    "yield" => {
+                        // Check if followed by '*'
+                        if i < chars.len() && chars[i] == '*' {
+                            tokens.push(Token::YieldStar);
+                            i += 1; // consume '*'
+                        } else {
+                            tokens.push(Token::Yield);
+                        }
+                    }
                     _ => tokens.push(Token::Identifier(ident)),
                 }
             }

@@ -407,6 +407,24 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let inner = parse_primary(tokens)?;
             Expr::Await(Box::new(inner))
         }
+        Token::Yield => {
+            // yield can be followed by an optional expression
+            if tokens.is_empty()
+                || matches!(
+                    tokens[0],
+                    Token::Semicolon | Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Colon
+                )
+            {
+                Expr::Yield(None)
+            } else {
+                let inner = parse_assignment(tokens)?;
+                Expr::Yield(Some(Box::new(inner)))
+            }
+        }
+        Token::YieldStar => {
+            let inner = parse_assignment(tokens)?;
+            Expr::YieldStar(Box::new(inner))
+        }
         Token::LogicalNot => {
             let inner = parse_primary(tokens)?;
             Expr::LogicalNot(Box::new(inner))
@@ -1076,7 +1094,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             }
             Expr::Array(elements)
         }
-        Token::Function => {
+        Token::Function | Token::FunctionStar => {
+            let is_generator = matches!(tokens[0], Token::FunctionStar);
             // Parse function expression
             if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                 tokens.remove(0); // consume (
@@ -1114,7 +1133,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     return Err(raise_parse_error!());
                 }
                 tokens.remove(0); // consume }
-                Expr::Function(params, body)
+                if is_generator {
+                    Expr::GeneratorFunction(params, body)
+                } else {
+                    Expr::Function(params, body)
+                }
             } else {
                 return Err(raise_parse_error!());
             }

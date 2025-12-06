@@ -442,8 +442,9 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
         return Err(raise_parse_error!());
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
-        tokens.remove(0); // consume function
+    if !tokens.is_empty() && (matches!(tokens[0], Token::Function) || matches!(tokens[0], Token::FunctionStar)) {
+        let is_generator = matches!(tokens[0], Token::FunctionStar);
+        tokens.remove(0); // consume function or function*
         log::trace!(
             "parse_statement: entered Function branch; next tokens: {:?}",
             tokens.iter().take(12).collect::<Vec<_>>()
@@ -500,7 +501,11 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     return Err(raise_parse_error!());
                 }
                 tokens.remove(0); // consume }
-                return Ok(Statement::Let(name, Some(Expr::Function(params, body))));
+                if is_generator {
+                    return Ok(Statement::Let(name, Some(Expr::GeneratorFunction(params, body))));
+                } else {
+                    return Ok(Statement::Let(name, Some(Expr::Function(params, body))));
+                }
             }
         }
     }

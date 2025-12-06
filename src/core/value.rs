@@ -29,6 +29,22 @@ pub struct JSWeakSet {
     pub values: Vec<std::rc::Weak<RefCell<JSObjectData>>>, // weak values
 }
 
+#[derive(Clone, Debug)]
+pub struct JSGenerator {
+    pub params: Vec<String>,
+    pub body: Vec<Statement>,
+    pub env: JSObjectDataPtr, // captured environment
+    pub state: GeneratorState,
+}
+
+#[derive(Clone, Debug)]
+pub enum GeneratorState {
+    NotStarted,
+    Running { pc: usize, stack: Vec<Value> },   // program counter and value stack
+    Suspended { pc: usize, stack: Vec<Value> }, // suspended at yield
+    Completed,
+}
+
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
 #[derive(Clone, Default)]
@@ -99,25 +115,27 @@ pub enum Value {
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
-    Object(JSObjectDataPtr),                                    // Object with properties
-    Function(String),                                           // Function name
-    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
-    AsyncClosure(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
-    ClassDefinition(Rc<ClassDefinition>),                       // Class definition
-    Getter(Vec<Statement>, JSObjectDataPtr),                    // getter body, captured environment
-    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),       // setter parameter, body, captured environment
+    Object(JSObjectDataPtr),                                         // Object with properties
+    Function(String),                                                // Function name
+    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr),           // parameters, body, captured environment
+    AsyncClosure(Vec<String>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
+    GeneratorFunction(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
+    ClassDefinition(Rc<ClassDefinition>),                            // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr),                         // getter body, captured environment
+    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),            // setter parameter, body, captured environment
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
         getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
-    Promise(Rc<RefCell<JSPromise>>), // Promise object
-    Symbol(Rc<SymbolData>),          // Symbol primitive with description
-    Map(Rc<RefCell<JSMap>>),         // Map object
-    Set(Rc<RefCell<JSSet>>),         // Set object
-    WeakMap(Rc<RefCell<JSWeakMap>>), // WeakMap object
-    WeakSet(Rc<RefCell<JSWeakSet>>), // WeakSet object
+    Promise(Rc<RefCell<JSPromise>>),     // Promise object
+    Symbol(Rc<SymbolData>),              // Symbol primitive with description
+    Map(Rc<RefCell<JSMap>>),             // Map object
+    Set(Rc<RefCell<JSSet>>),             // Set object
+    WeakMap(Rc<RefCell<JSWeakMap>>),     // WeakMap object
+    WeakSet(Rc<RefCell<JSWeakSet>>),     // WeakSet object
+    Generator(Rc<RefCell<JSGenerator>>), // Generator object
 }
 
 impl std::fmt::Debug for Value {
@@ -132,6 +150,7 @@ impl std::fmt::Debug for Value {
             Value::Function(name) => write!(f, "Function({})", name),
             Value::Closure(_, _, _) => write!(f, "Closure"),
             Value::AsyncClosure(_, _, _) => write!(f, "AsyncClosure"),
+            Value::GeneratorFunction(_, _, _) => write!(f, "GeneratorFunction"),
             Value::ClassDefinition(_) => write!(f, "ClassDefinition"),
             Value::Getter(_, _) => write!(f, "Getter"),
             Value::Setter(_, _, _) => write!(f, "Setter"),
@@ -142,6 +161,7 @@ impl std::fmt::Debug for Value {
             Value::Set(s) => write!(f, "Set({:p})", Rc::as_ptr(s)),
             Value::WeakMap(wm) => write!(f, "WeakMap({:p})", Rc::as_ptr(wm)),
             Value::WeakSet(ws) => write!(f, "WeakSet({:p})", Rc::as_ptr(ws)),
+            Value::Generator(g) => write!(f, "Generator({:p})", Rc::as_ptr(g)),
         }
     }
 }
@@ -171,6 +191,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
         Value::AsyncClosure(_, _, _) => true,
+        Value::GeneratorFunction(_, _, _) => true,
         Value::ClassDefinition(_) => true,
         Value::Getter(_, _) => true,
         Value::Setter(_, _, _) => true,
@@ -181,6 +202,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Set(_) => true,
         Value::WeakMap(_) => true,
         Value::WeakSet(_) => true,
+        Value::Generator(_) => true,
     }
 }
 
@@ -210,6 +232,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Function(name) => format!("function {}", name),
         Value::Closure(_, _, _) => "function".to_string(),
         Value::AsyncClosure(_, _, _) => "function".to_string(),
+        Value::GeneratorFunction(_, _, _) => "function".to_string(),
         Value::ClassDefinition(_) => "class".to_string(),
         Value::Getter(_, _) => "getter".to_string(),
         Value::Setter(_, _, _) => "setter".to_string(),
@@ -223,6 +246,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Set(_) => "[object Set]".to_string(),
         Value::WeakMap(_) => "[object WeakMap]".to_string(),
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
+        Value::Generator(_) => "[object Generator]".to_string(),
     }
 }
 
@@ -310,7 +334,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Undefined => "undefined".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
-        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "[function]".to_string(),
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "[function]".to_string(),
         Value::ClassDefinition(_) => "[class]".to_string(),
         Value::Getter(_, _) => "[getter]".to_string(),
         Value::Setter(_, _, _) => "[setter]".to_string(),
@@ -321,6 +345,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Set(_) => "[object Set]".to_string(),
         Value::WeakMap(_) => "[object WeakMap]".to_string(),
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
+        Value::Generator(_) => "[object Generator]".to_string(),
     }
 }
 

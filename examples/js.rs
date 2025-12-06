@@ -71,6 +71,8 @@ fn print_eval_result(result: &Value) {
         Value::Set(_) => println!("[object Set]"),
         Value::WeakMap(_) => println!("[object WeakMap]"),
         Value::WeakSet(_) => println!("[object WeakSet]"),
+        Value::GeneratorFunction(_, _, _) => println!("[GeneratorFunction]"),
+        Value::Generator(_) => println!("[object Generator]"),
     }
 }
 

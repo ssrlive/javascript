@@ -1740,6 +1740,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             }
         },
         Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::GeneratorFunction(params, body) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
@@ -1804,6 +1805,14 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 }
                 _ => Err(raise_eval_error!("await can only be used with promises")),
             }
+        }
+        Expr::Yield(_expr) => {
+            // Yield expressions are only valid in generator functions
+            Err(raise_eval_error!("yield expression is only valid in generator functions"))
+        }
+        Expr::YieldStar(_expr) => {
+            // Yield* expressions are only valid in generator functions
+            Err(raise_eval_error!("yield* expression is only valid in generator functions"))
         }
         Expr::Value(value) => Ok(value.clone()),
         Expr::Regex(pattern, flags) => {
@@ -2724,7 +2733,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::BigInt(_) => "bigint",
         Value::Object(_) => "object",
         Value::Function(_) => "function",
-        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "function",
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "function",
         Value::ClassDefinition(_) => "function",
         Value::Getter(_, _) => "function",
         Value::Setter(_, _, _) => "function",
@@ -2735,6 +2744,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Set(_) => "object",
         Value::WeakMap(_) => "object",
         Value::WeakSet(_) => "object",
+        Value::Generator(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }
@@ -3788,6 +3798,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::Set(set), method) => crate::js_set::handle_set_instance_method(&set, method, args, env),
             (Value::WeakMap(weakmap), method) => crate::js_weakmap::handle_weakmap_instance_method(&weakmap, method, args, env),
             (Value::WeakSet(weakset), method) => crate::js_weakset::handle_weakset_instance_method(&weakset, method, args, env),
+            (Value::Generator(generator), method) => crate::js_generator::handle_generator_instance_method(&generator, method, args, env),
             (Value::Object(obj_map), method) => {
                 // Object prototype methods are supplied on `Object.prototype`.
                 // Lookups will find user-defined (own) methods before inherited
@@ -4013,6 +4024,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         let func_val = evaluate_expr(env, func_expr)?;
         match func_val {
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
+            Value::GeneratorFunction(params, body, captured_env) => {
+                // Generator function call - return a generator object
+                crate::js_generator::handle_generator_function_call(&params, &body, args, &captured_env)
+            }
             Value::Closure(params, body, captured_env) => {
                 // Function call
                 // Collect all arguments, expanding spreads

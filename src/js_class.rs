@@ -672,6 +672,8 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Set(_) => utf8_to_utf16("[object Set]"),
             Value::WeakMap(_) => utf8_to_utf16("[object WeakMap]"),
             Value::WeakSet(_) => utf8_to_utf16("[object WeakSet]"),
+            Value::GeneratorFunction(_, _, _) => utf8_to_utf16("[GeneratorFunction]"),
+            Value::Generator(_) => utf8_to_utf16("[object Generator]"),
         }
     };
 

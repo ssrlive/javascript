@@ -297,6 +297,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::Set(_) => "Set",
                 Value::WeakMap(_) => "WeakMap",
                 Value::WeakSet(_) => "WeakSet",
+                Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
+                Value::Generator(_) => "Generator",
             },
             args.len()
         )));
@@ -371,6 +373,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
         Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
         Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
+        Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
+        Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
     }
 }
 
@@ -397,6 +401,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 Value::Set(_) => "Set",
                 Value::WeakMap(_) => "WeakMap",
                 Value::WeakSet(_) => "WeakSet",
+                &Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
+                &Value::Generator(_) => "Generator",
             },
             args.len()
         )));
@@ -437,5 +443,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::Set(set) => Ok(Value::Set(set.clone())),
         Value::WeakMap(weakmap) => Ok(Value::WeakMap(weakmap.clone())),
         Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
+        Value::GeneratorFunction(params, body, env) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
+        Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
     }
 }

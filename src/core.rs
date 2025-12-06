@@ -156,6 +156,7 @@ pub enum Expr {
     Call(Box<Expr>, Vec<Expr>),
     Function(Vec<String>, Vec<Statement>),                // parameters, body
     AsyncFunction(Vec<String>, Vec<Statement>),           // parameters, body for async functions
+    GeneratorFunction(Vec<String>, Vec<Statement>),       // parameters, body for generator functions
     ArrowFunction(Vec<String>, Vec<Statement>),           // parameters, body
     AsyncArrowFunction(Vec<String>, Vec<Statement>),      // parameters, body for async arrow functions
     Object(Vec<(String, Expr)>),                          // object literal: key-value pairs
@@ -167,6 +168,8 @@ pub enum Expr {
     OptionalCall(Box<Expr>, Vec<Expr>),                   // optional call: obj?.method(args)
     OptionalIndex(Box<Expr>, Box<Expr>),                  // optional bracket access: obj?.[expr]
     Await(Box<Expr>),                                     // await expression
+    Yield(Option<Box<Expr>>),                             // yield expression (optional value)
+    YieldStar(Box<Expr>),                                 // yield* expression (delegation)
     This,                                                 // this keyword
     New(Box<Expr>, Vec<Expr>),                            // new expression: new Constructor(args)
     Super,                                                // super keyword

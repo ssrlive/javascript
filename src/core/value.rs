@@ -45,6 +45,42 @@ pub struct JSProxy {
 }
 
 #[derive(Clone, Debug)]
+pub struct JSArrayBuffer {
+    pub data: Vec<u8>,  // The underlying byte buffer
+    pub detached: bool, // Whether the buffer has been detached
+}
+
+#[derive(Clone, Debug)]
+pub struct JSDataView {
+    pub buffer: Rc<RefCell<JSArrayBuffer>>, // Reference to the underlying ArrayBuffer
+    pub byte_offset: usize,                 // Starting byte offset in the buffer
+    pub byte_length: usize,                 // Length in bytes
+}
+
+#[derive(Clone, Debug)]
+pub enum TypedArrayKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+    BigInt64,
+    BigUint64,
+}
+
+#[derive(Clone, Debug)]
+pub struct JSTypedArray {
+    pub kind: TypedArrayKind,
+    pub buffer: Rc<RefCell<JSArrayBuffer>>, // Reference to the underlying ArrayBuffer
+    pub byte_offset: usize,                 // Starting byte offset in the buffer
+    pub length: usize,                      // Number of elements
+}
+
+#[derive(Clone, Debug)]
 pub enum GeneratorState {
     NotStarted,
     Running { pc: usize, stack: Vec<Value> },   // program counter and value stack
@@ -136,14 +172,17 @@ pub enum Value {
         getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
         setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
     },
-    Promise(Rc<RefCell<JSPromise>>),     // Promise object
-    Symbol(Rc<SymbolData>),              // Symbol primitive with description
-    Map(Rc<RefCell<JSMap>>),             // Map object
-    Set(Rc<RefCell<JSSet>>),             // Set object
-    WeakMap(Rc<RefCell<JSWeakMap>>),     // WeakMap object
-    WeakSet(Rc<RefCell<JSWeakSet>>),     // WeakSet object
-    Generator(Rc<RefCell<JSGenerator>>), // Generator object
-    Proxy(Rc<RefCell<JSProxy>>),         // Proxy object
+    Promise(Rc<RefCell<JSPromise>>),         // Promise object
+    Symbol(Rc<SymbolData>),                  // Symbol primitive with description
+    Map(Rc<RefCell<JSMap>>),                 // Map object
+    Set(Rc<RefCell<JSSet>>),                 // Set object
+    WeakMap(Rc<RefCell<JSWeakMap>>),         // WeakMap object
+    WeakSet(Rc<RefCell<JSWeakSet>>),         // WeakSet object
+    Generator(Rc<RefCell<JSGenerator>>),     // Generator object
+    Proxy(Rc<RefCell<JSProxy>>),             // Proxy object
+    ArrayBuffer(Rc<RefCell<JSArrayBuffer>>), // ArrayBuffer object
+    DataView(Rc<RefCell<JSDataView>>),       // DataView object
+    TypedArray(Rc<RefCell<JSTypedArray>>),   // TypedArray object
 }
 
 impl std::fmt::Debug for Value {
@@ -171,6 +210,9 @@ impl std::fmt::Debug for Value {
             Value::WeakSet(ws) => write!(f, "WeakSet({:p})", Rc::as_ptr(ws)),
             Value::Generator(g) => write!(f, "Generator({:p})", Rc::as_ptr(g)),
             Value::Proxy(p) => write!(f, "Proxy({:p})", Rc::as_ptr(p)),
+            Value::ArrayBuffer(ab) => write!(f, "ArrayBuffer({:p})", Rc::as_ptr(ab)),
+            Value::DataView(dv) => write!(f, "DataView({:p})", Rc::as_ptr(dv)),
+            Value::TypedArray(ta) => write!(f, "TypedArray({:p})", Rc::as_ptr(ta)),
         }
     }
 }
@@ -213,6 +255,9 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::WeakSet(_) => true,
         Value::Generator(_) => true,
         Value::Proxy(_) => true,
+        Value::ArrayBuffer(_) => true,
+        Value::DataView(_) => true,
+        Value::TypedArray(_) => true,
     }
 }
 
@@ -258,6 +303,9 @@ pub fn value_to_string(val: &Value) -> String {
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
         Value::Generator(_) => "[object Generator]".to_string(),
         Value::Proxy(_) => "[object Proxy]".to_string(),
+        Value::ArrayBuffer(_) => "[object ArrayBuffer]".to_string(),
+        Value::DataView(_) => "[object DataView]".to_string(),
+        Value::TypedArray(_) => "[object TypedArray]".to_string(),
     }
 }
 
@@ -358,6 +406,9 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::WeakSet(_) => "[object WeakSet]".to_string(),
         Value::Generator(_) => "[object Generator]".to_string(),
         Value::Proxy(_) => "[object Proxy]".to_string(),
+        Value::ArrayBuffer(_) => "[object ArrayBuffer]".to_string(),
+        Value::DataView(_) => "[object DataView]".to_string(),
+        Value::TypedArray(_) => "[object TypedArray]".to_string(),
     }
 }
 

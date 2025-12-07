@@ -309,6 +309,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             match specifier {
                                 crate::core::statement::ExportSpecifier::Named(name, alias) => {
                                     // For named exports, we need to find the value in current scope
+                                    // For now, assume it's a variable in the environment
                                     if let Some(var_val) = env.borrow().get(&crate::core::PropertyKey::String(name.clone())) {
                                         let export_name = alias.as_ref().unwrap_or(name).clone();
                                         exports_obj.borrow_mut().insert(
@@ -2947,6 +2948,9 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::WeakSet(_) => "object",
         Value::Generator(_) => "object",
         Value::Proxy(_) => "object",
+        Value::ArrayBuffer(_) => "object",
+        Value::DataView(_) => "object",
+        Value::TypedArray(_) => "object",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }

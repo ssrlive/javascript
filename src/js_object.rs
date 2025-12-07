@@ -300,6 +300,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
                 Value::Generator(_) => "Generator",
                 Value::Proxy(_) => "Proxy",
+                Value::ArrayBuffer(_) => "ArrayBuffer",
+                Value::DataView(_) => "DataView",
+                Value::TypedArray(_) => "TypedArray",
             },
             args.len()
         )));
@@ -377,6 +380,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
         Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
         Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
+        Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
+        Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
+        Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
     }
 }
 
@@ -406,6 +412,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 &Value::GeneratorFunction(_, _, _) => "GeneratorFunction",
                 &Value::Generator(_) => "Generator",
                 &Value::Proxy(_) => "Proxy",
+                &Value::ArrayBuffer(_) => "ArrayBuffer",
+                &Value::DataView(_) => "DataView",
+                &Value::TypedArray(_) => "TypedArray",
             },
             args.len()
         )));
@@ -449,5 +458,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::GeneratorFunction(params, body, env) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
         Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
         Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),
+        Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(array_buffer.clone())),
+        Value::DataView(data_view) => Ok(Value::DataView(data_view.clone())),
+        Value::TypedArray(typed_array) => Ok(Value::TypedArray(typed_array.clone())),
     }
 }

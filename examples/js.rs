@@ -74,6 +74,9 @@ fn print_eval_result(result: &Value) {
         Value::GeneratorFunction(_, _, _) => println!("[GeneratorFunction]"),
         Value::Generator(_) => println!("[object Generator]"),
         Value::Proxy(_) => println!("[object Proxy]"),
+        Value::ArrayBuffer(_) => println!("[object ArrayBuffer]"),
+        Value::DataView(_) => println!("[object DataView]"),
+        Value::TypedArray(_) => println!("[object TypedArray]"),
     }
 }
 

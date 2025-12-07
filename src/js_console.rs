@@ -112,6 +112,9 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::GeneratorFunction(_, _, _) => print!("[GeneratorFunction]"),
                     Value::Generator(_) => print!("[object Generator]"),
                     Value::Proxy(_) => print!("[object Proxy]"),
+                    Value::ArrayBuffer(_) => print!("[object ArrayBuffer]"),
+                    Value::DataView(_) => print!("[object DataView]"),
+                    Value::TypedArray(_) => print!("[object TypedArray]"),
                 }
                 if i < count - 1 {
                     print!(" ");

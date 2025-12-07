@@ -118,6 +118,9 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
                     Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
                     Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
+                    Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
+                    Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
+                    Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
                 }
             } else {
                 Ok(Value::String(Vec::new())) // String() with no args returns empty string

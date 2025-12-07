@@ -676,6 +676,9 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::GeneratorFunction(_, _, _) => utf8_to_utf16("[GeneratorFunction]"),
             Value::Generator(_) => utf8_to_utf16("[object Generator]"),
             Value::Proxy(_) => utf8_to_utf16("[object Proxy]"),
+            Value::ArrayBuffer(_) => utf8_to_utf16("[object ArrayBuffer]"),
+            Value::DataView(_) => utf8_to_utf16("[object DataView]"),
+            Value::TypedArray(_) => utf8_to_utf16("[object TypedArray]"),
         }
     };
 

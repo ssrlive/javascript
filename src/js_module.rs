@@ -53,13 +53,8 @@ fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<V
     let content = std::fs::read_to_string(&module_path)
         .map_err(|e| crate::raise_eval_error!(format!("Failed to read module file '{module_path}': {e}")))?;
 
-    // Create module exports object
-    let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-
-    // Execute the module in a special environment that captures exports
-    execute_module(&content, &module_exports, &module_path)?;
-
-    Ok(Value::Object(module_exports))
+    // Execute the module and get the final module value
+    execute_module(&content, &module_path)
 }
 
 fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
@@ -71,9 +66,13 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
         // a path containing a literal './' segment which may cause
         // `exists()` to fail on some platforms/environments.
         let mut full_path = if let Some(base) = base_path {
+            // Use the directory containing the base file as the base directory
             Path::new(base).parent().unwrap_or(Path::new(".")).join(module_name)
         } else {
-            Path::new(module_name).to_path_buf()
+            // Use current working directory as base when no base_path is provided
+            std::env::current_dir()
+                .map_err(|e| crate::raise_eval_error!(format!("Failed to get current directory: {e}")))?
+                .join(module_name)
         };
 
         // Add .js extension if not present
@@ -100,7 +99,10 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
     }
 }
 
-fn execute_module(content: &str, module_exports: &Rc<RefCell<crate::core::JSObjectData>>, _module_path: &str) -> Result<(), JSError> {
+fn execute_module(content: &str, _module_path: &str) -> Result<Value, JSError> {
+    // Create module exports object
+    let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+
     // Create a module environment
     let env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
     env.borrow_mut().is_function_scope = true;
@@ -119,7 +121,7 @@ fn execute_module(content: &str, module_exports: &Rc<RefCell<crate::core::JSObje
     );
     env.borrow_mut().insert(
         crate::core::PropertyKey::String("module".to_string()),
-        Rc::new(RefCell::new(Value::Object(module_obj))),
+        Rc::new(RefCell::new(Value::Object(module_obj.clone()))),
     );
 
     // Initialize global constructors
@@ -138,7 +140,22 @@ fn execute_module(content: &str, module_exports: &Rc<RefCell<crate::core::JSObje
         log::trace!(" - {}", key);
     }
 
-    Ok(())
+    // Check if module.exports was reassigned (CommonJS style)
+    if let Some(module_exports_val) = obj_get_value(&module_obj, &"exports".into())? {
+        match &*module_exports_val.borrow() {
+            Value::Object(obj) if Rc::ptr_eq(obj, &module_exports) => {
+                // exports was not reassigned, return the exports object
+                Ok(Value::Object(module_exports))
+            }
+            other_value => {
+                // exports was reassigned, return the new value
+                Ok(other_value.clone())
+            }
+        }
+    } else {
+        // Fallback to exports object
+        Ok(Value::Object(module_exports))
+    }
 }
 
 pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value, JSError> {
@@ -148,5 +165,22 @@ pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value
             None => Err(crate::raise_eval_error!(format!("Export '{}' not found in module", specifier))),
         },
         _ => Err(crate::raise_eval_error!("Module is not an object")),
+    }
+}
+
+#[allow(dead_code)]
+pub fn get_module_default_export(module_value: &Value) -> Value {
+    match module_value {
+        Value::Object(_) => {
+            // For object modules, try to get default export, otherwise return the module itself
+            match import_from_module(module_value, "default") {
+                Ok(default_value) => default_value,
+                Err(_) => module_value.clone(),
+            }
+        }
+        _ => {
+            // For non-object modules (like functions), the module value itself is the default export
+            module_value.clone()
+        }
     }
 }

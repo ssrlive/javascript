@@ -171,7 +171,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
-            ' ' | '\t' => i += 1,
+            ' ' | '\t' | '\r' => i += 1,
             '\n' => {
                 tokens.push(Token::LineTerminator);
                 i += 1;

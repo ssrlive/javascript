@@ -1,65 +1,10 @@
 use javascript::*;
-use std::ffi::CString;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
 #[ctor::ctor]
 fn __init_test_logger() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default()).is_test(true).try_init();
-}
-
-#[test]
-fn test_object_property() {
-    unsafe {
-        let rt = JS_NewRuntime();
-        assert!(!rt.is_null());
-        let ctx = JS_NewContext(rt);
-        assert!(!ctx.is_null());
-
-        // create object
-        let obj = JS_NewObject(ctx);
-        assert_eq!(obj.get_tag(), JS_TAG_OBJECT);
-        let obj_ptr = obj.get_ptr() as *mut JSObject;
-        assert!(!obj_ptr.is_null());
-
-        // create property name atom
-        let key = CString::new("a").unwrap();
-        let atom = (*rt).js_new_atom_len(key.as_ptr() as *const u8, 1);
-        assert!(atom != 0);
-
-        // set property value
-        let val = JSValue::new_int32(42);
-        let ret = JS_DefinePropertyValue(ctx, obj, atom, val, 0);
-        assert_eq!(ret, 1);
-
-        // find property
-        let shape = (*obj_ptr).shape;
-        let (idx, _) = (*shape).find_own_property(atom).unwrap();
-        let prop_val = (*(*obj_ptr).prop.offset(idx as isize)).u.value;
-        assert_eq!(prop_val.get_tag(), JS_TAG_INT);
-        assert_eq!(prop_val.u.int32, 42);
-
-        JS_FreeContext(ctx);
-        JS_FreeRuntime(rt);
-    }
-}
-
-#[test]
-fn test_eval_numeric() {
-    unsafe {
-        let rt = JS_NewRuntime();
-        assert!(!rt.is_null());
-        let ctx = JS_NewContext(rt);
-        assert!(!ctx.is_null());
-
-        let script = b"42.5";
-        let result = JS_Eval(ctx, script.as_ptr() as *const i8, script.len(), std::ptr::null(), 0);
-        assert_eq!(result.get_tag(), JS_TAG_FLOAT64);
-        assert_eq!(result.u.float64, 42.5);
-
-        JS_FreeContext(ctx);
-        JS_FreeRuntime(rt);
-    }
 }
 
 #[test]

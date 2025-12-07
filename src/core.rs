@@ -4,13 +4,10 @@
 use crate::error::JSError;
 use crate::js_promise::{PromiseState, run_event_loop};
 use crate::raise_eval_error;
-use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-
-mod ffi;
-pub use ffi::*;
 
 mod value;
 pub use value::*;

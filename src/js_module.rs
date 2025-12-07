@@ -37,7 +37,7 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
             Ok(loaded_module) => return Ok(loaded_module),
             Err(_) => {
                 // Default empty module if file loading fails
-                log::debug!("Failed to load module '{}' from file, returning empty module", module_name);
+                log::debug!("Failed to load module '{module_name}' from file, returning empty module");
             }
         }
     }
@@ -51,7 +51,7 @@ fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<V
 
     // Read the file
     let content = std::fs::read_to_string(&module_path)
-        .map_err(|e| crate::raise_eval_error!(format!("Failed to read module file '{}': {}", module_path, e)))?;
+        .map_err(|e| crate::raise_eval_error!(format!("Failed to read module file '{module_path}': {e}")))?;
 
     // Create module exports object
     let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
@@ -67,6 +67,9 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
 
     // If it's an absolute path or starts with ./ or ../, treat as file path
     if path.is_absolute() || module_name.starts_with("./") || module_name.starts_with("../") {
+        // Trim a leading "./" so joining with the crate root doesn't produce
+        // a path containing a literal './' segment which may cause
+        // `exists()` to fail on some platforms/environments.
         let mut full_path = if let Some(base) = base_path {
             Path::new(base).parent().unwrap_or(Path::new(".")).join(module_name)
         } else {
@@ -128,6 +131,12 @@ fn execute_module(content: &str, module_exports: &Rc<RefCell<crate::core::JSObje
 
     // Execute statements in module environment
     crate::core::evaluate_statements(&env, &statements)?;
+
+    // Log the exports stored in the provided `module_exports` object at trace level
+    log::trace!("Module executed, exports keys:");
+    for key in module_exports.borrow().keys() {
+        log::trace!(" - {}", key);
+    }
 
     Ok(())
 }

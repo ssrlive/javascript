@@ -55,7 +55,7 @@ pub enum Statement {
     TryCatch(Vec<Statement>, String, Vec<Statement>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
     Throw(Expr),                                                              // throw expression
     Import(Vec<ImportSpecifier>, String),                                     // import specifiers, module name
-    Export(Vec<ExportSpecifier>),                                             // export specifiers
+    Export(Vec<ExportSpecifier>, Option<Box<Statement>>),                     // export specifiers, optional inner declaration
 }
 
 impl std::fmt::Debug for Statement {
@@ -112,8 +112,12 @@ impl std::fmt::Debug for Statement {
             Statement::Import(specifiers, module) => {
                 write!(f, "Import({:?}, {})", specifiers, module)
             }
-            Statement::Export(specifiers) => {
-                write!(f, "Export({:?})", specifiers)
+            Statement::Export(specifiers, maybe_decl) => {
+                if let Some(decl) = maybe_decl {
+                    write!(f, "Export({:?}, {:?})", specifiers, decl)
+                } else {
+                    write!(f, "Export({:?})", specifiers)
+                }
             }
         }
     }
@@ -385,28 +389,28 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         } else {
             // export <declaration> (const, let, var, function, class)
             let stmt = parse_statement(tokens)?;
-            match stmt {
+            match stmt.clone() {
                 Statement::Const(name, _expr) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers));
+                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
                 Statement::Let(name, Some(_expr)) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers));
+                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
                 Statement::Var(name, Some(_expr)) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers));
+                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
                 Statement::Class(name, _, _) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers));
+                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
                 _ => return Err(raise_parse_error!()),
             }
         }
 
-        return Ok(Statement::Export(specifiers));
+        return Ok(Statement::Export(specifiers, None));
     }
 
     // Labelled statement: `label: <statement>`

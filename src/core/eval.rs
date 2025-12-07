@@ -274,7 +274,33 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     last_value = Value::Undefined;
                     Ok(None)
                 }
-                Statement::Export(specifiers) => {
+                Statement::Export(specifiers, maybe_decl) => {
+                    // If this export included an inner declaration (e.g. `export const x = 1`),
+                    // evaluate that declaration now so the exported name exists in the environment.
+                    if let Some(decl_stmt) = maybe_decl {
+                        match &**decl_stmt {
+                            Statement::Const(name, expr) => {
+                                let val = evaluate_expr(env, expr)?;
+                                env_set_const(env, name.as_str(), val);
+                            }
+                            Statement::Let(name, Some(expr)) => {
+                                let val = evaluate_expr(env, expr)?;
+                                env_set(env, name, val)?;
+                            }
+                            Statement::Var(name, Some(expr)) => {
+                                let val = evaluate_expr(env, expr)?;
+                                env_set_var(env, name, val)?;
+                            }
+                            Statement::Class(name, extends, members) => {
+                                let class_obj = create_class_object(name.as_str(), extends, members.as_slice(), env)?;
+                                env_set(env, name.as_str(), class_obj)?;
+                            }
+                            _ => {
+                                return Err(raise_eval_error!("Invalid export declaration"));
+                            }
+                        }
+                    }
+
                     // Handle exports in module context
                     if let Some(exports_val) = env.borrow().get(&crate::core::PropertyKey::String("exports".to_string()))
                         && let Value::Object(exports_obj) = &*exports_val.borrow()
@@ -283,7 +309,6 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             match specifier {
                                 crate::core::statement::ExportSpecifier::Named(name, alias) => {
                                     // For named exports, we need to find the value in current scope
-                                    // For now, assume it's a variable in the environment
                                     if let Some(var_val) = env.borrow().get(&crate::core::PropertyKey::String(name.clone())) {
                                         let export_name = alias.as_ref().unwrap_or(name).clone();
                                         exports_obj.borrow_mut().insert(

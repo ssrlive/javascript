@@ -89,8 +89,8 @@ mod tests {
     #[test]
     fn test_import_from_js_file() {
         let script = r#"
-            import { PI, E, add } from "./tests/test_module.js";
-            import multiply from "./tests/test_module.js";
+            import { PI, E, add } from "./tests/es6_test_module.js";
+            import multiply from "./tests/es6_test_module.js";
 
             // Test imported values
             console.log("PI:", PI);

@@ -228,7 +228,7 @@ pub enum ObjectDestructuringElement {
 pub(crate) fn filter_input_script(script: &str) -> String {
     // Remove comments and simple import lines that we've already handled via shim injection
     let mut filtered = String::new();
-    let chars: Vec<char> = script.chars().collect();
+    let chars: Vec<char> = script.trim().chars().collect();
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;

@@ -4,7 +4,8 @@
 /brief_zh.md
 /*.js
 /quickjs
-.vscode/
+/.vs
+/.vscode
 .VSCodeCounter/
 Cargo.lock
 target/

@@ -83,6 +83,7 @@ impl From<std::io::Error> for JSError {
 
 // Helper macro to get the current function name
 #[macro_export]
+#[doc(hidden)]
 macro_rules! function_name {
     () => {{
         fn f() {}
@@ -97,6 +98,7 @@ macro_rules! function_name {
 // Kernel macro: this is the base for all specific error macros
 // It takes a JSErrorKind and auto-fills file, line, method
 #[macro_export]
+#[doc(hidden)]
 macro_rules! make_js_error {
     ($kind:expr) => {
         $crate::JSError::new($kind, file!().to_string(), line!() as usize, $crate::function_name!().to_string())
@@ -106,6 +108,7 @@ macro_rules! make_js_error {
 // --- These macros use make_js_error! to create specific error types ---
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_tokenize_error {
     () => {
         $crate::make_js_error!($crate::JSErrorKind::TokenizationError)
@@ -113,6 +116,7 @@ macro_rules! raise_tokenize_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_parse_error {
     () => {
         $crate::make_js_error!($crate::JSErrorKind::ParseError)
@@ -120,6 +124,7 @@ macro_rules! raise_parse_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_eval_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::EvaluationError { message: $msg.to_string() })
@@ -127,6 +132,7 @@ macro_rules! raise_eval_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_infinite_loop_error {
     ($iterations:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::InfiniteLoopError { iterations: $iterations })
@@ -134,6 +140,7 @@ macro_rules! raise_infinite_loop_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_variable_not_found_error {
     ($name:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::VariableNotFound { name: $name.to_string() })
@@ -141,6 +148,7 @@ macro_rules! raise_variable_not_found_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_type_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::TypeError { message: $msg.to_string() })
@@ -148,6 +156,7 @@ macro_rules! raise_type_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_syntax_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::SyntaxError { message: $msg.to_string() })
@@ -155,6 +164,7 @@ macro_rules! raise_syntax_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_runtime_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::RuntimeError { message: $msg.to_string() })
@@ -162,6 +172,7 @@ macro_rules! raise_runtime_error {
 }
 
 #[macro_export]
+#[doc(hidden)]
 macro_rules! raise_throw_error {
     ($value:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::Throw { value: $value })

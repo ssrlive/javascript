@@ -22,11 +22,14 @@ fn get_next_file_id() -> u64 {
 
 /// Create a temporary file object
 pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
-    // Create a real temporary file
+    // Create a real temporary file with a more random suffix
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let process_id = std::process::id();
+    let thread_id = format!("{:?}", std::thread::current().id());
+    let thread_hash = thread_id.chars().map(|c| c as u64).sum::<u64>();
     let temp_dir = std::env::temp_dir();
-    let filename = temp_dir.join(format!("rust_js_tmp_{}.tmp", timestamp));
+    let filename = temp_dir.join(format!("rust_js_tmp_{}_{}_{}.tmp", timestamp, process_id, thread_hash));
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)

@@ -89,7 +89,15 @@ fn test_tmpfile_puts_tell() {
 
 #[test]
 fn test_tmpfile_getline() {
-    let src = "import * as std from \"std\";\nlet f = std.tmpfile();\nf.puts(\"a\\n\");\nf.puts(\"b\\n\");\nf.seek(0, std.SEEK_SET);\nlet l1 = f.getline();\nl1";
+    let src = r#"
+        import * as std from "std";
+        let f = std.tmpfile();
+        f.puts("a\n");
+        f.puts("b\n");
+        f.seek(0, std.SEEK_SET);
+        let l1 = f.getline();
+        l1
+    "#;
     match evaluate_script(src) {
         Ok(val) => {
             if let Value::String(vec) = val {

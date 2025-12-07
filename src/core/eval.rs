@@ -3775,6 +3775,97 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(Value::Boolean(false)),
             }
         }
+        BinaryOp::BitAnd => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                let a = crate::core::number::to_int32(ln);
+                let b = crate::core::number::to_int32(rn);
+                Ok(Value::Number((a & b) as f64))
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                use std::ops::BitAnd;
+                Ok(Value::BigInt((a.bitand(&b)).to_string()))
+            }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Bitwise AND only supported for numbers or BigInt")),
+        },
+        BinaryOp::BitOr => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                let a = crate::core::number::to_int32(ln);
+                let b = crate::core::number::to_int32(rn);
+                Ok(Value::Number((a | b) as f64))
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                use std::ops::BitOr;
+                Ok(Value::BigInt((a.bitor(&b)).to_string()))
+            }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Bitwise OR only supported for numbers or BigInt")),
+        },
+        BinaryOp::LeftShift => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                let a = crate::core::number::to_int32(ln);
+                let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                let res = a.wrapping_shl(shift);
+                Ok(Value::Number(res as f64))
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                if b < BigInt::from(0) {
+                    return Err(raise_eval_error!("negative shift count"));
+                }
+                let shift = b.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                use std::ops::Shl;
+                Ok(Value::BigInt((a.shl(shift)).to_string()))
+            }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Left shift only supported for numbers or BigInt")),
+        },
+        BinaryOp::RightShift => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                let a = crate::core::number::to_int32(ln);
+                let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                let res = a >> shift;
+                Ok(Value::Number(res as f64))
+            }
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                let a = BigInt::parse_bytes(la.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                let b = BigInt::parse_bytes(rb.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
+                if b < BigInt::from(0) {
+                    return Err(raise_eval_error!("negative shift count"));
+                }
+                let shift = b.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                use std::ops::Shr;
+                Ok(Value::BigInt((a.shr(shift)).to_string()))
+            }
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Right shift only supported for numbers or BigInt")),
+        },
+        BinaryOp::UnsignedRightShift => match (l, r) {
+            (Value::Number(ln), Value::Number(rn)) => {
+                let a = crate::core::number::to_uint32(ln);
+                let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                let res = a >> shift;
+                Ok(Value::Number(res as f64))
+            }
+            (Value::BigInt(_), Value::BigInt(_)) => Err(raise_type_error!("Unsigned right shift is not supported for BigInt")),
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(raise_type_error!("Cannot mix BigInt and other types"))
+            }
+            _ => Err(raise_eval_error!("Unsigned right shift only supported for numbers")),
+        },
         BinaryOp::NullishCoalescing => {
             // Nullish coalescing: return right if left is null or undefined, otherwise left
             match l {

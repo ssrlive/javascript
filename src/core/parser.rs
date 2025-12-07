@@ -201,17 +201,54 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_bitwise_xor(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_additive(tokens)?;
+    // Support bitwise operators: &, ^, |, and shift operators (<<, >>, >>>)
+    let mut left = parse_additive(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
-    if matches!(tokens[0], Token::BitXor) {
-        tokens.remove(0);
-        let right = parse_bitwise_xor(tokens)?;
-        Ok(Expr::BitXor(Box::new(left), Box::new(right)))
-    } else {
-        Ok(left)
+    loop {
+        if tokens.is_empty() {
+            break;
+        }
+        if matches!(tokens[0], Token::BitXor) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::BitXor(Box::new(left), Box::new(right));
+            continue;
+        }
+        if matches!(tokens[0], Token::BitAnd) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(right));
+            continue;
+        }
+        if matches!(tokens[0], Token::BitOr) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(right));
+            continue;
+        }
+        if matches!(tokens[0], Token::LeftShift) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(right));
+            continue;
+        }
+        if matches!(tokens[0], Token::RightShift) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(right));
+            continue;
+        }
+        if matches!(tokens[0], Token::UnsignedRightShift) {
+            tokens.remove(0);
+            let right = parse_additive(tokens)?;
+            left = Expr::Binary(Box::new(left), BinaryOp::UnsignedRightShift, Box::new(right));
+            continue;
+        }
+        break;
     }
+    Ok(left)
 }
 
 fn parse_logical_and(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {

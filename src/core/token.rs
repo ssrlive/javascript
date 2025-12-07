@@ -104,6 +104,7 @@ pub enum Token {
     LeftShiftAssign,
     RightShift,
     RightShiftAssign,
+    UnsignedRightShift,
     UnsignedRightShiftAssign,
     As,
     Import,
@@ -252,6 +253,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     let mut prev_end_expr = false;
                     if let Some(
                         Token::Number(_)
+                        | Token::BigInt(_)
                         | Token::StringLit(_)
                         | Token::Identifier(_)
                         | Token::RBracket
@@ -437,6 +439,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     // Recognize '>>>=' (unsigned right shift assignment)
                     tokens.push(Token::UnsignedRightShiftAssign);
                     i += 4;
+                } else if i + 2 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '>' {
+                    // Recognize '>>>' (unsigned right shift)
+                    tokens.push(Token::UnsignedRightShift);
+                    i += 3;
                 } else if i + 2 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '=' {
                     // Recognize '>>=' (right shift assignment)
                     tokens.push(Token::RightShiftAssign);

@@ -208,6 +208,11 @@ pub enum BinaryOp {
     NullishCoalescing,
     Pow,
     BitXor,
+    BitAnd,
+    BitOr,
+    LeftShift,
+    RightShift,
+    UnsignedRightShift,
 }
 
 #[derive(Debug, Clone)]

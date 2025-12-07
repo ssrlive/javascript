@@ -15,6 +15,7 @@ use crate::{
     js_math::{handle_math_method, make_math_object},
     js_number::make_number_object,
     js_promise::{JSPromise, PromiseState, handle_promise_method, run_event_loop},
+    js_reflect::make_reflect_object,
     js_testintl::make_testintl_object,
     obj_get_value, raise_eval_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
@@ -2075,6 +2076,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         Ok(v)
     } else if name == "Math" {
         let v = Value::Object(make_math_object()?);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
+    } else if name == "Reflect" {
+        let v = Value::Object(make_reflect_object()?);
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "JSON" {
@@ -4213,6 +4218,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Check if this is the Math object
                 if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                     crate::js_math::handle_math_method(method, args, env)
+                } else if obj_map.borrow().contains_key(&"apply".into()) && obj_map.borrow().contains_key(&"construct".into()) {
+                    crate::js_reflect::handle_reflect_method(method, args, env)
                 } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                     crate::js_json::handle_json_method(method, args, env)
                 } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {
@@ -4636,6 +4643,8 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Check if this is the Math object
                 if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                     crate::js_math::handle_math_method(method_name, args, env)
+                } else if obj_map.borrow().contains_key(&"apply".into()) && obj_map.borrow().contains_key(&"construct".into()) {
+                    crate::js_reflect::handle_reflect_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                     crate::js_json::handle_json_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {
@@ -5074,6 +5083,9 @@ fn handle_optional_method_call(
             } else if obj_map.borrow().contains_key(&"PI".into()) && obj_map.borrow().contains_key(&"E".into()) {
                 // Check if this is the Math object
                 handle_math_method(method, args, env)
+            } else if obj_map.borrow().contains_key(&"apply".into()) && obj_map.borrow().contains_key(&"construct".into()) {
+                // Check if this is the Reflect object
+                crate::js_reflect::handle_reflect_method(method, args, env)
             } else if obj_map.borrow().contains_key(&"parse".into()) && obj_map.borrow().contains_key(&"stringify".into()) {
                 crate::js_json::handle_json_method(method, args, env)
             } else if obj_map.borrow().contains_key(&"keys".into()) && obj_map.borrow().contains_key(&"values".into()) {

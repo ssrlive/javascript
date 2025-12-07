@@ -69,6 +69,21 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
     match constructor_val {
         Value::Object(class_obj) => {
+            // Check if this is a TypedArray constructor
+            if class_obj.borrow().contains_key(&"__kind".into()) {
+                return crate::js_typedarray::handle_typedarray_constructor(&class_obj, args, env);
+            }
+
+            // Check if this is ArrayBuffer constructor
+            if class_obj.borrow().contains_key(&"__arraybuffer".into()) {
+                return crate::js_typedarray::handle_arraybuffer_constructor(args, env);
+            }
+
+            // Check if this is DataView constructor
+            if class_obj.borrow().contains_key(&"__dataview".into()) {
+                return crate::js_typedarray::handle_dataview_constructor(args, env);
+            }
+
             // Check if this is a class object
             if let Some(class_def_val) = obj_get_value(&class_obj, &"__class_def__".into())?
                 && let Value::ClassDefinition(ref class_def) = *class_def_val.borrow()

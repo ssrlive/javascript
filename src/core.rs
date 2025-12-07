@@ -564,5 +564,24 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
             "__internal_allsettled_state_record_rejected".to_string(),
         ))),
     );
+
+    // Initialize TypedArray constructors
+    let arraybuffer_constructor = crate::js_typedarray::make_arraybuffer_constructor()?;
+    env_borrow.insert(
+        PropertyKey::String("ArrayBuffer".to_string()),
+        Rc::new(RefCell::new(Value::Object(arraybuffer_constructor))),
+    );
+
+    let dataview_constructor = crate::js_typedarray::make_dataview_constructor()?;
+    env_borrow.insert(
+        PropertyKey::String("DataView".to_string()),
+        Rc::new(RefCell::new(Value::Object(dataview_constructor))),
+    );
+
+    let typedarray_constructors = crate::js_typedarray::make_typedarray_constructors()?;
+    for (name, constructor) in typedarray_constructors {
+        env_borrow.insert(PropertyKey::String(name), Rc::new(RefCell::new(Value::Object(constructor))));
+    }
+
     Ok(())
 }

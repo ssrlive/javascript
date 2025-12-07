@@ -2,8 +2,8 @@ use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
         BinaryOp, DestructuringElement, Expr, JSObjectData, JSObjectDataPtr, ObjectDestructuringElement, Statement, SwitchCase, SymbolData,
-        WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, is_truthy, obj_delete, obj_set_value,
-        to_primitive, value_to_string, values_equal,
+        TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, is_truthy, obj_delete,
+        obj_set_value, to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
@@ -921,8 +921,27 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                 }
             }
             Expr::Index(obj_expr, idx_expr) => {
-                // Evaluate index — support number, string and symbol keys
+                // Check if this is a TypedArray assignment first
+                let obj_val = evaluate_expr(env, obj_expr)?;
                 let idx_val = evaluate_expr(env, idx_expr)?;
+                if let (Value::Object(obj_map), Value::Number(n)) = (&obj_val, &idx_val)
+                    && let Some(ta_val) = obj_get_value(obj_map, &"__typedarray".into())?
+                    && let Value::TypedArray(ta) = &*ta_val.borrow()
+                {
+                    // This is a TypedArray, use our set method
+                    let v = evaluate_expr(env, value_expr)?;
+                    let val_num = match &v {
+                        Value::Number(num) => *num as i64,
+                        Value::BigInt(s) => s.parse().unwrap_or(0),
+                        _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
+                    };
+                    ta.borrow_mut()
+                        .set(*n as usize, val_num)
+                        .map_err(|_| raise_eval_error!("TypedArray index out of bounds"))?;
+                    *last_value = v;
+                    return Ok(None);
+                }
+                // Evaluate index — support number, string and symbol keys
                 let v = evaluate_expr(env, value_expr)?;
                 match idx_val {
                     Value::Number(n) => {
@@ -2689,6 +2708,23 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                     Ok(val)
                 }
                 (Value::Object(obj_map), Value::Number(n)) => {
+                    // Check if this is a TypedArray first
+                    let ta_val_opt = obj_get_value(&obj_map, &"__typedarray".into());
+                    if let Ok(Some(ta_val)) = ta_val_opt
+                        && let Value::TypedArray(ta) = &*ta_val.borrow()
+                    {
+                        // This is a TypedArray, use our set method
+                        let idx = n as usize;
+                        let val_num = match &val {
+                            Value::Number(num) => *num as i64,
+                            Value::BigInt(s) => s.parse().unwrap_or(0),
+                            _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
+                        };
+                        ta.borrow_mut()
+                            .set(idx, val_num)
+                            .map_err(|_| raise_eval_error!("TypedArray index out of bounds"))?;
+                        return Ok(val);
+                    }
                     let key = PropertyKey::String(n.to_string());
                     obj_set_value(&obj_map, &key, val.clone())?;
                     Ok(val)
@@ -3758,6 +3794,32 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
             }
         }
         (Value::Object(obj_map), Value::Number(n)) => {
+            // Check if this is a TypedArray first
+            if let Some(ta_val) = obj_get_value(&obj_map, &"__typedarray".into())?
+                && let Value::TypedArray(ta) = &*ta_val.borrow()
+            {
+                // This is a TypedArray, use our get method
+                let idx = n as usize;
+                match ta.borrow().get(idx) {
+                    Ok(val) => {
+                        // Convert the raw value to appropriate JavaScript Value based on type
+                        let js_val = match ta.borrow().kind {
+                            TypedArrayKind::Float32 | TypedArrayKind::Float64 => {
+                                // For float types, we need to reinterpret the i64 as f64
+                                // This is a simplified conversion - in practice we'd need proper float handling
+                                Value::Number(val as f64)
+                            }
+                            TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => Value::BigInt(val.to_string()),
+                            _ => {
+                                // For integer types
+                                Value::Number(val as f64)
+                            }
+                        };
+                        return Ok(js_val);
+                    }
+                    Err(_) => return Err(raise_eval_error!("TypedArray index out of bounds")),
+                }
+            }
             // Array-like indexing
             let key = PropertyKey::String(n.to_string());
             if let Some(val) = obj_get_value(&obj_map, &key)? {
@@ -3847,6 +3909,25 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             if obj_map.borrow().contains_key(&"__generator__".into()) && (prop == "next" || prop == "return" || prop == "throw") =>
         {
             Ok(Value::Function(format!("Generator.prototype.{}", prop)))
+        }
+        // Special cases for DataView objects
+        Value::Object(obj_map)
+            if obj_map.borrow().contains_key(&"__dataview".into())
+                && (prop == "buffer" || prop == "byteLength" || prop == "byteOffset") =>
+        {
+            if let Some(dv_val) = obj_map.borrow().get(&"__dataview".into())
+                && let Value::DataView(dv) = &*dv_val.borrow()
+            {
+                let data_view = dv.borrow();
+                match prop {
+                    "buffer" => Ok(Value::ArrayBuffer(data_view.buffer.clone())),
+                    "byteLength" => Ok(Value::Number(data_view.byte_length as f64)),
+                    "byteOffset" => Ok(Value::Number(data_view.byte_offset as f64)),
+                    _ => Ok(Value::Undefined),
+                }
+            } else {
+                Ok(Value::Undefined)
+            }
         }
         Value::Object(obj_map) => {
             // Special-case the `__proto__` accessor so property reads return the
@@ -4152,6 +4233,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if obj_map.borrow().contains_key(&"__promise".into()) {
                     // Promise instance methods
                     handle_promise_method(&obj_map, method, args, env)
+                } else if obj_map.borrow().contains_key(&"__dataview".into()) {
+                    // DataView instance methods
+                    crate::js_typedarray::handle_dataview_method(&obj_map, method, args, env)
                 } else if obj_map.borrow().contains_key(&"__class_def__".into()) {
                     // Class static methods
                     call_static_method(&obj_map, method, args, env)
@@ -5201,4 +5285,23 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
         }
         _ => Err(raise_eval_error!("not an object")),
     }
+}
+
+#[allow(dead_code)]
+pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
+    // Initialize ArrayBuffer constructor
+    let arraybuffer_constructor = crate::js_typedarray::make_arraybuffer_constructor()?;
+    obj_set_value(env, &"ArrayBuffer".into(), Value::Object(arraybuffer_constructor))?;
+
+    // Initialize DataView constructor
+    let dataview_constructor = crate::js_typedarray::make_dataview_constructor()?;
+    obj_set_value(env, &"DataView".into(), Value::Object(dataview_constructor))?;
+
+    // Initialize TypedArray constructors
+    let typedarray_constructors = crate::js_typedarray::make_typedarray_constructors()?;
+    for (name, constructor) in typedarray_constructors {
+        obj_set_value(env, &name.into(), Value::Object(constructor))?;
+    }
+
+    Ok(())
 }

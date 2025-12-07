@@ -1932,7 +1932,6 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             let l = evaluate_expr(env, left)?;
             if is_truthy(&l) { Ok(l) } else { evaluate_expr(env, right) }
         }
-        Expr::BitXor(left, right) => evaluate_binary(env, left, &crate::core::BinaryOp::BitXor, right),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {

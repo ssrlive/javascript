@@ -184,7 +184,6 @@ pub enum Expr {
     /// Logical operators with short-circuit semantics
     LogicalAnd(Box<Expr>, Box<Expr>),
     LogicalOr(Box<Expr>, Box<Expr>),
-    BitXor(Box<Expr>, Box<Expr>),
     Value(Value), // literal value
 }
 

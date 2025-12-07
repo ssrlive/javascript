@@ -3,8 +3,8 @@ pub enum JSErrorKind {
     #[error("Tokenization failed")]
     TokenizationError,
 
-    #[error("Parsing failed")]
-    ParseError,
+    #[error("Parsing failed: {message}")]
+    ParseError { message: String },
 
     #[error("Evaluation failed: {message}")]
     EvaluationError { message: String },
@@ -119,7 +119,12 @@ macro_rules! raise_tokenize_error {
 #[doc(hidden)]
 macro_rules! raise_parse_error {
     () => {
-        $crate::make_js_error!($crate::JSErrorKind::ParseError)
+        $crate::make_js_error!($crate::JSErrorKind::ParseError {
+            message: "parse error".to_string()
+        })
+    };
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() })
     };
 }
 

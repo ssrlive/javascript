@@ -2150,6 +2150,12 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         let v = Value::Object(make_number_object()?);
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
+    } else if name == "BigInt" {
+        // Expose BigInt as a callable function name; constructor/prototype objects
+        // are created lazily if needed elsewhere.
+        let v = Value::Function("BigInt".to_string());
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Boolean" {
         let v = Value::Function("Boolean".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
@@ -4336,7 +4342,16 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method, args, env)
                 } else if obj_map.borrow().contains_key(&"__value__".into()) {
-                    crate::js_number::handle_number_object_method(&obj_map, method, args, env)
+                    // Dispatch boxed primitive object methods based on the actual __value__ type
+                    if let Some(val_rc) = obj_get_value(&obj_map, &"__value__".into())? {
+                        match &*val_rc.borrow() {
+                            Value::Number(_) => crate::js_number::handle_number_object_method(&obj_map, method, args, env),
+                            Value::BigInt(_) => crate::js_bigint::handle_bigint_object_method(&obj_map, method, args, env),
+                            _ => Err(raise_eval_error!("Invalid __value__ for boxed object")),
+                        }
+                    } else {
+                        Err(raise_eval_error!("__value__ not found on instance"))
+                    }
                 } else if obj_map.borrow().contains_key(&"__timestamp".into()) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method, args)
@@ -4395,6 +4410,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // Special-case Object.prototype.* built-ins so they can
                                 // operate on the receiver (`this`), which is the
                                 // object we fetched the method from (obj_map).
+                                // Also handle boxed-primitive built-ins that are
+                                // represented as `Value::Function("BigInt_toString")`,
+                                // etc., so they can access the receiver's `__value__`.
+                                if func_name == "BigInt_toString" {
+                                    return crate::js_bigint::handle_bigint_object_method(&obj_map, "toString", args, env);
+                                }
+                                if func_name == "BigInt_valueOf" {
+                                    return crate::js_bigint::handle_bigint_object_method(&obj_map, "valueOf", args, env);
+                                }
                                 if func_name.starts_with("Object.prototype.") {
                                     match func_name.as_str() {
                                         "Object.prototype.hasOwnProperty" => {
@@ -4490,6 +4514,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Array" => crate::js_array::handle_array_static_method(method, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method, args, env),
                     "Date" => crate::js_date::handle_date_static_method(method, args, env),
+                    "BigInt" => crate::js_bigint::handle_bigint_static_method(method, args, env),
                     "MockIntlConstructor" => crate::js_testintl::handle_mock_intl_static_method(method, args, env),
                     _ => Err(raise_eval_error!(format!("{func_name} has no static method '{method}'"))),
                 }
@@ -4510,6 +4535,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "Object" => crate::js_object::handle_object_method(method_name, args, env),
                     "Array" => crate::js_array::handle_array_static_method(method_name, args, env),
                     "Promise" => crate::js_promise::handle_promise_static_method(method_name, args, env),
+                    "BigInt" => crate::js_bigint::handle_bigint_static_method(method_name, args, env),
                     _ => Err(raise_eval_error!(format!("{func_name} has no static method '{method_name}'"))),
                 }
             }
@@ -4690,7 +4716,29 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
 
                     return Err(raise_eval_error!(format!("{message}")));
                 }
-                // Check if this is a built-in constructor object
+                // If this object is the global `Object` constructor (stored in the
+                // root environment as an object), route the call to the
+                // Object constructor handler. This ensures that calling the
+                // constructor object (e.g. `Object(123n)`) behaves like a
+                // constructor instead of attempting to call the object as a
+                // plain callable value.
+                let mut root_env_opt = Some(env.clone());
+                while let Some(r) = root_env_opt.clone() {
+                    if r.borrow().prototype.is_some() {
+                        root_env_opt = r.borrow().prototype.clone();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(root_env) = root_env_opt
+                    && let Some(obj_ctor_rc) = obj_get_value(&root_env, &"Object".into())?
+                    && let Value::Object(ctor_map) = &*obj_ctor_rc.borrow()
+                    && Rc::ptr_eq(ctor_map, &obj_map)
+                {
+                    return crate::js_class::handle_object_constructor(args, env);
+                }
+
+                // Check if this is a built-in constructor object (Number)
                 if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
@@ -4761,7 +4809,15 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key(&"__value__".into()) {
-                    crate::js_number::handle_number_object_method(&obj_map, method_name, args, env)
+                    if let Some(val_rc) = obj_get_value(&obj_map, &"__value__".into())? {
+                        match &*val_rc.borrow() {
+                            Value::Number(_) => crate::js_number::handle_number_object_method(&obj_map, method_name, args, env),
+                            Value::BigInt(_) => crate::js_bigint::handle_bigint_object_method(&obj_map, method_name, args, env),
+                            _ => Err(raise_eval_error!("Invalid __value__ for boxed object")),
+                        }
+                    } else {
+                        Err(raise_eval_error!("__value__ not found on instance"))
+                    }
                 } else if obj_map.borrow().contains_key(&"__timestamp".into()) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method_name, args)

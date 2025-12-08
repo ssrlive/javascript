@@ -319,6 +319,52 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
         }
         "Array" => handle_array_constructor(args, env),
+        "Object" => crate::js_class::handle_object_constructor(args, env),
+        "BigInt" => {
+            // BigInt(value) conversion per simplified rules:
+            if args.len() != 1 {
+                return Err(raise_type_error!("BigInt requires exactly one argument"));
+            }
+            let arg_val = evaluate_expr(env, &args[0])?;
+            match arg_val {
+                Value::BigInt(h) => Ok(Value::BigInt(h.clone())),
+                Value::Number(n) => {
+                    if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                        return Err(raise_type_error!("Cannot convert number to BigInt"));
+                    }
+                    let s = format!("{:.0}", n);
+                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s.as_str())?))
+                }
+                Value::String(s) => {
+                    let st = String::from_utf16_lossy(&s);
+                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(st.as_str())?))
+                }
+                Value::Boolean(b) => {
+                    let s = if b { "1" } else { "0" };
+                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s)?))
+                }
+                Value::Object(obj) => {
+                    // Try ToPrimitive with number hint first
+                    let prim = to_primitive(&Value::Object(obj.clone()), "number")?;
+                    match prim {
+                        Value::Number(n) => {
+                            if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                                return Err(raise_type_error!("Cannot convert number to BigInt"));
+                            }
+                            let s = format!("{:.0}", n);
+                            Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s.as_str())?))
+                        }
+                        Value::String(s) => {
+                            let st = String::from_utf16_lossy(&s);
+                            Ok(Value::BigInt(crate::core::BigIntHolder::try_from(st.as_str())?))
+                        }
+                        Value::BigInt(h) => Ok(Value::BigInt(h.clone())),
+                        _ => Err(raise_type_error!("Cannot convert object to BigInt")),
+                    }
+                }
+                _ => Err(raise_type_error!("Cannot convert value to BigInt")),
+            }
+        }
         "Number" => {
             // Number constructor
             if args.len() == 1 {

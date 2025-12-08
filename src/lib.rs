@@ -5,6 +5,7 @@ pub(crate) mod core;
 pub(crate) mod error;
 pub(crate) mod js_array;
 pub(crate) mod js_assert;
+pub(crate) mod js_bigint;
 pub(crate) mod js_class;
 pub(crate) mod js_console;
 pub(crate) mod js_date;

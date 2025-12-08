@@ -1,0 +1,148 @@
+use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_value};
+use crate::error::JSError;
+use crate::raise_eval_error;
+use crate::unicode::utf8_to_utf16;
+use num_bigint::BigInt;
+use num_bigint::Sign;
+
+/// Handle boxed BigInt object methods (toString, valueOf)
+pub fn handle_bigint_object_method(
+    obj_map: &JSObjectDataPtr,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
+    if let Some(value_val) = obj_get_value(obj_map, &"__value__".into())? {
+        if let Value::BigInt(h) = &*value_val.borrow() {
+            match method {
+                "toString" => {
+                    if args.is_empty() {
+                        return Ok(Value::String(utf8_to_utf16(&h.raw)));
+                    } else {
+                        // radix support: expect a number argument
+                        let arg0 = crate::core::evaluate_expr(env, &args[0])?;
+                        if let Value::Number(rad) = arg0 {
+                            let r = rad as i32;
+                            if !(2..=36).contains(&r) {
+                                return Err(raise_eval_error!("toString() radix out of range"));
+                            }
+                            let mut h_clone = h.clone();
+                            let bi = h_clone.refresh_parsed(false)?;
+                            let s = bi.to_str_radix(r as u32);
+                            return Ok(Value::String(utf8_to_utf16(&s)));
+                        } else {
+                            return Err(raise_eval_error!("toString radix must be a number"));
+                        }
+                    }
+                }
+                "valueOf" => {
+                    if args.is_empty() {
+                        return Ok(Value::BigInt(h.clone()));
+                    } else {
+                        return Err(raise_eval_error!("valueOf expects no arguments"));
+                    }
+                }
+                _ => return Err(raise_eval_error!(format!("BigInt.prototype.{} is not implemented", method))),
+            }
+        } else {
+            return Err(raise_eval_error!("Invalid __value__ for BigInt instance"));
+        }
+    }
+    Err(raise_eval_error!("__value__ not found on BigInt instance"))
+}
+
+/// Handle static methods on the BigInt constructor (asIntN, asUintN)
+pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Evaluate arguments
+    if method != "asIntN" && method != "asUintN" {
+        return Err(raise_eval_error!(format!("BigInt has no static method '{}'", method)));
+    }
+    if args.len() != 2 {
+        return Err(raise_eval_error!(format!("BigInt.{} requires 2 arguments", method)));
+    }
+
+    // bits must be a non-negative integer (ToIndex)
+    let bits_val = crate::core::evaluate_expr(env, &args[0])?;
+    let bits = match bits_val {
+        Value::Number(n) => {
+            if n.is_nan() || n < 0.0 || n.fract() != 0.0 {
+                return Err(raise_eval_error!("bits must be a non-negative integer"));
+            }
+            // limit to usize
+            if n < 0.0 {
+                return Err(raise_eval_error!("bits must be non-negative"));
+            }
+            n as usize
+        }
+        _ => return Err(raise_eval_error!("bits must be a number")),
+    };
+
+    // bigint argument: accept BigInt, Number (integer), String, Boolean, or Object (ToPrimitive)
+    let bigint_val = crate::core::evaluate_expr(env, &args[1])?;
+    let bi = match bigint_val {
+        Value::BigInt(h) => h.clone().refresh_parsed(false)?,
+        Value::Number(n) => {
+            if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                return Err(raise_eval_error!("Cannot convert number to BigInt"));
+            }
+            let s = format!("{:.0}", n);
+            let mut holder = crate::core::BigIntHolder::try_from(s.as_str())?;
+            holder.refresh_parsed(false)?
+        }
+        Value::String(s) => {
+            let st = String::from_utf16_lossy(&s);
+            let mut holder = crate::core::BigIntHolder::try_from(st.as_str())?;
+            holder.refresh_parsed(false)?
+        }
+        Value::Boolean(b) => {
+            let s = if b { "1" } else { "0" };
+            let mut holder = crate::core::BigIntHolder::try_from(s)?;
+            holder.refresh_parsed(false)?
+        }
+        Value::Object(obj) => {
+            // Try ToPrimitive with number hint first
+            let prim = crate::core::to_primitive(&Value::Object(obj.clone()), "number")?;
+            match prim {
+                Value::Number(n) => {
+                    if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                        return Err(raise_eval_error!("Cannot convert number to BigInt"));
+                    }
+                    let s = format!("{:.0}", n);
+                    let mut holder = crate::core::BigIntHolder::try_from(s.as_str())?;
+                    holder.refresh_parsed(false)?
+                }
+                Value::String(s) => {
+                    let st = String::from_utf16_lossy(&s);
+                    let mut holder = crate::core::BigIntHolder::try_from(st.as_str())?;
+                    holder.refresh_parsed(false)?
+                }
+                Value::BigInt(h) => h.clone().refresh_parsed(false)?,
+                _ => return Err(raise_eval_error!("Cannot convert object to BigInt")),
+            }
+        }
+        _ => return Err(raise_eval_error!("bigint argument must be a BigInt or convertible value")),
+    };
+
+    // modulus = 2 ** bits
+    let modulus = if bits == 0 { BigInt::from(1u8) } else { BigInt::from(1u8) << bits };
+
+    // r = bi mod modulus (non-negative)
+    let mut r = (&bi) % &modulus;
+    if r.sign() == Sign::Minus {
+        r += &modulus;
+    }
+
+    if method == "asUintN" {
+        return Ok(Value::BigInt(BigInt::from(r).into()));
+    }
+
+    // asIntN: if r >= 2^(bits-1) then r -= 2^bits
+    if bits == 0 {
+        return Ok(Value::BigInt(BigInt::from(0).into()));
+    }
+    let half = &modulus >> 1;
+    if r >= half {
+        r -= &modulus;
+    }
+    Ok(Value::BigInt(BigInt::from(r).into()))
+}

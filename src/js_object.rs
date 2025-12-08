@@ -309,7 +309,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
     }
     match obj_val {
         Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-        Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(s))),
+        Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.raw))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
@@ -318,7 +318,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             if let Some(wrapped_val) = obj_get_value(obj_map, &"__value__".into())? {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                    Value::BigInt(s) => return Ok(Value::String(utf8_to_utf16(s))),
+                    Value::BigInt(h) => return Ok(Value::String(utf8_to_utf16(&h.raw))),
                     Value::Boolean(b) => return Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::String(s) => return Ok(Value::String(s.clone())),
                     _ => {}

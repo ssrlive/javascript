@@ -6,7 +6,7 @@ fn bigint_addition_and_mixing() {
     // so either implementation may return Err; ensure test documents current behavior.
     let res = evaluate_script("1n + 2n");
     match res {
-        Ok(Value::BigInt(s)) => assert_eq!(s, "3"),
+        Ok(Value::BigInt(h)) => assert!(h.raw == "3"),
         Ok(other) => panic!("expected BigInt result for 1n + 2n, got {:?}", other),
         Err(_) => panic!("expected BigInt result for 1n + 2n, got error"),
     }

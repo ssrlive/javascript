@@ -40,3 +40,8 @@ path = "examples/js.rs"
 name = "promise_benchmarks"
 path = "benches/promise_benchmarks.rs"
 harness = false
+
+[[bench]]
+name = "bigint_bench"
+path = "benches/bigint_bench.rs"
+harness = false

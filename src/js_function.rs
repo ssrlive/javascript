@@ -110,7 +110,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
                         None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
                     },
-                    Value::BigInt(s) => Ok(Value::String(utf8_to_utf16(&s))),
+                    Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.raw))),
                     Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
                     Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
                     Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),

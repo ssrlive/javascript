@@ -4,7 +4,7 @@ use javascript::{Value, evaluate_script};
 fn test_unary_neg_on_bigint() {
     let r = evaluate_script("-1n");
     match r {
-        Ok(Value::BigInt(s)) => assert!(s == "-1" || s == "-1n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "-1"),
         other => panic!("expected bigint -1, got {:?}", other),
     }
 }
@@ -14,42 +14,42 @@ fn test_bigint_assignment_ops() {
     // +=
     let r1 = evaluate_script("let a = 1n; a += 2n; a");
     match r1 {
-        Ok(Value::BigInt(s)) => assert!(s == "3" || s == "3n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "3"),
         other => panic!("expected bigint 3, got {:?}", other),
     }
 
     // -=
     let r2 = evaluate_script("let b = 5n; b -= 2n; b");
     match r2 {
-        Ok(Value::BigInt(s)) => assert!(s == "3" || s == "3n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "3"),
         other => panic!("expected bigint 3, got {:?}", other),
     }
 
     // *=
     let r3 = evaluate_script("let c = 2n; c *= 3n; c");
     match r3 {
-        Ok(Value::BigInt(s)) => assert!(s == "6" || s == "6n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "6"),
         other => panic!("expected bigint 6, got {:?}", other),
     }
 
     // /= integer division
     let r4 = evaluate_script("let d = 7n; d /= 2n; d");
     match r4 {
-        Ok(Value::BigInt(s)) => assert!(s == "3" || s == "3n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "3"),
         other => panic!("expected bigint 3, got {:?}", other),
     }
 
     // %= modulo
     let r5 = evaluate_script("let e = 7n; e %= 3n; e");
     match r5 {
-        Ok(Value::BigInt(s)) => assert!(s == "1" || s == "1n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "1"),
         other => panic!("expected bigint 1, got {:?}", other),
     }
 
     // **=
     let r6 = evaluate_script("let f = 2n; f **= 3n; f");
     match r6 {
-        Ok(Value::BigInt(s)) => assert!(s == "8" || s == "8n"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "8"),
         other => panic!("expected bigint 8, got {:?}", other),
     }
 }

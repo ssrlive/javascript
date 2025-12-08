@@ -66,7 +66,7 @@ fn print_eval_result(result: &Value) {
         Value::Property { .. } => println!("[Property]"),
         Value::Promise(_) => println!("[object Promise]"),
         Value::Symbol(_) => println!("[object Symbol]"),
-        Value::BigInt(s) => println!("{s}"),
+        Value::BigInt(s) => println!("{}", s.raw),
         Value::Map(_) => println!("[object Map]"),
         Value::Set(_) => println!("[object Set]"),
         Value::WeakMap(_) => println!("[object WeakMap]"),

@@ -584,12 +584,12 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"__value__".into(), Value::String(s))?;
             Ok(Value::Object(obj))
         }
-        Value::BigInt(s) => {
+        Value::BigInt(h) => {
             // Object(bigint) creates a boxed BigInt-like object
             let obj = Rc::new(RefCell::new(JSObjectData::new()));
             obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
             obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
-            obj_set_value(&obj, &"__value__".into(), Value::BigInt(s))?;
+            obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
             Ok(Value::Object(obj))
         }
         _ => {
@@ -683,7 +683,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Property { .. } => utf8_to_utf16("[Property]"),
             Value::Promise(_) => utf8_to_utf16("[object Promise]"),
             Value::Symbol(_) => utf8_to_utf16("[object Symbol]"),
-            Value::BigInt(s) => utf8_to_utf16(&s),
+            Value::BigInt(s) => utf8_to_utf16(&s.raw),
             Value::Map(_) => utf8_to_utf16("[object Map]"),
             Value::Set(_) => utf8_to_utf16("[object Set]"),
             Value::WeakMap(_) => utf8_to_utf16("[object WeakMap]"),

@@ -181,8 +181,6 @@ pub fn set_internal_prototype_from_constructor(obj: &JSObjectDataPtr, env: &JSOb
     if let Some(proto_obj) = get_constructor_prototype(env, ctor_name)? {
         // set internal prototype pointer
         obj.borrow_mut().prototype = Some(proto_obj.clone());
-        // also set an own "__proto__" property pointing to the same object
-        obj_set_value(obj, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
     }
     Ok(())
 }

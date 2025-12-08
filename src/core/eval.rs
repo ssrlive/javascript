@@ -4927,13 +4927,9 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
             break;
         }
     }
-    if let Some(root_env) = root_env_opt
-        && let Some(obj_ctor_rc) = obj_get_value(&root_env, &"Object".into())?
-        && let Value::Object(ctor_map) = &*obj_ctor_rc.borrow()
-        && let Some(proto_val_rc) = obj_get_value(ctor_map, &"prototype".into())?
-        && let Value::Object(proto_map) = &*proto_val_rc.borrow()
-    {
-        obj.borrow_mut().prototype = Some(proto_map.clone());
+    if let Some(root_env) = root_env_opt {
+        // Use centralized helper to set default prototype from global Object constructor
+        crate::core::set_internal_prototype_from_constructor(&obj, &root_env, "Object")?;
     }
 
     for (key, value_expr) in properties {
@@ -5088,13 +5084,8 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, 
             break;
         }
     }
-    if let Some(root_env) = root_env_opt
-        && let Some(obj_ctor_rc) = obj_get_value(&root_env, &"Object".into())?
-        && let Value::Object(ctor_map) = &*obj_ctor_rc.borrow()
-        && let Some(proto_val_rc) = obj_get_value(ctor_map, &"prototype".into())?
-        && let Value::Object(proto_map) = &*proto_val_rc.borrow()
-    {
-        arr.borrow_mut().prototype = Some(proto_map.clone());
+    if let Some(root_env) = root_env_opt {
+        crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Object")?;
     }
     let mut index = 0;
     for elem_expr in elements {

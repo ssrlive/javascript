@@ -588,14 +588,8 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
             // Set internal prototype to Number.prototype if available
-            if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("Number".to_string())) {
-                if let Value::Object(num_ctor) = resolved_ctor {
-                    if let Some(proto_val) = obj_get_value(&num_ctor, &"prototype".into())?
-                        && let Value::Object(proto_obj) = &*proto_val.borrow()
-                    {
-                        obj.borrow_mut().prototype = Some(proto_obj.clone());
-                    }
-                }
+            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Number")? {
+                obj.borrow_mut().prototype = Some(proto_obj.clone());
             }
             Ok(Value::Object(obj))
         }
@@ -606,14 +600,8 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
             // Set internal prototype to Boolean.prototype if available
-            if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("Boolean".to_string())) {
-                if let Value::Object(bool_ctor) = resolved_ctor {
-                    if let Some(proto_val) = obj_get_value(&bool_ctor, &"prototype".into())?
-                        && let Value::Object(proto_obj) = &*proto_val.borrow()
-                    {
-                        obj.borrow_mut().prototype = Some(proto_obj.clone());
-                    }
-                }
+            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Boolean")? {
+                obj.borrow_mut().prototype = Some(proto_obj.clone());
             }
             Ok(Value::Object(obj))
         }
@@ -625,14 +613,8 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
             obj_set_value(&obj, &"__value__".into(), Value::String(s))?;
             // Set internal prototype to String.prototype if available
-            if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("String".to_string())) {
-                if let Value::Object(str_ctor) = resolved_ctor {
-                    if let Some(proto_val) = obj_get_value(&str_ctor, &"prototype".into())?
-                        && let Value::Object(proto_obj) = &*proto_val.borrow()
-                    {
-                        obj.borrow_mut().prototype = Some(proto_obj.clone());
-                    }
-                }
+            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "String")? {
+                obj.borrow_mut().prototype = Some(proto_obj.clone());
             }
             Ok(Value::Object(obj))
         }
@@ -643,23 +625,13 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
             // Set internal prototype to BigInt.prototype if available
-            if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("BigInt".to_string())) {
-                if let Value::Object(bi_ctor) = resolved_ctor {
-                    if let Some(proto_val) = obj_get_value(&bi_ctor, &"prototype".into())?
-                        && let Value::Object(proto_obj) = &*proto_val.borrow()
-                    {
-                        log::trace!(
-                            "boxing BigInt: resolved bi_ctor={:p}, proto_obj={:p}",
-                            Rc::as_ptr(&bi_ctor),
-                            Rc::as_ptr(proto_obj)
-                        );
-                        obj.borrow_mut().prototype = Some(proto_obj.clone());
-                        log::trace!(
-                            "boxing BigInt: set obj.prototype = {:p}",
-                            obj.borrow().prototype.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null())
-                        );
-                    }
-                }
+            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "BigInt")? {
+                log::trace!("boxing BigInt: proto_obj={:p}", Rc::as_ptr(&proto_obj));
+                obj.borrow_mut().prototype = Some(proto_obj.clone());
+                log::trace!(
+                    "boxing BigInt: set obj.prototype = {:p}",
+                    obj.borrow().prototype.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null())
+                );
             }
             Ok(Value::Object(obj))
         }
@@ -704,14 +676,8 @@ pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Number(num_val))?;
     // Set internal prototype to Number.prototype if available
-    if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("Number".to_string())) {
-        if let Value::Object(num_ctor) = resolved_ctor {
-            if let Some(proto_val) = obj_get_value(&num_ctor, &"prototype".into())?
-                && let Value::Object(proto_obj) = &*proto_val.borrow()
-            {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
-        }
+    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Number")? {
+        obj.borrow_mut().prototype = Some(proto_obj.clone());
     }
     Ok(Value::Object(obj))
 }
@@ -740,14 +706,8 @@ pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -
     obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Boolean(bool_val))?;
     // Set internal prototype to Boolean.prototype if available
-    if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("Boolean".to_string())) {
-        if let Value::Object(bool_ctor) = resolved_ctor {
-            if let Some(proto_val) = obj_get_value(&bool_ctor, &"prototype".into())?
-                && let Value::Object(proto_obj) = &*proto_val.borrow()
-            {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
-        }
+    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Boolean")? {
+        obj.borrow_mut().prototype = Some(proto_obj.clone());
     }
     Ok(Value::Object(obj))
 }
@@ -795,14 +755,8 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_value(&obj, &"length".into(), Value::Number(str_val.len() as f64))?;
     obj_set_value(&obj, &"__value__".into(), Value::String(str_val))?;
     // Set internal prototype to String.prototype if available
-    if let Ok(resolved_ctor) = evaluate_expr(env, &Expr::Var("String".to_string())) {
-        if let Value::Object(str_ctor) = resolved_ctor {
-            if let Some(proto_val) = obj_get_value(&str_ctor, &"prototype".into())?
-                && let Value::Object(proto_obj) = &*proto_val.borrow()
-            {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
-        }
+    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "String")? {
+        obj.borrow_mut().prototype = Some(proto_obj.clone());
     }
     Ok(Value::Object(obj))
 }

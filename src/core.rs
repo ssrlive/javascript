@@ -1,5 +1,4 @@
-#![allow(non_snake_case)]
-#![allow(non_camel_case_types)]
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::error::JSError;
 use crate::js_promise::{PromiseState, run_event_loop};
@@ -112,6 +111,66 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     // Run the event loop to process any queued asynchronous tasks
     run_event_loop()?;
     Ok(v)
+}
+
+// Helper to ensure a constructor-like object exists in the root env.
+// Creates an object, marks it with `marker_key` (e.g. "__is_string_constructor")
+// creates an empty `prototype` object whose internal prototype points to
+// `Object.prototype` when available, stores the constructor in `env` under
+// `name`, and returns the constructor object pointer.
+pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: &str) -> Result<JSObjectDataPtr, JSError> {
+    // If already present and is an object, return it
+    if let Some(val_rc) = obj_get_value(env, &PropertyKey::String(name.to_string()))? {
+        if let Value::Object(obj) = &*val_rc.borrow() {
+            return Ok(obj.clone());
+        }
+    }
+
+    let ctor = Rc::new(RefCell::new(JSObjectData::new()));
+    // mark constructor
+    obj_set_value(&ctor, &PropertyKey::String(marker_key.to_string()), Value::Boolean(true))?;
+
+    // create prototype object
+    let proto = Rc::new(RefCell::new(JSObjectData::new()));
+    // link prototype.__proto__ to Object.prototype if available
+    if let Some(object_ctor_val) = obj_get_value(env, &PropertyKey::String("Object".to_string()))?
+        && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
+        && let Some(obj_proto_val) = obj_get_value(object_ctor, &PropertyKey::String("prototype".to_string()))?
+        && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
+    {
+        proto.borrow_mut().prototype = Some(obj_proto_obj.clone());
+    }
+
+    obj_set_value(&ctor, &PropertyKey::String("prototype".to_string()), Value::Object(proto))?;
+    obj_set_value(env, &PropertyKey::String(name.to_string()), Value::Object(ctor.clone()))?;
+    Ok(ctor)
+}
+
+// Helper to resolve a constructor's prototype object if present in `env`.
+pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Option<JSObjectDataPtr>, JSError> {
+    // First try to find a constructor object already stored in the environment
+    if let Some(val_rc) = obj_get_value(env, &PropertyKey::String(name.to_string()))? {
+        if let Value::Object(ctor_obj) = &*val_rc.borrow() {
+            if let Some(proto_val_rc) = obj_get_value(ctor_obj, &PropertyKey::String("prototype".to_string()))? {
+                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
+                    return Ok(Some(proto_obj.clone()));
+                }
+            }
+        }
+    }
+
+    // If not found, attempt to evaluate the variable to force lazy creation
+    match evaluate_expr(env, &Expr::Var(name.to_string())) {
+        Ok(Value::Object(ctor_obj)) => {
+            if let Some(proto_val_rc) = obj_get_value(&ctor_obj, &PropertyKey::String("prototype".to_string()))? {
+                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
+                    return Ok(Some(proto_obj.clone()));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
 }
 
 #[derive(Debug, Clone)]

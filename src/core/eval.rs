@@ -2073,29 +2073,10 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "String" {
-        // Return existing constructor from env if present
-        if let Some(val_rc) = obj_get_value(env, &"String".into())? {
-            let resolved = val_rc.borrow().clone();
-            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
-            return Ok(resolved);
-        }
-        // Create a simple String constructor object with a prototype
-        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
-        // mark this object as the String constructor
-        obj_set_value(&ctor, &"__is_string_constructor".into(), Value::Boolean(true))?;
-        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
-        // Link prototype.__proto__ to Object.prototype if available
-        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
-            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
-            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
-            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
-        {
-            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
-        }
-        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
-        obj_set_value(env, &"String".into(), Value::Object(ctor.clone()))?;
+        // Ensure a singleton String constructor object exists in the global env
+        let ctor = super::ensure_constructor_object(env, "String", "__is_string_constructor")?;
         let v = Value::Object(ctor);
-        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "Math" {
         let v = Value::Object(make_math_object()?);
@@ -2181,55 +2162,16 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
         Ok(v)
     } else if name == "BigInt" {
-        // Return existing constructor from env if present
-        if let Some(val_rc) = obj_get_value(env, &"BigInt".into())? {
-            let resolved = val_rc.borrow().clone();
-            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
-            return Ok(resolved);
-        }
-        // Create a simple BigInt constructor-like object with a prototype so boxed BigInts can reference it
-        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
-        // mark this object as the BigInt constructor so calls like BigInt('123')
-        // can be detected when the constructor object is invoked
-        obj_set_value(&ctor, &"__is_bigint_constructor".into(), Value::Boolean(true))?;
-        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
-        // Link prototype.__proto__ to Object.prototype if available
-        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
-            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
-            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
-            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
-        {
-            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
-        }
-        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
-        obj_set_value(env, &"BigInt".into(), Value::Object(ctor.clone()))?;
+        // Ensure a singleton BigInt constructor object exists in the global env
+        let ctor = super::ensure_constructor_object(env, "BigInt", "__is_bigint_constructor")?;
         let v = Value::Object(ctor);
-        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "Boolean" {
-        // Return existing constructor from env if present
-        if let Some(val_rc) = obj_get_value(env, &"Boolean".into())? {
-            let resolved = val_rc.borrow().clone();
-            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
-            return Ok(resolved);
-        }
-        // Create a simple Boolean constructor object with a prototype
-        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
-        // mark this object as the Boolean constructor
-        obj_set_value(&ctor, &"__is_boolean_constructor".into(), Value::Boolean(true))?;
-        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
-        // Link prototype.__proto__ to Object.prototype if available
-        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
-            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
-            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
-            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
-        {
-            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
-        }
-        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
-        obj_set_value(env, &"Boolean".into(), Value::Object(ctor.clone()))?;
+        // Ensure a singleton Boolean constructor object exists in the global env
+        let ctor = super::ensure_constructor_object(env, "Boolean", "__is_boolean_constructor")?;
         let v = Value::Object(ctor);
-        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "Date" {
         let v = Value::Function("Date".to_string());

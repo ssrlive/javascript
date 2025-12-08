@@ -180,16 +180,18 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     Ok(Value::Object(arr))
                 } else if let Value::Object(obj_map) = sep_val {
                     // Separator is a RegExp-like object
-                    let pattern = match obj_map.borrow().get(&"__regex".into()) {
-                        Some(val) => match &*val.borrow() {
+                    let pattern_opt = crate::core::get_own_property(&obj_map, &"__regex".into());
+                    let pattern = match pattern_opt {
+                        Some(val_rc) => match &*val_rc.borrow() {
                             Value::String(s) => String::from_utf16_lossy(s),
                             _ => return Err(raise_eval_error!("split: invalid regex pattern")),
                         },
                         None => return Err(raise_eval_error!("split: invalid regex object")),
                     };
 
-                    let flags = match obj_map.borrow().get(&"__flags".into()) {
-                        Some(val) => match &*val.borrow() {
+                    let flags_opt = crate::core::get_own_property(&obj_map, &"__flags".into());
+                    let flags = match flags_opt {
+                        Some(val_rc) => match &*val_rc.borrow() {
                             Value::String(s) => String::from_utf16_lossy(s),
                             _ => String::new(),
                         },

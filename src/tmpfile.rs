@@ -64,7 +64,10 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
     if obj_map.borrow().contains_key(&"__file_id".into()) {
-        let file_id_val = obj_map.borrow().get(&"__file_id".into()).unwrap().borrow().clone();
+        let file_id_val = crate::core::get_own_property(obj_map, &"__file_id".into())
+            .unwrap()
+            .borrow()
+            .clone();
         let file_id = match file_id_val {
             Value::Number(n) => n as u64,
             _ => {

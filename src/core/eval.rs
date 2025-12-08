@@ -303,30 +303,32 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
 
                     // Handle exports in module context
-                    if let Some(exports_val) = env.borrow().get(&crate::core::PropertyKey::String("exports".to_string()))
-                        && let Value::Object(exports_obj) = &*exports_val.borrow()
-                    {
-                        for specifier in specifiers {
-                            match specifier {
-                                crate::core::statement::ExportSpecifier::Named(name, alias) => {
-                                    // For named exports, we need to find the value in current scope
-                                    // For now, assume it's a variable in the environment
-                                    if let Some(var_val) = env.borrow().get(&crate::core::PropertyKey::String(name.clone())) {
-                                        let export_name = alias.as_ref().unwrap_or(name).clone();
-                                        exports_obj.borrow_mut().insert(
-                                            crate::core::PropertyKey::String(export_name),
-                                            Rc::new(RefCell::new(var_val.borrow().clone())),
-                                        );
-                                    } else {
-                                        return Err(crate::raise_eval_error!(format!("Export '{}' not found in scope", name)));
+                    let exports_opt = crate::core::get_own_property(env, &crate::core::PropertyKey::String("exports".to_string()));
+                    if let Some(exports_val) = exports_opt {
+                        if let Value::Object(exports_obj) = &*exports_val.borrow() {
+                            for specifier in specifiers {
+                                match specifier {
+                                    crate::core::statement::ExportSpecifier::Named(name, alias) => {
+                                        // For named exports, we need to find the value in current scope
+                                        // For now, assume it's a variable in the environment
+                                        let var_opt = crate::core::get_own_property(env, &crate::core::PropertyKey::String(name.clone()));
+                                        if let Some(var_val) = var_opt {
+                                            let export_name = alias.as_ref().unwrap_or(name).clone();
+                                            exports_obj.borrow_mut().insert(
+                                                crate::core::PropertyKey::String(export_name),
+                                                Rc::new(RefCell::new(var_val.borrow().clone())),
+                                            );
+                                        } else {
+                                            return Err(crate::raise_eval_error!(format!("Export '{}' not found in scope", name)));
+                                        }
                                     }
-                                }
-                                crate::core::statement::ExportSpecifier::Default(expr) => {
-                                    // Evaluate the default export expression
-                                    let val = evaluate_expr(env, expr)?;
-                                    exports_obj
-                                        .borrow_mut()
-                                        .insert(crate::core::PropertyKey::String("default".to_string()), Rc::new(RefCell::new(val)));
+                                    crate::core::statement::ExportSpecifier::Default(expr) => {
+                                        // Evaluate the default export expression
+                                        let val = evaluate_expr(env, expr)?;
+                                        exports_obj
+                                            .borrow_mut()
+                                            .insert(crate::core::PropertyKey::String("default".to_string()), Rc::new(RefCell::new(val)));
+                                    }
                                 }
                             }
                         }
@@ -4027,44 +4029,51 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
         // Accessing other properties on string primitives should return undefined
         Value::String(_) => Ok(Value::Undefined),
         // Special cases for wrapped Map and Set objects
-        Value::Object(obj_map) if obj_map.borrow().contains_key(&"__map__".into()) && prop == "size" => {
-            if let Some(map_val) = obj_map.borrow().get(&"__map__".into())
-                && let Value::Map(map) = &*map_val.borrow()
-            {
-                Ok(Value::Number(map.borrow().entries.len() as f64))
+        Value::Object(obj_map) if prop == "size" && crate::core::get_own_property(&obj_map, &"__map__".into()).is_some() => {
+            if let Some(map_val) = crate::core::get_own_property(&obj_map, &"__map__".into()) {
+                if let Value::Map(map) = &*map_val.borrow() {
+                    Ok(Value::Number(map.borrow().entries.len() as f64))
+                } else {
+                    Ok(Value::Undefined)
+                }
             } else {
                 Ok(Value::Undefined)
             }
         }
-        Value::Object(obj_map) if obj_map.borrow().contains_key(&"__set__".into()) && prop == "size" => {
-            if let Some(set_val) = obj_map.borrow().get(&"__set__".into())
-                && let Value::Set(set) = &*set_val.borrow()
-            {
-                Ok(Value::Number(set.borrow().values.len() as f64))
+        Value::Object(obj_map) if prop == "size" && crate::core::get_own_property(&obj_map, &"__set__".into()).is_some() => {
+            if let Some(set_val) = crate::core::get_own_property(&obj_map, &"__set__".into()) {
+                if let Value::Set(set) = &*set_val.borrow() {
+                    Ok(Value::Number(set.borrow().values.len() as f64))
+                } else {
+                    Ok(Value::Undefined)
+                }
             } else {
                 Ok(Value::Undefined)
             }
         }
         // Special cases for wrapped Generator objects
         Value::Object(obj_map)
-            if obj_map.borrow().contains_key(&"__generator__".into()) && (prop == "next" || prop == "return" || prop == "throw") =>
+            if (prop == "next" || prop == "return" || prop == "throw")
+                && crate::core::get_own_property(&obj_map, &"__generator__".into()).is_some() =>
         {
             Ok(Value::Function(format!("Generator.prototype.{}", prop)))
         }
         // Special cases for DataView objects
         Value::Object(obj_map)
-            if obj_map.borrow().contains_key(&"__dataview".into())
-                && (prop == "buffer" || prop == "byteLength" || prop == "byteOffset") =>
+            if (prop == "buffer" || prop == "byteLength" || prop == "byteOffset")
+                && crate::core::get_own_property(&obj_map, &"__dataview".into()).is_some() =>
         {
-            if let Some(dv_val) = obj_map.borrow().get(&"__dataview".into())
-                && let Value::DataView(dv) = &*dv_val.borrow()
-            {
-                let data_view = dv.borrow();
-                match prop {
-                    "buffer" => Ok(Value::ArrayBuffer(data_view.buffer.clone())),
-                    "byteLength" => Ok(Value::Number(data_view.byte_length as f64)),
-                    "byteOffset" => Ok(Value::Number(data_view.byte_offset as f64)),
-                    _ => Ok(Value::Undefined),
+            if let Some(dv_val) = crate::core::get_own_property(&obj_map, &"__dataview".into()) {
+                if let Value::DataView(dv) = &*dv_val.borrow() {
+                    let data_view = dv.borrow();
+                    match prop {
+                        "buffer" => Ok(Value::ArrayBuffer(data_view.buffer.clone())),
+                        "byteLength" => Ok(Value::Number(data_view.byte_length as f64)),
+                        "byteOffset" => Ok(Value::Number(data_view.byte_offset as f64)),
+                        _ => Ok(Value::Undefined),
+                    }
+                } else {
+                    Ok(Value::Undefined)
                 }
             } else {
                 Ok(Value::Undefined)
@@ -4287,20 +4296,24 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             // and Object.prototype functions act as fallbacks.
             (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args),
             (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
-            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__map__".into()) => {
-                if let Some(map_val) = obj_map.borrow().get(&"__map__".into())
-                    && let Value::Map(map) = &*map_val.borrow()
-                {
-                    crate::js_map::handle_map_instance_method(map, method, args, env)
+            (Value::Object(obj_map), method) if crate::core::get_own_property(&obj_map, &"__map__".into()).is_some() => {
+                if let Some(map_val) = crate::core::get_own_property(&obj_map, &"__map__".into()) {
+                    if let Value::Map(map) = &*map_val.borrow() {
+                        crate::js_map::handle_map_instance_method(map, method, args, env)
+                    } else {
+                        Err(raise_eval_error!("Invalid Map object"))
+                    }
                 } else {
                     Err(raise_eval_error!("Invalid Map object"))
                 }
             }
-            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__set__".into()) => {
-                if let Some(set_val) = obj_map.borrow().get(&"__set__".into())
-                    && let Value::Set(set) = &*set_val.borrow()
-                {
-                    crate::js_set::handle_set_instance_method(set, method, args, env)
+            (Value::Object(obj_map), method) if crate::core::get_own_property(&obj_map, &"__set__".into()).is_some() => {
+                if let Some(set_val) = crate::core::get_own_property(&obj_map, &"__set__".into()) {
+                    if let Value::Set(set) = &*set_val.borrow() {
+                        crate::js_set::handle_set_instance_method(set, method, args, env)
+                    } else {
+                        Err(raise_eval_error!("Invalid Set object"))
+                    }
                 } else {
                     Err(raise_eval_error!("Invalid Set object"))
                 }
@@ -4310,11 +4323,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::WeakMap(weakmap), method) => crate::js_weakmap::handle_weakmap_instance_method(&weakmap, method, args, env),
             (Value::WeakSet(weakset), method) => crate::js_weakset::handle_weakset_instance_method(&weakset, method, args, env),
             (Value::Generator(generator), method) => crate::js_generator::handle_generator_instance_method(&generator, method, args, env),
-            (Value::Object(obj_map), method) if obj_map.borrow().contains_key(&"__generator__".into()) => {
-                if let Some(gen_val) = obj_map.borrow().get(&"__generator__".into())
-                    && let Value::Generator(generator) = &*gen_val.borrow()
-                {
-                    crate::js_generator::handle_generator_instance_method(generator, method, args, env)
+            (Value::Object(obj_map), method) if crate::core::get_own_property(&obj_map, &"__generator__".into()).is_some() => {
+                if let Some(gen_val) = crate::core::get_own_property(&obj_map, &"__generator__".into()) {
+                    if let Value::Generator(generator) = &*gen_val.borrow() {
+                        crate::js_generator::handle_generator_instance_method(generator, method, args, env)
+                    } else {
+                        Err(raise_eval_error!("Invalid Generator object"))
+                    }
                 } else {
                     Err(raise_eval_error!("Invalid Generator object"))
                 }
@@ -4964,7 +4979,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                     if let Expr::Function(_params, body) = func_expr.as_ref() {
                         // Check if property already exists
                         let pk = key_to_property_key(key);
-                        let existing_opt = obj.borrow().get(&pk);
+                        let existing_opt = crate::core::get_own_property(&obj, &pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -5002,7 +5017,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                     if let Expr::Function(params, body) = func_expr.as_ref() {
                         // Check if property already exists
                         let pk = key_to_property_key(key);
-                        let existing_opt = obj.borrow().get(&pk);
+                        let existing_opt = crate::core::get_own_property(&obj, &pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
                             if let Value::Property {
@@ -5041,7 +5056,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                     let value = evaluate_expr(env, value_expr)?;
                     // Check if property already exists
                     let pk = key_to_property_key(key);
-                    let existing_rc = obj.borrow().get(&pk);
+                    let existing_rc = crate::core::get_own_property(&obj, &pk);
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
                         if let Value::Property {

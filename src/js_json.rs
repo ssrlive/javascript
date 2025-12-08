@@ -105,14 +105,16 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                 log::debug!("js_value_to_json_value: array with properties.len() = {}", len);
                 let mut arr = Vec::new();
                 for i in 0..len {
-                    if let Some(val) = obj.borrow().get(&i.to_string().into()) {
-                        if let Some(json_val) = js_value_to_json_value(val.borrow().clone()) {
+                    let val_opt = crate::core::get_own_property(&obj, &i.to_string().into());
+                    if let Some(val_rc) = val_opt {
+                        let val_clone = val_rc.borrow().clone();
+                        if let Some(json_val) = js_value_to_json_value(val_clone) {
                             arr.push(json_val);
                         } else {
                             log::debug!(
                                 "js_value_to_json_value: array element {} could not be serialized: {:?}",
                                 i,
-                                val.borrow().clone()
+                                val_rc.borrow().clone()
                             );
                             return None;
                         }

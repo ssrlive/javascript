@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+
 use num_bigint::BigInt;
 use std::{cell::RefCell, rc::Rc};
 
@@ -811,17 +813,20 @@ pub fn value_to_sort_string(val: &Value) -> String {
 // Helper accessors for objects and environments
 pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     // Check if this object is a proxy wrapper
-    if let Some(proxy_val) = js_obj.borrow().get(&"__proxy__".into())
-        && let Value::Proxy(proxy) = &*proxy_val.borrow()
-    {
-        return crate::js_proxy::proxy_get_property(proxy, key);
+    // Avoid holding a Ref borrow across calls by extracting the optional Rc first.
+    let proxy_opt = js_obj.borrow().get(&"__proxy__".into());
+    if let Some(proxy_val_rc) = proxy_opt {
+        if let Value::Proxy(proxy) = &*proxy_val_rc.borrow() {
+            return crate::js_proxy::proxy_get_property(proxy, key);
+        }
     }
 
     // Search own properties and then walk the prototype chain until we find
     // a matching property or run out of prototypes.
     let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
     while let Some(cur) = current {
-        if let Some(val) = cur.borrow().get(key) {
+        let val_opt = cur.borrow().get(key);
+        if let Some(val) = val_opt {
             // Found an own/inherited value on `cur`. For getters we bind `this` to
             // the original object (`js_obj`) as per JS semantics.
             let val_clone = val.borrow().clone();
@@ -926,209 +931,212 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             }
 
             // Map default iterator
-            if let Some(map_val) = js_obj.borrow().get(&"__map__".into())
-                && let Value::Map(map_rc) = &*map_val.borrow()
-            {
-                let map_entries = map_rc.borrow().entries.clone();
+            let map_opt = js_obj.borrow().get(&"__map__".into());
+            if let Some(map_val) = map_opt {
+                if let Value::Map(map_rc) = &*map_val.borrow() {
+                    let map_entries = map_rc.borrow().entries.clone();
 
-                // next function body for Map iteration (returns [key, value] pairs)
-                let next_body = vec![
-                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
-                    Statement::If(
-                        Expr::Binary(
-                            Box::new(Expr::Var("idx".to_string())),
-                            BinaryOp::LessThan,
-                            Box::new(Expr::Value(Value::Number(map_entries.len() as f64))),
-                        ),
-                        vec![
-                            Statement::Let(
-                                "entry".to_string(),
-                                Some(Expr::Array(vec![
-                                    Expr::Property(
-                                        Box::new(Expr::Index(
-                                            Box::new(Expr::Var("__entries".to_string())),
-                                            Box::new(Expr::Var("idx".to_string())),
-                                        )),
-                                        "0".to_string(),
-                                    ),
-                                    Expr::Property(
-                                        Box::new(Expr::Index(
-                                            Box::new(Expr::Var("__entries".to_string())),
-                                            Box::new(Expr::Var("idx".to_string())),
-                                        )),
-                                        "1".to_string(),
-                                    ),
-                                ])),
+                    // next function body for Map iteration (returns [key, value] pairs)
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Value(Value::Number(map_entries.len() as f64))),
                             ),
-                            Statement::Expr(Expr::Assign(
-                                Box::new(Expr::Var("__i".to_string())),
-                                Box::new(Expr::Binary(
+                            vec![
+                                Statement::Let(
+                                    "entry".to_string(),
+                                    Some(Expr::Array(vec![
+                                        Expr::Property(
+                                            Box::new(Expr::Index(
+                                                Box::new(Expr::Var("__entries".to_string())),
+                                                Box::new(Expr::Var("idx".to_string())),
+                                            )),
+                                            "0".to_string(),
+                                        ),
+                                        Expr::Property(
+                                            Box::new(Expr::Index(
+                                                Box::new(Expr::Var("__entries".to_string())),
+                                                Box::new(Expr::Var("idx".to_string())),
+                                            )),
+                                            "1".to_string(),
+                                        ),
+                                    ])),
+                                ),
+                                Statement::Expr(Expr::Assign(
                                     Box::new(Expr::Var("__i".to_string())),
-                                    BinaryOp::Add,
-                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("__i".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
                                 )),
-                            )),
-                            Statement::Return(Some(Expr::Object(vec![
-                                ("value".to_string(), Expr::Var("entry".to_string())),
-                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
-                            ]))),
-                        ],
-                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
-                            "done".to_string(),
-                            Expr::Value(Value::Boolean(true)),
-                        )])))]),
-                    ),
-                ];
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("entry".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
 
-                let map_iter_body = vec![
-                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                    Statement::Return(Some(Expr::Object(vec![(
-                        "next".to_string(),
-                        Expr::Function(Vec::new(), next_body),
-                    )]))),
-                ];
+                    let map_iter_body = vec![
+                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                        Statement::Return(Some(Expr::Object(vec![(
+                            "next".to_string(),
+                            Expr::Function(Vec::new(), next_body),
+                        )]))),
+                    ];
 
-                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
-                // Store map entries in the closure environment
-                let mut entries_obj = JSObjectData::new();
-                for (i, (key, value)) in map_entries.iter().enumerate() {
-                    let mut entry_obj = JSObjectData::new();
-                    entry_obj.insert("0".into(), Rc::new(RefCell::new(key.clone())));
-                    entry_obj.insert("1".into(), Rc::new(RefCell::new(value.clone())));
-                    entries_obj.insert(
-                        i.to_string().into(),
-                        Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entry_obj))))),
+                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    // Store map entries in the closure environment
+                    let mut entries_obj = JSObjectData::new();
+                    for (i, (key, value)) in map_entries.iter().enumerate() {
+                        let mut entry_obj = JSObjectData::new();
+                        entry_obj.insert("0".into(), Rc::new(RefCell::new(key.clone())));
+                        entry_obj.insert("1".into(), Rc::new(RefCell::new(value.clone())));
+                        entries_obj.insert(
+                            i.to_string().into(),
+                            Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entry_obj))))),
+                        );
+                    }
+                    captured_env.borrow_mut().insert(
+                        "__entries".into(),
+                        Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entries_obj))))),
                     );
-                }
-                captured_env.borrow_mut().insert(
-                    "__entries".into(),
-                    Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entries_obj))))),
-                );
 
-                let closure = Value::Closure(Vec::new(), map_iter_body, captured_env.clone());
-                return Ok(Some(Rc::new(RefCell::new(closure))));
+                    let closure = Value::Closure(Vec::new(), map_iter_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
+                }
             }
 
             // Set default iterator
-            if let Some(set_val) = js_obj.borrow().get(&"__set__".into())
-                && let Value::Set(set_rc) = &*set_val.borrow()
-            {
-                let set_values = set_rc.borrow().values.clone();
-                // next function body for Set iteration (returns values)
-                let next_body = vec![
-                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
-                    Statement::If(
-                        Expr::Binary(
-                            Box::new(Expr::Var("idx".to_string())),
-                            BinaryOp::LessThan,
-                            Box::new(Expr::Value(Value::Number(set_values.len() as f64))),
-                        ),
-                        vec![
-                            Statement::Let(
-                                "value".to_string(),
-                                Some(Expr::Index(
-                                    Box::new(Expr::Var("__values".to_string())),
-                                    Box::new(Expr::Var("idx".to_string())),
-                                )),
+            let set_opt = js_obj.borrow().get(&"__set__".into());
+            if let Some(set_val) = set_opt {
+                if let Value::Set(set_rc) = &*set_val.borrow() {
+                    let set_values = set_rc.borrow().values.clone();
+                    // next function body for Set iteration (returns values)
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Value(Value::Number(set_values.len() as f64))),
                             ),
-                            Statement::Expr(Expr::Assign(
-                                Box::new(Expr::Var("__i".to_string())),
-                                Box::new(Expr::Binary(
-                                    Box::new(Expr::Var("idx".to_string())),
-                                    BinaryOp::Add,
-                                    Box::new(Expr::Value(Value::Number(1.0))),
+                            vec![
+                                Statement::Let(
+                                    "value".to_string(),
+                                    Some(Expr::Index(
+                                        Box::new(Expr::Var("__values".to_string())),
+                                        Box::new(Expr::Var("idx".to_string())),
+                                    )),
+                                ),
+                                Statement::Expr(Expr::Assign(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("idx".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
                                 )),
-                            )),
-                            Statement::Return(Some(Expr::Object(vec![
-                                ("value".to_string(), Expr::Var("value".to_string())),
-                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
-                            ]))),
-                        ],
-                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
-                            "done".to_string(),
-                            Expr::Value(Value::Boolean(true)),
-                        )])))]),
-                    ),
-                ];
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("value".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
 
-                let set_iter_body = vec![
-                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                    Statement::Return(Some(Expr::Object(vec![(
-                        "next".to_string(),
-                        Expr::Function(Vec::new(), next_body),
-                    )]))),
-                ];
+                    let set_iter_body = vec![
+                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                        Statement::Return(Some(Expr::Object(vec![(
+                            "next".to_string(),
+                            Expr::Function(Vec::new(), next_body),
+                        )]))),
+                    ];
 
-                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
-                // Store set values in the closure environment
-                let mut values_obj = JSObjectData::new();
-                for (i, value) in set_values.iter().enumerate() {
-                    values_obj.insert(i.to_string().into(), Rc::new(RefCell::new(value.clone())));
+                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    // Store set values in the closure environment
+                    let mut values_obj = JSObjectData::new();
+                    for (i, value) in set_values.iter().enumerate() {
+                        values_obj.insert(i.to_string().into(), Rc::new(RefCell::new(value.clone())));
+                    }
+                    captured_env.borrow_mut().insert(
+                        "__values".into(),
+                        Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(values_obj))))),
+                    );
+
+                    let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
-                captured_env.borrow_mut().insert(
-                    "__values".into(),
-                    Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(values_obj))))),
-                );
-
-                let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone());
-                return Ok(Some(Rc::new(RefCell::new(closure))));
             }
 
             // Wrapped String iterator (for String objects)
-            if let Some(wrapped) = js_obj.borrow().get(&"__value__".into())
-                && let Value::String(_) = &*wrapped.borrow()
-            {
-                let next_body = vec![
-                    Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
-                    Statement::If(
-                        Expr::Binary(
-                            Box::new(Expr::Var("idx".to_string())),
-                            BinaryOp::LessThan,
-                            Box::new(Expr::Property(Box::new(Expr::Var("__s".to_string())), "length".to_string())),
-                        ),
-                        vec![
-                            Statement::Let(
-                                "v".to_string(),
-                                Some(Expr::Index(
-                                    Box::new(Expr::Var("__s".to_string())),
-                                    Box::new(Expr::Var("idx".to_string())),
-                                )),
+            let wrapped_opt = js_obj.borrow().get(&"__value__".into());
+            if let Some(wrapped) = wrapped_opt {
+                if let Value::String(_) = &*wrapped.borrow() {
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Property(Box::new(Expr::Var("__s".to_string())), "length".to_string())),
                             ),
-                            Statement::Expr(Expr::Assign(
-                                Box::new(Expr::Var("__i".to_string())),
-                                Box::new(Expr::Binary(
-                                    Box::new(Expr::Var("idx".to_string())),
-                                    BinaryOp::Add,
-                                    Box::new(Expr::Value(Value::Number(1.0))),
+                            vec![
+                                Statement::Let(
+                                    "v".to_string(),
+                                    Some(Expr::Index(
+                                        Box::new(Expr::Var("__s".to_string())),
+                                        Box::new(Expr::Var("idx".to_string())),
+                                    )),
+                                ),
+                                Statement::Expr(Expr::Assign(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("idx".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
                                 )),
-                            )),
-                            Statement::Return(Some(Expr::Object(vec![
-                                ("value".to_string(), Expr::Var("v".to_string())),
-                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
-                            ]))),
-                        ],
-                        Some(vec![Statement::Return(Some(Expr::Object(vec![(
-                            "done".to_string(),
-                            Expr::Value(Value::Boolean(true)),
-                        )])))]),
-                    ),
-                ];
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("v".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
 
-                let str_iter_body = vec![
-                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                    Statement::Return(Some(Expr::Object(vec![(
-                        "next".to_string(),
-                        Expr::Function(Vec::new(), next_body),
-                    )]))),
-                ];
+                    let str_iter_body = vec![
+                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+                        Statement::Return(Some(Expr::Object(vec![(
+                            "next".to_string(),
+                            Expr::Function(Vec::new(), next_body),
+                        )]))),
+                    ];
 
-                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
-                captured_env.borrow_mut().insert(
-                    PropertyKey::String("__s".to_string()),
-                    Rc::new(RefCell::new(wrapped.borrow().clone())),
-                );
-                let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
-                return Ok(Some(Rc::new(RefCell::new(closure))));
+                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    captured_env.borrow_mut().insert(
+                        PropertyKey::String("__s".to_string()),
+                        Rc::new(RefCell::new(wrapped.borrow().clone())),
+                    );
+                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
+                }
             }
         }
         if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag")
@@ -1138,7 +1146,8 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             if is_array(js_obj) {
                 return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Array"))))));
             }
-            if let Some(wrapped) = js_obj.borrow().get(&"__value__".into()) {
+            let wrapped_opt2 = js_obj.borrow().get(&"__value__".into());
+            if let Some(wrapped) = wrapped_opt2 {
                 match &*wrapped.borrow() {
                     Value::String(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("String")))))),
                     Value::Number(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Number")))))),
@@ -1157,14 +1166,15 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
 
 pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
     // Check if this object is a proxy wrapper
-    if let Some(proxy_val) = js_obj.borrow().get(&"__proxy__".into())
-        && let Value::Proxy(proxy) = &*proxy_val.borrow()
-    {
-        let success = crate::js_proxy::proxy_set_property(proxy, key, val)?;
-        if !success {
-            return Err(raise_eval_error!("Proxy set trap returned false"));
+    let proxy_opt = js_obj.borrow().get(&"__proxy__".into());
+    if let Some(proxy_val) = proxy_opt {
+        if let Value::Proxy(proxy) = &*proxy_val.borrow() {
+            let success = crate::js_proxy::proxy_set_property(proxy, key, val)?;
+            if !success {
+                return Err(raise_eval_error!("Proxy set trap returned false"));
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     // Check if there's a setter for this property
@@ -1210,10 +1220,11 @@ pub fn obj_set_rc(map: &JSObjectDataPtr, key: &PropertyKey, val_rc: Rc<RefCell<V
 
 pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSError> {
     // Check if this object is a proxy wrapper
-    if let Some(proxy_val) = map.borrow().get(&"__proxy__".into())
-        && let Value::Proxy(proxy) = &*proxy_val.borrow()
-    {
-        return crate::js_proxy::proxy_delete_property(proxy, key);
+    let proxy_opt = map.borrow().get(&"__proxy__".into());
+    if let Some(proxy_val) = proxy_opt {
+        if let Value::Proxy(proxy) = &*proxy_val.borrow() {
+            return crate::js_proxy::proxy_delete_property(proxy, key);
+        }
     }
 
     map.borrow_mut().remove(key);
@@ -1222,6 +1233,13 @@ pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSEr
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {
     env.borrow().get(&key.as_ref().into())
+}
+
+/// Helper to get an own property Rc<Value> from an object without holding
+/// the object's borrow across later inner borrows. This centralizes the
+/// `obj.borrow().get(key)` pattern so callers can safely borrow the inner Rc.
+pub fn get_own_property(obj: &JSObjectDataPtr, key: &PropertyKey) -> Option<Rc<RefCell<Value>>> {
+    obj.borrow().get(key)
 }
 
 pub fn env_set<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Value) -> Result<(), JSError> {

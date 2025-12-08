@@ -1434,7 +1434,7 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> 
 
 /// Check if an object looks like an array (has length and consecutive numeric indices)
 pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
-    if let Some(length_rc) = obj.borrow().get(&"length".into()) {
+    if let Some(length_rc) = crate::core::get_own_property(obj, &"length".into()) {
         if let Value::Number(len) = *length_rc.borrow() {
             let len = len as usize;
             // Check if all indices from 0 to len-1 exist
@@ -1462,7 +1462,7 @@ pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
-    if let Some(length_rc) = obj.borrow().get(&"length".into())
+    if let Some(length_rc) = crate::core::get_own_property(obj, &"length".into())
         && let Value::Number(len) = *length_rc.borrow()
         && len >= 0.0
         && len == len.floor()

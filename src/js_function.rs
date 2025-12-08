@@ -76,6 +76,17 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             Ok(promise_obj)
         }
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
+        "Object.prototype.valueOf" => {
+            // When the prototype valueOf function is invoked as a global
+            // function, `this` is provided in the `env`. Delegate to the
+            // same helper used for method calls so boxed primitives and
+            // object behavior are consistent.
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return crate::js_object::handle_value_of_method(&this_val, args);
+            }
+            Err(raise_eval_error!("Object.prototype.valueOf called without this"))
+        }
         "String" => {
             // String() constructor
             if args.len() == 1 {

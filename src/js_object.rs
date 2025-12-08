@@ -83,34 +83,6 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }
             }
         }
-        "assign" => {
-            if args.is_empty() {
-                return Err(raise_type_error!("Object.assign requires at least one argument"));
-            }
-            let target_val = evaluate_expr(env, &args[0])?;
-            let target_obj = match target_val {
-                Value::Object(obj) => obj,
-                _ => {
-                    return Err(raise_type_error!("Object.assign target must be an object"));
-                }
-            };
-
-            // Copy properties from source objects to target
-            for arg in &args[1..] {
-                let source_val = evaluate_expr(env, arg)?;
-                if let Value::Object(source_obj) = source_val {
-                    for (key, value) in source_obj.borrow().properties.iter() {
-                        if *key != "length".into() && *key != "__proto__".into() {
-                            // Skip array length and prototype properties
-                            obj_set_value(&target_obj, key, value.borrow().clone())?;
-                        }
-                    }
-                }
-                // If source is not an object, skip it (like in JS)
-            }
-
-            Ok(Value::Object(target_obj))
-        }
         "create" => {
             if args.is_empty() {
                 return Err(raise_type_error!("Object.create requires at least one argument"));
@@ -269,6 +241,77 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }
                 _ => Err(raise_type_error!("Object.getOwnPropertyDescriptors called on non-object")),
             }
+        }
+        "assign" => {
+            if args.is_empty() {
+                return Err(raise_type_error!("Object.assign requires at least one argument"));
+            }
+            // Evaluate target and apply ToObject semantics: throw on undefined,
+            // box primitives into corresponding object wrappers, or use the
+            // object directly.
+            let target_val = evaluate_expr(env, &args[0])?;
+            let target_obj = match target_val {
+                Value::Object(o) => o,
+                Value::Undefined => return Err(raise_type_error!("Object.assign target cannot be undefined or null")),
+                Value::Number(n) => {
+                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&obj, &"valueOf".into(), Value::Function("Number_valueOf".to_string()))?;
+                    obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
+                    obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
+                    obj
+                }
+                Value::Boolean(b) => {
+                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&obj, &"valueOf".into(), Value::Function("Boolean_valueOf".to_string()))?;
+                    obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
+                    obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
+                    obj
+                }
+                Value::String(s) => {
+                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&obj, &"valueOf".into(), Value::Function("String_valueOf".to_string()))?;
+                    obj_set_value(&obj, &"toString".into(), Value::Function("String_toString".to_string()))?;
+                    obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
+                    obj_set_value(&obj, &"__value__".into(), Value::String(s.clone()))?;
+                    obj
+                }
+                Value::BigInt(h) => {
+                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
+                    obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
+                    obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
+                    obj
+                }
+                Value::Symbol(sd) => {
+                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
+                    obj_set_value(&obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
+                    obj_set_value(&obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
+                    obj
+                }
+                // For other types (functions, closures, etc.), create a plain object
+                _ => Rc::new(RefCell::new(JSObjectData::new())),
+            };
+
+            // Iterate sources
+            for src_expr in args.iter().skip(1) {
+                let src_val = evaluate_expr(env, src_expr)?;
+                if let Value::Object(source_obj) = src_val {
+                    for (key, _val_rc) in source_obj.borrow().properties.iter() {
+                        if *key != "length".into() && *key != "__proto__".into() {
+                            // Only copy string-keyed own properties
+                            if let PropertyKey::String(_) = key
+                                && let Some(v_rc) = obj_get_value(&source_obj, key)?
+                            {
+                                obj_set_value(&target_obj, key, v_rc.borrow().clone())?;
+                            }
+                        }
+                    }
+                }
+                // non-objects are skipped, like in JS
+            }
+
+            Ok(Value::Object(target_obj))
         }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
     }
@@ -429,6 +472,51 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_value(obj_map, &"__value__".into())? {
                 return Ok(wrapped_val.borrow().clone());
+            }
+            // If object defines a user valueOf function, call it and use its
+            // primitive result if it returns a primitive.
+            if let Some(method_rc) = obj_get_value(obj_map, &"valueOf".into())? {
+                let method_val = method_rc.borrow().clone();
+                match method_val {
+                    Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        func_env.borrow_mut().is_function_scope = true;
+                        // bind `this` to the object
+                        crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                        let result = crate::core::evaluate_statements(&func_env, &body)?;
+                        if matches!(
+                            result,
+                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                        ) {
+                            return Ok(result);
+                        }
+                    }
+                    Value::Function(func_name) => {
+                        // If the function is one of the Object.prototype builtins,
+                        // handle it directly here to avoid recursion back into
+                        // `handle_global_function` which would call us again.
+                        if func_name == "Object.prototype.valueOf" {
+                            return Ok(Value::Object(obj_map.clone()));
+                        }
+                        if func_name == "Object.prototype.toString" {
+                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args);
+                        }
+
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().is_function_scope = true;
+                        // bind `this` to the object
+                        crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                        let res = crate::js_function::handle_global_function(&func_name, &[], &func_env)?;
+                        if matches!(
+                            res,
+                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                        ) {
+                            return Ok(res);
+                        }
+                    }
+                    _ => {}
+                }
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
             if obj_map.borrow().contains_key(&"__timestamp".into()) {

@@ -69,3 +69,54 @@ fn bigint_asintn_asuintn_basic() {
         other => panic!("expected BigInt result for 2^63 -> -2^63, got {:?}", other),
     }
 }
+
+#[test]
+fn bigint_asintn_conversion_cases() {
+    // String input
+    let r1 = evaluate_script("BigInt.asUintN(5, '15')");
+    match r1 {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "15"),
+        other => panic!("expected BigInt result for asUintN string input, got {:?}", other),
+    }
+
+    // Number input (integer float)
+    let r2 = evaluate_script("BigInt.asUintN(3, 7.0)");
+    match r2 {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "7"),
+        other => panic!("expected BigInt result for asUintN numeric integer input, got {:?}", other),
+    }
+
+    // Number input (non-integer) should fail
+    let r3 = evaluate_script("BigInt.asUintN(3, 7.5)");
+    assert!(r3.is_err(), "expected error for non-integer numeric input");
+
+    // Boolean inputs
+    let r4 = evaluate_script("BigInt.asUintN(4, true)");
+    match r4 {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "1"),
+        other => panic!("expected BigInt result for asUintN boolean true, got {:?}", other),
+    }
+    let r5 = evaluate_script("BigInt.asUintN(4, false)");
+    match r5 {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "0"),
+        other => panic!("expected BigInt result for asUintN boolean false, got {:?}", other),
+    }
+
+    // Object with valueOf returning BigInt
+    let r6 = evaluate_script("BigInt.asUintN(4, { valueOf: function(){ return 7n; } })");
+    match r6 {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "7"),
+        other => panic!("expected BigInt result for asUintN object valueOf BigInt, got {:?}", other),
+    }
+
+    // Object with valueOf returning Number
+    let r6b = evaluate_script("BigInt.asUintN(4, { valueOf: function(){ return 7; } })");
+    match r6b {
+        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "7"),
+        other => panic!("expected BigInt result for asUintN object valueOf Number, got {:?}", other),
+    }
+
+    // bits not integer -> error
+    let r7 = evaluate_script("BigInt.asUintN(3.5, 7n)");
+    assert!(r7.is_err(), "expected error for non-integer bits argument");
+}

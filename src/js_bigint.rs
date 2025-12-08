@@ -133,7 +133,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     }
 
     if method == "asUintN" {
-        return Ok(Value::BigInt(BigInt::from(r).into()));
+        return Ok(Value::BigInt(r.into()));
     }
 
     // asIntN: if r >= 2^(bits-1) then r -= 2^bits
@@ -144,5 +144,5 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     if r >= half {
         r -= &modulus;
     }
-    Ok(Value::BigInt(BigInt::from(r).into()))
+    Ok(Value::BigInt(r.into()))
 }

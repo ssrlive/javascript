@@ -725,7 +725,9 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                             }
                             let result = evaluate_statements(&func_env, &body)?;
                             match result {
-                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_) => return Ok(result),
+                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
+                                    return Ok(result);
+                                }
                                 _ => {
                                     return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
                                 }
@@ -742,21 +744,21 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
             if hint == "string" {
                 // toString -> valueOf
                 let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
-                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }
                 let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
-                if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
             } else {
                 // number or default: valueOf -> toString
                 let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
-                if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_)) {
+                if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
                 let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
-                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_)) {
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }
             }

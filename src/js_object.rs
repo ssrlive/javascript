@@ -259,6 +259,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Number_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
+                    // Set prototype to Number.prototype if available
+                    let _ = crate::core::set_internal_prototype_from_constructor(&obj, env, "Number");
                     obj
                 }
                 Value::Boolean(b) => {
@@ -266,6 +268,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Boolean_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
+                    // Set prototype to Boolean.prototype if available
+                    let _ = crate::core::set_internal_prototype_from_constructor(&obj, env, "Boolean");
                     obj
                 }
                 Value::String(s) => {
@@ -274,6 +278,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj_set_value(&obj, &"toString".into(), Value::Function("String_toString".to_string()))?;
                     obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
                     obj_set_value(&obj, &"__value__".into(), Value::String(s.clone()))?;
+                    // Set prototype to String.prototype if available
+                    let _ = crate::core::set_internal_prototype_from_constructor(&obj, env, "String");
                     obj
                 }
                 Value::BigInt(h) => {
@@ -281,6 +287,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
+                    // Set prototype to BigInt.prototype if available
+                    let _ = crate::core::set_internal_prototype_from_constructor(&obj, env, "BigInt");
                     obj
                 }
                 Value::Symbol(sd) => {
@@ -288,6 +296,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
+                    // Set prototype to Symbol.prototype if available
+                    let _ = crate::core::set_internal_prototype_from_constructor(&obj, env, "Symbol");
                     obj
                 }
                 // For other types (functions, closures, etc.), create a plain object

@@ -3,7 +3,10 @@
 use crate::js_array::is_array;
 use crate::raise_eval_error;
 use crate::{
-    core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, obj_get_value, obj_set_value},
+    core::{
+        Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, obj_get_value,
+        obj_set_value,
+    },
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -72,17 +75,17 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
     match constructor_val {
         Value::Object(class_obj) => {
             // Check if this is a TypedArray constructor
-            if crate::core::get_own_property(&class_obj, &"__kind".into()).is_some() {
+            if get_own_property(&class_obj, &"__kind".into()).is_some() {
                 return crate::js_typedarray::handle_typedarray_constructor(&class_obj, args, env);
             }
 
             // Check if this is ArrayBuffer constructor
-            if crate::core::get_own_property(&class_obj, &"__arraybuffer".into()).is_some() {
+            if get_own_property(&class_obj, &"__arraybuffer".into()).is_some() {
                 return crate::js_typedarray::handle_arraybuffer_constructor(args, env);
             }
 
             // Check if this is DataView constructor
-            if crate::core::get_own_property(&class_obj, &"__dataview".into()).is_some() {
+            if get_own_property(&class_obj, &"__dataview".into()).is_some() {
                 return crate::js_typedarray::handle_dataview_constructor(args, env);
             }
 
@@ -142,10 +145,10 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 return handle_number_constructor(args, env);
             }
             // Check for constructor-like singleton objects created by the evaluator
-            if crate::core::get_own_property(&class_obj, &"__is_string_constructor".into()).is_some() {
+            if get_own_property(&class_obj, &"__is_string_constructor".into()).is_some() {
                 return handle_string_constructor(args, env);
             }
-            if crate::core::get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
+            if get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
                 return handle_boolean_constructor(args, env);
             }
         }

@@ -1,5 +1,6 @@
 use crate::core::{
-    Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, obj_get_value, obj_set_value,
+    Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, get_well_known_symbol_rc, obj_get_value,
+    obj_set_value,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
@@ -369,7 +370,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             }
 
             // If this object looks like a Date (has __timestamp), call Date.toString()
-            if obj_map.borrow().contains_key(&"__timestamp".into()) {
+            if get_own_property(obj_map, &"__timestamp".into()).is_some() {
                 return crate::js_date::handle_date_method(obj_map, "toString", args);
             }
 
@@ -519,7 +520,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 }
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
-            if obj_map.borrow().contains_key(&"__timestamp".into()) {
+            if get_own_property(obj_map, &"__timestamp".into()).is_some() {
                 return crate::js_date::handle_date_method(obj_map, "valueOf", args);
             }
             // For regular objects, return the object itself

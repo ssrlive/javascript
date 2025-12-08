@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_slice, utf16_to_utf8};
 use fancy_regex::Regex;
@@ -282,7 +282,7 @@ pub(crate) fn handle_regexp_method(
             };
 
             // Get regex pattern and flags
-            let pattern = match crate::core::get_own_property(obj_map, &"__regex".into()) {
+            let pattern = match get_own_property(obj_map, &"__regex".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => {
@@ -294,7 +294,7 @@ pub(crate) fn handle_regexp_method(
                 }
             };
 
-            let flags = match crate::core::get_own_property(obj_map, &"__flags".into()) {
+            let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -347,7 +347,7 @@ pub(crate) fn handle_regexp_method(
             let global = flags.contains('g');
             let use_last = global || flags.contains('y');
             if use_last
-                && let Some(last_index_val) = crate::core::get_own_property(obj_map, &"__lastIndex".into())
+                && let Some(last_index_val) = get_own_property(obj_map, &"__lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 // Clamp and use as UTF-16 code unit index
@@ -510,7 +510,7 @@ pub(crate) fn handle_regexp_method(
             };
 
             // Get regex pattern and flags
-            let pattern = match crate::core::get_own_property(obj_map, &"__regex".into()) {
+            let pattern = match get_own_property(obj_map, &"__regex".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => {
@@ -522,7 +522,7 @@ pub(crate) fn handle_regexp_method(
                 }
             };
 
-            let flags = match crate::core::get_own_property(obj_map, &"__flags".into()) {
+            let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -569,7 +569,7 @@ pub(crate) fn handle_regexp_method(
             let global = flags.contains('g');
             let use_last = global || flags.contains('y');
             if use_last
-                && let Some(last_index_val) = crate::core::get_own_property(obj_map, &"__lastIndex".into())
+                && let Some(last_index_val) = get_own_property(obj_map, &"__lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 let mut li = *n as isize;
@@ -661,7 +661,7 @@ pub(crate) fn handle_regexp_method(
         }
         "toString" => {
             // Get pattern and flags (two-step get to avoid long-lived borrows)
-            let pattern = match crate::core::get_own_property(obj_map, &"__regex".into()) {
+            let pattern = match get_own_property(obj_map, &"__regex".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -669,7 +669,7 @@ pub(crate) fn handle_regexp_method(
                 None => "".to_string(),
             };
 
-            let flags = match crate::core::get_own_property(obj_map, &"__flags".into()) {
+            let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),

@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::raise_eval_error;
@@ -61,7 +61,7 @@ fn get_parent_pid_windows() -> u32 {
 /// Handle OS module method calls
 pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
-    if obj_map.borrow().contains_key(&"open".into()) {
+    if get_own_property(obj_map, &"open".into()).is_some() {
         match method {
             "open" => {
                 if !args.is_empty() {
@@ -320,7 +320,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
     }
 
     // If this object looks like the `os.path` module
-    if obj_map.borrow().contains_key(&"join".into()) {
+    if get_own_property(obj_map, &"join".into()).is_some() {
         match method {
             "join" => {
                 let mut result = String::new();

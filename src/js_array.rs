@@ -7,9 +7,9 @@ use crate::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::core::{
-    Expr, Value, env_get, env_set, evaluate_expr, evaluate_statements, obj_get_value, obj_set_rc, obj_set_value, value_to_sort_string,
-    values_equal,
+use crate::core::{
+    Expr, Value, env_get, env_set, evaluate_expr, evaluate_statements, get_own_property, obj_get_value, obj_set_rc, obj_set_value,
+    value_to_sort_string, values_equal,
 };
 
 /// Handle Array static method calls (Array.isArray, Array.from, Array.of)
@@ -1434,12 +1434,12 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> 
 
 /// Check if an object looks like an array (has length and consecutive numeric indices)
 pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
-    if let Some(length_rc) = crate::core::get_own_property(obj, &"length".into()) {
+    if let Some(length_rc) = get_own_property(obj, &"length".into()) {
         if let Value::Number(len) = *length_rc.borrow() {
             let len = len as usize;
             // Check if all indices from 0 to len-1 exist
             for i in 0..len {
-                if !obj.borrow().contains_key(&i.to_string().into()) {
+                if get_own_property(obj, &i.to_string().into()).is_none() {
                     return false;
                 }
             }
@@ -1462,7 +1462,7 @@ pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
 }
 
 pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
-    if let Some(length_rc) = crate::core::get_own_property(obj, &"length".into())
+    if let Some(length_rc) = get_own_property(obj, &"length".into())
         && let Value::Number(len) = *length_rc.borrow()
         && len >= 0.0
         && len == len.floor()

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::raise_eval_error;
@@ -105,7 +105,7 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                 log::debug!("js_value_to_json_value: array with properties.len() = {}", len);
                 let mut arr = Vec::new();
                 for i in 0..len {
-                    let val_opt = crate::core::get_own_property(&obj, &i.to_string().into());
+                    let val_opt = get_own_property(&obj, &i.to_string().into());
                     if let Some(val_rc) = val_opt {
                         let val_clone = val_rc.borrow().clone();
                         if let Some(json_val) = js_value_to_json_value(val_clone) {

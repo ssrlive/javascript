@@ -814,7 +814,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
 pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     // Check if this object is a proxy wrapper
     // Avoid holding a Ref borrow across calls by extracting the optional Rc first.
-    let proxy_opt = js_obj.borrow().get(&"__proxy__".into());
+    let proxy_opt = get_own_property(js_obj, &"__proxy__".into());
     if let Some(proxy_val_rc) = proxy_opt {
         if let Value::Proxy(proxy) = &*proxy_val_rc.borrow() {
             return crate::js_proxy::proxy_get_property(proxy, key);
@@ -825,7 +825,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
     // a matching property or run out of prototypes.
     let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
     while let Some(cur) = current {
-        let val_opt = cur.borrow().get(key);
+        let val_opt = get_own_property(&cur, key);
         if let Some(val) = val_opt {
             // Found an own/inherited value on `cur`. For getters we bind `this` to
             // the original object (`js_obj`) as per JS semantics.
@@ -931,7 +931,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             }
 
             // Map default iterator
-            let map_opt = js_obj.borrow().get(&"__map__".into());
+            let map_opt = get_own_property(js_obj, &"__map__".into());
             if let Some(map_val) = map_opt {
                 if let Value::Map(map_rc) = &*map_val.borrow() {
                     let map_entries = map_rc.borrow().entries.clone();
@@ -1016,7 +1016,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             }
 
             // Set default iterator
-            let set_opt = js_obj.borrow().get(&"__set__".into());
+            let set_opt = get_own_property(js_obj, &"__set__".into());
             if let Some(set_val) = set_opt {
                 if let Value::Set(set_rc) = &*set_val.borrow() {
                     let set_values = set_rc.borrow().values.clone();
@@ -1082,7 +1082,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             }
 
             // Wrapped String iterator (for String objects)
-            let wrapped_opt = js_obj.borrow().get(&"__value__".into());
+            let wrapped_opt = get_own_property(js_obj, &"__value__".into());
             if let Some(wrapped) = wrapped_opt {
                 if let Value::String(_) = &*wrapped.borrow() {
                     let next_body = vec![
@@ -1146,7 +1146,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             if is_array(js_obj) {
                 return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Array"))))));
             }
-            let wrapped_opt2 = js_obj.borrow().get(&"__value__".into());
+            let wrapped_opt2 = get_own_property(js_obj, &"__value__".into());
             if let Some(wrapped) = wrapped_opt2 {
                 match &*wrapped.borrow() {
                     Value::String(_) => return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("String")))))),
@@ -1155,7 +1155,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                     _ => {}
                 }
             }
-            if js_obj.borrow().contains_key(&"__timestamp".into()) {
+            if get_own_property(js_obj, &"__timestamp".into()).is_some() {
                 return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Date"))))));
             }
         }
@@ -1166,7 +1166,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
 
 pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
     // Check if this object is a proxy wrapper
-    let proxy_opt = js_obj.borrow().get(&"__proxy__".into());
+    let proxy_opt = get_own_property(js_obj, &"__proxy__".into());
     if let Some(proxy_val) = proxy_opt {
         if let Value::Proxy(proxy) = &*proxy_val.borrow() {
             let success = crate::js_proxy::proxy_set_property(proxy, key, val)?;
@@ -1178,7 +1178,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
     }
 
     // Check if there's a setter for this property
-    let existing_opt = js_obj.borrow().get(key);
+    let existing_opt = get_own_property(js_obj, key);
     if let Some(existing) = existing_opt {
         match existing.borrow().clone() {
             Value::Property { value: _, getter, setter } => {
@@ -1220,7 +1220,7 @@ pub fn obj_set_rc(map: &JSObjectDataPtr, key: &PropertyKey, val_rc: Rc<RefCell<V
 
 pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSError> {
     // Check if this object is a proxy wrapper
-    let proxy_opt = map.borrow().get(&"__proxy__".into());
+    let proxy_opt = get_own_property(map, &"__proxy__".into());
     if let Some(proxy_val) = proxy_opt {
         if let Value::Proxy(proxy) = &*proxy_val.borrow() {
             return crate::js_proxy::proxy_delete_property(proxy, key);
@@ -1232,7 +1232,7 @@ pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSEr
 }
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {
-    env.borrow().get(&key.as_ref().into())
+    get_own_property(env, &key.as_ref().into())
 }
 
 /// Helper to get an own property Rc<Value> from an object without holding
@@ -1256,7 +1256,7 @@ pub fn env_set_recursive<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Valu
     let key_str = key.as_ref();
     let mut current = env.clone();
     loop {
-        if current.borrow().contains_key(&key_str.into()) {
+        if get_own_property(&current, &key_str.into()).is_some() {
             return env_set(&current, key_str, val);
         }
         let parent_opt = current.borrow().prototype.clone();

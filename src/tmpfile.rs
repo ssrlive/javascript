@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -63,9 +63,9 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 /// Handle file object method calls
 pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if obj_map.borrow().contains_key(&"__file_id".into()) {
-        let file_id_val = crate::core::get_own_property(obj_map, &"__file_id".into())
-            .unwrap()
+    if get_own_property(obj_map, &"__file_id".into()).is_some() {
+        let file_id_val = get_own_property(obj_map, &"__file_id".into())
+            .ok_or(raise_eval_error!("Invalid file object"))?
             .borrow()
             .clone();
         let file_id = match file_id_val {

@@ -2073,8 +2073,29 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "String" {
-        let v = Value::Function("String".to_string());
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        // Return existing constructor from env if present
+        if let Some(val_rc) = obj_get_value(env, &"String".into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        // Create a simple String constructor object with a prototype
+        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
+        // mark this object as the String constructor
+        obj_set_value(&ctor, &"__is_string_constructor".into(), Value::Boolean(true))?;
+        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
+        // Link prototype.__proto__ to Object.prototype if available
+        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
+            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
+            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
+            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
+        {
+            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
+        }
+        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
+        obj_set_value(env, &"String".into(), Value::Object(ctor.clone()))?;
+        let v = Value::Object(ctor);
+        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
         Ok(v)
     } else if name == "Math" {
         let v = Value::Object(make_math_object()?);
@@ -2147,18 +2168,68 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "Number" {
-        let v = Value::Object(make_number_object()?);
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        // If Number constructor is already stored in the environment, return it.
+        if let Some(val_rc) = obj_get_value(env, &"Number".into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        // Otherwise, create the Number constructor object, store it in the env, and return it.
+        let number_obj = make_number_object()?;
+        obj_set_value(env, &"Number".into(), Value::Object(number_obj.clone()))?;
+        let v = Value::Object(number_obj);
+        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
         Ok(v)
     } else if name == "BigInt" {
-        // Expose BigInt as a callable function name; constructor/prototype objects
-        // are created lazily if needed elsewhere.
-        let v = Value::Function("BigInt".to_string());
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        // Return existing constructor from env if present
+        if let Some(val_rc) = obj_get_value(env, &"BigInt".into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        // Create a simple BigInt constructor-like object with a prototype so boxed BigInts can reference it
+        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
+        // mark this object as the BigInt constructor so calls like BigInt('123')
+        // can be detected when the constructor object is invoked
+        obj_set_value(&ctor, &"__is_bigint_constructor".into(), Value::Boolean(true))?;
+        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
+        // Link prototype.__proto__ to Object.prototype if available
+        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
+            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
+            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
+            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
+        {
+            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
+        }
+        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
+        obj_set_value(env, &"BigInt".into(), Value::Object(ctor.clone()))?;
+        let v = Value::Object(ctor);
+        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
         Ok(v)
     } else if name == "Boolean" {
-        let v = Value::Function("Boolean".to_string());
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        // Return existing constructor from env if present
+        if let Some(val_rc) = obj_get_value(env, &"Boolean".into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} (from env) -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        // Create a simple Boolean constructor object with a prototype
+        let ctor = Rc::new(RefCell::new(JSObjectData::new()));
+        // mark this object as the Boolean constructor
+        obj_set_value(&ctor, &"__is_boolean_constructor".into(), Value::Boolean(true))?;
+        let prototype = Rc::new(RefCell::new(JSObjectData::new()));
+        // Link prototype.__proto__ to Object.prototype if available
+        if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
+            && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
+            && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
+            && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
+        {
+            prototype.borrow_mut().prototype = Some(obj_proto_obj.clone());
+        }
+        obj_set_value(&ctor, &"prototype".into(), Value::Object(prototype))?;
+        obj_set_value(env, &"Boolean".into(), Value::Object(ctor.clone()))?;
+        let v = Value::Object(ctor);
+        log::trace!("evaluate_var - {} (created) -> {:?}", name, v);
         Ok(v)
     } else if name == "Date" {
         let v = Value::Function("Date".to_string());
@@ -3762,8 +3833,16 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::InstanceOf => {
             // Check if left is an instance of right (constructor)
+            log::trace!("Evaluating instanceof with left={:?}, right={:?}", l, r);
             match (l, r) {
-                (Value::Object(obj), Value::Object(constructor)) => Ok(Value::Boolean(is_instance_of(&obj, &constructor)?)),
+                (Value::Object(obj), Value::Object(constructor)) => {
+                    // Debug: inspect the object's direct __proto__ read before instanceof
+                    match crate::core::obj_get_value(&obj, &"__proto__".into())? {
+                        Some(v) => log::trace!("pre-instanceof: obj.__proto__ = {:?}", v),
+                        None => log::trace!("pre-instanceof: obj.__proto__ = None"),
+                    }
+                    Ok(Value::Boolean(is_instance_of(&obj, &constructor)?))
+                }
                 _ => Ok(Value::Boolean(false)),
             }
         }
@@ -4341,6 +4420,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_object::handle_object_method(method, args, env)
                 } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method, args, env)
+                } else if obj_map.borrow().contains_key(&"__is_bigint_constructor".into()) {
+                    crate::js_bigint::handle_bigint_static_method(method, args, env)
                 } else if obj_map.borrow().contains_key(&"__value__".into()) {
                     // Dispatch boxed primitive object methods based on the actual __value__ type
                     if let Some(val_rc) = obj_get_value(&obj_map, &"__value__".into())? {
@@ -4742,6 +4823,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
+                } else if obj_map.borrow().contains_key(&"__is_string_constructor".into()) {
+                    crate::js_function::handle_global_function("String", args, env)
+                } else if obj_map.borrow().contains_key(&"__is_boolean_constructor".into()) {
+                    crate::js_function::handle_global_function("Boolean", args, env)
+                } else if obj_map.borrow().contains_key(&"__is_bigint_constructor".into()) {
+                    // BigInt constructor-like object: handle conversion via global function
+                    crate::js_function::handle_global_function("BigInt", args, env)
                 } else {
                     // Log diagnostic context before returning a generic evaluation error
                     log::error!("evaluate_call - unexpected object method dispatch: obj_map={:?}", obj_map);
@@ -4808,6 +4896,8 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     crate::js_object::handle_object_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key(&"MAX_VALUE".into()) && obj_map.borrow().contains_key(&"MIN_VALUE".into()) {
                     crate::js_number::handle_number_method(method_name, args, env)
+                } else if obj_map.borrow().contains_key(&"__is_bigint_constructor".into()) {
+                    crate::js_bigint::handle_bigint_static_method(method_name, args, env)
                 } else if obj_map.borrow().contains_key(&"__value__".into()) {
                     if let Some(val_rc) = obj_get_value(&obj_map, &"__value__".into())? {
                         match &*val_rc.borrow() {

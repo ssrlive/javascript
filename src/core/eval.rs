@@ -3155,6 +3155,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     result.extend_from_slice(&rs);
                     Ok(Value::String(result))
                 }
+                // Mixing BigInt and Number for `+` should raise a TypeError
+                (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                    Err(raise_type_error!("Cannot mix BigInt and other types"))
+                }
                 _ => Err(raise_eval_error!("error")),
             }
         }

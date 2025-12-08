@@ -588,9 +588,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
             // Set internal prototype to Number.prototype if available
-            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Number")? {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
+            crate::core::set_internal_prototype_from_constructor(&obj, env, "Number")?;
             Ok(Value::Object(obj))
         }
         Value::Boolean(b) => {
@@ -600,9 +598,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
             // Set internal prototype to Boolean.prototype if available
-            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Boolean")? {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
+            crate::core::set_internal_prototype_from_constructor(&obj, env, "Boolean")?;
             Ok(Value::Object(obj))
         }
         Value::String(s) => {
@@ -613,9 +609,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
             obj_set_value(&obj, &"__value__".into(), Value::String(s))?;
             // Set internal prototype to String.prototype if available
-            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "String")? {
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-            }
+            crate::core::set_internal_prototype_from_constructor(&obj, env, "String")?;
             Ok(Value::Object(obj))
         }
         Value::BigInt(h) => {
@@ -625,14 +619,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
             // Set internal prototype to BigInt.prototype if available
-            if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "BigInt")? {
-                log::trace!("boxing BigInt: proto_obj={:p}", Rc::as_ptr(&proto_obj));
-                obj.borrow_mut().prototype = Some(proto_obj.clone());
-                log::trace!(
-                    "boxing BigInt: set obj.prototype = {:p}",
-                    obj.borrow().prototype.as_ref().map(Rc::as_ptr).unwrap_or(std::ptr::null())
-                );
-            }
+            crate::core::set_internal_prototype_from_constructor(&obj, env, "BigInt")?;
             Ok(Value::Object(obj))
         }
         _ => {
@@ -676,9 +663,7 @@ pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Number(num_val))?;
     // Set internal prototype to Number.prototype if available
-    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Number")? {
-        obj.borrow_mut().prototype = Some(proto_obj.clone());
-    }
+    crate::core::set_internal_prototype_from_constructor(&obj, env, "Number")?;
     Ok(Value::Object(obj))
 }
 
@@ -706,9 +691,7 @@ pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -
     obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Boolean(bool_val))?;
     // Set internal prototype to Boolean.prototype if available
-    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Boolean")? {
-        obj.borrow_mut().prototype = Some(proto_obj.clone());
-    }
+    crate::core::set_internal_prototype_from_constructor(&obj, env, "Boolean")?;
     Ok(Value::Object(obj))
 }
 
@@ -755,8 +738,6 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_value(&obj, &"length".into(), Value::Number(str_val.len() as f64))?;
     obj_set_value(&obj, &"__value__".into(), Value::String(str_val))?;
     // Set internal prototype to String.prototype if available
-    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "String")? {
-        obj.borrow_mut().prototype = Some(proto_obj.clone());
-    }
+    crate::core::set_internal_prototype_from_constructor(&obj, env, "String")?;
     Ok(Value::Object(obj))
 }

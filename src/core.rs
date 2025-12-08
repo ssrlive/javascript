@@ -120,7 +120,7 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
 // `name`, and returns the constructor object pointer.
 pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: &str) -> Result<JSObjectDataPtr, JSError> {
     // If already present and is an object, return it
-    if let Some(val_rc) = obj_get_value(env, &PropertyKey::String(name.to_string()))? {
+    if let Some(val_rc) = obj_get_value(env, &name.into())? {
         if let Value::Object(obj) = &*val_rc.borrow() {
             return Ok(obj.clone());
         }
@@ -128,30 +128,30 @@ pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: 
 
     let ctor = Rc::new(RefCell::new(JSObjectData::new()));
     // mark constructor
-    obj_set_value(&ctor, &PropertyKey::String(marker_key.to_string()), Value::Boolean(true))?;
+    obj_set_value(&ctor, &marker_key.into(), Value::Boolean(true))?;
 
     // create prototype object
     let proto = Rc::new(RefCell::new(JSObjectData::new()));
     // link prototype.__proto__ to Object.prototype if available
-    if let Some(object_ctor_val) = obj_get_value(env, &PropertyKey::String("Object".to_string()))?
+    if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
         && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
-        && let Some(obj_proto_val) = obj_get_value(object_ctor, &PropertyKey::String("prototype".to_string()))?
+        && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
         && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
     {
         proto.borrow_mut().prototype = Some(obj_proto_obj.clone());
     }
 
-    obj_set_value(&ctor, &PropertyKey::String("prototype".to_string()), Value::Object(proto))?;
-    obj_set_value(env, &PropertyKey::String(name.to_string()), Value::Object(ctor.clone()))?;
+    obj_set_value(&ctor, &"prototype".into(), Value::Object(proto))?;
+    obj_set_value(env, &name.into(), Value::Object(ctor.clone()))?;
     Ok(ctor)
 }
 
 // Helper to resolve a constructor's prototype object if present in `env`.
 pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Option<JSObjectDataPtr>, JSError> {
     // First try to find a constructor object already stored in the environment
-    if let Some(val_rc) = obj_get_value(env, &PropertyKey::String(name.to_string()))? {
+    if let Some(val_rc) = obj_get_value(env, &name.into())? {
         if let Value::Object(ctor_obj) = &*val_rc.borrow() {
-            if let Some(proto_val_rc) = obj_get_value(ctor_obj, &PropertyKey::String("prototype".to_string()))? {
+            if let Some(proto_val_rc) = obj_get_value(ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -162,7 +162,7 @@ pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Op
     // If not found, attempt to evaluate the variable to force lazy creation
     match evaluate_expr(env, &Expr::Var(name.to_string())) {
         Ok(Value::Object(ctor_obj)) => {
-            if let Some(proto_val_rc) = obj_get_value(&ctor_obj, &PropertyKey::String("prototype".to_string()))? {
+            if let Some(proto_val_rc) = obj_get_value(&ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -171,6 +171,20 @@ pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Op
         }
         _ => Ok(None),
     }
+}
+
+// Helper to set an object's internal prototype from a constructor name.
+// If the constructor.prototype is available, sets `obj.borrow_mut().prototype`
+// to that object. This consolidates the common pattern used when boxing
+// primitives and creating instances.
+pub fn set_internal_prototype_from_constructor(obj: &JSObjectDataPtr, env: &JSObjectDataPtr, ctor_name: &str) -> Result<(), JSError> {
+    if let Some(proto_obj) = get_constructor_prototype(env, ctor_name)? {
+        // set internal prototype pointer
+        obj.borrow_mut().prototype = Some(proto_obj.clone());
+        // also set an own "__proto__" property pointing to the same object
+        obj_set_value(obj, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

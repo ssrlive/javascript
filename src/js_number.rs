@@ -259,9 +259,7 @@ pub fn box_number_and_get_property(n: f64, prop: &str, env: &JSObjectDataPtr) ->
     let number_obj = Rc::new(RefCell::new(JSObjectData::new()));
     obj_set_value(&number_obj, &"__value__".into(), Value::Number(n))?;
     // Set prototype to Number.prototype (if available)
-    if let Some(proto_obj) = crate::core::get_constructor_prototype(env, "Number")? {
-        obj_set_value(&number_obj, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
-    }
+    crate::core::set_internal_prototype_from_constructor(&number_obj, env, "Number")?;
     // Now look up the property on the boxed object
     if let Some(val) = obj_get_value(&number_obj, &prop.into())? {
         Ok(val.borrow().clone())

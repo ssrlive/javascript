@@ -1,6 +1,6 @@
 use crate::{
     JSError,
-    core::{BinaryOp, DestructuringElement, Expr, ObjectDestructuringElement, Statement, TemplatePart, Token, parse_statements},
+    core::{BinaryOp, DestructuringElement, Expr, ObjectDestructuringElement, Statement, TemplatePart, Token, Value, parse_statements},
     raise_parse_error,
 };
 
@@ -10,7 +10,15 @@ pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<String>, JSError>
         loop {
             if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                 tokens.remove(0);
-                params.push(param);
+                params.push(param.clone());
+                // Support default initializers: identifier '=' expression
+                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                    // consume '=' and parse the default expression
+                    tokens.remove(0);
+                    // parse_expression will consume tokens belonging to the default
+                    // initializer and leave a trailing ',' or ')' for the parameter list.
+                    let _ = parse_expression(tokens)?;
+                }
                 if tokens.is_empty() {
                     return Err(raise_parse_error!(format!(
                         "Unexpected end of parameters; next tokens: {:?}",
@@ -1019,6 +1027,11 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     let key = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                         tokens.remove(0);
                         name
+                    } else if let Some(Token::Number(n)) = tokens.first().cloned() {
+                        // Numeric property keys are allowed in object literals (they become strings)
+                        tokens.remove(0);
+                        // Format as integer if whole number, otherwise use default representation
+                        if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }
                     } else if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
                         // Computed key (e.g., get [Symbol.toPrimitive]())
                         // Capture the inner tokens up to the matching ']'
@@ -1188,7 +1201,19 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
 
                 log::trace!("parse_primary: array element next token: {:?}", tokens.first());
-                // Parse element
+                // Support elisions (sparse arrays) where a comma without an
+                // expression indicates an empty slot, e.g. `[ , ]` or `[a,,b]`.
+                if matches!(tokens[0], Token::Comma) {
+                    // Push an explicit `undefined` element to represent the elision
+                    elements.push(Expr::Value(Value::Undefined));
+                    tokens.remove(0); // consume comma representing empty slot
+                    // After consuming the comma, allow the loop to continue and
+                    // possibly encounter another comma or the closing bracket.
+                    // If the next token is RBracket we'll handle completion below.
+                    continue;
+                }
+
+                // Parse element expression
                 let elem = parse_expression(tokens)?;
                 elements.push(elem);
 
@@ -1401,6 +1426,55 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             valid = false;
                             break;
                         }
+
+                        // Support default initializers in parameter lists: identifier '=' expression
+                        if matches!(tokens[0], Token::Assign) {
+                            // Speculatively parse the default expression on a clone so we can
+                            // rollback if this isn't actually an arrow parameter list.
+                            let mut tmp = tokens.clone();
+                            tmp.remove(0); // consume '=' in tmp
+                            if parse_expression(&mut tmp).is_ok() {
+                                // After parsing the default expression, tmp should start with
+                                // either ',' or ')' for a valid parameter list.
+                                if !tmp.is_empty() && (matches!(tmp[0], Token::Comma) || matches!(tmp[0], Token::RParen)) {
+                                    // consume the same tokens from the real tokens vector and
+                                    // record them for possible rollback
+                                    let consumed = tokens.len() - tmp.len();
+                                    for _ in 0..consumed {
+                                        local_consumed.push(tokens.remove(0));
+                                    }
+                                    if tokens.is_empty() {
+                                        valid = false;
+                                        break;
+                                    }
+                                    if matches!(tokens[0], Token::RParen) {
+                                        tokens.remove(0);
+                                        local_consumed.push(Token::RParen);
+                                        if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
+                                            tokens.remove(0);
+                                            is_arrow = true;
+                                        } else {
+                                            valid = false;
+                                        }
+                                        break;
+                                    } else if matches!(tokens[0], Token::Comma) {
+                                        tokens.remove(0);
+                                        local_consumed.push(Token::Comma);
+                                        continue;
+                                    } else {
+                                        valid = false;
+                                        break;
+                                    }
+                                } else {
+                                    valid = false;
+                                    break;
+                                }
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+
                         if matches!(tokens[0], Token::RParen) {
                             tokens.remove(0);
                             local_consumed.push(Token::RParen);

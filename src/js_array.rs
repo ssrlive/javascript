@@ -1,5 +1,5 @@
 use crate::{
-    core::{JSObjectData, JSObjectDataPtr, PropertyKey},
+    core::{JSObjectData, JSObjectDataPtr, PropertyKey, extract_closure_from_value},
     error::JSError,
     raise_eval_error,
     unicode::utf8_to_utf16,
@@ -53,22 +53,19 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                             if let Some(val) = obj_get_value(&obj_map, &i.to_string().into())? {
                                 let element = val.borrow().clone();
                                 if let Some(ref fn_val) = map_fn {
-                                    match fn_val {
-                                        Value::Closure(params, body, captured_env) => {
-                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                            if !params.is_empty() {
-                                                env_set(&func_env, params[0].as_str(), element)?;
-                                            }
-                                            if params.len() >= 2 {
-                                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
-                                            }
-                                            let mapped = evaluate_statements(&func_env, body)?;
-                                            result.push(mapped);
+                                    if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
+                                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                        if !params.is_empty() {
+                                            env_set(&func_env, params[0].as_str(), element)?;
                                         }
-                                        _ => {
-                                            return Err(raise_eval_error!("Array.from map function must be a function"));
+                                        if params.len() >= 2 {
+                                            env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                                         }
+                                        let mapped = evaluate_statements(&func_env, &body)?;
+                                        result.push(mapped);
+                                    } else {
+                                        return Err(raise_eval_error!("Array.from map function must be a function"));
                                     }
                                 } else {
                                     result.push(element);
@@ -299,26 +296,23 @@ pub(crate) fn handle_array_instance_method(
 
                 for i in 0..current_len {
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
-                        match &callback_val {
-                            Value::Closure(params, body, captured_env) => {
-                                // Prepare function environment
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                // Map params: (element, index, array)
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
-                                }
-                                if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-                                evaluate_statements(&func_env, body)?;
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                            // Prepare function environment
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // Map params: (element, index, array)
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                             }
-                            _ => {
-                                return Err(raise_eval_error!("Array.forEach expects a function"));
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                             }
+                            if params.len() >= 3 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+                            evaluate_statements(&func_env, &body)?;
+                        } else {
+                            return Err(raise_eval_error!("Array.forEach expects a function"));
                         }
                     }
                 }
@@ -336,27 +330,24 @@ pub(crate) fn handle_array_instance_method(
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
-                        match &callback_val {
-                            Value::Closure(params, body, captured_env) => {
-                                // Prepare function environment
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
-                                }
-                                if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-                                let res = evaluate_statements(&func_env, body)?;
-                                obj_set_value(&new_array, &idx.to_string().into(), res)?;
-                                idx += 1;
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                            // Prepare function environment
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                             }
-                            _ => {
-                                return Err(raise_eval_error!("Array.map expects a function"));
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                             }
+                            if params.len() >= 3 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+                            let res = evaluate_statements(&func_env, &body)?;
+                            obj_set_value(&new_array, &idx.to_string().into(), res)?;
+                            idx += 1;
+                        } else {
+                            return Err(raise_eval_error!("Array.map expects a function"));
                         }
                     }
                 }
@@ -375,37 +366,34 @@ pub(crate) fn handle_array_instance_method(
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
-                        match &callback_val {
-                            Value::Closure(params, body, captured_env) => {
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
-                                }
-                                if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-                                let res = evaluate_statements(&func_env, body)?;
-                                // truthy check
-                                let include = match res {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0,
-                                    Value::String(ref s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                if include {
-                                    obj_set_value(&new_array, &idx.to_string().into(), val.borrow().clone())?;
-                                    idx += 1;
-                                }
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                             }
-                            _ => {
-                                return Err(raise_eval_error!("Array.filter expects a function"));
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                             }
+                            if params.len() >= 3 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+                            let res = evaluate_statements(&func_env, &body)?;
+                            // truthy check
+                            let include = match res {
+                                Value::Boolean(b) => b,
+                                Value::Number(n) => n != 0.0,
+                                Value::String(ref s) => !s.is_empty(),
+                                Value::Object(_) => true,
+                                Value::Undefined => false,
+                                _ => false,
+                            };
+                            if include {
+                                obj_set_value(&new_array, &idx.to_string().into(), val.borrow().clone())?;
+                                idx += 1;
+                            }
+                        } else {
+                            return Err(raise_eval_error!("Array.filter expects a function"));
                         }
                     }
                 }
@@ -441,29 +429,26 @@ pub(crate) fn handle_array_instance_method(
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
                     if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
-                        match &callback_val {
-                            Value::Closure(params, body, captured_env) => {
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                // build args for callback: first acc, then current element
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), accumulator.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), val.borrow().clone())?;
-                                }
-                                if params.len() >= 3 {
-                                    env_set(&func_env, params[2].as_str(), Value::Number(i as f64))?;
-                                }
-                                if params.len() >= 4 {
-                                    env_set(&func_env, params[3].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-                                let res = evaluate_statements(&func_env, body)?;
-                                accumulator = res;
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // build args for callback: first acc, then current element
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), accumulator.clone())?;
                             }
-                            _ => {
-                                return Err(raise_eval_error!("Array.reduce expects a function"));
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), val.borrow().clone())?;
                             }
+                            if params.len() >= 3 {
+                                env_set(&func_env, params[2].as_str(), Value::Number(i as f64))?;
+                            }
+                            if params.len() >= 4 {
+                                env_set(&func_env, params[3].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+                            let res = evaluate_statements(&func_env, &body)?;
+                            accumulator = res;
+                        } else {
+                            return Err(raise_eval_error!("Array.reduce expects a function"));
                         }
                     }
                 }
@@ -475,47 +460,46 @@ pub(crate) fn handle_array_instance_method(
         "find" => {
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
-                match callback {
-                    Value::Closure(params, body, captured_env) => {
-                        let current_len = get_array_length(obj_map).unwrap_or(0);
+                let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                        for i in 0..current_len {
-                            if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
+                for i in 0..current_len {
+                    if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                            let element = value.borrow().clone();
+                            let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-
-                                let res = evaluate_statements(&func_env, &body)?;
-                                // truthy check
-                                let is_truthy = match res {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0,
-                                    Value::String(ref s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                if is_truthy {
-                                    return Ok(element);
-                                }
+                            // Create new environment for callback
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), element.clone())?;
                             }
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), index_val)?;
+                            }
+                            if params.len() > 2 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+
+                            let res = evaluate_statements(&func_env, &body)?;
+                            // truthy check
+                            let is_truthy = match res {
+                                Value::Boolean(b) => b,
+                                Value::Number(n) => n != 0.0,
+                                Value::String(ref s) => !s.is_empty(),
+                                Value::Object(_) => true,
+                                Value::Undefined => false,
+                                _ => false,
+                            };
+                            if is_truthy {
+                                return Ok(element);
+                            }
+                        } else {
+                            return Err(raise_eval_error!("Array.find expects a function"));
                         }
-                        Ok(Value::Undefined)
                     }
-                    _ => Err(raise_eval_error!("Array.find expects a function")),
                 }
+                Ok(Value::Undefined)
             } else {
                 Err(raise_eval_error!("Array.find expects at least one argument"))
             }
@@ -523,47 +507,46 @@ pub(crate) fn handle_array_instance_method(
         "findIndex" => {
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
-                match callback {
-                    Value::Closure(params, body, captured_env) => {
-                        let current_len = get_array_length(obj_map).unwrap_or(0);
+                let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                        for i in 0..current_len {
-                            if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
+                for i in 0..current_len {
+                    if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                            let element = value.borrow().clone();
+                            let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-
-                                let res = evaluate_statements(&func_env, &body)?;
-                                // truthy check
-                                let is_truthy = match res {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0,
-                                    Value::String(ref s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                if is_truthy {
-                                    return Ok(Value::Number(i as f64));
-                                }
+                            // Create new environment for callback
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), element.clone())?;
                             }
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), index_val)?;
+                            }
+                            if params.len() > 2 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+
+                            let res = evaluate_statements(&func_env, &body)?;
+                            // truthy check
+                            let is_truthy = match res {
+                                Value::Boolean(b) => b,
+                                Value::Number(n) => n != 0.0,
+                                Value::String(ref s) => !s.is_empty(),
+                                Value::Object(_) => true,
+                                Value::Undefined => false,
+                                _ => false,
+                            };
+                            if is_truthy {
+                                return Ok(Value::Number(i as f64));
+                            }
+                        } else {
+                            return Err(raise_eval_error!("Array.findIndex expects a function"));
                         }
-                        Ok(Value::Number(-1.0))
                     }
-                    _ => Err(raise_eval_error!("Array.findIndex expects a function")),
                 }
+                Ok(Value::Number(-1.0))
             } else {
                 Err(raise_eval_error!("Array.findIndex expects at least one argument"))
             }
@@ -571,47 +554,46 @@ pub(crate) fn handle_array_instance_method(
         "some" => {
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
-                match callback {
-                    Value::Closure(params, body, captured_env) => {
-                        let current_len = get_array_length(obj_map).unwrap_or(0);
+                let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                        for i in 0..current_len {
-                            if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
+                for i in 0..current_len {
+                    if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                            let element = value.borrow().clone();
+                            let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback (fresh frame whose prototype is captured_env)
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-
-                                let res = evaluate_statements(&func_env, &body)?;
-                                // truthy check
-                                let is_truthy = match res {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0,
-                                    Value::String(ref s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                if is_truthy {
-                                    return Ok(Value::Boolean(true));
-                                }
+                            // Create new environment for callback (fresh frame whose prototype is captured_env)
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), element.clone())?;
                             }
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), index_val)?;
+                            }
+                            if params.len() > 2 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+
+                            let res = evaluate_statements(&func_env, &body)?;
+                            // truthy check
+                            let is_truthy = match res {
+                                Value::Boolean(b) => b,
+                                Value::Number(n) => n != 0.0,
+                                Value::String(ref s) => !s.is_empty(),
+                                Value::Object(_) => true,
+                                Value::Undefined => false,
+                                _ => false,
+                            };
+                            if is_truthy {
+                                return Ok(Value::Boolean(true));
+                            }
+                        } else {
+                            return Err(raise_eval_error!("Array.some expects a function"));
                         }
-                        Ok(Value::Boolean(false))
                     }
-                    _ => Err(raise_eval_error!("Array.some expects a function")),
                 }
+                Ok(Value::Boolean(false))
             } else {
                 Err(raise_eval_error!("Array.some expects at least one argument"))
             }
@@ -619,47 +601,46 @@ pub(crate) fn handle_array_instance_method(
         "every" => {
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
-                match callback {
-                    Value::Closure(params, body, captured_env) => {
-                        let current_len = get_array_length(obj_map).unwrap_or(0);
+                let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                        for i in 0..current_len {
-                            if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
+                for i in 0..current_len {
+                    if let Some(value) = obj_get_value(obj_map, &i.to_string().into())? {
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                            let element = value.borrow().clone();
+                            let index_val = Value::Number(i as f64);
 
-                                // Create new environment for callback (fresh frame whose prototype is captured_env)
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    env_set(&func_env, params[0].as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    env_set(&func_env, params[1].as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                                }
-
-                                let res = evaluate_statements(&func_env, &body)?;
-                                // truthy check
-                                let is_truthy = match res {
-                                    Value::Boolean(b) => b,
-                                    Value::Number(n) => n != 0.0,
-                                    Value::String(ref s) => !s.is_empty(),
-                                    Value::Object(_) => true,
-                                    Value::Undefined => false,
-                                    _ => false,
-                                };
-                                if !is_truthy {
-                                    return Ok(Value::Boolean(false));
-                                }
+                            // Create new environment for callback (fresh frame whose prototype is captured_env)
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if !params.is_empty() {
+                                env_set(&func_env, params[0].as_str(), element.clone())?;
                             }
+                            if params.len() >= 2 {
+                                env_set(&func_env, params[1].as_str(), index_val)?;
+                            }
+                            if params.len() > 2 {
+                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                            }
+
+                            let res = evaluate_statements(&func_env, &body)?;
+                            // truthy check
+                            let is_truthy = match res {
+                                Value::Boolean(b) => b,
+                                Value::Number(n) => n != 0.0,
+                                Value::String(ref s) => !s.is_empty(),
+                                Value::Object(_) => true,
+                                Value::Undefined => false,
+                                _ => false,
+                            };
+                            if !is_truthy {
+                                return Ok(Value::Boolean(false));
+                            }
+                        } else {
+                            return Err(raise_eval_error!("Array.every expects a function"));
                         }
-                        Ok(Value::Boolean(true))
                     }
-                    _ => Err(raise_eval_error!("Array.every expects a function")),
                 }
+                Ok(Value::Boolean(true))
             } else {
                 Err(raise_eval_error!("Array.every expects at least one argument"))
             }
@@ -795,7 +776,7 @@ pub(crate) fn handle_array_instance_method(
             } else {
                 // Custom sort with compare function
                 let compare_fn = evaluate_expr(env, &args[0])?;
-                if let Value::Closure(params, body, captured_env) = compare_fn {
+                if let Some((params, body, captured_env)) = extract_closure_from_value(&compare_fn) {
                     elements.sort_by(|a, b| {
                         // Create function environment for comparison (fresh frame whose prototype is captured_env)
                         let func_env = Rc::new(RefCell::new(JSObjectData::new()));
@@ -1179,25 +1160,22 @@ pub(crate) fn handle_array_instance_method(
             let mut result = Vec::new();
             for i in 0..current_len {
                 if let Some(val) = obj_get_value(obj_map, &i.to_string().into())? {
-                    match &callback_val {
-                        Value::Closure(params, body, captured_env) => {
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
-                            }
-                            if params.len() >= 2 {
-                                env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
-                            }
-                            if params.len() >= 3 {
-                                env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
-                            }
-                            let mapped_val = evaluate_statements(&func_env, body)?;
-                            flatten_single_value(mapped_val, &mut result, 1)?;
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        if !params.is_empty() {
+                            env_set(&func_env, params[0].as_str(), val.borrow().clone())?;
                         }
-                        _ => {
-                            return Err(raise_eval_error!("Array.flatMap expects a function"));
+                        if params.len() >= 2 {
+                            env_set(&func_env, params[1].as_str(), Value::Number(i as f64))?;
                         }
+                        if params.len() >= 3 {
+                            env_set(&func_env, params[2].as_str(), Value::Object(obj_map.clone()))?;
+                        }
+                        let mapped_val = evaluate_statements(&func_env, &body)?;
+                        flatten_single_value(mapped_val, &mut result, 1)?;
+                    } else {
+                        return Err(raise_eval_error!("Array.flatMap expects a function"));
                     }
                 }
             }

@@ -1,10 +1,9 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
-    core::get_own_property,
     core::{
         BigIntHolder, BinaryOp, DestructuringElement, Expr, JSObjectData, JSObjectDataPtr, ObjectDestructuringElement, Statement,
         SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
-        is_truthy, obj_delete, obj_set_value, to_primitive, value_to_string, values_equal,
+        extract_closure_from_value, get_own_property, is_truthy, obj_delete, obj_set_value, to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
@@ -71,18 +70,49 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
             match stmt {
                 Statement::Let(name, expr_opt) => {
                     let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+                    // If the initialized value is a function-object wrapping a closure,
+                    // set its `name` property to the declared identifier to match
+                    // typical JS engines (e.g. Node.js) which expose `Function.name`.
+                    if let Value::Object(obj_map) = &val {
+                        if let Some(_cl) = obj_get_value(obj_map, &"__closure__".into())? {
+                            // set name property if not present
+                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
+                            let existing = obj_get_value(obj_map, &"name".into())?;
+                            if existing.is_none() {
+                                obj_set_value(obj_map, &"name".into(), name_val)?;
+                            }
+                        }
+                    }
                     env_set(env, name.as_str(), val.clone())?;
                     last_value = val;
                     Ok(None)
                 }
                 Statement::Var(name, expr_opt) => {
                     let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+                    if let Value::Object(obj_map) = &val {
+                        if let Some(_cl) = obj_get_value(obj_map, &"__closure__".into())? {
+                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
+                            let existing = obj_get_value(obj_map, &"name".into())?;
+                            if existing.is_none() {
+                                obj_set_value(obj_map, &"name".into(), name_val)?;
+                            }
+                        }
+                    }
                     env_set_var(env, name.as_str(), val.clone())?;
                     last_value = val;
                     Ok(None)
                 }
                 Statement::Const(name, expr) => {
                     let val = evaluate_expr(env, expr)?;
+                    if let Value::Object(obj_map) = &val {
+                        if let Some(_cl) = obj_get_value(obj_map, &"__closure__".into())? {
+                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
+                            let existing = obj_get_value(obj_map, &"name".into())?;
+                            if existing.is_none() {
+                                obj_set_value(obj_map, &"name".into(), name_val)?;
+                            }
+                        }
+                    }
                     env_set_const(env, name.as_str(), val.clone());
                     last_value = val;
                     Ok(None)
@@ -1551,77 +1581,93 @@ fn for_of_destructuring_array_iter(
                     let iterator_key = PropertyKey::Symbol(Rc::new(RefCell::new(sym_rc.borrow().clone())));
                     if let Some(iterator_val) = obj_get_value(obj_map, &iterator_key)? {
                         let iterator_factory = iterator_val.borrow().clone();
-                        // Call Symbol.iterator to get the iterator object
-                        let iterator = match iterator_factory {
-                            Value::Closure(_params, body, closure_env) => evaluate_statements(&closure_env, &body)?,
-                            _ => return Err(raise_eval_error!("Symbol.iterator is not a function")),
+                        // Call Symbol.iterator to get the iterator object. Accept
+                        // either a direct closure or a function-object wrapper.
+                        let iterator = if let Some((params, body, closure_env)) = extract_closure_from_value(&iterator_factory) {
+                            // Call the closure with `this` bound to the original object
+                            let call_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            call_env.borrow_mut().prototype = Some(closure_env.clone());
+                            // Bind `this` to the receiver
+                            obj_set_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                            // Bind any declared params to undefined (no args passed)
+                            for param in params.iter() {
+                                obj_set_value(&call_env, &param.clone().into(), Value::Undefined)?;
+                            }
+                            evaluate_statements(&call_env, &body)?
+                        } else {
+                            return Err(raise_eval_error!("Symbol.iterator is not a function"));
                         };
 
                         if let Value::Object(iterator_obj) = iterator {
                             if let Some(next_val) = obj_get_value(&iterator_obj, &"next".into())? {
                                 let next_func = next_val.borrow().clone();
                                 loop {
-                                    // Call next()
-                                    let next_result = match &next_func {
-                                        Value::Closure(_params, body, closure_env) => {
-                                            let call_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                            call_env.borrow_mut().prototype = Some(closure_env.clone());
-                                            evaluate_statements(&call_env, body)?
+                                    // Call next() — accept direct closures or function-objects
+                                    if let Some((nparams, nbody, nclosure_env)) = extract_closure_from_value(&next_func) {
+                                        let call_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                        call_env.borrow_mut().prototype = Some(nclosure_env.clone());
+                                        // Bind `this` to iterator object
+                                        obj_set_value(&call_env, &"this".into(), Value::Object(iterator_obj.clone()))?;
+                                        // Bind params to undefined (no args)
+                                        for param in nparams.iter() {
+                                            obj_set_value(&call_env, &param.clone().into(), Value::Undefined)?;
                                         }
-                                        Value::Function(_func_name) => {
-                                            // Handle built-in functions if needed
-                                            return Err(raise_eval_error!("Iterator next function not implemented"));
-                                        }
-                                        _ => return Err(raise_eval_error!("Iterator next is not a function")),
-                                    };
+                                        let next_result = evaluate_statements(&call_env, &nbody)?;
 
-                                    if let Value::Object(result_obj) = next_result {
-                                        // Check if done
-                                        if let Some(done_val) = obj_get_value(&result_obj, &"done".into())?
-                                            && let Value::Boolean(true) = *done_val.borrow()
-                                        {
-                                            break; // Iteration complete
-                                        }
+                                        if let Value::Object(result_obj) = next_result {
+                                            // Check if done
+                                            if let Some(done_val) = obj_get_value(&result_obj, &"done".into())?
+                                                && let Value::Boolean(true) = *done_val.borrow()
+                                            {
+                                                break; // Iteration complete
+                                            }
 
-                                        // Get value
-                                        if let Some(value_val) = obj_get_value(&result_obj, &"value".into())? {
-                                            let element = value_val.borrow().clone();
-                                            // perform array destructuring into env (var semantics)
-                                            perform_array_destructuring(env, pattern, &element, false)?;
-                                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                            block_env.borrow_mut().prototype = Some(env.clone());
-                                            block_env.borrow_mut().is_function_scope = false;
-                                            match evaluate_statements_with_context(&block_env, body)? {
-                                                ControlFlow::Normal(val) => *last_value = val,
-                                                ControlFlow::Break(None) => break,
-                                                ControlFlow::Break(Some(lbl)) => {
-                                                    if let Some(ln) = label_name {
-                                                        if lbl == ln {
-                                                            break;
+                                            // Get value
+                                            if let Some(value_val) = obj_get_value(&result_obj, &"value".into())? {
+                                                let element = value_val.borrow().clone();
+                                                // perform array destructuring into env (var semantics)
+                                                perform_array_destructuring(env, pattern, &element, false)?;
+                                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                                block_env.borrow_mut().prototype = Some(env.clone());
+                                                block_env.borrow_mut().is_function_scope = false;
+                                                match evaluate_statements_with_context(&block_env, body)? {
+                                                    ControlFlow::Normal(val) => *last_value = val,
+                                                    ControlFlow::Break(None) => break,
+                                                    ControlFlow::Break(Some(lbl)) => {
+                                                        if let Some(ln) = label_name {
+                                                            if lbl == ln {
+                                                                break;
+                                                            } else {
+                                                                return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                            }
                                                         } else {
                                                             return Ok(Some(ControlFlow::Break(Some(lbl))));
                                                         }
-                                                    } else {
-                                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
                                                     }
-                                                }
-                                                ControlFlow::Continue(None) => {}
-                                                ControlFlow::Continue(Some(lbl)) => {
-                                                    if let Some(ln) = label_name {
-                                                        if lbl == ln {
-                                                            continue;
+                                                    ControlFlow::Continue(None) => {}
+                                                    ControlFlow::Continue(Some(lbl)) => {
+                                                        if let Some(ln) = label_name {
+                                                            if lbl == ln {
+                                                                continue;
+                                                            } else {
+                                                                return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                            }
                                                         } else {
                                                             return Ok(Some(ControlFlow::Continue(Some(lbl))));
                                                         }
-                                                    } else {
-                                                        return Ok(Some(ControlFlow::Continue(Some(lbl))));
                                                     }
+                                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                                 }
-                                                ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                                continue;
                                             }
+                                        } else {
+                                            return Err(raise_eval_error!("Iterator next() did not return an object"));
                                         }
+                                    } else if let Value::Function(_func_name) = &next_func {
+                                        // Built-in next handling not implemented
+                                        return Err(raise_eval_error!("Iterator next function not implemented"));
                                     } else {
-                                        return Err(raise_eval_error!("Iterator next() did not return an object"));
+                                        return Err(raise_eval_error!("Iterator next is not a function"));
                                     }
                                 }
                                 Ok(None)
@@ -1683,9 +1729,11 @@ fn statement_for_of_var_iter(
                 if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator") {
                     let key = PropertyKey::Symbol(iter_sym_rc.clone());
                     if let Some(method_rc) = obj_get_value(&obj_map, &key)? {
-                        // method can be a function/closure or an object
-                        let iterator_val = match &*method_rc.borrow() {
-                            Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                        // method can be a direct closure, an object-wrapped closure
+                        // (function-object), a native function, or an iterator object.
+                        let iterator_val = {
+                            let method_val = &*method_rc.borrow();
+                            if let Some((params, body, captured_env)) = extract_closure_from_value(method_val) {
                                 // Call closure with 'this' bound to the object
                                 let func_env = Rc::new(RefCell::new(JSObjectData::new()));
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -1693,15 +1741,18 @@ fn statement_for_of_var_iter(
                                 // env_set_var bind into this frame rather than parent
                                 func_env.borrow_mut().is_function_scope = true;
                                 obj_set_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                                // Bind params to undefined (no args passed)
+                                for param in params.iter() {
+                                    obj_set_value(&func_env, &param.clone().into(), Value::Undefined)?;
+                                }
                                 // Execute body to produce iterator result
-                                evaluate_statements(&func_env, body)?
-                            }
-                            Value::Function(func_name) => {
+                                evaluate_statements(&func_env, &body)?
+                            } else if let Value::Function(func_name) = method_val {
                                 // Call built-in function (no arguments)
                                 crate::js_function::handle_global_function(func_name, &[], env)?
-                            }
-                            Value::Object(iter_obj) => Value::Object(iter_obj.clone()),
-                            _ => {
+                            } else if let Value::Object(iter_obj) = method_val {
+                                Value::Object(iter_obj.clone())
+                            } else {
                                 return Err(raise_eval_error!("iterator property is not callable"));
                             }
                         };
@@ -1711,15 +1762,20 @@ fn statement_for_of_var_iter(
                             loop {
                                 // call iter_obj.next()
                                 if let Some(next_rc) = obj_get_value(&iter_obj, &"next".into())? {
-                                    let next_val = match &*next_rc.borrow() {
-                                        Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                                    let next_val = {
+                                        let nv = &*next_rc.borrow();
+                                        if let Some((nparams, nbody, ncaptured_env)) = extract_closure_from_value(nv) {
                                             let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                            func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
                                             obj_set_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
-                                            evaluate_statements(&func_env, body)?
-                                        }
-                                        Value::Function(func_name) => crate::js_function::handle_global_function(func_name, &[], env)?,
-                                        _ => {
+                                            // Bind params to undefined (no args)
+                                            for param in nparams.iter() {
+                                                obj_set_value(&func_env, &param.clone().into(), Value::Undefined)?;
+                                            }
+                                            evaluate_statements(&func_env, &nbody)?
+                                        } else if let Value::Function(func_name) = nv {
+                                            crate::js_function::handle_global_function(func_name, &[], env)?
+                                        } else {
                                             return Err(raise_eval_error!("next is not callable"));
                                         }
                                     };
@@ -1951,7 +2007,26 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 Err(e)
             }
         },
-        Expr::Function(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
+        Expr::Function(params, body) => {
+            // Create a callable function *object* that wraps the closure so
+            // script-level assignments like `F.prototype = ...` work. Store
+            // the executable closure under an internal `__closure__` key and
+            // expose a `prototype` object with a `constructor` backpointer.
+            let func_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+            // Create the associated prototype object for instances
+            let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+            // Store the closure under an internal key
+            let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
+            obj_set_value(&func_obj, &"__closure__".into(), closure_val)?;
+
+            // Wire up `prototype` and `prototype.constructor`
+            obj_set_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+            obj_set_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+
+            Ok(Value::Object(func_obj))
+        }
         Expr::GeneratorFunction(params, body) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
@@ -1966,7 +2041,10 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::OptionalCall(func_expr, args) => evaluate_optional_call(env, func_expr, args),
         Expr::OptionalIndex(obj, idx) => evaluate_optional_index(env, obj, idx),
         Expr::This => evaluate_this(env),
-        Expr::New(constructor, args) => evaluate_new(env, constructor, args),
+        Expr::New(constructor, args) => {
+            log::debug!("DBG Expr::New - constructor_expr={:?} args.len={}", constructor, args.len());
+            evaluate_new(env, constructor, args)
+        }
         Expr::Super => evaluate_super(env),
         Expr::SuperCall(args) => evaluate_super_call(env, args),
         Expr::SuperProperty(prop) => evaluate_super_property(env, prop),
@@ -2997,13 +3075,21 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
 
 fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     let val = evaluate_expr(env, expr)?;
-    let type_str = match val {
+    let type_str = match &val {
         Value::Undefined => "undefined",
         Value::Boolean(_) => "boolean",
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::BigInt(_) => "bigint",
-        Value::Object(_) => "object",
+        Value::Object(_obj_map) => {
+            // If this object wraps a closure under the internal `__closure__` key,
+            // report `function` for `typeof` so function-objects behave like functions.
+            if extract_closure_from_value(&val).is_some() {
+                "function"
+            } else {
+                "object"
+            }
+        }
         Value::Function(_) => "function",
         Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "function",
         Value::ClassDefinition(_) => "function",
@@ -4550,6 +4636,43 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     crate::js_function::handle_global_function(&func_name, args, env)
                                 }
                             }
+                            Value::Object(func_obj_map) => {
+                                // Support function-objects stored as properties (they
+                                // wrap an internal `__closure__`). Invoke the
+                                // internal closure with `this` bound to the
+                                // receiver object (`obj_map`). This allows
+                                // assignments like `MyError.prototype.toString = function() { ... }`
+                                // to be callable as methods.
+                                if let Some(cl_rc) = obj_get_value(&func_obj_map, &"__closure__".into())? {
+                                    match &*cl_rc.borrow() {
+                                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                                            // Collect all arguments, expanding spreads
+                                            let mut evaluated_args = Vec::new();
+                                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                                            // Create new environment starting with captured environment (fresh frame)
+                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                            // ensure this env is a proper function scope
+                                            func_env.borrow_mut().is_function_scope = true;
+                                            // Bind `this` to the receiver object
+                                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                            // Bind parameters: provide provided args, set missing params to undefined
+                                            for (i, param) in params.iter().enumerate() {
+                                                if i < evaluated_args.len() {
+                                                    env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                                } else {
+                                                    env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                                }
+                                            }
+                                            // Execute function body
+                                            evaluate_statements(&func_env, body)
+                                        }
+                                        _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
+                                    }
+                                } else {
+                                    Err(raise_eval_error!(format!("Property '{method}' is not a function")))
+                                }
+                            }
                             _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
                         }
                     } else {
@@ -4666,6 +4789,35 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 Ok(promise_obj)
             }
             Value::Object(obj_map) => {
+                // If this object wraps a closure under the internal `__closure__` key,
+                // call that closure. This lets script-defined functions be stored
+                // as objects (so they have assignable `prototype`), while still
+                // being callable.
+                if let Some(cl_rc) = obj_get_value(&obj_map, &"__closure__".into())? {
+                    match &*cl_rc.borrow() {
+                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                            // Collect all arguments, expanding spreads
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            // Create new environment starting with captured environment (fresh frame)
+                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // ensure this env is a proper function scope
+                            func_env.borrow_mut().is_function_scope = true;
+                            // Bind parameters: provide provided args, set missing params to undefined
+                            for (i, param) in params.iter().enumerate() {
+                                if i < evaluated_args.len() {
+                                    env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                } else {
+                                    env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                }
+                            }
+                            // Execute function body
+                            return evaluate_statements(&func_env, body);
+                        }
+                        _ => {}
+                    }
+                }
                 // Support calling the `assert` testing object as a function as well
                 // Many tests use `assert(condition, message)` in addition to
                 // `assert.sameValue(...)`. If this object appears to be the
@@ -5326,28 +5478,29 @@ fn handle_optional_method_call(
             } else {
                 // Check for user-defined method
                 if let Some(prop_val) = obj_get_value(obj_map, &method.into())? {
-                    match prop_val.borrow().clone() {
-                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
-                            // Function call
-                            // Collect all arguments, expanding spreads
-                            let mut evaluated_args = Vec::new();
-                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                            // Create new environment starting with captured environment (fresh frame)
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            // Bind parameters: provide provided args, set missing params to undefined
-                            for (i, param) in params.iter().enumerate() {
-                                if i < evaluated_args.len() {
-                                    env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
-                                } else {
-                                    env_set(&func_env, param.as_str(), Value::Undefined)?;
-                                }
+                    let prop = prop_val.borrow().clone();
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&prop) {
+                        // Function call
+                        // Collect all arguments, expanding spreads
+                        let mut evaluated_args = Vec::new();
+                        expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                        // Create new environment starting with captured environment (fresh frame)
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        // Bind parameters: provide provided args, set missing params to undefined
+                        for (i, param) in params.iter().enumerate() {
+                            if i < evaluated_args.len() {
+                                env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                            } else {
+                                env_set(&func_env, param.as_str(), Value::Undefined)?;
                             }
-                            // Execute function body
-                            evaluate_statements(&func_env, &body)
                         }
-                        Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-                        _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
+                        // Execute function body
+                        evaluate_statements(&func_env, &body)
+                    } else if let Value::Function(func_name) = prop {
+                        crate::js_function::handle_global_function(&func_name, args, env)
+                    } else {
+                        Err(raise_eval_error!(format!("Property '{method}' is not a function")))
                     }
                 } else {
                     Ok(Value::Undefined)

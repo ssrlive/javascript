@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+
 use crate::core::{
     Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, get_well_known_symbol_rc, obj_get_value,
     obj_set_value,
@@ -324,6 +326,71 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
             Ok(Value::Object(target_obj))
         }
+        "defineProperty" => {
+            // Minimal implementation: Object.defineProperty(target, prop, descriptor)
+            if args.len() < 3 {
+                return Err(raise_type_error!("Object.defineProperty requires three arguments"));
+            }
+            let target_val = evaluate_expr(env, &args[0])?;
+            let target_obj = match target_val {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Object.defineProperty called on non-object")),
+            };
+
+            let prop_val = evaluate_expr(env, &args[1])?;
+            // Determine property key (support strings & numbers for now)
+            let prop_key = match prop_val {
+                Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
+            };
+
+            let desc_val = evaluate_expr(env, &args[2])?;
+            let desc_obj = match desc_val {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Property descriptor must be an object")),
+            };
+
+            // Extract descriptor fields
+            let value_rc_opt = obj_get_value(&desc_obj, &"value".into())?;
+
+            let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr)> = None;
+            if let Some(get_rc) = obj_get_value(&desc_obj, &"get".into())? {
+                match &*get_rc.borrow() {
+                    Value::Closure(_params, body, genv) => {
+                        getter_opt = Some((body.clone(), genv.clone()));
+                    }
+                    Value::Getter(body, genv) => {
+                        getter_opt = Some((body.clone(), genv.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
+            let mut setter_opt: Option<(Vec<String>, Vec<crate::core::Statement>, JSObjectDataPtr)> = None;
+            if let Some(set_rc) = obj_get_value(&desc_obj, &"set".into())? {
+                match &*set_rc.borrow() {
+                    Value::Closure(params, body, senv) => {
+                        setter_opt = Some((params.clone(), body.clone(), senv.clone()));
+                    }
+                    Value::Setter(params, body, senv) => {
+                        setter_opt = Some((params.clone(), body.clone(), senv.clone()));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Create property descriptor value
+            let prop_descriptor = Value::Property {
+                value: value_rc_opt.clone(),
+                getter: getter_opt,
+                setter: setter_opt,
+            };
+
+            // Install property on target object
+            obj_set_value(&target_obj, &prop_key, prop_descriptor)?;
+            Ok(Value::Object(target_obj))
+        }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),
     }
 }
@@ -527,6 +594,27 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                         }
                     }
                     _ => {}
+                }
+                // Support method stored as a function-object (object wrapping a closure)
+                if let Value::Object(func_obj_map) = &*method_rc.borrow() {
+                    if let Some(cl_rc) = obj_get_value(func_obj_map, &"__closure__".into())? {
+                        match &*cl_rc.borrow() {
+                            Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                func_env.borrow_mut().is_function_scope = true;
+                                crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                let result = crate::core::evaluate_statements(&func_env, body)?;
+                                if matches!(
+                                    result,
+                                    Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                                ) {
+                                    return Ok(result);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()

@@ -141,7 +141,10 @@ pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: 
         proto.borrow_mut().prototype = Some(obj_proto_obj.clone());
     }
 
-    obj_set_value(&ctor, &"prototype".into(), Value::Object(proto))?;
+    obj_set_value(&ctor, &"prototype".into(), Value::Object(proto.clone()))?;
+    // Ensure prototype.constructor points back to the constructor object
+    obj_set_value(&proto, &"constructor".into(), Value::Object(ctor.clone()))?;
+
     obj_set_value(env, &name.into(), Value::Object(ctor.clone()))?;
     Ok(ctor)
 }
@@ -456,6 +459,9 @@ pub(crate) fn filter_input_script(script: &str) -> String {
 
 /// Initialize global built-in constructors in the environment
 pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
+    // Create Error constructor object early so its prototype exists.
+    let _error_ctor_early = ensure_constructor_object(env, "Error", "__is_error_constructor")?;
+
     let mut env_borrow = env.borrow_mut();
 
     // Object constructor (object with static methods) and Object.prototype

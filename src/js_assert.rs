@@ -8,6 +8,11 @@ use std::rc::Rc;
 pub fn make_assert_object() -> Result<JSObjectDataPtr, JSError> {
     let assert_obj = Rc::new(RefCell::new(JSObjectData::new()));
     obj_set_value(&assert_obj, &"sameValue".into(), Value::Function("assert.sameValue".to_string()))?;
+    obj_set_value(
+        &assert_obj,
+        &"notSameValue".into(),
+        Value::Function("assert.notSameValue".to_string()),
+    )?;
     Ok(assert_obj)
 }
 
@@ -42,6 +47,41 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
             if !equal {
                 return Err(raise_eval_error!(format!("{message}: expected {expected:?}, got {actual:?}")));
+            }
+
+            Ok(Value::Undefined)
+        }
+        "notSameValue" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(raise_eval_error!("assert.notSameValue requires 2 or 3 arguments"));
+            }
+
+            let actual = evaluate_expr(env, &args[0])?;
+            let expected = evaluate_expr(env, &args[1])?;
+            let message = if args.len() == 3 {
+                let message_val = evaluate_expr(env, &args[2])?;
+                match message_val {
+                    Value::String(s) => String::from_utf16_lossy(&s),
+                    _ => "assert.notSameValue failed".to_string(),
+                }
+            } else {
+                "assert.notSameValue failed".to_string()
+            };
+
+            // Simple equality check (mirror sameValue logic)
+            let equal = match (&actual, &expected) {
+                (Value::Number(a), Value::Number(b)) => a == b,
+                (Value::String(a), Value::String(b)) => a == b,
+                (Value::Boolean(a), Value::Boolean(b)) => a == b,
+                (Value::Undefined, Value::Undefined) => true,
+                _ => false,
+            };
+
+            // If values are the same, this assertion fails — throw a plain error object
+            if equal {
+                let err_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                obj_set_value(&err_obj, &"message".into(), Value::String(message.encode_utf16().collect()))?;
+                return Err(raise_throw_error!(Value::Object(err_obj)));
             }
 
             Ok(Value::Undefined)

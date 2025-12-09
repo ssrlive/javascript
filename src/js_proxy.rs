@@ -1,5 +1,8 @@
 use crate::{
-    core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_get_value, obj_set_value},
+    core::{
+        Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value,
+        obj_get_value, obj_set_value,
+    },
     error::JSError,
     raise_eval_error,
     unicode::utf8_to_utf16,
@@ -106,27 +109,27 @@ pub(crate) fn apply_proxy_trap(
         && let Some(trap_val) = obj_get_value(handler_obj, &trap_name.into())?
     {
         let trap = trap_val.borrow().clone();
-        match trap {
-            Value::Closure(params, body, captured_env) => {
-                // Create execution environment for the trap
-                let trap_env = Rc::new(RefCell::new(JSObjectData::new()));
-                trap_env.borrow_mut().prototype = Some(captured_env);
+        // Accept either a direct `Value::Closure` or a function-object that
+        // stores the executable closure under the internal `__closure__` key.
+        if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
+            // Create execution environment for the trap
+            let trap_env = Rc::new(RefCell::new(JSObjectData::new()));
+            trap_env.borrow_mut().prototype = Some(captured_env);
 
-                // Bind arguments to parameters
-                for (i, arg) in args.iter().enumerate() {
-                    if i < params.len() {
-                        obj_set_value(&trap_env, &params[i].clone().into(), arg.clone())?;
-                    }
+            // Bind arguments to parameters
+            for (i, arg) in args.iter().enumerate() {
+                if i < params.len() {
+                    obj_set_value(&trap_env, &params[i].clone().into(), arg.clone())?;
                 }
+            }
 
-                // Evaluate the body
-                return crate::core::evaluate_statements(&trap_env, &body);
-            }
-            Value::Function(_) => {
-                // For now, we don't handle built-in functions as traps
-                // Fall through to default
-            }
-            _ => {} // Not a callable trap, fall through to default
+            // Evaluate the body
+            return evaluate_statements(&trap_env, &body);
+        } else if matches!(trap, Value::Function(_)) {
+            // For now, we don't handle built-in functions as traps
+            // Fall through to default
+        } else {
+            // Not a callable trap, fall through to default
         }
     }
 

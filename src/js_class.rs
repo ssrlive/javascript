@@ -1,5 +1,6 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
+use crate::core::value_to_string;
 use crate::js_array::is_array;
 use crate::raise_eval_error;
 use crate::{
@@ -74,6 +75,49 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
     match constructor_val {
         Value::Object(class_obj) => {
+            // If this object wraps a closure (created from a function
+            // expression/declaration), treat it as a constructor by
+            // extracting the internal closure and invoking it as a
+            // constructor. This allows script-defined functions stored
+            // as objects to be used with `new` while still exposing
+            // assignable `prototype` properties.
+            if let Some(cl_val_rc) = obj_get_value(&class_obj, &"__closure__".into())? {
+                if let Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) = &*cl_val_rc.borrow() {
+                    // Create the instance object
+                    let instance = Rc::new(RefCell::new(JSObjectData::new()));
+
+                    // Set prototype from the constructor object's `.prototype` if available
+                    if let Some(prototype_val) = obj_get_value(&class_obj, &"prototype".into())? {
+                        if let Value::Object(proto_obj) = &*prototype_val.borrow() {
+                            instance.borrow_mut().prototype = Some(proto_obj.clone());
+                            obj_set_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
+                        } else {
+                            obj_set_value(&instance, &"__proto__".into(), prototype_val.borrow().clone())?;
+                        }
+                    }
+
+                    // Prepare function environment with 'this' bound to the instance
+                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                    obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
+
+                    // Bind parameters from args
+                    for (i, param) in params.iter().enumerate() {
+                        if i < args.len() {
+                            let arg_val = evaluate_expr(env, &args[i])?;
+                            obj_set_value(&func_env, &param.into(), arg_val)?;
+                        }
+                    }
+
+                    // Execute constructor body
+                    evaluate_statements(&func_env, body)?;
+
+                    // Ensure instance.constructor points back to the constructor object
+                    obj_set_value(&instance, &"constructor".into(), Value::Object(class_obj.clone()))?;
+
+                    return Ok(Value::Object(instance));
+                }
+            }
             // Check if this is a TypedArray constructor
             if get_own_property(&class_obj, &"__kind".into()).is_some() {
                 return crate::js_typedarray::handle_typedarray_constructor(&class_obj, args, env);
@@ -138,6 +182,10 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     }
                 }
 
+                // Also set an own `constructor` property on the instance so `err.constructor`
+                // resolves directly to the canonical constructor object.
+                obj_set_value(&instance, &"constructor".into(), Value::Object(class_obj.clone()))?;
+
                 return Ok(Value::Object(instance));
             }
             // Check if this is the Number constructor object
@@ -150,6 +198,110 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             }
             if get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
                 return handle_boolean_constructor(args, env);
+            }
+            // Error-like constructors (Error) created via ensure_constructor_object
+            if get_own_property(&class_obj, &"__is_error_constructor".into()).is_some() {
+                log::debug!(
+                    "DBG evaluate_new - entered error-like constructor branch, args.len={} class_obj ptr={:p}",
+                    args.len(),
+                    Rc::as_ptr(&class_obj)
+                );
+                if !args.is_empty() {
+                    log::debug!("DBG evaluate_new - args[0] expr = {:?}", args[0]);
+                }
+                // Use the class_obj as the canonical constructor
+                let canonical_ctor = class_obj.clone();
+
+                // Create instance object
+                let instance = Rc::new(RefCell::new(JSObjectData::new()));
+
+                // Attach a debug identifier (pointer string) so we can correlate
+                // runtime-created instances with later logs (e.g. thrown object ptrs).
+                let dbg_ptr_str = format!("{:p}", Rc::as_ptr(&instance));
+                obj_set_value(&instance, &"__dbg_ptr__".into(), Value::String(utf8_to_utf16(&dbg_ptr_str)))?;
+                log::debug!(
+                    "DBG evaluate_new - created instance ptr={:p} __dbg_ptr__={}",
+                    Rc::as_ptr(&instance),
+                    dbg_ptr_str
+                );
+
+                // Set prototype from the canonical constructor's `.prototype` if available
+                if let Some(prototype_val) = obj_get_value(&canonical_ctor, &"prototype".into())? {
+                    if let Value::Object(proto_obj) = &*prototype_val.borrow() {
+                        instance.borrow_mut().prototype = Some(proto_obj.clone());
+                        obj_set_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
+                    } else {
+                        obj_set_value(&instance, &"__proto__".into(), prototype_val.borrow().clone())?;
+                    }
+                }
+
+                // If a message argument was supplied, set the message property
+                if !args.is_empty() {
+                    log::debug!("DBG evaluate_new - about to evaluate args[0]");
+                    match evaluate_expr(env, &args[0]) {
+                        Ok(val) => {
+                            log::debug!("DBG evaluate_new - eval args[0] result = {:?}", val);
+                            match val {
+                                Value::String(s) => {
+                                    log::debug!("DBG evaluate_new - setting message (string) = {:?}", String::from_utf16_lossy(&s));
+                                    obj_set_value(&instance, &"message".into(), Value::String(s))?;
+                                }
+                                Value::Number(n) => {
+                                    log::debug!("DBG evaluate_new - setting message (number) = {}", n);
+                                    obj_set_value(&instance, &"message".into(), Value::String(utf8_to_utf16(&n.to_string())))?;
+                                }
+                                _ => {
+                                    // convert other types to string via value_to_string
+                                    let s = utf8_to_utf16(&value_to_string(&val));
+                                    log::debug!("DBG evaluate_new - setting message (other) = {:?}", String::from_utf16_lossy(&s));
+                                    obj_set_value(&instance, &"message".into(), Value::String(s))?;
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            log::debug!("DBG evaluate_new - failed to evaluate args[0]: {:?}", err);
+                        }
+                    }
+                }
+
+                // Ensure prototype.constructor points back to the canonical constructor
+                if let Some(prototype_val) = obj_get_value(&canonical_ctor, &"prototype".into())? {
+                    if let Value::Object(proto_obj) = &*prototype_val.borrow() {
+                        match crate::core::get_own_property(proto_obj, &"constructor".into()) {
+                            Some(existing_rc) => {
+                                if let Value::Object(existing_ctor_obj) = &*existing_rc.borrow() {
+                                    if !Rc::ptr_eq(existing_ctor_obj, &canonical_ctor) {
+                                        obj_set_value(proto_obj, &"constructor".into(), Value::Object(canonical_ctor.clone()))?;
+                                    }
+                                } else {
+                                    obj_set_value(proto_obj, &"constructor".into(), Value::Object(canonical_ctor.clone()))?;
+                                }
+                            }
+                            None => {
+                                obj_set_value(proto_obj, &"constructor".into(), Value::Object(canonical_ctor.clone()))?;
+                            }
+                        }
+                    }
+                }
+
+                // Ensure constructor.name exists
+                let ctor_name = "Error";
+                match crate::core::get_own_property(&canonical_ctor, &"name".into()) {
+                    Some(name_rc) => {
+                        if let Value::Undefined = &*name_rc.borrow() {
+                            obj_set_value(&canonical_ctor, &"name".into(), Value::String(utf8_to_utf16(ctor_name)))?;
+                        }
+                    }
+                    None => {
+                        obj_set_value(&canonical_ctor, &"name".into(), Value::String(utf8_to_utf16(ctor_name)))?;
+                    }
+                }
+
+                // Also set an own `constructor` property on the instance so `err.constructor`
+                // resolves directly to the canonical constructor object used by the bootstrap.
+                obj_set_value(&instance, &"constructor".into(), Value::Object(canonical_ctor.clone()))?;
+
+                return Ok(Value::Object(instance));
             }
         }
         Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {

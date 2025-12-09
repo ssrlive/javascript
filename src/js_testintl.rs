@@ -1,4 +1,6 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, obj_set_value};
+use crate::core::{
+    Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, obj_set_value,
+};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -309,29 +311,23 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
             }
 
             let callback = evaluate_expr(env, &args[0])?;
-            let callback_func = match callback {
-                Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
-                    (params, body, captured_env)
-                }
-                _ => {
-                    return Err(raise_eval_error!("testWithIntlConstructors requires a function as argument"));
-                }
-            };
+            if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                // Create a mock constructor
+                let mock_constructor = create_mock_intl_constructor()?;
 
-            // Create a mock constructor
-            let mock_constructor = create_mock_intl_constructor()?;
+                // Call the callback with the mock constructor
+                let func_env = captured_env.clone();
+                // Bind the mock constructor as the first parameter
+                if !params.is_empty() {
+                    env_set(&func_env, params[0].as_str(), mock_constructor)?;
+                }
 
-            // Call the callback with the mock constructor
-            let func_env = callback_func.2.clone();
-            // Bind the mock constructor as the first parameter
-            if !callback_func.0.is_empty() {
-                env_set(&func_env, &callback_func.0[0], mock_constructor)?;
+                // Execute the callback body
+                evaluate_statements(&func_env, &body)?;
+                Ok(Value::Undefined)
+            } else {
+                Err(raise_eval_error!("testWithIntlConstructors requires a function as argument"))
             }
-
-            // Execute the callback body
-            crate::core::evaluate_statements(&func_env, &callback_func.1)?;
-
-            Ok(Value::Undefined)
         }
         _ => Err(raise_eval_error!(format!("testIntl method {method} not implemented"))),
     }

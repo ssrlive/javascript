@@ -705,6 +705,26 @@ pub fn value_to_string(val: &Value) -> String {
     }
 }
 
+// Helper: extract a closure (params, body, env) from a Value. This accepts
+// either a direct `Value::Closure` or an object wrapper that stores the
+// executable closure under the internal `"__closure__"` property.
+pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate::core::Statement>, crate::core::JSObjectDataPtr)> {
+    match val {
+        Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+        Value::Object(obj_map) => {
+            if let Ok(Some(cl_rc)) = obj_get_value(obj_map, &"__closure__".into()) {
+                match &*cl_rc.borrow() {
+                    Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 // Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
 pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
     match val {
@@ -715,29 +735,27 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                 let key = PropertyKey::Symbol(tp_sym.clone());
                 if let Some(method_rc) = obj_get_value(obj_map, &key)? {
                     let method_val = method_rc.borrow().clone();
-                    match method_val {
-                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
-                            // Create a new execution env and bind this
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
-                            // Pass hint as first param if the function declares params
-                            if !params.is_empty() {
-                                env_set(&func_env, &params[0], Value::String(utf8_to_utf16(hint)))?;
+                    // Accept direct closures or function-objects that wrap a closure
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
+                        // Create a new execution env and bind this
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                        // Pass hint as first param if the function declares params
+                        if !params.is_empty() {
+                            env_set(&func_env, &params[0], Value::String(utf8_to_utf16(hint)))?;
+                        }
+                        let result = evaluate_statements(&func_env, &body)?;
+                        match result {
+                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
+                                return Ok(result);
                             }
-                            let result = evaluate_statements(&func_env, &body)?;
-                            match result {
-                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
-                                    return Ok(result);
-                                }
-                                _ => {
-                                    return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
-                                }
+                            _ => {
+                                return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
                             }
                         }
-                        _ => {
-                            // Not a closure/minimally supported callable - fall through to default algorithm
-                        }
+                    } else {
+                        // Not a closure/minimally supported callable - fall through to default algorithm
                     }
                 }
             }
@@ -1193,6 +1211,15 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                     // No setter, update value
                     let value = Some(Rc::new(RefCell::new(val)));
                     let new_prop = Value::Property { value, getter, setter };
+                    if let PropertyKey::String(s) = key {
+                        if s == "message" {
+                            // Try to include any debug id set on the instance for correlation
+                            let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())
+                                .map(|r| format!("{:?}", r.borrow()))
+                                .unwrap_or_else(|| "<none>".to_string());
+                            log::debug!("DBG obj_set_value - inserting 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={new_prop:?}");
+                        }
+                    }
                     js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(new_prop)));
                 }
                 return Ok(());
@@ -1210,6 +1237,14 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
         }
     }
     // No setter, just set the value normally
+    if let PropertyKey::String(s) = key {
+        if s == "message" {
+            let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())
+                .map(|r| format!("{:?}", r.borrow()))
+                .unwrap_or_else(|| "<none>".to_string());
+            log::debug!("DBG obj_set_value - direct insert 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={val:?}");
+        }
+    }
     js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(val)));
     Ok(())
 }

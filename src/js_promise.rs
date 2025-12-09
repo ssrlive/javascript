@@ -23,7 +23,9 @@
 //!
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements};
+use crate::core::{
+    Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value,
+};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
@@ -91,29 +93,26 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
-                    match &callback {
-                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        if !params.is_empty() {
+                            env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                        }
+                        match evaluate_statements(&func_env, &body) {
+                            Ok(result) => {
+                                log::trace!("Callback executed successfully, resolving promise");
+                                resolve_promise(&new_promise, result);
                             }
-                            match evaluate_statements(&func_env, body) {
-                                Ok(result) => {
-                                    log::trace!("Callback executed successfully, resolving promise");
-                                    resolve_promise(&new_promise, result);
-                                }
-                                Err(e) => {
-                                    log::trace!("Callback execution failed: {:?}", e);
-                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
-                                }
+                            Err(e) => {
+                                log::trace!("Callback execution failed: {:?}", e);
+                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
                             }
                         }
-                        _ => {
-                            // If callback is not a function, resolve with undefined
-                            log::trace!("Callback is not a function, resolving with undefined");
-                            resolve_promise(&new_promise, Value::Undefined);
-                        }
+                    } else {
+                        // If callback is not a function, resolve with undefined
+                        log::trace!("Callback is not a function, resolving with undefined");
+                        resolve_promise(&new_promise, Value::Undefined);
                     }
                 }
             }
@@ -121,26 +120,23 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 log::trace!("Processing Rejection task with {} callbacks", callbacks.len());
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
-                    match &callback {
-                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        if !params.is_empty() {
+                            env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                        }
+                        match evaluate_statements(&func_env, &body) {
+                            Ok(result) => {
+                                resolve_promise(&new_promise, result);
                             }
-                            match evaluate_statements(&func_env, body) {
-                                Ok(result) => {
-                                    resolve_promise(&new_promise, result);
-                                }
-                                Err(e) => {
-                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
-                                }
+                            Err(e) => {
+                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
                             }
                         }
-                        _ => {
-                            // If callback is not a function, resolve with undefined
-                            resolve_promise(&new_promise, Value::Undefined);
-                        }
+                    } else {
+                        // If callback is not a function, resolve with undefined
+                        resolve_promise(&new_promise, Value::Undefined);
                     }
                 }
             }
@@ -371,11 +367,10 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     }
 
     let executor = evaluate_expr(env, &args[0])?;
-    let (params, captured_env) = match &executor {
-        Value::Closure(p, _b, c) | Value::AsyncClosure(p, _b, c) => (p.clone(), c.clone()),
-        _ => {
-            return Err(raise_eval_error!("Promise constructor requires a function as executor"));
-        }
+    let (params, captured_env) = if let Some((p, _body, c)) = extract_closure_from_value(&executor) {
+        (p.clone(), c.clone())
+    } else {
+        return Err(raise_eval_error!("Promise constructor requires a function as executor"));
     };
 
     // Create the promise directly

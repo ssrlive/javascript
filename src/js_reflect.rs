@@ -161,9 +161,46 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     crate::js_function::handle_global_function(&func_name, &expr_args, env)
                 }
                 Value::Object(obj_map) => {
-                    // If it's an object with callable property (like assert object), attempt to call as object
-                    // Build call expression: Call(Value(target), arg_exprs...)
-                    // Evaluate by using evaluate_call with Expr::Value(target)
+                    // If this object wraps an internal closure (function-object),
+                    // invoke that closure with `this` bound to `this_arg` and
+                    // the provided argument list. This preserves the correct
+                    // `this` binding for `Reflect.apply` when the target is a
+                    // script-defined function stored as an object.
+                    if let Some(cl_rc) = obj_get_value(&obj_map, &"__closure__".into())? {
+                        match &*cl_rc.borrow() {
+                            Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                                // Evaluate argument expressions to Values
+                                let mut evaluated_args: Vec<Value> = Vec::new();
+                                for ae in &arg_exprs {
+                                    evaluated_args.push(evaluate_expr(env, ae)?);
+                                }
+
+                                // Prepare function environment and bind `this`
+                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                func_env.borrow_mut().is_function_scope = true;
+                                // Use env_set so function scope semantics apply
+                                crate::core::env_set(&func_env, "this", this_arg)?;
+
+                                // Bind parameters
+                                for (i, param) in params.iter().enumerate() {
+                                    if i < evaluated_args.len() {
+                                        crate::core::env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                    } else {
+                                        crate::core::env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                    }
+                                }
+
+                                // Execute function body
+                                return crate::core::evaluate_statements(&func_env, body);
+                            }
+                            _ => {
+                                // Not callable - fall through to generic error below
+                            }
+                        }
+                    }
+
+                    // If not an internal closure, fall back to building a call expression
                     let call_expr = Expr::Call(Box::new(Expr::Value(Value::Object(obj_map.clone()))), arg_exprs);
                     crate::core::evaluate_expr(env, &call_expr)
                 }

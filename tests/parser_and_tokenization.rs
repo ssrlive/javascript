@@ -8,7 +8,7 @@ fn __init_test_logger() {
 #[test]
 fn multiple_var_declarations_without_initializers() {
     let script = "var a, b; a = 1; b = 2; a + b";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 3.0),
         _ => panic!("Expected number 3.0, got {:?}", result),
@@ -18,7 +18,7 @@ fn multiple_var_declarations_without_initializers() {
 #[test]
 fn skip_empty_semicolons_and_let() {
     let script = ";; let x = 5; ; x";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 5.0),
         _ => panic!("Expected number 5.0, got {:?}", result),
@@ -28,7 +28,7 @@ fn skip_empty_semicolons_and_let() {
 #[test]
 fn single_line_and_block_comments_ignored() {
     let script = "// leading comment\n/* block comment */ let x = 7; x";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 7.0),
         _ => panic!("Expected number 7.0, got {:?}", result),
@@ -59,27 +59,27 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
 #[test]
 fn exponentiation_and_numeric_separators_supported() {
     // Exponentiation for numbers
-    let res = evaluate_script("2 ** 3;");
+    let res = evaluate_script("2 ** 3;", None::<&std::path::Path>);
     match res {
         Ok(crate::Value::Number(n)) => assert_eq!(n, 8.0),
         _ => panic!("expected numeric result for 2 ** 3"),
     }
 
-    let res2 = evaluate_script("2 ** 3 ** 2;");
+    let res2 = evaluate_script("2 ** 3 ** 2;", None::<&std::path::Path>);
     match res2 {
         Ok(crate::Value::Number(n)) => assert_eq!(n, 512.0),
         _ => panic!("expected numeric result for 2 ** 3 ** 2"),
     }
 
     // Numeric separators
-    let res3 = evaluate_script("1_000_000 + 2000;");
+    let res3 = evaluate_script("1_000_000 + 2000;", None::<&std::path::Path>);
     match res3 {
         Ok(crate::Value::Number(n)) => assert_eq!(n, 1_002_000.0),
         _ => panic!("expected numeric result for 1_000_000 + 2000"),
     }
 
     // BigInt with separators and exponentiation
-    let res4 = evaluate_script("1_000n ** 2n;");
+    let res4 = evaluate_script("1_000n ** 2n;", None::<&std::path::Path>);
     match res4 {
         Ok(crate::Value::BigInt(s)) => assert_eq!(s.raw, "1000000".to_string()),
         _ => panic!("expected bigint result for 1_000n ** 2n"),

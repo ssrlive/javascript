@@ -11,7 +11,7 @@ fn __init_test_logger() {
 fn test_async_function_syntax() {
     // Test that async function syntax is accepted (even if execution is synchronous)
     let script = "async function foo() { return 42; }; await foo()";
-    let result = evaluate_script(script).expect("evaluation failed");
+    let result = evaluate_script(script, None::<&std::path::Path>).expect("evaluation failed");
     match result {
         Value::Number(n) => assert_eq!(n, 42.0),
         other => panic!("expected number 42.0, got {:?}", other),
@@ -22,7 +22,7 @@ fn test_async_function_syntax() {
 fn test_await_syntax() {
     // Test that await syntax is accepted
     let script = "let p = Promise.resolve(42); await p";
-    let result = evaluate_script(script).expect("evaluation failed");
+    let result = evaluate_script(script, None::<&std::path::Path>).expect("evaluation failed");
     match result {
         Value::Number(n) => assert_eq!(n, 42.0),
         other => panic!("expected number 42.0, got {:?}", other),
@@ -33,7 +33,7 @@ fn test_await_syntax() {
 fn test_async_arrow_function_syntax() {
     // Test that async arrow function syntax is accepted
     let script = "let foo = async () => { return 42; }; await foo()";
-    let result = evaluate_script(script).expect("evaluation failed");
+    let result = evaluate_script(script, None::<&std::path::Path>).expect("evaluation failed");
     match result {
         Value::Number(n) => assert_eq!(n, 42.0),
         other => panic!("expected number 42.0, got {:?}", other),
@@ -50,7 +50,7 @@ fn test_async_promise_resolution() {
         result.push("sync");
         result
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(value) => {
             // Should be an array with ["sync", "async"] since the then callback executes asynchronously

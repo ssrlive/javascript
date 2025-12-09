@@ -21,7 +21,7 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 3.0),
         _ => panic!("Expected number 3.0, got {:?}", result),
@@ -39,7 +39,7 @@ fn test_trailing_comma_in_array_initializer_with_following_statement() {
         f();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 3.0),
         _ => panic!("Expected number 3.0, got {:?}", result),

@@ -251,7 +251,7 @@ fn test_js_arraybuffer_constructor_via_script() {
         "ArrayBuffer created successfully";
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "ArrayBuffer constructor should work");
 }
 
@@ -265,7 +265,7 @@ fn test_js_dataview_constructor_via_script() {
         "DataView created successfully";
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "DataView constructor should work");
 }
 
@@ -294,7 +294,7 @@ fn test_js_typedarray_constructors_via_script() {
         "All TypedArray constructors work";
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "All TypedArray constructors should work");
 }
 
@@ -312,7 +312,7 @@ fn test_js_typedarray_shared_buffer_via_script() {
         result;
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(val) => {
             if let Value::Number(n) = val {
@@ -337,7 +337,7 @@ fn test_js_arraybuffer_dataview_integration_via_script() {
         "ArrayBuffer-DataView integration works";
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "ArrayBuffer-DataView integration should work");
 }
 
@@ -424,6 +424,6 @@ fn test_js_typedarray_different_construction_patterns_via_script() {
         "Different construction patterns work";
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "Different TypedArray construction patterns should work");
 }

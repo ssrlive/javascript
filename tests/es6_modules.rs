@@ -16,7 +16,7 @@ mod tests {
             import identity from "math";
             PI + E
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Import statement should work");
         // The result should be PI + E
         if let Ok(Value::Number(val)) = result {
@@ -33,7 +33,7 @@ mod tests {
                 return module.PI + module.E;
             })
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         // Dynamic import should return a Promise
         assert!(result.is_ok(), "Dynamic import should work");
     }
@@ -45,7 +45,7 @@ mod tests {
             export function add(a, b) { return a + b; }
             1
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Export statement should work");
     }
 
@@ -76,7 +76,7 @@ mod tests {
             // Return a success value
             42
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Import star from os should work");
         // The result should be 42
         if let Ok(Value::Number(val)) = result {
@@ -106,7 +106,7 @@ mod tests {
 
             pi_ok && e_ok && add_ok && multiply_ok
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Import from JS file should work");
         // The result should be true
         if let Ok(Value::Boolean(val)) = result {

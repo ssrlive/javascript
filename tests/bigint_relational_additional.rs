@@ -15,7 +15,7 @@ fn bigint_nan_infinite_and_sign_edgecases() {
     ];
 
     for (expr, expected) in cases {
-        let res = evaluate_script(expr).expect("eval failed");
+        let res = evaluate_script(expr, None::<&std::path::Path>).expect("eval failed");
         match res {
             Value::Boolean(b) => assert_eq!(b, expected, "{} should be {}", expr, expected),
             other => panic!("Expected boolean for '{}', got {:?}", expr, other),
@@ -39,7 +39,7 @@ fn bigint_relational_le_ge_and_negative_fractional() {
     ];
 
     for (expr, expected) in cases {
-        let res = evaluate_script(expr).expect("eval failed");
+        let res = evaluate_script(expr, None::<&std::path::Path>).expect("eval failed");
         match res {
             Value::Boolean(b) => assert_eq!(b, expected, "{} should be {}", expr, expected),
             other => panic!("Expected boolean for '{}', got {:?}", expr, other),
@@ -77,7 +77,7 @@ fn bigint_relational_small_fuzz_returns_boolean() {
         for n in &numbers {
             for op in &ops {
                 let expr = format!("{} {} {}", bi, op, n);
-                let res = evaluate_script(&expr);
+                let res = evaluate_script(&expr, None::<&std::path::Path>);
                 match res {
                     Ok(Value::Boolean(_)) => {} // good
                     Ok(other) => panic!("Expected boolean for '{}', got {:?}", expr, other),

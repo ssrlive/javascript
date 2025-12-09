@@ -20,7 +20,7 @@ mod symbol_property_tests {
             obj[sym] = "symbol value";
             obj[sym]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol value"),
             _ => panic!("Expected string 'symbol value', got {:?}", result),
@@ -37,7 +37,7 @@ mod symbol_property_tests {
             obj[sym2] = "value2";
             obj[sym1] != obj[sym2]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b), // true
             _ => panic!("Expected number 1.0 (true), got {:?}", result),
@@ -53,7 +53,7 @@ mod symbol_property_tests {
             delete obj[sym];
             obj[sym]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => (), // Should be undefined after deletion
             _ => panic!("Expected undefined after deletion, got {:?}", result),
@@ -69,7 +69,7 @@ mod symbol_property_tests {
             obj[sym]++;
             obj[sym]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 6.0),
             _ => panic!("Expected number 6.0 after increment, got {:?}", result),
@@ -85,7 +85,7 @@ mod symbol_property_tests {
             obj[sym]--;
             obj[sym]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 4.0),
             _ => panic!("Expected number 4.0 after decrement, got {:?}", result),

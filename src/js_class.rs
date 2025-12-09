@@ -301,6 +301,41 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // resolves directly to the canonical constructor object used by the bootstrap.
                 obj_set_value(&instance, &"constructor".into(), Value::Object(canonical_ctor.clone()))?;
 
+                // Build a minimal stack string from any linked __frame/__caller
+                // frames available on the current environment. This provides a
+                // reasonable default for Error instances created via `new Error()`.
+                let mut stack_lines: Vec<String> = Vec::new();
+                // First line: Error: <message>
+                let message_text = match crate::core::get_own_property(&instance, &"message".into()) {
+                    Some(mrc) => match &*mrc.borrow() {
+                        Value::String(s) => String::from_utf16_lossy(s),
+                        other => crate::core::value_to_string(other),
+                    },
+                    None => String::new(),
+                };
+                stack_lines.push(format!("Error: {}", message_text));
+
+                // Walk caller chain starting from current env
+                let mut env_opt: Option<crate::core::JSObjectDataPtr> = Some(env.clone());
+                while let Some(env_ptr) = env_opt {
+                    if let Ok(Some(frame_val_rc)) = crate::core::obj_get_value(&env_ptr, &"__frame".into()) {
+                        if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
+                            stack_lines.push(format!("    at {}", String::from_utf16_lossy(s_utf16)));
+                        }
+                    }
+                    // follow caller link if present
+                    if let Ok(Some(caller_rc)) = crate::core::obj_get_value(&env_ptr, &"__caller".into()) {
+                        if let Value::Object(caller_env) = &*caller_rc.borrow() {
+                            env_opt = Some(caller_env.clone());
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                let stack_combined = stack_lines.join("\n");
+                obj_set_value(&instance, &"stack".into(), Value::String(utf8_to_utf16(&stack_combined)))?;
+
                 return Ok(Value::Object(instance));
             }
         }

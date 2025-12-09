@@ -474,7 +474,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 match arg_val {
                     Value::String(s) => {
                         let code = String::from_utf16_lossy(&s);
-                        crate::core::evaluate_script(&code)
+                        crate::core::evaluate_script(&code, None::<&std::path::Path>) // Evaluate in global context
                     }
                     _ => Ok(arg_val),
                 }

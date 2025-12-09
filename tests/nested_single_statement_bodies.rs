@@ -24,7 +24,7 @@ fn test_nested_if_else_associativity() {
         [f(true, true), f(true, false), f(false, false)].join(',');
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     eprintln!("s6 result raw = {:?}", result);
     // cleanup accidental debug from earlier
     match result {
@@ -47,7 +47,7 @@ fn test_nested_for_single_statement_bodies() {
         f();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "0,1,2,3".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -72,7 +72,7 @@ fn test_do_while_with_inner_if_single_statement() {
         f();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "0,-1,2,-3".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -98,7 +98,7 @@ fn test_pathological_if_do_for_combo() {
         f();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "E0-0,E0-1,O1-0,O1-1,E2-0,E2-1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -124,7 +124,7 @@ fn test_pathological_for_do_if_combo() {
         g();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "F0,T1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -152,7 +152,7 @@ fn test_complex_nested_chain() {
         h();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "0-0:1X:1-0:2X".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -172,7 +172,7 @@ fn test_try_catch_finally_single_statement_bodies_no_throw() {
         t1();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "T1,F1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -193,7 +193,7 @@ fn test_try_catch_finally_single_statement_bodies_with_throw() {
         t2();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "caught,done".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -218,7 +218,7 @@ fn test_try_in_for_with_single_statement_bodies() {
         t3();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "E0,C1,E2".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -239,7 +239,7 @@ fn test_try_catch_nested_in_catch_finally_single_statement() {
         t4();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "inner,innerfin,outerfin".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -268,7 +268,7 @@ fn test_deep_try_for_do_while_combo() {
         t5();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "N0|ONE|N2|FIN".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -293,7 +293,7 @@ fn test_for_with_try_while_inner_do() {
         t6();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "V0-0,V0-1,V1-0,V1-1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -318,7 +318,7 @@ fn test_nested_try_do_for_try_deep_chain() {
         t7();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "P0;Q1;P2;END".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -343,7 +343,7 @@ fn test_switch_try_in_case_no_throw() {
         s1();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "X".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -369,7 +369,7 @@ fn test_switch_try_in_case_throw_and_fallthrough() {
         s2();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "C,D".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -392,7 +392,7 @@ fn test_switch_case_try_with_for_inner_single_statement() {
         s3();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "F0,F1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -415,7 +415,7 @@ fn test_switch_try_inside_for_and_back_to_switch() {
         s4();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "A0,F0,B1,G1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -436,7 +436,7 @@ fn test_labeled_try_break_outer() {
         L1();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "I0,F0,F1".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -457,7 +457,7 @@ fn test_labeled_try_continue_outer() {
         L2();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "F0|I1|F1|I2|F2".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -482,7 +482,7 @@ fn test_switch_try_finally_fallthrough_no_break() {
         S1();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "A,F,B".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -511,7 +511,7 @@ fn test_labeled_try_in_switch_with_outer_label_break() {
         s5();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "X,F,AFTER".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -537,7 +537,7 @@ fn test_labeled_nested_block_break_and_finally() {
         L3();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "FIN,AFTER_OUTER".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -554,7 +554,7 @@ fn test_try_return_finally_override_and_side_effects() {
         [r1(), r2(), global_out.join(',')].join('|');
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "FIN|TRY|SIDE".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -582,7 +582,7 @@ fn test_switch_try_fallthrough_array_nextline_asi() {
         s6();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "A,F,B,X0".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -604,7 +604,7 @@ fn test_labeled_switch_try_return_finally_sideeffect() {
         s7();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "R|FIN".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),
@@ -626,7 +626,7 @@ fn test_labeled_block_parenthesis_after_block_asi() {
         let result = s8();
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => assert_eq!(s, "B|F|PAREN".encode_utf16().collect::<Vec<u16>>()),
         Ok(v) => panic!("Unexpected ok value: {:?}", v),

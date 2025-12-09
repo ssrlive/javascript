@@ -34,7 +34,7 @@ p
 "#
         );
 
-        let result = evaluate_script(&script);
+        let result = evaluate_script(&script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n as i64, depth),
             other => panic!("Expected number {}, got {:?}", depth, other),
@@ -58,7 +58,7 @@ p = p.then(function(y) {
 p
 "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n as i64, 25), // 5 * 3 + 10 = 25
             other => panic!("Expected number 25, got {:?}", other),
@@ -85,6 +85,6 @@ p
                     .catch(err => "error: " + err)
                     .finally(() => console.log("finally: cleanup"));
             "#;
-        evaluate_script(script).unwrap();
+        evaluate_script(script, None::<&std::path::Path>).unwrap();
     }
 }

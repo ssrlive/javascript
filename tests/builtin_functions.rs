@@ -15,7 +15,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_constants() {
         let script = "Math.PI";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => {
                 assert!((n - std::f64::consts::PI).abs() < 0.0001);
@@ -24,7 +24,7 @@ mod builtin_functions_tests {
         }
 
         let script = "Math.E";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => {
                 assert!((n - std::f64::consts::E).abs() < 0.0001);
@@ -36,7 +36,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_floor() {
         let script = "Math.floor(3.7)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected Math.floor(3.7) to be 3.0, got {:?}", result),
@@ -46,7 +46,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_ceil() {
         let script = "Math.ceil(3.1)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 4.0),
             _ => panic!("Expected Math.ceil(3.1) to be 4.0, got {:?}", result),
@@ -56,7 +56,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_sqrt() {
         let script = "Math.sqrt(9)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected Math.sqrt(9) to be 3.0, got {:?}", result),
@@ -66,7 +66,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_pow() {
         let script = "Math.pow(2, 3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 8.0),
             _ => panic!("Expected Math.pow(2, 3) to be 8.0, got {:?}", result),
@@ -76,7 +76,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_sin() {
         let script = "Math.sin(0)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 0.0),
             _ => panic!("Expected Math.sin(0) to be 0.0, got {:?}", result),
@@ -86,7 +86,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_math_random() {
         let script = "Math.random()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => {
                 assert!((0.0..1.0).contains(&n));
@@ -99,7 +99,7 @@ mod builtin_functions_tests {
     fn test_math_clz32() {
         // Test clz32 with zero
         let script = "Math.clz32(0)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 32.0),
             _ => panic!("Expected Math.clz32(0) to return 32, got {:?}", result),
@@ -107,7 +107,7 @@ mod builtin_functions_tests {
 
         // Test clz32 with 1
         let script2 = "Math.clz32(1)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 31.0),
             _ => panic!("Expected Math.clz32(1) to return 31, got {:?}", result2),
@@ -115,7 +115,7 @@ mod builtin_functions_tests {
 
         // Test clz32 with larger number (268435456 = 2^28)
         let script3 = "Math.clz32(268435456)";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected Math.clz32(268435456) to return 3, got {:?}", result3),
@@ -123,7 +123,7 @@ mod builtin_functions_tests {
 
         // Test clz32 with NaN (should return 32)
         let script4 = "Math.clz32(NaN)";
-        let result4 = evaluate_script(script4);
+        let result4 = evaluate_script(script4, None::<&std::path::Path>);
         match result4 {
             Ok(Value::Number(n)) => assert_eq!(n, 32.0),
             _ => panic!("Expected Math.clz32(NaN) to return 32, got {:?}", result4),
@@ -134,7 +134,7 @@ mod builtin_functions_tests {
     fn test_math_imul() {
         // Test basic imul
         let script = "Math.imul(2, 3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 6.0),
             _ => panic!("Expected Math.imul(2, 3) to return 6, got {:?}", result),
@@ -142,7 +142,7 @@ mod builtin_functions_tests {
 
         // Test imul with negative numbers
         let script2 = "Math.imul(-2, 3)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, -6.0),
             _ => panic!("Expected Math.imul(-2, 3) to return -6, got {:?}", result2),
@@ -151,7 +151,7 @@ mod builtin_functions_tests {
         // Test imul with overflow (should wrap around)
         // 2147483647 is 2^31 - 1 (max 32-bit signed int)
         let script3 = "Math.imul(2147483647, 2)";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, -2.0), // Should wrap to -2
             _ => panic!("Expected Math.imul(2147483647, 2) to return -2, got {:?}", result3),
@@ -161,14 +161,14 @@ mod builtin_functions_tests {
     #[test]
     fn test_parse_int() {
         let script = "parseInt('42')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 42.0),
             _ => panic!("Expected parseInt('42') to be 42.0, got {:?}", result),
         }
 
         let script = "parseInt('3.14')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected parseInt('3.14') to be 3.0, got {:?}", result),
@@ -179,7 +179,7 @@ mod builtin_functions_tests {
     #[allow(clippy::approx_constant)]
     fn test_parse_float() {
         let script = "parseFloat('3.14')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.14_f64),
             _ => panic!("Expected parseFloat('3.14') to be 3.14, got {:?}", result),
@@ -189,14 +189,14 @@ mod builtin_functions_tests {
     #[test]
     fn test_is_nan() {
         let script = "isNaN(NaN)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected isNaN(NaN) to be true, got {:?}", result),
         }
 
         let script = "isNaN(42)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected isNaN(42) to be false, got {:?}", result),
@@ -206,14 +206,14 @@ mod builtin_functions_tests {
     #[test]
     fn test_is_finite() {
         let script = "isFinite(42)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected isFinite(42) to be true, got {:?}", result),
         }
 
         let script = "isFinite(Infinity)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected isFinite(Infinity) to be false, got {:?}", result),
@@ -223,7 +223,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_json_stringify() {
         let script = "JSON.stringify(42)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -236,7 +236,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_json_parse_stringify_roundtrip() {
         let script = r#"let obj = JSON.parse('{"name":"John","age":30,"city":"New York"}'); JSON.stringify(obj)"#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -250,7 +250,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_json_parse_array() {
         let script = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr.length"#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 4.0),
             _ => panic!("Expected parsed array length to be 4.0, got {:?}", result),
@@ -258,14 +258,14 @@ mod builtin_functions_tests {
 
         // Check elements
         let script2 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[0]"#;
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected arr[0] to be 1.0, got {:?}", result2),
         }
 
         let script3 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[1]"#;
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -275,14 +275,14 @@ mod builtin_functions_tests {
         }
 
         let script4 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[2]"#;
-        let result4 = evaluate_script(script4);
+        let result4 = evaluate_script(script4, None::<&std::path::Path>);
         match result4 {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr[2] to be true, got {:?}", result4),
         }
 
         let script5 = r#"let arr = JSON.parse('[1, "hello", true, null]'); arr[3]"#;
-        let result5 = evaluate_script(script5);
+        let result5 = evaluate_script(script5, None::<&std::path::Path>);
         match result5 {
             Ok(Value::Undefined) => {}
             _ => panic!("Expected arr[3] to be undefined (null), got {:?}", result5),
@@ -292,7 +292,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_push() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected array length to be 2.0, got {:?}", result),
@@ -302,7 +302,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_pop() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.pop()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected arr.pop() to return 2.0, got {:?}", result),
@@ -312,7 +312,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_join() {
         let script = "let arr = Array(); let arr2 = arr.push('a'); let arr3 = arr2.push('b'); arr3.join('-')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -325,7 +325,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_object_keys() {
         let script = "let obj = {a: 1, b: 2}; Object.keys(obj).length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected Object.keys(obj).length to be 2.0, got {:?}", result),
@@ -336,7 +336,7 @@ mod builtin_functions_tests {
     fn test_object_assign() {
         // Test basic assign
         let script = "let target = {a: 1}; let source = {b: 2, c: 3}; Object.assign(target, source); target.c";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected Object.assign to copy properties, got {:?}", result),
@@ -345,7 +345,7 @@ mod builtin_functions_tests {
         // Test assign with multiple sources
         let script2 =
             "let target = {a: 1}; let source1 = {b: 2}; let source2 = {c: 3}; Object.assign(target, source1, source2); target.b + target.c";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 5.0),
             _ => panic!("Expected Object.assign with multiple sources to work, got {:?}", result2),
@@ -353,7 +353,7 @@ mod builtin_functions_tests {
 
         // Test assign returns target
         let script3 = "let target = {a: 1}; let result = Object.assign(target, {b: 2}); result.a + result.b";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected Object.assign to return target, got {:?}", result3),
@@ -364,7 +364,7 @@ mod builtin_functions_tests {
     fn test_object_create() {
         // Test basic create with null prototype
         let script = "let obj = Object.create(null); obj.a = 1; obj.a";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected Object.create(null) to work, got {:?}", result),
@@ -372,7 +372,7 @@ mod builtin_functions_tests {
 
         // Test create with prototype
         let script2 = "let proto = {inherited: 'yes'}; let obj = Object.create(proto); obj.own = 'mine'; obj.inherited + obj.own";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "yesmine"),
             _ => panic!("Expected Object.create with prototype to work, got {:?}", result2),
@@ -380,7 +380,7 @@ mod builtin_functions_tests {
 
         // Test create with property descriptors (basic)
         let script3 = "let obj = Object.create({}, {prop: {value: 42}}); obj.prop";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, 42.0),
             _ => panic!("Expected Object.create with property descriptors to work, got {:?}", result3),
@@ -390,7 +390,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_encode_uri_component() {
         let script = "encodeURIComponent('hello world')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -403,7 +403,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_decode_uri_component() {
         let script = "decodeURIComponent('hello%20world')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -416,7 +416,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_number_constructor() {
         let script = "Number('42.5')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 42.5),
             _ => panic!("Expected Number('42.5') to be 42.5, got {:?}", result),
@@ -426,7 +426,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_boolean_constructor() {
         let script = "Boolean(1)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected Boolean(1) to be true, got {:?}", result),
@@ -436,7 +436,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_eval_function() {
         let script = "eval('\"hello\"')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -449,7 +449,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_eval_expression() {
         let script = "eval('1 + 2')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected eval('1 + 2') to return 3.0, got {:?}", result),
@@ -459,7 +459,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_encode_uri() {
         let script = "encodeURI('hello world')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -472,7 +472,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_decode_uri() {
         let script = "decodeURI('hello%20world')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -485,7 +485,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_for_each() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.forEach(function(x) { return x; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => {
                 // forEach returns undefined
@@ -497,7 +497,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_map() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let mapped = arr3.map(function(x) { return x * 2; }); mapped.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected mapped array length to be 2.0, got {:?}", result),
@@ -507,7 +507,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_filter() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let filtered = arr3.filter(function(x) { return x > 1; }); filtered.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected filtered array length to be 1.0, got {:?}", result),
@@ -517,7 +517,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_reduce() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.reduce(function(acc, x) { return acc + x; }, 0)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 6.0),
             _ => panic!("Expected arr.reduce to return 6.0, got {:?}", result),
@@ -527,7 +527,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_split_simple() {
         let script = "let parts = 'a,b,c'.split(','); parts.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected split length to be 3.0, got {:?}", result),
@@ -537,7 +537,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_split_empty_sep() {
         let script = "let parts = 'abc'.split(''); parts.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected split empty-sep length to be 3.0, got {:?}", result),
@@ -547,7 +547,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_char_at() {
         let script = "'hello'.charAt(1)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -560,7 +560,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_replace_functional() {
         let script = "'hello world'.replace('world', 'there')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -573,7 +573,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_map_values() {
         let script = "let arr = Array(); let a2 = arr.push(1); let a3 = a2.push(2); let mapped = a3.map(function(x) { return x * 2; }); mapped.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -586,7 +586,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_trim() {
         let script = "'  hello world  '.trim()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -599,7 +599,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_starts_with() {
         let script = "'hello world'.startsWith('hello')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected startsWith to return true, got {:?}", result),
@@ -609,7 +609,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_ends_with() {
         let script = "'hello world'.endsWith('world')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected endsWith to return true, got {:?}", result),
@@ -619,7 +619,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_includes() {
         let script = "'hello world'.includes('lo wo')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected includes to return true, got {:?}", result),
@@ -629,7 +629,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_repeat() {
         let script = "'ha'.repeat(3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -642,7 +642,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_concat() {
         let script = "'hello'.concat(' ', 'world', '!')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -655,7 +655,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_pad_start() {
         let script = "'5'.padStart(3, '0')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -668,7 +668,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_string_pad_end() {
         let script = "'5'.padEnd(3, '0')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -681,7 +681,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_find() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.find(function(x) { return x > 2; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected arr.find to return 3.0, got {:?}", result),
@@ -689,7 +689,7 @@ mod builtin_functions_tests {
 
         // Test find with no match
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.find(function(x) { return x > 5; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => {
                 // find returns undefined when no element matches
@@ -701,7 +701,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_find_index() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.findIndex(function(x) { return x > 2; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected arr.findIndex to return 2.0, got {:?}", result),
@@ -709,7 +709,7 @@ mod builtin_functions_tests {
 
         // Test findIndex with no match
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.findIndex(function(x) { return x > 5; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
             _ => panic!("Expected arr.findIndex to return -1.0, got {:?}", result),
@@ -719,7 +719,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_some() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.some(function(x) { return x > 2; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.some to return true, got {:?}", result),
@@ -727,7 +727,7 @@ mod builtin_functions_tests {
 
         // Test some with no match
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.some(function(x) { return x > 5; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.some to return false, got {:?}", result),
@@ -737,7 +737,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_every() {
         let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(4); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.every to return true, got {:?}", result),
@@ -745,7 +745,7 @@ mod builtin_functions_tests {
 
         // Test every with some elements not matching
         let script = "let arr = Array(); let arr2 = arr.push(2); let arr3 = arr2.push(1); let arr4 = arr3.push(6); arr4.every(function(x) { return x > 1; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.every to return false, got {:?}", result),
@@ -755,7 +755,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_concat() {
         let script = "let arr1 = Array(); let arr2 = arr1.push(1); let arr3 = arr2.push(2); let arr4 = Array(); let arr5 = arr4.push(3); let arr6 = arr5.push(4); let result = arr3.concat(arr6); result.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 4.0),
             _ => panic!("Expected concat result length to be 4.0, got {:?}", result),
@@ -763,7 +763,7 @@ mod builtin_functions_tests {
 
         // Test concat with non-array values
         let script = "let arr1 = Array(); let arr2 = arr1.push(1); let result = arr2.concat(2, 3); result.length";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected concat result length to be 3.0, got {:?}", result),
@@ -773,7 +773,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_index_of() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.indexOf(2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected arr.indexOf(2) to return 1.0, got {:?}", result),
@@ -781,7 +781,7 @@ mod builtin_functions_tests {
 
         // Test indexOf with element not found
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.indexOf(5)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
             _ => panic!("Expected arr.indexOf(5) to return -1.0, got {:?}", result),
@@ -789,7 +789,7 @@ mod builtin_functions_tests {
 
         // Test indexOf with fromIndex
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.indexOf(2, 2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 2.0),
             _ => panic!("Expected arr.indexOf(2, 2) to return 2.0, got {:?}", result),
@@ -799,7 +799,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_includes() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.includes(2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.includes(2) to return true, got {:?}", result),
@@ -807,7 +807,7 @@ mod builtin_functions_tests {
 
         // Test includes with element not found
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.includes(5)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected arr.includes(5) to return false, got {:?}", result),
@@ -815,7 +815,7 @@ mod builtin_functions_tests {
 
         // Test includes with fromIndex
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(2); arr4.includes(2, 2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected arr.includes(2, 2) to return true, got {:?}", result),
@@ -825,7 +825,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_sort() {
         let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(); sorted.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -836,7 +836,7 @@ mod builtin_functions_tests {
 
         // Test sort with custom compare function
         let script = "let arr = Array(); let arr2 = arr.push(3); let arr3 = arr2.push(1); let arr4 = arr3.push(2); let sorted = arr4.sort(function(a, b) { return b - a; }); sorted.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -849,7 +849,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_reverse() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let reversed = arr4.reverse(); reversed.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -864,7 +864,7 @@ mod builtin_functions_tests {
         // Test basic splice - remove elements
         let script =
             "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); arr.push(4); let removed = arr.splice(1, 2); removed.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -875,7 +875,7 @@ mod builtin_functions_tests {
 
         // Test splice with insertion (no elements removed)
         let script2 = "let arr = Array(); arr.push(1); arr.push(4); let removed = arr.splice(1, 0, 2, 3); removed.length";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 0.0), // No elements were removed
             _ => panic!("Expected splice with insertion to return empty array (length 0), got {:?}", result2),
@@ -885,7 +885,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_shift() {
         let script = "let arr = Array(); arr.push(1); arr.push(2); arr.push(3); let first = arr.shift(); arr.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -896,7 +896,7 @@ mod builtin_functions_tests {
 
         // Test shift on empty array
         let script2 = "let arr = Array(); arr.shift()";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Undefined) => {}
             _ => panic!("Expected shift on empty array to return undefined, got {:?}", result2),
@@ -906,7 +906,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_unshift() {
         let script = "let arr = Array(); arr.push(3); arr.push(4); let len = arr.unshift(1, 2); arr.join(',') + ',' + len";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -917,7 +917,7 @@ mod builtin_functions_tests {
 
         // Test unshift on empty array
         let script2 = "let arr = Array(); let len = arr.unshift(1, 2, 3); len";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected unshift on empty array to return 3, got {:?}", result2),
@@ -927,7 +927,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_fill() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(4); let filled = arr5.fill(9, 1, 3); filled.join(',')";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -938,7 +938,7 @@ mod builtin_functions_tests {
 
         // Test fill entire array
         let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let filled = arr4.fill(0); filled.join(',')";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -951,7 +951,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_last_index_of() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); let arr6 = arr5.push(1); arr6.lastIndexOf(2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected lastIndexOf(2) to return 3, got {:?}", result),
@@ -959,7 +959,7 @@ mod builtin_functions_tests {
 
         // Test element not found
         let script2 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.lastIndexOf(4)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
             _ => panic!("Expected lastIndexOf(4) to return -1, got {:?}", result2),
@@ -967,7 +967,7 @@ mod builtin_functions_tests {
 
         // Test with fromIndex
         let script3 = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(2); arr5.lastIndexOf(2, 2)";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected lastIndexOf(2, 2) to return 1, got {:?}", result3),
@@ -977,7 +977,7 @@ mod builtin_functions_tests {
     #[test]
     fn test_array_to_string() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.toString()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -988,7 +988,7 @@ mod builtin_functions_tests {
 
         // Test empty array
         let script2 = "let arr = Array(); arr.toString()";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -1000,7 +1000,7 @@ mod builtin_functions_tests {
         // Test array with different types
         let script3 =
             "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push('hello'); let arr4 = arr3.push(true); arr4.toString()";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
@@ -1014,7 +1014,7 @@ mod builtin_functions_tests {
     fn test_array_flat() {
         // Test basic flat - create nested array manually
         let script = "let arr = Array(); let subarr = Array(); let subarr2 = subarr.push(2); let subarr3 = subarr2.push(3); let arr2 = arr.push(1); let arr3 = arr2.push(subarr3); let arr4 = arr3.push(4); arr4.flat()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1059,7 +1059,7 @@ mod builtin_functions_tests {
     fn test_array_flat_map() {
         // Test basic flatMap - create arrays manually
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.flatMap(function(x) { let result = Array(); let r2 = result.push(x); let r3 = r2.push(x*2); return r3; })";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1104,7 +1104,7 @@ mod builtin_functions_tests {
     fn test_array_copy_within() {
         // Test copyWithin
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); let arr5 = arr4.push(4); arr5.copyWithin(0, 2, 4)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1149,7 +1149,7 @@ mod builtin_functions_tests {
     fn test_array_entries() {
         // Test entries
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); arr3.entries()";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1211,7 +1211,7 @@ mod builtin_functions_tests {
     fn test_array_from() {
         // Test Array.from with array-like object
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); Array.from(arr3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1244,7 +1244,7 @@ mod builtin_functions_tests {
     fn test_array_is_array() {
         // Test Array.isArray with array
         let script = "let arr = Array(); let arr2 = arr.push(1); Array.isArray(arr2)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected Array.isArray(array) to return true, got {:?}", result),
@@ -1252,7 +1252,7 @@ mod builtin_functions_tests {
 
         // Test Array.isArray with non-array
         let script2 = "Array.isArray(42)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected Array.isArray(number) to return false, got {:?}", result2),
@@ -1263,7 +1263,7 @@ mod builtin_functions_tests {
     fn test_array_of() {
         // Test Array.of
         let script = "Array.of(1, 2, 3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(obj)) => {
                 let obj = obj.borrow();
@@ -1302,42 +1302,42 @@ mod builtin_functions_tests {
     fn test_typeof_operator() {
         // Test typeof with different types
         let script = "typeof 42";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "number"),
             _ => panic!("Expected typeof 42 to be 'number', got {:?}", result),
         }
 
         let script = "typeof 'hello'";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "string"),
             _ => panic!("Expected typeof 'hello' to be 'string', got {:?}", result),
         }
 
         let script = "typeof true";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "boolean"),
             _ => panic!("Expected typeof true to be 'boolean', got {:?}", result),
         }
 
         let script = "typeof undefined";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "undefined"),
             _ => panic!("Expected typeof undefined to be 'undefined', got {:?}", result),
         }
 
         let script = "typeof {}";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "object"),
             _ => panic!("Expected typeof {{}} to be 'object', got {:?}", result),
         }
 
         let script = "typeof function(){}";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "function"),
             _ => panic!("Expected typeof function(){{}} to be 'function', got {:?}", result),
@@ -1348,7 +1348,7 @@ mod builtin_functions_tests {
     fn test_delete_operator() {
         // Test deleting a property from an object
         let script = "let obj = {}; obj.x = 42; delete obj.x; obj.x";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => (), // obj.x should be undefined after deletion
             _ => panic!("Expected obj.x to be undefined after deletion, got {:?}", result),
@@ -1356,7 +1356,7 @@ mod builtin_functions_tests {
 
         // Test deleting a non-existent property
         let script = "let obj = {}; delete obj.nonexistent";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b), // Should return true even for non-existent properties
             _ => panic!("Expected delete on non-existent property to return true, got {:?}", result),
@@ -1364,7 +1364,7 @@ mod builtin_functions_tests {
 
         // Test deleting a variable (should return false)
         let script = "let x = 42; delete x";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b), // Cannot delete local variables
             _ => panic!("Expected delete on local variable to return false, got {:?}", result),
@@ -1375,7 +1375,7 @@ mod builtin_functions_tests {
     fn test_void_operator() {
         // Test void with a number
         let script = "void 42";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => (),
             _ => panic!("Expected void 42 to return undefined, got {:?}", result),
@@ -1383,7 +1383,7 @@ mod builtin_functions_tests {
 
         // Test void with an expression
         let script = "void (1 + 2 + 3)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => (),
             _ => panic!("Expected void (1 + 2 + 3) to return undefined, got {:?}", result),
@@ -1391,7 +1391,7 @@ mod builtin_functions_tests {
 
         // Test void with a string
         let script = "void 'hello'";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Undefined) => (),
             _ => panic!("Expected void 'hello' to return undefined, got {:?}", result),
@@ -1402,7 +1402,7 @@ mod builtin_functions_tests {
     fn test_in_operator() {
         // Test property exists
         let script = "let obj = {}; obj.x = 42; 'x' in obj";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected 'x' in obj to return true, got {:?}", result),
@@ -1410,7 +1410,7 @@ mod builtin_functions_tests {
 
         // Test property doesn't exist
         let script = "let obj = {}; 'nonexistent' in obj";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(!b),
             _ => panic!("Expected 'nonexistent' in obj to return false, got {:?}", result),
@@ -1418,7 +1418,7 @@ mod builtin_functions_tests {
 
         // Test inherited property
         let script = "let proto = {}; proto.inherited = 'yes'; let obj = {}; obj.__proto__ = proto; 'inherited' in obj";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected 'inherited' in obj to return true for inherited property, got {result:?}"),
@@ -1429,7 +1429,7 @@ mod builtin_functions_tests {
     fn test_array_find_last() {
         // Test findLast with even numbers
         let script = "let arr = [1, 2, 3, 4, 5]; arr.findLast(x => x % 2 === 0)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 4.0),
             _ => panic!("Expected findLast to return 4, got {:?}", result),
@@ -1437,7 +1437,7 @@ mod builtin_functions_tests {
 
         // Test findLast with no match
         let script2 = "let arr = [1, 3, 5]; arr.findLast(x => x % 2 === 0)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Undefined) => (),
             _ => panic!("Expected findLast with no match to return undefined, got {:?}", result2),
@@ -1445,7 +1445,7 @@ mod builtin_functions_tests {
 
         // Test findLast with strings
         let script3 = "let arr = ['a', 'b', 'c']; arr.findLast(x => x === 'b')";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "b"),
             _ => panic!("Expected findLast to return 'b', got {:?}", result3),
@@ -1456,7 +1456,7 @@ mod builtin_functions_tests {
     fn test_array_find_last_index() {
         // Test findLastIndex with even numbers
         let script = "let arr = [1, 2, 3, 4, 5]; arr.findLastIndex(x => x % 2 === 0)";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected findLastIndex to return 3, got {:?}", result),
@@ -1464,7 +1464,7 @@ mod builtin_functions_tests {
 
         // Test findLastIndex with no match
         let script2 = "let arr = [1, 3, 5]; arr.findLastIndex(x => x % 2 === 0)";
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, -1.0),
             _ => panic!("Expected findLastIndex with no match to return -1, got {:?}", result2),
@@ -1472,7 +1472,7 @@ mod builtin_functions_tests {
 
         // Test findLastIndex with strings
         let script3 = "let arr = ['a', 'b', 'c', 'b']; arr.findLastIndex(x => x === 'b')";
-        let result3 = evaluate_script(script3);
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected findLastIndex to return 3, got {:?}", result3),

@@ -14,7 +14,7 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_no_args() {
-        let result = evaluate_script("new Date().toString()");
+        let result = evaluate_script("new Date().toString()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -31,7 +31,7 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_with_timestamp() {
-        let result = evaluate_script("new Date(1234567890000).getTime()");
+        let result = evaluate_script("new Date(1234567890000).getTime()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         println!("Timestamp: {:?}", value);
@@ -43,7 +43,7 @@ mod date_tests {
 
     #[test]
     fn test_date_value_of() {
-        let result = evaluate_script("new Date(1234567890000).valueOf()");
+        let result = evaluate_script("new Date(1234567890000).valueOf()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -54,7 +54,7 @@ mod date_tests {
 
     #[test]
     fn test_date_to_string() {
-        let result = evaluate_script("new Date(1234567890000).toString()");
+        let result = evaluate_script("new Date(1234567890000).toString()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -69,7 +69,7 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_with_iso_string() {
-        let result = evaluate_script("new Date('2023-12-25T10:30:00Z').getTime()");
+        let result = evaluate_script("new Date('2023-12-25T10:30:00Z').getTime()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -83,7 +83,7 @@ mod date_tests {
 
     #[test]
     fn test_date_constructor_with_components() {
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -94,7 +94,7 @@ mod date_tests {
 
     #[test]
     fn test_date_get_methods() {
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -102,7 +102,7 @@ mod date_tests {
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -110,7 +110,7 @@ mod date_tests {
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getHours()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getHours()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -118,7 +118,7 @@ mod date_tests {
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -126,7 +126,7 @@ mod date_tests {
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()");
+        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -134,7 +134,10 @@ mod date_tests {
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMilliseconds()");
+        let result = evaluate_script(
+            "new Date(2023, 11, 25, 10, 30, 45, 123).getMilliseconds()",
+            None::<&std::path::Path>,
+        );
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {

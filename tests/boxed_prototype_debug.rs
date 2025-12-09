@@ -12,7 +12,7 @@ fn debug_boxed_prototype_identity() -> Result<(), JSError> {
         protoMarker + '|' + ctorMarker + '|' + (eq ? 'EQ' : 'NEQ');
     "#;
 
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::String(s) => {
             let out = String::from_utf16_lossy(&s);

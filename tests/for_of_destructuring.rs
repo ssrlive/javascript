@@ -8,7 +8,7 @@ fn for_of_destructuring_var_object() {
         x;
     "#;
 
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     assert!(result.is_ok(), "evaluation should succeed");
     if let Ok(val) = result {
         match val {

@@ -24,6 +24,9 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
                     for key in obj.borrow().keys() {
+                        if !obj.borrow().is_enumerable(key) {
+                            continue;
+                        }
                         if let PropertyKey::String(s) = key
                             && s != "length"
                         {
@@ -61,6 +64,9 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Object(obj) => {
                     let mut values = Vec::new();
                     for (key, value) in obj.borrow().properties.iter() {
+                        if !obj.borrow().is_enumerable(key) {
+                            continue;
+                        }
                         if let PropertyKey::String(s) = key
                             && s != "length"
                         {
@@ -189,6 +195,9 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     for (key, val_rc) in obj.borrow().properties.iter() {
                         // iterate own properties
                         // Build descriptor object
+                        if !obj.borrow().is_enumerable(key) {
+                            // Mark the descriptor's enumerable flag appropriately below
+                        }
                         let desc_obj = Rc::new(RefCell::new(JSObjectData::new()));
 
                         match &*val_rc.borrow() {
@@ -212,16 +221,21 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                                         Value::Closure(sparams.clone(), sbody.clone(), senv.clone()),
                                     )?;
                                 }
-                                // default flags
-                                obj_set_value(&desc_obj, &"enumerable".into(), Value::Boolean(true))?;
-                                obj_set_value(&desc_obj, &"configurable".into(), Value::Boolean(true))?;
+                                // flags: enumerable depends on object's non-enumerable set
+                                let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
+                                obj_set_value(&desc_obj, &"enumerable".into(), enum_flag)?;
+                                let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
+                                obj_set_value(&desc_obj, &"configurable".into(), config_flag)?;
                             }
                             other => {
                                 // plain value stored directly
                                 obj_set_value(&desc_obj, &"value".into(), other.clone())?;
-                                obj_set_value(&desc_obj, &"writable".into(), Value::Boolean(true))?;
-                                obj_set_value(&desc_obj, &"enumerable".into(), Value::Boolean(true))?;
-                                obj_set_value(&desc_obj, &"configurable".into(), Value::Boolean(true))?;
+                                let writable_flag = Value::Boolean(obj.borrow().is_writable(key));
+                                obj_set_value(&desc_obj, &"writable".into(), writable_flag)?;
+                                let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
+                                obj_set_value(&desc_obj, &"enumerable".into(), enum_flag)?;
+                                let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
+                                obj_set_value(&desc_obj, &"configurable".into(), config_flag)?;
                             }
                         }
 
@@ -353,6 +367,79 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
             // Extract descriptor fields
             let value_rc_opt = obj_get_value(&desc_obj, &"value".into())?;
+
+            // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
+            if let Some(existing_rc) = obj_get_value(&target_obj, &prop_key)? {
+                if !target_obj.borrow().is_configurable(&prop_key) {
+                    // If descriptor explicitly sets configurable true -> throw
+                    if let Some(cfg_rc) = obj_get_value(&desc_obj, &"configurable".into())? {
+                        if let Value::Boolean(true) = &*cfg_rc.borrow() {
+                            return Err(raise_type_error!("Cannot make non-configurable property configurable"));
+                        }
+                    }
+
+                    // If descriptor explicitly sets enumerable and it's different -> throw
+                    if let Some(enum_rc) = obj_get_value(&desc_obj, &"enumerable".into())? {
+                        if let Value::Boolean(new_enum) = &*enum_rc.borrow() {
+                            let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
+                            if *new_enum != existing_enum {
+                                return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
+                            }
+                        }
+                    }
+
+                    // Determine whether existing property is a data property or accessor
+                    let existing_is_accessor = match &*existing_rc.borrow() {
+                        Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
+                        Value::Getter(_, _) | Value::Setter(_, _, _) => true,
+                        _ => false,
+                    };
+
+                    // If existing is data property
+                    if !existing_is_accessor {
+                        // Disallow converting to accessor
+                        if obj_get_value(&desc_obj, &"get".into())?.is_some() || obj_get_value(&desc_obj, &"set".into())?.is_some() {
+                            return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
+                        }
+
+                        // If writable is being set from false -> true, disallow
+                        if let Some(wrc) = obj_get_value(&desc_obj, &"writable".into())? {
+                            if let Value::Boolean(new_writable) = &*wrc.borrow() {
+                                if *new_writable && !target_obj.borrow().is_writable(&prop_key) {
+                                    return Err(raise_type_error!("Cannot make non-writable property writable"));
+                                }
+                            }
+                        }
+
+                        // If attempting to change value while not writable and values differ -> throw
+                        if let Some(new_val_rc) = value_rc_opt.as_ref() {
+                            if !target_obj.borrow().is_writable(&prop_key) {
+                                // get existing value for comparison
+                                let existing_val = match &*existing_rc.borrow() {
+                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                                    other => other.clone(),
+                                };
+                                if !crate::core::values_equal(&existing_val, &new_val_rc.borrow().clone()) {
+                                    return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
+                                }
+                            }
+                        }
+                    } else {
+                        // existing is accessor
+                        // Disallow converting to data property
+                        if value_rc_opt.is_some() || obj_get_value(&desc_obj, &"writable".into())?.is_some() {
+                            return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
+                        }
+
+                        // Disallow changing getter/setter functions on non-configurable accessor
+                        if obj_get_value(&desc_obj, &"get".into())?.is_some() || obj_get_value(&desc_obj, &"set".into())?.is_some() {
+                            return Err(raise_type_error!(
+                                "Cannot change getter/setter of non-configurable accessor property"
+                            ));
+                        }
+                    }
+                }
+            }
 
             let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr)> = None;
             if let Some(get_rc) = obj_get_value(&desc_obj, &"get".into())? {
@@ -504,6 +591,45 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
         Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
         Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
+    }
+}
+
+pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+    if !args.is_empty() {
+        return Err(raise_type_error!("Error.prototype.toString takes no arguments"));
+    }
+
+    // Expect an object receiver
+    if let Value::Object(obj_map) = obj_val {
+        // name default to "Error"
+        let name = if let Some(n_rc) = obj_get_value(obj_map, &"name".into())? {
+            if let Value::String(s) = &*n_rc.borrow() {
+                String::from_utf16_lossy(s)
+            } else {
+                "Error".to_string()
+            }
+        } else {
+            "Error".to_string()
+        };
+
+        // message default to empty
+        let message = if let Some(m_rc) = obj_get_value(obj_map, &"message".into())? {
+            if let Value::String(s) = &*m_rc.borrow() {
+                String::from_utf16_lossy(s)
+            } else {
+                "".to_string()
+            }
+        } else {
+            "".to_string()
+        };
+
+        if message.is_empty() {
+            Ok(Value::String(utf8_to_utf16(&name)))
+        } else {
+            Ok(Value::String(utf8_to_utf16(&format!("{}: {}", name, message))))
+        }
+    } else {
+        Err(raise_type_error!("Error.prototype.toString called on non-object"))
     }
 }
 

@@ -16,7 +16,7 @@ fn mock_intl_constructor_with_string() {
         });
         result
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             let expected = "en-GB".encode_utf16().collect::<Vec<u16>>();
@@ -36,7 +36,7 @@ fn mock_intl_constructor_with_array() {
         });
         result
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             let expected = "fr-FR".encode_utf16().collect::<Vec<u16>>();
@@ -55,7 +55,7 @@ fn mock_intl_constructor_invalid_locale_throws_string() {
         });
         result
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             let expected = "Invalid locale".encode_utf16().collect::<Vec<u16>>();
@@ -75,7 +75,7 @@ fn mock_intl_constructor_default_locale() {
         });
         result
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             // Depending on the path, resolvedOptions may return an object

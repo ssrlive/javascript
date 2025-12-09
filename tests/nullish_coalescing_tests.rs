@@ -15,7 +15,7 @@ mod nullish_coalescing_tests {
     #[test]
     fn test_nullish_coalescing() {
         // Test undefined ?? default
-        let result = evaluate_script("undefined ?? 'default'");
+        let result = evaluate_script("undefined ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
@@ -23,7 +23,7 @@ mod nullish_coalescing_tests {
         }
 
         // Test null ?? default (null is represented as undefined in this engine)
-        let result = evaluate_script("null ?? 'default'");
+        let result = evaluate_script("null ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
@@ -31,21 +31,21 @@ mod nullish_coalescing_tests {
         }
 
         // Test falsy values ?? default (should return the falsy value)
-        let result = evaluate_script("0 ?? 'default'");
+        let result = evaluate_script("0 ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::Number(n) => assert_eq!(n, 0.0),
             _ => panic!("Expected number result"),
         }
 
-        let result = evaluate_script("false ?? 'default'");
+        let result = evaluate_script("false ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::Boolean(b) => assert!(!b),
             _ => panic!("Expected boolean result"),
         }
 
-        let result = evaluate_script("'' ?? 'default'");
+        let result = evaluate_script("'' ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), ""),
@@ -53,14 +53,14 @@ mod nullish_coalescing_tests {
         }
 
         // Test truthy values ?? default (should return the truthy value)
-        let result = evaluate_script("'hello' ?? 'default'");
+        let result = evaluate_script("'hello' ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "hello"),
             _ => panic!("Expected string result"),
         }
 
-        let result = evaluate_script("42 ?? 'default'");
+        let result = evaluate_script("42 ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::Number(n) => assert_eq!(n, 42.0),
@@ -68,7 +68,7 @@ mod nullish_coalescing_tests {
         }
 
         // Test chained nullish coalescing
-        let result = evaluate_script("undefined ?? null ?? 'fallback'");
+        let result = evaluate_script("undefined ?? null ?? 'fallback'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "fallback"),
@@ -76,14 +76,14 @@ mod nullish_coalescing_tests {
         }
 
         // Test with variables
-        let result = evaluate_script("let x = undefined; x ?? 'default'");
+        let result = evaluate_script("let x = undefined; x ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
             _ => panic!("Expected string result"),
         }
 
-        let result = evaluate_script("let x = 'value'; x ?? 'default'");
+        let result = evaluate_script("let x = 'value'; x ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "value"),

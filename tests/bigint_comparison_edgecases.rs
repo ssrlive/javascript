@@ -3,7 +3,7 @@ use javascript::{Value, evaluate_script};
 #[test]
 fn bigint_vs_number_comparison_edgecases() {
     // 1n == 1
-    let r1 = evaluate_script("1n == 1");
+    let r1 = evaluate_script("1n == 1", None::<&std::path::Path>);
     match r1 {
         Ok(Value::Boolean(b)) => assert!(b),
         Ok(Value::Number(n)) => assert_eq!(n, 1.0),
@@ -11,7 +11,7 @@ fn bigint_vs_number_comparison_edgecases() {
     }
 
     // 1n == 1.5 -> false
-    let r2 = evaluate_script("1n == 1.5");
+    let r2 = evaluate_script("1n == 1.5", None::<&std::path::Path>);
     match r2 {
         Ok(Value::Boolean(b)) => assert!(!b),
         Ok(Value::Number(n)) => assert_eq!(n, 0.0),
@@ -20,7 +20,7 @@ fn bigint_vs_number_comparison_edgecases() {
 
     // Integer conversion path: for integers that are exactly representable in Number
     // (e.g. 2^53-1) comparison with BigInt should succeed
-    let r3 = evaluate_script("9007199254740991n == 9007199254740991");
+    let r3 = evaluate_script("9007199254740991n == 9007199254740991", None::<&std::path::Path>);
     match r3 {
         Ok(Value::Boolean(b)) => assert!(b),
         Ok(Value::Number(n)) => assert_eq!(n, 1.0),
@@ -28,7 +28,7 @@ fn bigint_vs_number_comparison_edgecases() {
     }
 
     // But if a Number literal cannot represent the integer exactly, equality should be false
-    let r3b = evaluate_script("123456789123456789n == 123456789123456789");
+    let r3b = evaluate_script("123456789123456789n == 123456789123456789", None::<&std::path::Path>);
     match r3b {
         Ok(Value::Boolean(b)) => assert!(!b),
         Ok(Value::Number(n)) => assert_eq!(n, 0.0),
@@ -36,7 +36,7 @@ fn bigint_vs_number_comparison_edgecases() {
     }
 
     // Non-integer number with BigInt: should compare numerically -> 1n < 1.5 true
-    let r4 = evaluate_script("1n < 1.5");
+    let r4 = evaluate_script("1n < 1.5", None::<&std::path::Path>);
     match r4 {
         Ok(Value::Boolean(b)) => assert!(b),
         Ok(Value::Number(n)) => assert_eq!(n, 1.0),
@@ -44,7 +44,7 @@ fn bigint_vs_number_comparison_edgecases() {
     }
 
     // Very large BigInt vs a large Number (1e20): expect BigInt which is larger to compare greater
-    let r5 = evaluate_script("123456789123456789123456789n > 1e20");
+    let r5 = evaluate_script("123456789123456789123456789n > 1e20", None::<&std::path::Path>);
     match r5 {
         Ok(Value::Boolean(b)) => assert!(b),
         Ok(Value::Number(n)) => assert_eq!(n, 1.0),
@@ -53,7 +53,7 @@ fn bigint_vs_number_comparison_edgecases() {
 
     // Conversely, a huge negative BigInt < a negative floating number
     // Note: parser currently doesn't treat unary - on BigInt as a bigint literal, use 0n - Xn
-    let r6 = evaluate_script("(0n - 123456789123456789123456789n) < -1e20");
+    let r6 = evaluate_script("(0n - 123456789123456789123456789n) < -1e20", None::<&std::path::Path>);
     match r6 {
         Ok(Value::Boolean(b)) => assert!(b),
         Ok(Value::Number(n)) => assert_eq!(n, 1.0),

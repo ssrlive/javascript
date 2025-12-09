@@ -21,7 +21,7 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol('x')
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol"),
             _ => panic!("Expected string 'symbol', got {:?}", result),
@@ -38,7 +38,7 @@ mod symbol_additional_tests {
             let d = Object.getOwnPropertyDescriptors(o);
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let a = arr.borrow().get(&"0".into()).unwrap();
@@ -70,7 +70,7 @@ mod symbol_additional_tests {
             s1 + '|' + s2 + '|' + (typeof d1) + '|' + (typeof d2)
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
                 let out = String::from_utf16_lossy(&s);
@@ -87,7 +87,7 @@ mod symbol_additional_tests {
         let script = r#"
             Symbol() !== Symbol()
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected true for distinct symbols, got {:?}", result),
@@ -103,7 +103,7 @@ mod symbol_additional_tests {
             o[s] = 1;
             JSON.stringify(o);
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "{}"),
             _ => panic!("Expected JSON '{}' for object with only symbol keys", "{}"),
@@ -120,7 +120,7 @@ mod symbol_additional_tests {
             o[s] = 2;
             [Object.keys(o).length, Object.values(o).length]
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(Value::Object(arr)) => {
                 // Expect [1, 1]
@@ -149,7 +149,7 @@ mod symbol_additional_tests {
             Object.assign(target, src);
             JSON.stringify(target)
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "{\"a\":1}"),
             _ => panic!("Expected object string with only 'a' copied, got {:?}", result),
@@ -166,7 +166,7 @@ mod symbol_additional_tests {
             }
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "error"),
             _ => panic!("Expected error when calling new Symbol(), got {:?}", result),
@@ -180,7 +180,7 @@ mod symbol_additional_tests {
             s.valueOf() === s
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Boolean(b)) => assert!(b),
             _ => panic!("Expected true for valueOf equality, got {:?}", result),
@@ -202,7 +202,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 // expect [1,2,1]
@@ -236,7 +236,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let a = arr.borrow().get(&"0".into()).unwrap();
@@ -266,7 +266,7 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let a = arr.borrow().get(&"0".into()).unwrap();
@@ -294,7 +294,7 @@ mod symbol_additional_tests {
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let a = arr.borrow().get(&"0".into()).unwrap();
@@ -319,7 +319,7 @@ mod symbol_additional_tests {
             [typeof d.x.get, typeof d.x.set]
         "#;
 
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Object(arr)) => {
                 let a = arr.borrow().get(&"0".into()).unwrap();
@@ -341,7 +341,7 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol.iterator
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol"),
             _ => panic!("Expected string 'symbol' for Symbol.iterator, got {:?}", result),
@@ -360,7 +360,7 @@ mod symbol_additional_tests {
             sum
         "#;
 
-        let result2 = evaluate_script(script2);
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::Number(n)) => assert_eq!(n, 6.0),
             _ => panic!("Expected number 6 from iterable for-of, got {:?}", result2),
@@ -376,7 +376,7 @@ mod symbol_additional_tests {
             o.toString();
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "[object MyTag]"),
             _ => panic!("Expected [object MyTag], got {:?}", result),
@@ -392,7 +392,7 @@ mod symbol_additional_tests {
             acc
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "abc"),
             _ => panic!("Expected 'abc' from string for-of, got {:?}", result),
@@ -407,7 +407,7 @@ mod symbol_additional_tests {
             [a[Symbol.toStringTag], s[Symbol.toStringTag]]
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let a0 = arr.borrow().get(&"0".into()).unwrap();
@@ -436,7 +436,7 @@ mod symbol_additional_tests {
             s
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 6.0),
             _ => panic!("Expected 6 from manual iterator next(), got {:?}", result),
@@ -452,7 +452,7 @@ mod symbol_additional_tests {
             a
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "xy"),
             _ => panic!("Expected 'xy' from string iterator, got {:?}", result),
@@ -472,7 +472,7 @@ mod symbol_additional_tests {
                 let res = [String(o), Number(o), o + 2]; res
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 let s = arr.borrow().get(&"0".into()).unwrap();

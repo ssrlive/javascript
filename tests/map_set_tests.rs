@@ -10,7 +10,7 @@ fn __init_test_logger() {
 
 #[test]
 fn test_map_constructor() {
-    let result = evaluate_script("new Map()").unwrap();
+    let result = evaluate_script("new Map()", None::<&std::path::Path>).unwrap();
     assert!(matches!(result, Value::Object(_)));
 }
 
@@ -23,6 +23,7 @@ fn test_map_set_and_get() {
         map.set("key2", "value2");
         map.get("key1")
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -39,6 +40,7 @@ fn test_map_has() {
         map.set("key", "value");
         map.has("key")
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Boolean(true)));
@@ -53,6 +55,7 @@ fn test_map_size() {
         map.set("b", 2);
         map.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Number(2.0)));
@@ -68,6 +71,7 @@ fn test_map_delete() {
         let has = map.has("key");
         [deleted, has]
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     // This should return an array [true, false]
@@ -85,6 +89,7 @@ fn test_map_clear() {
         map.clear();
         map.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Number(0.0)));
@@ -92,7 +97,7 @@ fn test_map_clear() {
 
 #[test]
 fn test_set_constructor() {
-    let result = evaluate_script("new Set()").unwrap();
+    let result = evaluate_script("new Set()", None::<&std::path::Path>).unwrap();
     assert!(matches!(result, Value::Object(_)));
 }
 
@@ -105,6 +110,7 @@ fn test_set_add_and_has() {
         set.add("item2");
         set.has("item1")
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Boolean(true)));
@@ -120,6 +126,7 @@ fn test_set_size() {
         set.add(2); // duplicate
         set.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Number(2.0)));
@@ -135,6 +142,7 @@ fn test_set_delete() {
         let has = set.has("item");
         [deleted, has]
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     // This should return an array [true, false]
@@ -151,6 +159,7 @@ fn test_set_clear() {
         set.clear();
         set.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Number(0.0)));
@@ -168,6 +177,7 @@ fn test_map_keys_values_entries() {
         let entries = map.entries();
         [keys.length, values.length, entries.length]
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     // Should return [2, 2, 2]
@@ -184,6 +194,7 @@ fn test_set_values() {
         let values = set.values();
         values.length
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     assert!(matches!(result, Value::Number(2.0)));

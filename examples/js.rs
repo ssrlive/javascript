@@ -24,8 +24,8 @@ fn main() {
 
     if let Some(script) = cli.eval {
         script_content = Some(script);
-    } else if let Some(file) = cli.file {
-        match std::fs::read_to_string(&file) {
+    } else if let Some(ref file) = cli.file {
+        match std::fs::read_to_string(file) {
             Ok(content) => script_content = Some(content),
             Err(e) => {
                 eprintln!("Error reading file {}: {}", file.display(), e);
@@ -40,7 +40,7 @@ fn main() {
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
     if let Some(script) = script_content {
-        match evaluate_script(script) {
+        match evaluate_script(script, cli.file.as_ref()) {
             Ok(result) => print_eval_result(&result),
             Err(err) => {
                 eprintln!("Evaluation failed: {err}");

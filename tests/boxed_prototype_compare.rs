@@ -8,7 +8,7 @@ fn compare_proto_and_instanceof() -> Result<(), JSError> {
         const inst = (n instanceof Number) ? 'I' : 'N';
         protoEq + '|' + inst;
     "#;
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::String(s) => {
             println!("proto vs instanceof: {}", String::from_utf16_lossy(&s));

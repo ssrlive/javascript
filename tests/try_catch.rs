@@ -9,14 +9,14 @@ fn __init_test_logger() {
 #[test]
 fn catch_preserves_number_throw() {
     let script = "try { throw 42; } catch (e) { e }";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 42.0),
         _ => panic!("Expected number 42.0, got {:?}", result),
     }
 
     let script = "try { throw 42 } catch (e) { e }";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::Number(n)) => assert_eq!(n, 42.0),
         _ => panic!("Expected number 42.0, got {:?}", result),
@@ -26,7 +26,7 @@ fn catch_preserves_number_throw() {
 #[test]
 fn catch_preserves_string_throw() {
     let script = "try { throw 'boom'; } catch (e) { e }";
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             let expected = "boom".encode_utf16().collect::<Vec<u16>>();
@@ -38,8 +38,10 @@ fn catch_preserves_string_throw() {
 
 #[test]
 fn engine_error_converted_to_string_in_catch() {
-    let script = "try { let a = 1; a(); } catch (e) { e }";
-    let result = evaluate_script(script);
+    // Call `String(e)` so the test passes whether `e` is a raw string
+    // (legacy behavior) or an `Error` object created by the engine.
+    let script = "try { let a = 1; a(); } catch (e) { String(e) }";
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
             // The engine should expose a textual representation of the runtime error

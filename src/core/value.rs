@@ -516,6 +516,12 @@ pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<PropertyKey, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
+    /// Tracks keys that should not be enumerated by `Object.keys` / `Object.values`.
+    pub non_enumerable: std::collections::HashSet<PropertyKey>,
+    /// Tracks keys that are non-writable (read-only)
+    pub non_writable: std::collections::HashSet<PropertyKey>,
+    /// Tracks keys that are non-configurable
+    pub non_configurable: std::collections::HashSet<PropertyKey>,
     pub prototype: Option<Rc<RefCell<JSObjectData>>>,
     pub is_function_scope: bool,
 }
@@ -540,6 +546,36 @@ impl JSObjectData {
 
     pub fn insert(&mut self, key: PropertyKey, val: Rc<RefCell<Value>>) {
         self.properties.insert(key, val);
+    }
+
+    /// Mark a property key as non-enumerable on this object
+    pub fn set_non_enumerable(&mut self, key: PropertyKey) {
+        self.non_enumerable.insert(key);
+    }
+
+    /// Mark a property key as non-writable on this object
+    pub fn set_non_writable(&mut self, key: PropertyKey) {
+        self.non_writable.insert(key);
+    }
+
+    /// Mark a property key as non-configurable on this object
+    pub fn set_non_configurable(&mut self, key: PropertyKey) {
+        self.non_configurable.insert(key);
+    }
+
+    /// Check whether a key is writable (default true)
+    pub fn is_writable(&self, key: &PropertyKey) -> bool {
+        !self.non_writable.contains(key)
+    }
+
+    /// Check whether a key is configurable (default true)
+    pub fn is_configurable(&self, key: &PropertyKey) -> bool {
+        !self.non_configurable.contains(key)
+    }
+
+    /// Check whether a key is enumerable (default true)
+    pub fn is_enumerable(&self, key: &PropertyKey) -> bool {
+        !self.non_enumerable.contains(key)
     }
 
     pub fn get(&self, key: &PropertyKey) -> Option<Rc<RefCell<Value>>> {
@@ -1225,6 +1261,11 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
     // Check if there's a setter for this property
     let existing_opt = get_own_property(js_obj, key);
     if let Some(existing) = existing_opt {
+        // If property exists and is non-writable on this object, disallow assignment
+        if !js_obj.borrow().is_writable(key) {
+            return Err(raise_type_error!(format!("Cannot assign to read-only property '{}'", key)));
+        }
+
         match existing.borrow().clone() {
             Value::Property { value: _, getter, setter } => {
                 if let Some((param, body, env)) = setter {
@@ -1289,8 +1330,13 @@ pub fn obj_delete(map: &JSObjectDataPtr, key: &PropertyKey) -> Result<bool, JSEr
         }
     }
 
+    // If property is non-configurable, deletion fails (return false)
+    if !map.borrow().is_configurable(key) {
+        return Ok(false);
+    }
+
     map.borrow_mut().remove(key);
-    Ok(true) // In JavaScript, delete always returns true
+    Ok(true)
 }
 
 pub fn env_get<T: AsRef<str>>(env: &JSObjectDataPtr, key: T) -> Option<Rc<RefCell<Value>>> {

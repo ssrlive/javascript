@@ -17,6 +17,7 @@ fn stage1_map_comprehensive() {
         map.set({}, 'object_key');
         map.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -34,6 +35,7 @@ fn stage1_map_comprehensive() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -47,6 +49,7 @@ fn stage1_map_comprehensive() {
         let map = new Map([['x', 10], ['y', 20]]);
         map.has('x') && map.get('x') === 10 && map.delete('x') && !map.has('x') && map.size === 1
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -63,6 +66,7 @@ fn stage1_set_comprehensive() {
         let set = new Set([1, 2, 3, 2, 1]);
         set.size
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -80,6 +84,7 @@ fn stage1_set_comprehensive() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -93,6 +98,7 @@ fn stage1_set_comprehensive() {
         let set = new Set([1, 2, 3]);
         set.has(2) && set.delete(2) && !set.has(2) && set.size === 2
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -111,6 +117,7 @@ fn stage1_weakmap_weakset() {
         wm.set(key, 'value');
         wm.has(key) && wm.get(key) === 'value'
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -126,6 +133,7 @@ fn stage1_weakmap_weakset() {
         ws.add(obj);
         ws.has(obj)
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -146,6 +154,7 @@ fn stage1_generator_functions() {
         var result = g.next();
         result.value;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     match result.unwrap() {
@@ -164,6 +173,7 @@ fn stage1_generator_functions() {
         var result = g.next(); // second call should be done
         result.done;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     match result.unwrap() {
@@ -179,6 +189,7 @@ fn stage1_generator_functions() {
         }
         typeof gen;
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -195,6 +206,7 @@ fn stage1_generator_functions() {
         var g = gen();
         typeof g;
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -215,6 +227,7 @@ fn stage1_iterator_protocol() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -232,6 +245,7 @@ fn stage1_iterator_protocol() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -249,6 +263,7 @@ fn stage1_iterator_protocol() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -282,6 +297,7 @@ fn stage1_iterator_protocol() {
         }
         sum
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -307,6 +323,7 @@ fn stage1_proxy_basic() {
         let proxy = new Proxy(target, handler);
         proxy.foo
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -328,6 +345,7 @@ fn stage1_proxy_basic() {
         proxy.x = 5;
         proxy.x
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -354,6 +372,7 @@ fn stage1_proxy_revocable() {
         let result2 = 'revoked';
         result1
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -383,6 +402,7 @@ fn stage1_proxy_delete_trap() {
         let still_has_foo = 'foo' in proxy;
         deleted_bar && still_has_foo
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -435,6 +455,7 @@ fn stage1_integration_all_features() {
         // Combine results
         mapSize === 2 && setSum === 6 && genType === 'object' && canCallNext && proxyValue === 84
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -452,6 +473,7 @@ fn stage1_error_handling() {
         let proxy = new Proxy({}, {});
         proxy.foo === undefined
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -468,6 +490,7 @@ fn stage1_error_handling() {
         revocable.revoke();
         value === 42
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -484,6 +507,7 @@ fn stage1_error_handling() {
             e === 42
         }
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {

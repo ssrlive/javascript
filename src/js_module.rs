@@ -99,13 +99,18 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
     }
 }
 
-fn execute_module(content: &str, _module_path: &str) -> Result<Value, JSError> {
+fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
     // Create module exports object
     let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
 
     // Create a module environment
     let env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
     env.borrow_mut().is_function_scope = true;
+
+    // Record a module path on the module environment so stack frames / errors can include it
+    // Store as `__script_name` similarly to `evaluate_script`.
+    let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
+    obj_set_value(&env, &"__script_name".into(), val)?;
 
     // Add exports object to the environment
     env.borrow_mut().insert(

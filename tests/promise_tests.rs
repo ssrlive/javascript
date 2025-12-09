@@ -23,7 +23,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // For now, just check that it doesn't crash
     }
@@ -44,7 +44,7 @@ mod promise_tests {
             });
             finalResult
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // For now, just check that it doesn't crash - full chaining requires async execution
     }
@@ -67,7 +67,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // For now, just check that it doesn't crash - full functionality requires async execution
     }
@@ -87,7 +87,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // For now, just check that it doesn't crash - full functionality requires async execution
     }
@@ -107,7 +107,7 @@ mod promise_tests {
             executionOrder.push("sync");
         "#;
 
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         match result {
             Ok(Value::Object(arr)) => {
                 // Check that we have an array with 2 elements
@@ -146,7 +146,7 @@ mod promise_tests {
     #[test]
     fn test_promise_finally() {
         let code = r#"new Promise(function(resolve, reject) { resolve(42); }).finally(function() { console.log('finally executed'); })"#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(42.0)) => {
                 // Test passed - basic promise works
@@ -172,7 +172,7 @@ mod promise_tests {
             });
             Promise.allSettled([p1, p2, p3])
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // The result should be the resolved array from allSettled
         match result {
@@ -252,7 +252,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // This tests that the direct constructor functions work properly
     }
@@ -270,7 +270,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // This tests that the direct then handler works
     }
@@ -288,7 +288,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // This tests that the direct catch handler works
     }
@@ -305,7 +305,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // This tests that the direct finally handler works
     }
@@ -331,7 +331,7 @@ mod promise_tests {
 
             [resolveResult, rejectResult]
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         assert!(result.is_ok());
         // This tests that the direct resolve/reject functions work
     }
@@ -346,7 +346,7 @@ mod promise_tests {
             });
             result
         "#;
-        let result = evaluate_script(code);
+        let result = evaluate_script(code, None::<&std::path::Path>);
         match result {
             Ok(_) => {
                 // Test passed

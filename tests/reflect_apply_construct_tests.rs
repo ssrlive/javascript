@@ -10,7 +10,7 @@ fn __init_test_logger() {
 #[test]
 fn test_reflect_apply_with_non_array_arguments_list_errors() {
     let script = "Reflect.apply(function(){}, undefined, 123)";
-    let res = evaluate_script(script);
+    let res = evaluate_script(script, None::<&std::path::Path>);
     assert!(res.is_err(), "expected Reflect.apply with non-array argumentsList to error");
 }
 
@@ -23,7 +23,7 @@ fn test_reflect_construct_with_new_target_parameter() {
         let o = Reflect.construct(A, [42], B);
         o.full();
     "#;
-    let v = evaluate_script(script).expect("script ran");
+    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
         Value::Number(n) => assert_eq!(n, 42.0),
         other => panic!("expected number 42, got {:?}", other),
@@ -37,7 +37,7 @@ fn test_reflect_apply_with_async_closure_returns_promise_resolved() {
         let p = Reflect.apply(fnc, undefined, [1]);
         await p;
     "#;
-    let v = evaluate_script(script).expect("script ran");
+    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
         Value::Number(n) => assert_eq!(n, 2.0),
         other => panic!("expected number 2, got {:?}", other),
@@ -47,7 +47,7 @@ fn test_reflect_apply_with_async_closure_returns_promise_resolved() {
 #[test]
 fn test_reflect_apply_with_non_callable_target_errors() {
     let script = "Reflect.apply(123, undefined, [])";
-    let res = evaluate_script(script);
+    let res = evaluate_script(script, None::<&std::path::Path>);
     assert!(res.is_err(), "expected Reflect.apply with non-callable target to error");
 }
 
@@ -61,7 +61,7 @@ fn test_reflect_apply_with_closure_and_this() {
         result;
     "#;
 
-    let v = evaluate_script(script).expect("script ran");
+    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
         Value::Number(n) => assert_eq!(n, 13.0),
         other => panic!("expected number 13, got {:?}", other),
@@ -77,7 +77,7 @@ fn test_reflect_apply_with_native_function() {
         res;
     "#;
 
-    let v = evaluate_script(script).expect("script ran");
+    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
         Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "123"),
         other => panic!("expected string '123', got {:?}", other),
@@ -95,7 +95,7 @@ fn test_reflect_construct_with_constructor_args() {
         p.full();
     "#;
 
-    let v = evaluate_script(script).expect("script ran");
+    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
         Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "Jane Doe"),
         other => panic!("expected string 'Jane Doe', got {:?}", other),

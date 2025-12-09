@@ -13,7 +13,7 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_constructor() {
-        let result = evaluate_script("new RegExp('hello')");
+        let result = evaluate_script("new RegExp('hello')", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -31,7 +31,7 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_constructor_with_flags() {
-        let result = evaluate_script("new RegExp('hello', 'gi')");
+        let result = evaluate_script("new RegExp('hello', 'gi')", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -47,7 +47,7 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_test_method() {
-        let result = evaluate_script("new RegExp('hello').test('hello world')");
+        let result = evaluate_script("new RegExp('hello').test('hello world')", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -58,7 +58,7 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_test_method_case_insensitive() {
-        let result = evaluate_script("new RegExp('hello', 'i').test('HELLO world')");
+        let result = evaluate_script("new RegExp('hello', 'i').test('HELLO world')", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -69,7 +69,7 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_exec_method() {
-        let result = evaluate_script("new RegExp('hello').exec('hello world')[0]");
+        let result = evaluate_script("new RegExp('hello').exec('hello world')[0]", None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -85,7 +85,7 @@ mod regexp_tests {
     fn test_regexp_extract_emails() {
         // Test RegExp with a simple pattern
         // This demonstrates RegExp's ability to handle basic patterns
-        let result = evaluate_script(r#"new RegExp('test').test('test string')"#);
+        let result = evaluate_script(r#"new RegExp('test').test('test string')"#, None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
 
@@ -101,7 +101,7 @@ mod regexp_tests {
         // Translated StackOverflow-style email regex into a Rust-regex-compatible pattern.
         // This keeps the validation strict while avoiding PCRE-only constructs.
         let script = r#"new RegExp('^([A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z]{2,})+)$','i').test('john.doe@example.com')"#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         let value = result.unwrap();
         match value {
@@ -125,7 +125,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Object(arr_rc) => {
                 let arr = arr_rc.borrow();
@@ -163,7 +163,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
                 let s0 = String::from_utf16_lossy(&s);
@@ -185,7 +185,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
                 let val = String::from_utf16_lossy(&s);
@@ -208,7 +208,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
                 let val = String::from_utf16_lossy(&s);
@@ -238,7 +238,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
                 let s0 = String::from_utf16_lossy(&s);
@@ -266,7 +266,7 @@ mod regexp_tests {
         })()
         "#;
 
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
                 let val = String::from_utf16_lossy(&s);

@@ -24,6 +24,7 @@ fn test_proxy_basic() {
         var proxy = new Proxy(target, handler);
         proxy.foo
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {
@@ -49,6 +50,7 @@ fn test_proxy_revocable() {
         revocable.revoke();
         result
     "#,
+        None::<&std::path::Path>,
     )
     .unwrap();
     match result {

@@ -14,15 +14,18 @@ mod comment_tests {
     #[test]
     fn test_comment_removal() {
         // Test single-line comments
-        let result = evaluate_script("// This is a comment\nconsole.log('Hello');");
+        let result = evaluate_script("// This is a comment\nconsole.log('Hello');", None::<&std::path::Path>);
         assert!(result.is_ok());
 
         // Test multi-line comments
-        let result = evaluate_script("/* Multi-line\ncomment */ console.log('World');");
+        let result = evaluate_script("/* Multi-line\ncomment */ console.log('World');", None::<&std::path::Path>);
         assert!(result.is_ok());
 
         // Test comments in strings are preserved
-        let result = evaluate_script("console.log('// Not a comment'); console.log('/* Not a comment */');");
+        let result = evaluate_script(
+            "console.log('// Not a comment'); console.log('/* Not a comment */');",
+            None::<&std::path::Path>,
+        );
         assert!(result.is_ok());
 
         // Test mixed comments
@@ -37,7 +40,7 @@ console.log('Line 2'); // just a space
 // Inline comment
 console.log('Line 3 // not a comment in line 3'); // Another comment
 "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
     }
 }

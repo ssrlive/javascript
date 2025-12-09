@@ -19,7 +19,7 @@ fn test_tmpfile_puts_tell() {
         let s = f.readAsString();
         s
     "#;
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -43,7 +43,7 @@ fn test_tmpfile_getline() {
         let l1 = f.getline();
         l1
     "#;
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -59,7 +59,7 @@ fn test_tmpfile_getline() {
 #[test]
 fn test_sprintf_basic() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"a=%d s=%s\", 123, \"abc\")";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -75,7 +75,7 @@ fn test_sprintf_basic() {
 #[test]
 fn test_sprintf_zero_pad() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%010d\", 123)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -91,7 +91,7 @@ fn test_sprintf_zero_pad() {
 #[test]
 fn test_sprintf_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%x\", -2)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -107,7 +107,7 @@ fn test_sprintf_hex() {
 #[test]
 fn test_sprintf_float() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%10.1f\", 2.1)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -123,7 +123,7 @@ fn test_sprintf_float() {
 #[test]
 fn test_sprintf_dynamic_width() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%*.*f\", 10, 2, -2.13)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -139,7 +139,7 @@ fn test_sprintf_dynamic_width() {
 #[test]
 fn test_sprintf_long_hex() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%lx\", -2)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);
@@ -155,7 +155,7 @@ fn test_sprintf_long_hex() {
 #[test]
 fn test_sprintf_hex_with_prefix() {
     let src = "import * as std from \"std\";\nstd.sprintf(\"%#lx\", 123)";
-    match evaluate_script(src) {
+    match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
                 let s = String::from_utf16_lossy(&vec);

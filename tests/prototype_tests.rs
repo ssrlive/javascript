@@ -9,7 +9,7 @@ fn test_prototype_assignment() {
         obj.__proto__ = proto;
         obj
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     println!("Object after __proto__ assignment: {:?}", result);
     match result {
         Value::Object(obj) => {
@@ -35,7 +35,7 @@ fn test_prototype_chain_lookup() {
         obj.__proto__ = proto;
         [obj.ownProp, obj.inheritedProp]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             // Check own property
@@ -72,7 +72,7 @@ fn test_multi_level_prototype_chain() {
         child.__proto__ = parent;
         [child.childProp, child.parentProp, child.grandparentProp]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             // Check child property
@@ -119,7 +119,7 @@ fn test_has_own_property_symbol_and_inherited() {
         obj[s] = 42;
         [ obj.hasOwnProperty('own'), obj.hasOwnProperty('inherited'), obj.hasOwnProperty(s) ]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             let a = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
@@ -142,7 +142,7 @@ fn test_is_prototype_of_and_property_is_enumerable() {
         obj.q = 2;
         [ proto.isPrototypeOf(obj), obj.isPrototypeOf(proto), obj.propertyIsEnumerable('q'), obj.propertyIsEnumerable('p') ]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             let a = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
@@ -169,7 +169,7 @@ fn test_override_has_own_property() {
         var descs = Object.getOwnPropertyDescriptors(obj);
         [obj.hasOwnProperty === obj.__proto__.hasOwnProperty, keys, descs.hasOwnProperty ? 'own' : 'none', obj.hasOwnProperty('own')]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             // [ equality_with_proto, keys_array, descriptor_presence, call_result ]
@@ -235,7 +235,7 @@ fn test_to_string_default_and_tag() {
         o2[tag] = 'Custom';
         [ o1.toString(), o2.toString() ]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             let a = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
@@ -263,7 +263,7 @@ fn test_to_locale_string_defaults_and_override() {
         o3.toLocaleString = function() { return 'my-locale'; };
         [ o1.toLocaleString(), o2.toLocaleString(), o3.toLocaleString() ]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             let a = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
@@ -292,7 +292,7 @@ fn test_to_string_override_and_valueof() {
         var v = o.valueOf();
         [ o.toString(), proto.toString(), o === v ]
     "#;
-    let result = evaluate_script(script).unwrap();
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     match result {
         Value::Object(arr) => {
             let t = arr.borrow().get(&"0".into()).unwrap().borrow().clone();

@@ -24,7 +24,7 @@ mod os_tests {
                 -1;
             }
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         if let Err(e) = &result {
             println!("Error: {:?}", e);
         }
@@ -48,7 +48,7 @@ mod os_tests {
                 "";
             }
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         assert_eq!(
             match result.unwrap() {
@@ -67,7 +67,7 @@ mod os_tests {
             import * as os from "os";
             os.getcwd();
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
@@ -85,7 +85,7 @@ mod os_tests {
             import * as os from "os";
             os.getpid();
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::Number(pid) => {
@@ -101,7 +101,7 @@ mod os_tests {
             import * as os from "os";
             os.path.join("a", "b", "c");
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
@@ -119,7 +119,7 @@ mod os_tests {
             import * as os from "os";
             os.path.basename("path/to/file.txt");
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
@@ -136,7 +136,7 @@ mod os_tests {
             import * as os from "os";
             os.path.extname("file.txt");
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
@@ -153,7 +153,7 @@ mod os_tests {
             import * as os from "os";
             os.getppid();
         "#;
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         // Just check that it doesn't crash and returns some number
         assert!(result.is_ok());
         match result.unwrap() {

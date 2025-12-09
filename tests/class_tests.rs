@@ -18,7 +18,7 @@ mod class_tests {
             }
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         if let Err(e) = &result {
             println!("Error: {:?}", e);
         }
@@ -36,7 +36,7 @@ mod class_tests {
             let person = new Person();
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -56,7 +56,7 @@ mod class_tests {
             let person = new Person("Alice");
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -81,7 +81,7 @@ mod class_tests {
             let greeting = person.greet();
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -102,7 +102,7 @@ mod class_tests {
             let obj = {};
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Script should execute successfully");
 
         // Note: We can't easily test is_class_instance from here since it's internal
@@ -139,7 +139,7 @@ mod class_tests {
             "is_obj_person: " + is_obj_person;
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => {
                 if let Value::String(s) = val {
@@ -189,7 +189,7 @@ mod class_tests {
             let dog = new Dog("Buddy", "Golden Retriever");
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         assert!(result.is_ok(), "Class inheritance should work");
     }
 
@@ -213,7 +213,7 @@ mod class_tests {
             child.value + " " + child.extra;
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -241,7 +241,7 @@ mod class_tests {
             calc.add(3, 4);
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),
@@ -269,7 +269,7 @@ mod class_tests {
             staticProp + ", " + staticResult + ", " + instanceName;
         "#;
 
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(val) => println!("Success: {:?}", val),
             Err(e) => println!("Error: {:?}", e),

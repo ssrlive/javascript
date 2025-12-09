@@ -65,7 +65,7 @@ let result = evaluate_script(r#"
     let x = 42;
     let y = x * 2;
     y + 10
-"#).unwrap();
+"#, None::<&std::path::Path>).unwrap();
 
 match result {
     javascript::Value::Number(n) => println!("Result: {}", n), // Output: Result: 94
@@ -85,7 +85,7 @@ let result = evaluate_script(r#"
     console.log("Hello from JavaScript!");
     let cwd = os.getcwd();
     cwd
-"#).unwrap();
+"#, None::<&std::path::Path>).unwrap();
 ```
 
 ### Command Line Interface

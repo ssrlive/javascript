@@ -7,7 +7,7 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         const n = Object(123);
         n instanceof Number;
     "#;
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     println!("Number check res: {:?}", res);
     match res {
         Value::Boolean(true) => {}
@@ -19,7 +19,7 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         const s = Object('x');
         s instanceof String;
     "#;
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::Boolean(true) => {}
         other => panic!("String prototype check failed: {:?}", other),
@@ -30,7 +30,7 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         const b = Object(true);
         b instanceof Boolean;
     "#;
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::Boolean(true) => {}
         other => panic!("Boolean prototype check failed: {:?}", other),
@@ -41,7 +41,7 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         const bi = Object(7n);
         bi instanceof Object && typeof bi === 'object';
     "#;
-    let res = evaluate_script(script)?;
+    let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::Boolean(true) => {}
         other => panic!("BigInt prototype check failed: {:?}", other),

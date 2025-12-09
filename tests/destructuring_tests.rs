@@ -17,7 +17,7 @@ mod destructuring_tests {
     #[test]
     fn test_basic_array_destructuring() {
         let script = "let [a, b] = [1, 2]; a + b";
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Number(3.0) => (),
             _ => panic!("Expected 3.0, got {:?}", result),
@@ -27,7 +27,7 @@ mod destructuring_tests {
     #[test]
     fn test_array_destructuring_with_rest() {
         let script = "let [a, ...rest] = [1, 2, 3, 4]; rest[0] + rest[1]";
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Number(5.0) => (),
             _ => panic!("Expected 5.0, got {:?}", result),
@@ -37,7 +37,7 @@ mod destructuring_tests {
     #[test]
     fn test_basic_object_destructuring() {
         let script = "let {a, b} = {a: 1, b: 2}; a + b";
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Number(3.0) => (),
             _ => panic!("Expected 3.0, got {:?}", result),
@@ -47,7 +47,7 @@ mod destructuring_tests {
     #[test]
     fn test_object_destructuring_with_rest() {
         let script = "let {a, ...rest} = {a: 1, b: 2, c: 3}; rest.b + rest.c";
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Number(5.0) => (),
             _ => panic!("Expected 5.0, got {:?}", result),
@@ -57,7 +57,7 @@ mod destructuring_tests {
     #[test]
     fn test_nested_destructuring() {
         let script = "let [a, {b}] = [1, {b: 2, c: 3}]; a + b";
-        let result = evaluate_script(script).unwrap();
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::Number(3.0) => (),
             _ => panic!("Expected 3.0, got {:?}", result),
@@ -71,7 +71,7 @@ mod destructuring_tests {
             let { seconds = 0, milliseconds = 0 } = duration;
         "#;
 
-        let res = evaluate_script(script);
+        let res = evaluate_script(script, None::<&std::path::Path>);
         match res {
             Err(err) => match err.kind() {
                 JSErrorKind::EvaluationError { message, .. } => {
@@ -92,7 +92,7 @@ mod destructuring_tests {
             seconds;
         "#;
 
-        let res = evaluate_script(script);
+        let res = evaluate_script(script, None::<&std::path::Path>);
         assert!(res.is_ok());
         // Last evaluation should be the `seconds` value (0)
         let v = res.unwrap();

@@ -82,7 +82,7 @@ fn bench_engine_bigint_cached_2(c: &mut Criterion) {
     c.bench_function("engine_bigint_cached_2", |ben| {
         ben.iter(|| {
             // Call the already-bound function in the same persistent env.
-            black_box(evaluate_script(script).unwrap());
+            black_box(evaluate_script(script, None::<&std::path::Path>).unwrap());
         })
     });
 }

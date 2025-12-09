@@ -33,7 +33,11 @@ thread_local! {
     static WELL_KNOWN_SYMBOLS: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
 
-pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
+pub fn evaluate_script<T, P>(script: T, script_path: Option<P>) -> Result<Value, JSError>
+where
+    T: AsRef<str>,
+    P: AsRef<std::path::Path>,
+{
     let script = script.as_ref();
     log::debug!("evaluate_script async called with script len {}", script.len());
     let filtered = filter_input_script(script);
@@ -58,6 +62,9 @@ pub fn evaluate_script<T: AsRef<str>>(script: T) -> Result<Value, JSError> {
     }
     let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
     env.borrow_mut().is_function_scope = true;
+    // Record a script name on the root environment so stack frames can include it.
+    let path = script_path.map_or("<script>".to_string(), |p| p.as_ref().to_string_lossy().to_string());
+    let _ = obj_set_value(&env, &"__script_name".into(), Value::String(utf8_to_utf16(&path)));
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
     //   import * as NAME from "std";
@@ -460,7 +467,33 @@ pub(crate) fn filter_input_script(script: &str) -> String {
 /// Initialize global built-in constructors in the environment
 pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSError> {
     // Create Error constructor object early so its prototype exists.
-    let _error_ctor_early = ensure_constructor_object(env, "Error", "__is_error_constructor")?;
+    let error_ctor = ensure_constructor_object(env, "Error", "__is_error_constructor")?;
+
+    // Ensure Error.prototype.toString uses our handler
+    if let Some(proto_val) = obj_get_value(&error_ctor, &"prototype".into())? {
+        if let Value::Object(proto_obj) = &*proto_val.borrow() {
+            obj_set_value(
+                proto_obj,
+                &"toString".into(),
+                Value::Function("Error.prototype.toString".to_string()),
+            )?;
+        }
+    }
+
+    // Create common Error sub-constructors and point their prototype.toString to Error.prototype.toString
+    let error_types = ["TypeError", "SyntaxError", "ReferenceError", "RangeError", "EvalError", "URIError"];
+    for t in error_types.iter() {
+        let ctor = ensure_constructor_object(env, t, &format!("__is_{}_constructor", t.to_lowercase()))?;
+        if let Some(proto_val) = obj_get_value(&ctor, &"prototype".into())? {
+            if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                obj_set_value(
+                    proto_obj,
+                    &"toString".into(),
+                    Value::Function("Error.prototype.toString".to_string()),
+                )?;
+            }
+        }
+    }
 
     let mut env_borrow = env.borrow_mut();
 

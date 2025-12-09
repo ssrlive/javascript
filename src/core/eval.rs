@@ -26,6 +26,49 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, str::FromStr};
 
+// Thread-local storage for last captured stack frames when an error occurs.
+thread_local! {
+    static LAST_STACK: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+fn set_last_stack(frames: Vec<String>) {
+    LAST_STACK.with(|s| *s.borrow_mut() = frames);
+}
+
+fn take_last_stack() -> Vec<String> {
+    LAST_STACK.with(|s| s.borrow_mut().drain(..).collect())
+}
+
+// Build a human-friendly frame name including approximate source location
+fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
+    // Attempt to find a script name by walking the env chain for `__script_name`
+    let mut script_name = "<script>".to_string();
+    let mut line: Option<usize> = None;
+    let mut env_opt = Some(caller_env.clone());
+    while let Some(env_ptr) = env_opt {
+        if let Ok(Some(sn_rc)) = obj_get_value(&env_ptr, &"__script_name".into()) {
+            if let Value::String(s_utf16) = &*sn_rc.borrow() {
+                script_name = String::from_utf16_lossy(s_utf16);
+            }
+        }
+        if line.is_none() {
+            if let Ok(Some(idx_rc)) = obj_get_value(&env_ptr, &"__stmt_index".into()) {
+                if let Value::Number(n) = &*idx_rc.borrow() {
+                    // convert 0-based index to 1-based line-like number
+                    line = Some((*n as usize) + 1);
+                }
+            }
+        }
+        // follow prototype/caller chain to find root script name if needed
+        env_opt = env_ptr.borrow().prototype.clone();
+    }
+    if let Some(ln) = line {
+        format!("{} ({}:{}:0)", base, script_name, ln)
+    } else {
+        format!("{} ({})", base, script_name)
+    }
+}
+
 thread_local! {
     static SYMBOL_REGISTRY: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
@@ -60,6 +103,9 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
+        // Attach statement index to the current env so callsites can include
+        // an approximate source location in stack frames.
+        let _ = obj_set_value(env, &"__stmt_index".into(), Value::Number(i as f64));
         // Evaluate the statement inside a closure so we can log the
         // statement index and AST if an error occurs while preserving
         // control-flow returns. The closure returns
@@ -426,6 +472,31 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         log::error!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
                     }
                 }
+                // Capture a minimal JS-style call stack by walking `__frame`/`__caller`
+                // links from the environment where the error occurred. This produces
+                // a vector of frame descriptions (innermost first).
+                fn capture_frames_from_env(mut env_opt: Option<JSObjectDataPtr>) -> Vec<String> {
+                    let mut frames = Vec::new();
+                    while let Some(env_ptr) = env_opt {
+                        if let Ok(Some(frame_val_rc)) = obj_get_value(&env_ptr, &"__frame".into()) {
+                            if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
+                                frames.push(String::from_utf16_lossy(s_utf16));
+                            }
+                        }
+                        // follow caller link if present
+                        if let Ok(Some(caller_rc)) = obj_get_value(&env_ptr, &"__caller".into()) {
+                            if let Value::Object(caller_env) = &*caller_rc.borrow() {
+                                env_opt = Some(caller_env.clone());
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    frames
+                }
+
+                let frames = capture_frames_from_env(Some(env.clone()));
+                set_last_stack(frames);
                 return Err(e);
             }
         }
@@ -638,6 +709,69 @@ fn statement_try_catch(
                 let catch_env = Rc::new(RefCell::new(JSObjectData::new()));
                 catch_env.borrow_mut().prototype = Some(env.clone());
                 catch_env.borrow_mut().is_function_scope = false;
+                // Helper: construct a JS Error instance from a constructor name and the original JSError
+                fn create_js_error_instance(env: &JSObjectDataPtr, ctor_name: &str, err: &JSError) -> Result<Value, JSError> {
+                    // Try to find the constructor in the environment
+                    if let Ok(Some(ctor_rc)) = obj_get_value(env, &ctor_name.into()) {
+                        if let Value::Object(ctor_obj) = &*ctor_rc.borrow() {
+                            let instance = Rc::new(RefCell::new(JSObjectData::new()));
+                            // Link prototype
+                            if let Ok(Some(proto_val)) = obj_get_value(ctor_obj, &"prototype".into()) {
+                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                                    instance.borrow_mut().prototype = Some(proto_obj.clone());
+                                    let _ = obj_set_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()));
+                                }
+                            }
+                            // name/message
+                            let _ = obj_set_value(&instance, &"name".into(), Value::String(utf8_to_utf16(ctor_name)));
+                            let _ = obj_set_value(&instance, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())));
+                            // Build stack string from last captured frames plus error string
+                            let mut stack_lines = Vec::new();
+                            // first line: ErrorName: message
+                            stack_lines.push(format!("{}: {}", ctor_name, err));
+                            let frames = take_last_stack();
+                            for f in frames.iter() {
+                                stack_lines.push(format!("    at {}", f));
+                            }
+                            let stack_combined = stack_lines.join("\n");
+                            let _ = obj_set_value(&instance, &"stack".into(), Value::String(utf8_to_utf16(&stack_combined)));
+                            let _ = obj_set_value(&instance, &"constructor".into(), Value::Object(ctor_obj.clone()));
+                            // Mark these properties non-enumerable, non-writable, and non-configurable per ECMAScript semantics
+                            let name_key = PropertyKey::String("name".to_string());
+                            let msg_key = PropertyKey::String("message".to_string());
+                            let stack_key = PropertyKey::String("stack".to_string());
+                            instance.borrow_mut().set_non_enumerable(name_key.clone());
+                            instance.borrow_mut().set_non_enumerable(msg_key.clone());
+                            instance.borrow_mut().set_non_enumerable(stack_key.clone());
+                            instance.borrow_mut().set_non_writable(name_key.clone());
+                            instance.borrow_mut().set_non_writable(msg_key.clone());
+                            instance.borrow_mut().set_non_writable(stack_key.clone());
+                            instance.borrow_mut().set_non_configurable(name_key.clone());
+                            instance.borrow_mut().set_non_configurable(msg_key.clone());
+                            instance.borrow_mut().set_non_configurable(stack_key.clone());
+                            return Ok(Value::Object(instance));
+                        }
+                    }
+                    // Fallback: plain Error-like object
+                    let error_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    obj_set_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
+                    obj_set_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
+                    obj_set_value(&error_obj, &"stack".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
+                    let name_key = PropertyKey::String("name".to_string());
+                    let msg_key = PropertyKey::String("message".to_string());
+                    let stack_key = PropertyKey::String("stack".to_string());
+                    error_obj.borrow_mut().set_non_enumerable(name_key.clone());
+                    error_obj.borrow_mut().set_non_enumerable(msg_key.clone());
+                    error_obj.borrow_mut().set_non_enumerable(stack_key.clone());
+                    error_obj.borrow_mut().set_non_writable(name_key.clone());
+                    error_obj.borrow_mut().set_non_writable(msg_key.clone());
+                    error_obj.borrow_mut().set_non_writable(stack_key.clone());
+                    error_obj.borrow_mut().set_non_configurable(name_key.clone());
+                    error_obj.borrow_mut().set_non_configurable(msg_key.clone());
+                    error_obj.borrow_mut().set_non_configurable(stack_key.clone());
+                    Ok(Value::Object(error_obj))
+                }
+
                 let catch_value = match &err.kind() {
                     // Thrown values created by `throw <expr>` should be delivered
                     // to the catch clause unmodified (as in ECMA-262).
@@ -646,21 +780,12 @@ fn statement_try_catch(
                     // Error-like objects for the catch. Preserve the
                     // original thrown value here.
                     JSErrorKind::Throw { value } => value.clone(),
-                    JSErrorKind::TypeError { .. }
-                    | JSErrorKind::SyntaxError { .. }
-                    | JSErrorKind::RuntimeError { .. }
-                    | JSErrorKind::EvaluationError { .. } => {
-                        // For engine-generated errors, expose the textual
-                        // representation to the catch clause as a string
-                        // (tests expect error text rather than an object).
-                        Value::String(utf8_to_utf16(&err.to_string()))
-                    }
+                    JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", &err)?,
+                    JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", &err)?,
+                    JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", &err)?,
                     _ => {
                         // For other errors, create a generic Error object
-                        let error_obj = Rc::new(RefCell::new(JSObjectData::new()));
-                        obj_set_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
-                        obj_set_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
-                        Value::Object(error_obj)
+                        create_js_error_instance(env, "Error", &err)?
                     }
                 };
                 env_set(&catch_env, catch_param, catch_value)?;
@@ -1746,6 +1871,10 @@ fn statement_for_of_var_iter(
                                     obj_set_value(&func_env, &param.clone().into(), Value::Undefined)?;
                                 }
                                 // Execute body to produce iterator result
+                                // Attach minimal frame/caller info for stack traces
+                                let frame = build_frame_name(env, "[Symbol.iterator]");
+                                let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                 evaluate_statements(&func_env, &body)?
                             } else if let Value::Function(func_name) = method_val {
                                 // Call built-in function (no arguments)
@@ -1772,6 +1901,10 @@ fn statement_for_of_var_iter(
                                             for param in nparams.iter() {
                                                 obj_set_value(&func_env, &param.clone().into(), Value::Undefined)?;
                                             }
+                                            // Attach frame/caller for iterator.next
+                                            let frame = build_frame_name(env, "iterator.next");
+                                            let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                            let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                             evaluate_statements(&func_env, &nbody)?
                                         } else if let Value::Function(func_name) = nv {
                                             crate::js_function::handle_global_function(func_name, &[], env)?
@@ -4544,6 +4677,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                         env_set(&func_env, param.as_str(), Value::Undefined)?;
                                     }
                                 }
+                                // Attach frame/caller information for stack traces
+                                let frame = build_frame_name(env, method);
+                                let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                 // Execute function body
                                 evaluate_statements(&func_env, &body)
                             }
@@ -4560,7 +4697,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 if func_name == "BigInt_valueOf" {
                                     return crate::js_bigint::handle_bigint_object_method(&obj_map, "valueOf", args, env);
                                 }
-                                if func_name.starts_with("Object.prototype.") {
+                                if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
                                     match func_name.as_str() {
                                         "Object.prototype.hasOwnProperty" => {
                                             // hasOwnProperty takes one argument; evaluate it in caller env
@@ -4608,6 +4745,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             // Delegate Object.prototype.toLocaleString to the
                                             // same handler as toString (defaults to toString)
                                             crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args)
+                                        }
+                                        "Error.prototype.toString" => {
+                                            crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args)
                                         }
                                         "Object.prototype.propertyIsEnumerable" => {
                                             if args.len() != 1 {
@@ -4673,6 +4813,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                     env_set(&func_env, param.as_str(), Value::Undefined)?;
                                                 }
                                             }
+                                            // Attach frame/caller information for stack traces
+                                            let frame = build_frame_name(env, method);
+                                            let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                            let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                             // Execute function body
                                             evaluate_statements(&func_env, body)
                                         }
@@ -4749,6 +4893,19 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // ensure this env is a proper function scope
                 func_env.borrow_mut().is_function_scope = true;
+                // Attach minimal frame info (try to derive a name from captured_env, else anonymous)
+                let frame_name = if let Ok(Some(name_rc)) = obj_get_value(&captured_env, &"name".into()) {
+                    if let Value::String(s) = &*name_rc.borrow() {
+                        String::from_utf16_lossy(s)
+                    } else {
+                        "<anonymous>".to_string()
+                    }
+                } else {
+                    "<anonymous>".to_string()
+                };
+                let frame = build_frame_name(env, &frame_name);
+                let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                 // Bind parameters: provide provided args, set missing params to undefined
                 for (i, param) in params.iter().enumerate() {
                     if i < evaluated_args.len() {
@@ -4813,6 +4970,19 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             // ensure this env is a proper function scope
                             func_env.borrow_mut().is_function_scope = true;
+                            // Attach minimal frame info for this callable (derive name from func object if present)
+                            let frame_name = if let Ok(Some(nrc)) = obj_get_value(&obj_map, &"name".into()) {
+                                if let Value::String(s) = &*nrc.borrow() {
+                                    String::from_utf16_lossy(s)
+                                } else {
+                                    "<anonymous>".to_string()
+                                }
+                            } else {
+                                "<anonymous>".to_string()
+                            };
+                            let frame = build_frame_name(env, &frame_name);
+                            let _ = obj_set_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                            let _ = obj_set_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                             // Bind parameters: provide provided args, set missing params to undefined
                             for (i, param) in params.iter().enumerate() {
                                 if i < evaluated_args.len() {

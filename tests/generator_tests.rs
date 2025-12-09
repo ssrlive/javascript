@@ -12,6 +12,7 @@ fn test_generator_function_syntax() {
         }
         typeof gen;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     match result.unwrap() {
@@ -31,6 +32,7 @@ fn test_generator_function_call() {
         var g = gen();
         typeof g;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     // Should return "object" for generator object
@@ -52,6 +54,7 @@ fn test_generator_next() {
         var result = g.next();
         result.value;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     match result.unwrap() {
@@ -73,6 +76,7 @@ fn test_generator_done() {
         var result = g.next(); // second call should be done
         result.done;
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_ok());
     match result.unwrap() {
@@ -91,6 +95,7 @@ fn test_yield_without_generator() {
         }
         regular();
     "#,
+        None::<&std::path::Path>,
     );
     assert!(result.is_err());
 }

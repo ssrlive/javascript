@@ -15,7 +15,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_basic_arithmetic() {
         let script = "let x = 1; let y = 2; x + y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected number 3.0, got {:?}", result),
@@ -25,7 +25,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_variable_assignment() {
         let script = "let a = 5; a";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 5.0),
             _ => panic!("Expected number 5.0, got {:?}", result),
@@ -35,7 +35,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_multiple_operations() {
         let script = "let x = 10; let y = 3; x - y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 7.0),
             _ => panic!("Expected number 7.0, got {:?}", result),
@@ -45,7 +45,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_multiplication() {
         let script = "let x = 4; let y = 5; x * y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 20.0),
             _ => panic!("Expected number 20.0, got {:?}", result),
@@ -55,7 +55,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_intentionally_failing_arithmetic() {
         let script = "let x = 1; let y = 2; x + y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected number 3.0, got {:?}", result),
@@ -65,7 +65,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_modulo_operation() {
         let script = "let x = 7; let y = 3; x % y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 1.0),
             _ => panic!("Expected number 1.0, got {:?}", result),
@@ -75,7 +75,7 @@ mod basic_arithmetic_tests {
     #[test]
     fn test_modulo_zero_remainder() {
         let script = "let x = 6; let y = 3; x % y";
-        let result = evaluate_script(script);
+        let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 0.0),
             _ => panic!("Expected number 0.0, got {:?}", result),

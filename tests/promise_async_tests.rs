@@ -8,7 +8,7 @@ fn test_promise_async_resolution() {
             resolve("async result");
         })
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(value) => {
             // Should get the resolved value
@@ -35,7 +35,7 @@ fn test_await_async_function() {
         }
         getResult()
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(value) => {
             // Should get the awaited result
@@ -62,7 +62,7 @@ fn test_promise_chaining_async() {
             return value + 5;
         })
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(value) => {
             // Should get the final chained result
@@ -87,7 +87,7 @@ fn test_promise_allsettled() {
             new Promise(function(resolve, reject) { resolve(3); console.log("executor 3 called"); })
         ])
     "#;
-    let result = evaluate_script(script);
+    let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(value) => {
             // Should get an array of settled results
@@ -161,7 +161,7 @@ fn test_main() {
             new Promise((resolve, reject) => { resolve(3); })
         ])
     "#;
-    match evaluate_script(script) {
+    match evaluate_script(script, None::<&std::path::Path>) {
         Ok(result) => println!("Success:{:?}", result),
         Err(e) => println!("Error:{:?}", e),
     }

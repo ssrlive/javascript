@@ -4459,6 +4459,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Check if this is the Math object
                 if get_own_property(&obj_map, &"PI".into()).is_some() && get_own_property(&obj_map, &"E".into()).is_some() {
                     crate::js_math::handle_math_method(method, args, env)
+                // Detect Atomics object (basic ops)
+                } else if get_own_property(&obj_map, &"load".into()).is_some() && get_own_property(&obj_map, &"store".into()).is_some() {
+                    crate::js_typedarray::handle_atomics_method(method, args, env)
                 } else if get_own_property(&obj_map, &"apply".into()).is_some() && get_own_property(&obj_map, &"construct".into()).is_some()
                 {
                     crate::js_reflect::handle_reflect_method(method, args, env)
@@ -4467,6 +4470,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_json::handle_json_method(method, args, env)
                 } else if get_own_property(&obj_map, &"keys".into()).is_some() && get_own_property(&obj_map, &"values".into()).is_some() {
                     crate::js_object::handle_object_method(method, args, env)
+                } else if get_own_property(&obj_map, &"__arraybuffer".into()).is_some() {
+                    if get_own_property(&obj_map, &"__sharedarraybuffer".into()).is_some() {
+                        crate::js_typedarray::handle_sharedarraybuffer_constructor(args, env)
+                    } else {
+                        crate::js_typedarray::handle_arraybuffer_constructor(args, env)
+                    }
                 } else if get_own_property(&obj_map, &"MAX_VALUE".into()).is_some()
                     && get_own_property(&obj_map, &"MIN_VALUE".into()).is_some()
                 {
@@ -4944,6 +4953,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 if get_own_property(&obj_map, &"MAX_VALUE".into()).is_some() && get_own_property(&obj_map, &"MIN_VALUE".into()).is_some() {
                     // Number constructor call
                     crate::js_function::handle_global_function("Number", args, env)
+                } else if get_own_property(&obj_map, &"__arraybuffer".into()).is_some() {
+                    // ArrayBuffer / SharedArrayBuffer constructor call
+                    if get_own_property(&obj_map, &"__sharedarraybuffer".into()).is_some() {
+                        crate::js_typedarray::handle_sharedarraybuffer_constructor(args, env)
+                    } else {
+                        crate::js_typedarray::handle_arraybuffer_constructor(args, env)
+                    }
                 } else if get_own_property(&obj_map, &"__is_string_constructor".into()).is_some() {
                     crate::js_function::handle_global_function("String", args, env)
                 } else if get_own_property(&obj_map, &"__is_boolean_constructor".into()).is_some() {
@@ -5009,6 +5025,9 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 // Check if this is the Math object
                 if get_own_property(&obj_map, &"PI".into()).is_some() && get_own_property(&obj_map, &"E".into()).is_some() {
                     crate::js_math::handle_math_method(method_name, args, env)
+                // Detect Atomics object
+                } else if get_own_property(&obj_map, &"load".into()).is_some() && get_own_property(&obj_map, &"store".into()).is_some() {
+                    crate::js_typedarray::handle_atomics_method(method_name, args, env)
                 } else if get_own_property(&obj_map, &"apply".into()).is_some() && get_own_property(&obj_map, &"construct".into()).is_some()
                 {
                     crate::js_reflect::handle_reflect_method(method_name, args, env)

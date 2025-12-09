@@ -1,6 +1,7 @@
 use javascript::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind, Value, evaluate_script};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -11,18 +12,19 @@ fn __init_test_logger() {
 fn test_jsarraybuffer_creation_and_access() {
     // Test creating a new ArrayBuffer
     let mut buffer = JSArrayBuffer {
-        data: vec![0; 16],
+        data: Arc::new(Mutex::new(vec![0; 16])),
         detached: false,
+        shared: false,
     };
 
-    assert_eq!(buffer.data.len(), 16);
+    assert_eq!(buffer.data.lock().unwrap().len(), 16);
     assert!(!buffer.detached);
 
     // Test data access and modification
-    buffer.data[0] = 42;
-    buffer.data[15] = 255;
-    assert_eq!(buffer.data[0], 42);
-    assert_eq!(buffer.data[15], 255);
+    buffer.data.lock().unwrap()[0] = 42;
+    buffer.data.lock().unwrap()[15] = 255;
+    assert_eq!(buffer.data.lock().unwrap()[0], 42);
+    assert_eq!(buffer.data.lock().unwrap()[15], 255);
 
     // Test detachment
     buffer.detached = true;
@@ -33,8 +35,9 @@ fn test_jsarraybuffer_creation_and_access() {
 fn test_jsdataview_creation_and_access() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        data: Arc::new(Mutex::new(vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])),
         detached: false,
+        shared: false,
     }));
 
     // Create a DataView for the entire buffer
@@ -50,8 +53,8 @@ fn test_jsdataview_creation_and_access() {
     // Test reading different data types (simulated)
     // Note: In a real implementation, these would be methods on DataView
     // For now, we just test the structure setup
-    assert_eq!(buffer.borrow().data[0], 0);
-    assert_eq!(buffer.borrow().data[1], 1);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[0], 0);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[1], 1);
 
     // Create a DataView with offset and length
     let partial_view = JSDataView {
@@ -68,8 +71,9 @@ fn test_jsdataview_creation_and_access() {
 fn test_jstypedarray_creation_and_properties() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0; 64], // 64 bytes
+        data: Arc::new(Mutex::new(vec![0; 64])), // 64 bytes
         detached: false,
+        shared: false,
     }));
 
     // Test different TypedArray kinds
@@ -102,8 +106,9 @@ fn test_jstypedarray_creation_and_properties() {
 fn test_typedarray_with_offset() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0; 32],
+        data: Arc::new(Mutex::new(vec![0; 32])),
         detached: false,
+        shared: false,
     }));
 
     // Create a TypedArray with offset
@@ -123,8 +128,9 @@ fn test_typedarray_with_offset() {
 fn test_shared_arraybuffer_behavior() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0; 16],
+        data: Arc::new(Mutex::new(vec![0; 16])),
         detached: false,
+        shared: false,
     }));
 
     // Create multiple views sharing the same buffer
@@ -152,8 +158,8 @@ fn test_shared_arraybuffer_behavior() {
     assert!(Rc::ptr_eq(&data_view1.buffer, &typed_array.buffer));
 
     // Modifications through one view should be visible through the buffer
-    buffer.borrow_mut().data[0] = 42;
-    assert_eq!(buffer.borrow().data[0], 42);
+    buffer.borrow_mut().data.lock().unwrap()[0] = 42;
+    assert_eq!(buffer.borrow().data.lock().unwrap()[0], 42);
 
     // Test that modifications through TypedArray are visible through the buffer
     let mut typed_array_clone = JSTypedArray {
@@ -167,7 +173,7 @@ fn test_shared_arraybuffer_behavior() {
     typed_array_clone.set(1, 99).unwrap();
 
     // Check that it's visible in the buffer
-    assert_eq!(buffer.borrow().data[1], 99);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[1], 99);
 
     // Check that it's visible through another TypedArray on the same buffer
     assert_eq!(typed_array.get(1).unwrap(), 99);
@@ -184,7 +190,7 @@ fn test_shared_arraybuffer_behavior() {
     offset_array.set(2, 77).unwrap();
 
     // Check that it's visible in the original buffer
-    assert_eq!(buffer.borrow().data[7], 77);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[7], 77);
 
     // Check that it's visible through the first TypedArray
     assert_eq!(typed_array.get(7).unwrap(), 77);
@@ -194,12 +200,13 @@ fn test_shared_arraybuffer_behavior() {
 fn test_arraybuffer_detachment() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![1, 2, 3, 4],
+        data: Arc::new(Mutex::new(vec![1, 2, 3, 4])),
         detached: false,
+        shared: false,
     }));
 
     assert!(!buffer.borrow().detached);
-    assert_eq!(buffer.borrow().data.len(), 4);
+    assert_eq!(buffer.borrow().data.lock().unwrap().len(), 4);
 
     // Detach the buffer
     buffer.borrow_mut().detached = true;
@@ -338,8 +345,9 @@ fn test_js_arraybuffer_dataview_integration_via_script() {
 fn test_dataview_read_write_operations() {
     // Create an ArrayBuffer
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0; 16],
+        data: Arc::new(Mutex::new(vec![0; 16])),
         detached: false,
+        shared: false,
     }));
 
     // Create a DataView for the entire buffer
@@ -380,10 +388,10 @@ fn test_dataview_read_write_operations() {
     offset_view.set_int32(0, 0x12345678, true).unwrap();
 
     // Check that it affected the main buffer
-    assert_eq!(buffer.borrow().data[4], 0x78);
-    assert_eq!(buffer.borrow().data[5], 0x56);
-    assert_eq!(buffer.borrow().data[6], 0x34);
-    assert_eq!(buffer.borrow().data[7], 0x12);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[4], 0x78);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[5], 0x56);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[6], 0x34);
+    assert_eq!(buffer.borrow().data.lock().unwrap()[7], 0x12);
 
     // Read back through offset view
     assert_eq!(offset_view.get_int32(0, true).unwrap(), 0x12345678);

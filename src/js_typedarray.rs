@@ -3,7 +3,17 @@ use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Condvar;
+use std::sync::LazyLock;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+// Global waiters registry keyed by (buffer_arc_ptr, byte_index). Each waiter
+// is an Arc containing a (Mutex<bool>, Condvar) pair the waiting thread blocks on.
+#[allow(clippy::type_complexity)]
+static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Condvar)>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Create an ArrayBuffer constructor object
 pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
@@ -15,6 +25,325 @@ pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
 
     // Mark as ArrayBuffer constructor
     obj_set_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
+
+    Ok(obj)
+}
+
+/// Create the Atomics object with basic atomic methods
+pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+    obj_set_value(&obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
+    obj_set_value(&obj, &"store".into(), Value::Function("Atomics.store".to_string()))?;
+    obj_set_value(
+        &obj,
+        &"compareExchange".into(),
+        Value::Function("Atomics.compareExchange".to_string()),
+    )?;
+    obj_set_value(&obj, &"exchange".into(), Value::Function("Atomics.exchange".to_string()))?;
+    obj_set_value(&obj, &"add".into(), Value::Function("Atomics.add".to_string()))?;
+    obj_set_value(&obj, &"sub".into(), Value::Function("Atomics.sub".to_string()))?;
+    obj_set_value(&obj, &"and".into(), Value::Function("Atomics.and".to_string()))?;
+    obj_set_value(&obj, &"or".into(), Value::Function("Atomics.or".to_string()))?;
+    obj_set_value(&obj, &"xor".into(), Value::Function("Atomics.xor".to_string()))?;
+    obj_set_value(&obj, &"wait".into(), Value::Function("Atomics.wait".to_string()))?;
+    obj_set_value(&obj, &"notify".into(), Value::Function("Atomics.notify".to_string()))?;
+    obj_set_value(&obj, &"isLockFree".into(), Value::Function("Atomics.isLockFree".to_string()))?;
+
+    Ok(obj)
+}
+
+/// Handle Atomics.* calls (minimal mutex-backed implementations)
+pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Helper to extract TypedArray from first argument
+    if args.is_empty() {
+        return Err(raise_eval_error!("Atomics method requires arguments"));
+    }
+    // Special-case Atomics.isLockFree which accepts a size (in bytes)
+    // and does not require a TypedArray as the first argument.
+    if method == "isLockFree" {
+        if args.len() != 1 {
+            return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument"));
+        }
+        let size_val = evaluate_expr(env, &args[0])?;
+        let size = match size_val {
+            Value::Number(n) => n as usize,
+            _ => return Err(raise_eval_error!("Atomics.isLockFree argument must be a number")),
+        };
+
+        #[allow(clippy::match_like_matches_macro, clippy::needless_bool)]
+        let res = match size {
+            1 => cfg!(target_has_atomic = "8"),
+            2 => cfg!(target_has_atomic = "16"),
+            4 => cfg!(target_has_atomic = "32"),
+            8 => cfg!(target_has_atomic = "64"),
+            _ => false,
+        };
+        return Ok(Value::Boolean(res));
+    }
+    let ta_val = evaluate_expr(env, &args[0])?;
+    let ta_obj = if let Value::Object(obj_map) = ta_val {
+        if let Some(ta_rc) = obj_get_value(&obj_map, &"__typedarray".into())? {
+            if let Value::TypedArray(ta) = &*ta_rc.borrow() {
+                ta.clone()
+            } else {
+                return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+            }
+        } else {
+            return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+        }
+    } else {
+        return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+    };
+
+    match method {
+        "load" => {
+            if args.len() != 2 {
+                return Err(raise_eval_error!("Atomics.load requires 2 arguments"));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let v = ta_obj.borrow().get(idx)?;
+            Ok(Value::Number(v as f64))
+        }
+        "store" => {
+            if args.len() != 3 {
+                return Err(raise_eval_error!("Atomics.store requires 3 arguments"));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let val_val = evaluate_expr(env, &args[2])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let v = match val_val {
+                Value::Number(n) => n as i64,
+                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                _ => return Err(raise_eval_error!("Atomics value must be a number or BigInt")),
+            };
+            let old = ta_obj.borrow().get(idx)?;
+            ta_obj.borrow_mut().set(idx, v)?;
+            Ok(Value::Number(old as f64))
+        }
+        "compareExchange" => {
+            if args.len() != 4 {
+                return Err(raise_eval_error!("Atomics.compareExchange requires 4 arguments"));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let expected_val = evaluate_expr(env, &args[2])?;
+            let replacement_val = evaluate_expr(env, &args[3])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let expected = match expected_val {
+                Value::Number(n) => n as i64,
+                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
+            };
+            let replacement = match replacement_val {
+                Value::Number(n) => n as i64,
+                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                _ => return Err(raise_eval_error!("Atomics replacement must be a number or BigInt")),
+            };
+            let old = ta_obj.borrow().get(idx)?;
+            if old == expected {
+                ta_obj.borrow_mut().set(idx, replacement)?;
+            }
+            Ok(Value::Number(old as f64))
+        }
+        "add" | "sub" | "and" | "or" | "xor" | "exchange" => {
+            if args.len() < 2 || args.len() > 3 {
+                return Err(raise_eval_error!(format!("Atomics.{} invalid args", method)));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let operand = if args.len() == 3 {
+                let v = evaluate_expr(env, &args[2])?;
+                match v {
+                    Value::Number(n) => n as i64,
+                    Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                    _ => return Err(raise_eval_error!("Atomics operand must be a number or BigInt")),
+                }
+            } else {
+                0
+            };
+            let old = ta_obj.borrow().get(idx)?;
+            let new = match method {
+                "add" => old.wrapping_add(operand),
+                "sub" => old.wrapping_sub(operand),
+                "and" => old & operand,
+                "or" => old | operand,
+                "xor" => old ^ operand,
+                "exchange" => operand,
+                _ => old,
+            };
+            ta_obj.borrow_mut().set(idx, new)?;
+            Ok(Value::Number(old as f64))
+        }
+        "wait" => {
+            // Atomics.wait(typedArray, index, value[, timeout])
+            if args.len() < 3 || args.len() > 4 {
+                return Err(raise_eval_error!("Atomics.wait requires 3 or 4 arguments"));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let expected_val = evaluate_expr(env, &args[2])?;
+            let expected = match expected_val {
+                Value::Number(n) => n as i64,
+                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
+            };
+
+            // Check current value
+            let current = ta_obj.borrow().get(idx)?;
+            if current != expected {
+                return Ok(Value::String(utf8_to_utf16("not-equal")));
+            }
+
+            // Determine timeout (milliseconds)
+            let timeout_ms_opt = if args.len() == 4 {
+                let tval = evaluate_expr(env, &args[3])?;
+                match tval {
+                    Value::Number(n) => Some(n as i64),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Compute key for waiters: (arc_ptr, byte_index)
+            let buffer_rc = ta_obj.borrow().buffer.clone();
+            let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
+            let byte_index = ta_obj.borrow().byte_offset + idx * ta_obj.borrow().element_size();
+
+            // Create waiter and register
+            let waiter = Arc::new((Mutex::new(false), Condvar::new()));
+            {
+                let mut map = WAITERS.lock().unwrap();
+                let entry = map.entry((arc_ptr, byte_index)).or_default();
+                entry.push(waiter.clone());
+            }
+
+            // Block on the condvar
+            let (m, cv) = &*waiter;
+            let mut signaled = m.lock().unwrap();
+            if let Some(ms) = timeout_ms_opt {
+                let dur = if ms <= 0 {
+                    Duration::from_millis(0)
+                } else {
+                    Duration::from_millis(ms as u64)
+                };
+                let (guard, res) = cv.wait_timeout(signaled, dur).unwrap();
+                signaled = guard;
+                if *signaled {
+                    Ok(Value::String(utf8_to_utf16("ok")))
+                } else if res.timed_out() {
+                    // remove self from WAITERS
+                    let mut map = WAITERS.lock().unwrap();
+                    if let Some(v) = map.get_mut(&(arc_ptr, byte_index)) {
+                        v.retain(|h| !Arc::ptr_eq(h, &waiter));
+                        if v.is_empty() {
+                            map.remove(&(arc_ptr, byte_index));
+                        }
+                    }
+                    Ok(Value::String(utf8_to_utf16("timed-out")))
+                } else {
+                    // Spurious wake, treat as timed-out
+                    let mut map = WAITERS.lock().unwrap();
+                    if let Some(v) = map.get_mut(&(arc_ptr, byte_index)) {
+                        v.retain(|h| !Arc::ptr_eq(h, &waiter));
+                        if v.is_empty() {
+                            map.remove(&(arc_ptr, byte_index));
+                        }
+                    }
+                    Ok(Value::String(utf8_to_utf16("timed-out")))
+                }
+            } else {
+                // Wait indefinitely
+                while !*signaled {
+                    signaled = cv.wait(signaled).unwrap();
+                }
+                Ok(Value::String(utf8_to_utf16("ok")))
+            }
+        }
+        "notify" => {
+            // Atomics.notify(typedArray, index[, count])
+            if args.len() < 2 || args.len() > 3 {
+                return Err(raise_eval_error!("Atomics.notify requires 2 or 3 arguments"));
+            }
+            let idx_val = evaluate_expr(env, &args[1])?;
+            let idx = match idx_val {
+                Value::Number(n) => n as usize,
+                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+            };
+            let count = if args.len() == 3 {
+                let cval = evaluate_expr(env, &args[2])?;
+                match cval {
+                    Value::Number(n) => n as usize,
+                    _ => return Err(raise_eval_error!("Atomics count must be a number")),
+                }
+            } else {
+                usize::MAX
+            };
+
+            let buffer_rc = ta_obj.borrow().buffer.clone();
+            let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
+            let byte_index = ta_obj.borrow().byte_offset + idx * ta_obj.borrow().element_size();
+
+            let mut awakened = 0usize;
+            let mut map = WAITERS.lock().unwrap();
+            if let Some(vec) = map.get_mut(&(arc_ptr, byte_index)) {
+                let to_awake = std::cmp::min(count, vec.len());
+                for _ in 0..to_awake {
+                    // wake oldest
+                    if vec.is_empty() {
+                        break;
+                    }
+                    let handle = vec.remove(0);
+                    let (m, cv) = &*handle;
+                    let mut g = m.lock().unwrap();
+                    *g = true;
+                    cv.notify_one();
+                    awakened += 1;
+                }
+                if vec.is_empty() {
+                    map.remove(&(arc_ptr, byte_index));
+                }
+            }
+            Ok(Value::Number(awakened as f64))
+        }
+        "isLockFree" => {
+            // For simplicity, always return false (no native lock-free guarantees)
+            if args.len() != 1 {
+                return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument"));
+            }
+            Ok(Value::Boolean(false))
+        }
+        _ => Err(raise_eval_error!(format!("Atomics method '{method}' not implemented"))),
+    }
+}
+
+/// Create a SharedArrayBuffer constructor object
+pub fn make_sharedarraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+
+    // Set prototype and name
+    obj_set_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
+    obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+
+    // Mark as ArrayBuffer constructor and indicate it's the shared variant
+    obj_set_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
+    obj_set_value(&obj, &"__sharedarraybuffer".into(), Value::Boolean(true))?;
 
     Ok(obj)
 }
@@ -260,8 +589,9 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Create ArrayBuffer instance
     let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-        data: vec![0; length],
+        data: Arc::new(Mutex::new(vec![0; length])),
         detached: false,
+        shared: false,
     }));
 
     // Create the ArrayBuffer object
@@ -269,6 +599,37 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype
+    let proto = make_arraybuffer_prototype()?;
+    obj.borrow_mut().prototype = Some(proto);
+
+    Ok(Value::Object(obj))
+}
+
+/// Handle SharedArrayBuffer constructor calls (creates a shared buffer)
+pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // SharedArrayBuffer(length)
+    if args.is_empty() {
+        return Err(raise_eval_error!("SharedArrayBuffer constructor requires a length argument"));
+    }
+
+    let length_val = evaluate_expr(env, &args[0])?;
+    let length = match length_val {
+        Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
+        _ => return Err(raise_eval_error!("SharedArrayBuffer length must be a non-negative integer")),
+    };
+
+    // Create SharedArrayBuffer instance (mark shared: true)
+    let buffer = Rc::new(RefCell::new(JSArrayBuffer {
+        data: Arc::new(Mutex::new(vec![0; length])),
+        detached: false,
+        shared: true,
+    }));
+
+    // Create the SharedArrayBuffer object wrapper
+    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
+
+    // Set prototype to ArrayBuffer.prototype
     let proto = make_arraybuffer_prototype()?;
     obj.borrow_mut().prototype = Some(proto);
 
@@ -315,11 +676,11 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
             _ => return Err(raise_eval_error!("DataView byteLength must be a non-negative integer")),
         }
     } else {
-        buffer.borrow().data.len() - byte_offset
+        buffer.borrow().data.lock().unwrap().len() - byte_offset
     };
 
     // Validate bounds
-    if byte_offset + byte_length > buffer.borrow().data.len() {
+    if byte_offset + byte_length > buffer.borrow().data.lock().unwrap().len() {
         return Err(raise_eval_error!("DataView bounds exceed buffer size"));
     }
 
@@ -378,8 +739,9 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
     let (buffer, byte_offset, length) = if args.is_empty() {
         // new TypedArray() - create empty array
         let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-            data: vec![],
+            data: Arc::new(Mutex::new(vec![])),
             detached: false,
+            shared: false,
         }));
         (buffer, 0, 0)
     } else if args.len() == 1 {
@@ -389,8 +751,9 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                 // new TypedArray(length)
                 let length = n as usize;
                 let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-                    data: vec![0; length * element_size],
+                    data: Arc::new(Mutex::new(vec![0; length * element_size])),
                     detached: false,
+                    shared: false,
                 }));
                 (buffer, 0, length)
             }
@@ -401,8 +764,9 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.borrow().length;
                         let buffer = Rc::new(RefCell::new(JSArrayBuffer {
-                            data: vec![0; src_length * element_size],
+                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
                             detached: false,
+                            shared: false,
                         }));
                         // TODO: Copy data from source TypedArray
                         (buffer, 0, src_length)
@@ -412,7 +776,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                 } else if let Some(ab_val) = obj_get_value(&obj, &"__arraybuffer".into())? {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
-                        (ab.clone(), 0, ab.borrow().data.len() / element_size)
+                        (ab.clone(), 0, ab.borrow().data.lock().unwrap().len() / element_size)
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
@@ -435,7 +799,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                         if !offset.is_multiple_of(element_size) {
                             return Err(raise_eval_error!("TypedArray byteOffset must be multiple of element size"));
                         }
-                        let remaining_bytes = ab.borrow().data.len() - offset;
+                        let remaining_bytes = ab.borrow().data.lock().unwrap().len() - offset;
                         let length = remaining_bytes / element_size;
                         (ab.clone(), offset, length)
                     } else {
@@ -465,7 +829,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                         if !offset.is_multiple_of(element_size) {
                             return Err(raise_eval_error!("TypedArray byteOffset must be multiple of element size"));
                         }
-                        if length * element_size + offset > ab.borrow().data.len() {
+                        if length * element_size + offset > ab.borrow().data.lock().unwrap().len() {
                             return Err(raise_eval_error!("TypedArray length exceeds buffer size"));
                         }
                         (ab.clone(), offset, length)
@@ -920,5 +1284,116 @@ pub fn handle_dataview_method(obj_map: &JSObjectDataPtr, method: &str, args: &[E
             Ok(Value::Number(data_view.byte_offset as f64))
         }
         _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented"))),
+    }
+}
+
+#[cfg(test)]
+mod atomics_thread_tests {
+    use super::*;
+    use crate::core::{evaluate_statements, initialize_global_constructors, parse_statements};
+    use crate::unicode::utf16_to_utf8;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[test]
+    fn atomics_wait_notify_multithreaded() {
+        // Create a shared ArrayBuffer (shared = true)
+        let buffer = Rc::new(RefCell::new(JSArrayBuffer {
+            data: Arc::new(Mutex::new(vec![0u8; 16])),
+            detached: false,
+            shared: true,
+        }));
+
+        // Create a typed array view (Int32Array) referencing the same buffer
+        let _ = Rc::new(RefCell::new(JSTypedArray {
+            kind: TypedArrayKind::Int32,
+            buffer: buffer.clone(),
+            byte_offset: 0,
+            length: 4,
+        }));
+
+        // Extract the inner Arc for sharing between threads. Each thread will
+        // create its own `JSArrayBuffer` wrapper using the same `Arc<Mutex<...>>`.
+        let shared_arc = buffer.borrow().data.clone();
+
+        // Ensure initial int32 value at index 0 is 0
+        {
+            let data_arc = buffer.borrow().data.clone();
+            let mut d = data_arc.lock().unwrap();
+            let b = 0i32.to_le_bytes();
+            d[0] = b[0];
+            d[1] = b[1];
+            d[2] = b[2];
+            d[3] = b[3];
+        }
+
+        // Spawn a thread that will call Atomics.wait(ia, 0, 0) and block until notified.
+        // The thread creates its own JS environment but uses the same underlying
+        // Arc-backed byte buffer so wait/notify will match on the same key.
+        let shared_for_wait = shared_arc.clone();
+        let waiter = std::thread::spawn(move || {
+            // Build a local JSArrayBuffer wrapper around the shared Arc
+            let local_buffer = Rc::new(RefCell::new(JSArrayBuffer {
+                data: shared_for_wait.clone(),
+                detached: false,
+                shared: true,
+            }));
+            let local_ta = Rc::new(RefCell::new(JSTypedArray {
+                kind: TypedArrayKind::Int32,
+                buffer: local_buffer.clone(),
+                byte_offset: 0,
+                length: 4,
+            }));
+            let obj_local = Rc::new(RefCell::new(JSObjectData::new()));
+            obj_set_value(&obj_local, &"__typedarray".into(), Value::TypedArray(local_ta)).unwrap();
+
+            let env_local = Rc::new(RefCell::new(JSObjectData::new()));
+            env_local.borrow_mut().is_function_scope = true;
+            initialize_global_constructors(&env_local).unwrap();
+            obj_set_value(&env_local, &"ia".into(), Value::Object(obj_local)).unwrap();
+
+            let mut tokens = crate::tokenize("Atomics.wait(ia, 0, 0)").unwrap();
+            let stmts = parse_statements(&mut tokens).unwrap();
+            let v = evaluate_statements(&env_local, &stmts).unwrap();
+            // Expect a string result ("ok" when woken)
+            if let Value::String(s) = v {
+                utf16_to_utf8(&s)
+            } else {
+                "".to_string()
+            }
+        });
+
+        // Give the waiter a moment to block in Atomics.wait
+        std::thread::sleep(Duration::from_millis(100));
+
+        // In the notifier context, store a new value and notify the waiter
+        // Build a separate notifier environment that shares the same Arc
+        let local_buffer2 = Rc::new(RefCell::new(JSArrayBuffer {
+            data: shared_arc.clone(),
+            detached: false,
+            shared: true,
+        }));
+        let local_ta2 = Rc::new(RefCell::new(JSTypedArray {
+            kind: TypedArrayKind::Int32,
+            buffer: local_buffer2.clone(),
+            byte_offset: 0,
+            length: 4,
+        }));
+        let obj_notify = Rc::new(RefCell::new(JSObjectData::new()));
+        obj_set_value(&obj_notify, &"__typedarray".into(), Value::TypedArray(local_ta2)).unwrap();
+        let env_notify = Rc::new(RefCell::new(JSObjectData::new()));
+        env_notify.borrow_mut().is_function_scope = true;
+        initialize_global_constructors(&env_notify).unwrap();
+        obj_set_value(&env_notify, &"ia".into(), Value::Object(obj_notify)).unwrap();
+
+        let mut tokens2 = crate::tokenize("Atomics.store(ia, 0, 1); Atomics.notify(ia, 0, 1)").unwrap();
+        let stmts2 = parse_statements(&mut tokens2).unwrap();
+        let _ = evaluate_statements(&env_notify, &stmts2).unwrap();
+
+        // Join waiter and assert it observed an "ok" wakeup
+        let res = waiter.join().unwrap();
+        assert_eq!(res, "ok");
     }
 }

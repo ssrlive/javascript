@@ -641,6 +641,13 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
         Rc::new(RefCell::new(Value::Object(arraybuffer_constructor))),
     );
 
+    // SharedArrayBuffer constructor
+    let shared_arraybuffer_constructor = crate::js_typedarray::make_sharedarraybuffer_constructor()?;
+    env_borrow.insert(
+        PropertyKey::String("SharedArrayBuffer".to_string()),
+        Rc::new(RefCell::new(Value::Object(shared_arraybuffer_constructor))),
+    );
+
     let dataview_constructor = crate::js_typedarray::make_dataview_constructor()?;
     env_borrow.insert(
         PropertyKey::String("DataView".to_string()),
@@ -651,6 +658,13 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     for (name, constructor) in typedarray_constructors {
         env_borrow.insert(PropertyKey::String(name), Rc::new(RefCell::new(Value::Object(constructor))));
     }
+
+    // Atomics object
+    let atomics_obj = crate::js_typedarray::make_atomics_object()?;
+    env_borrow.insert(
+        PropertyKey::String("Atomics".to_string()),
+        Rc::new(RefCell::new(Value::Object(atomics_obj))),
+    );
 
     Ok(())
 }

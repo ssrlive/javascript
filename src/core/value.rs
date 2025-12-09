@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use num_bigint::BigInt;
+use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
@@ -49,8 +50,13 @@ pub struct JSProxy {
 
 #[derive(Clone, Debug)]
 pub struct JSArrayBuffer {
-    pub data: Vec<u8>,  // The underlying byte buffer
-    pub detached: bool, // Whether the buffer has been detached
+    // Use an Arc<Mutex<Vec<u8>>> so the underlying bytes can be shared
+    // safely between threads (for SharedArrayBuffer semantics) while
+    // remaining compatible with the existing Rc<RefCell<JSArrayBuffer>>
+    // wrapper used across the project.
+    pub data: Arc<Mutex<Vec<u8>>>, // The underlying byte buffer
+    pub detached: bool,            // Whether the buffer has been detached
+    pub shared: bool,              // Whether this buffer was created as a SharedArrayBuffer
 }
 
 #[derive(Clone, Debug)]
@@ -155,36 +161,37 @@ impl JSTypedArray {
         }
 
         let byte_index = self.byte_offset + index * self.element_size();
-        if byte_index + self.element_size() > buffer.data.len() {
+        let data_lock = buffer.data.lock().unwrap();
+        if byte_index + self.element_size() > data_lock.len() {
             return Err(raise_type_error!("Index out of bounds"));
         }
 
         match self.kind {
-            TypedArrayKind::Int8 => Ok(buffer.data[byte_index] as i8 as i64),
-            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => Ok(buffer.data[byte_index] as i64),
+            TypedArrayKind::Int8 => Ok(data_lock[byte_index] as i8 as i64),
+            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => Ok(data_lock[byte_index] as i64),
             TypedArrayKind::Int16 => {
-                let bytes = &buffer.data[byte_index..byte_index + 2];
+                let bytes = &data_lock[byte_index..byte_index + 2];
                 Ok(i16::from_le_bytes([bytes[0], bytes[1]]) as i64)
             }
             TypedArrayKind::Uint16 => {
-                let bytes = &buffer.data[byte_index..byte_index + 2];
+                let bytes = &data_lock[byte_index..byte_index + 2];
                 Ok(u16::from_le_bytes([bytes[0], bytes[1]]) as i64)
             }
             TypedArrayKind::Int32 => {
-                let bytes = &buffer.data[byte_index..byte_index + 4];
+                let bytes = &data_lock[byte_index..byte_index + 4];
                 Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64)
             }
             TypedArrayKind::Uint32 => {
-                let bytes = &buffer.data[byte_index..byte_index + 4];
+                let bytes = &data_lock[byte_index..byte_index + 4];
                 Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i64)
             }
             TypedArrayKind::Float32 => {
-                let bytes = &buffer.data[byte_index..byte_index + 4];
+                let bytes = &data_lock[byte_index..byte_index + 4];
                 let float_val = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
                 Ok(float_val as i64) // Simplified conversion
             }
             TypedArrayKind::Float64 => {
-                let bytes = &buffer.data[byte_index..byte_index + 8];
+                let bytes = &data_lock[byte_index..byte_index + 8];
                 let float_val = f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
                 Ok(float_val as i64) // Simplified conversion
             }
@@ -200,47 +207,47 @@ impl JSTypedArray {
         if index >= self.length {
             return Err(raise_type_error!("Index out of bounds"));
         }
-
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         if buffer.detached {
             return Err(raise_type_error!("ArrayBuffer is detached"));
         }
 
         let byte_index = self.byte_offset + index * self.element_size();
-        if byte_index + self.element_size() > buffer.data.len() {
+        let mut data_lock = buffer.data.lock().unwrap();
+        if byte_index + self.element_size() > data_lock.len() {
             return Err(raise_type_error!("Index out of bounds"));
         }
 
         match self.kind {
             TypedArrayKind::Int8 => {
-                buffer.data[byte_index] = value as i8 as u8;
+                data_lock[byte_index] = value as i8 as u8;
             }
             TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => {
-                buffer.data[byte_index] = value as u8;
+                data_lock[byte_index] = value as u8;
             }
             TypedArrayKind::Int16 => {
                 let bytes = (value as i16).to_le_bytes();
-                buffer.data[byte_index..byte_index + 2].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 2].copy_from_slice(&bytes);
             }
             TypedArrayKind::Uint16 => {
                 let bytes = (value as u16).to_le_bytes();
-                buffer.data[byte_index..byte_index + 2].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 2].copy_from_slice(&bytes);
             }
             TypedArrayKind::Int32 => {
                 let bytes = (value as i32).to_le_bytes();
-                buffer.data[byte_index..byte_index + 4].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Uint32 => {
                 let bytes = (value as u32).to_le_bytes();
-                buffer.data[byte_index..byte_index + 4].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Float32 => {
                 let bytes = (value as f32).to_le_bytes();
-                buffer.data[byte_index..byte_index + 4].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 4].copy_from_slice(&bytes);
             }
             TypedArrayKind::Float64 => {
                 let bytes = (value as f64).to_le_bytes();
-                buffer.data[byte_index..byte_index + 8].copy_from_slice(&bytes);
+                data_lock[byte_index..byte_index + 8].copy_from_slice(&bytes);
             }
             TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => {
                 // For BigInt types, do nothing for now (simplified)
@@ -256,21 +263,24 @@ impl JSDataView {
     pub fn get_int8(&self, offset: usize) -> Result<i8, JSError> {
         self.check_bounds(offset, 1)?;
         let buffer = self.buffer.borrow();
-        Ok(buffer.data[self.byte_offset + offset] as i8)
+        let data_lock = buffer.data.lock().unwrap();
+        Ok(data_lock[self.byte_offset + offset] as i8)
     }
 
     /// Get an 8-bit unsigned integer at the specified byte offset
     pub fn get_uint8(&self, offset: usize) -> Result<u8, JSError> {
         self.check_bounds(offset, 1)?;
         let buffer = self.buffer.borrow();
-        Ok(buffer.data[self.byte_offset + offset])
+        let data_lock = buffer.data.lock().unwrap();
+        Ok(data_lock[self.byte_offset + offset])
     }
 
     /// Get a 16-bit signed integer at the specified byte offset
     pub fn get_int16(&self, offset: usize, little_endian: bool) -> Result<i16, JSError> {
         self.check_bounds(offset, 2)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 2];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 2];
         if little_endian {
             Ok(i16::from_le_bytes([bytes[0], bytes[1]]))
         } else {
@@ -282,7 +292,8 @@ impl JSDataView {
     pub fn get_uint16(&self, offset: usize, little_endian: bool) -> Result<u16, JSError> {
         self.check_bounds(offset, 2)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 2];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 2];
         if little_endian {
             Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
         } else {
@@ -294,7 +305,8 @@ impl JSDataView {
     pub fn get_int32(&self, offset: usize, little_endian: bool) -> Result<i32, JSError> {
         self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 4];
         if little_endian {
             Ok(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         } else {
@@ -306,7 +318,8 @@ impl JSDataView {
     pub fn get_uint32(&self, offset: usize, little_endian: bool) -> Result<u32, JSError> {
         self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 4];
         if little_endian {
             Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         } else {
@@ -318,7 +331,8 @@ impl JSDataView {
     pub fn get_float32(&self, offset: usize, little_endian: bool) -> Result<f32, JSError> {
         self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 4];
         if little_endian {
             Ok(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
         } else {
@@ -330,7 +344,8 @@ impl JSDataView {
     pub fn get_float64(&self, offset: usize, little_endian: bool) -> Result<f64, JSError> {
         self.check_bounds(offset, 8)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 8];
         if little_endian {
             Ok(f64::from_le_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -346,7 +361,8 @@ impl JSDataView {
     pub fn get_big_int64(&self, offset: usize, little_endian: bool) -> Result<i64, JSError> {
         self.check_bounds(offset, 8)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 8];
         if little_endian {
             Ok(i64::from_le_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -362,7 +378,8 @@ impl JSDataView {
     pub fn get_big_uint64(&self, offset: usize, little_endian: bool) -> Result<u64, JSError> {
         self.check_bounds(offset, 8)?;
         let buffer = self.buffer.borrow();
-        let bytes = &buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8];
+        let data_lock = buffer.data.lock().unwrap();
+        let bytes = &data_lock[self.byte_offset + offset..self.byte_offset + offset + 8];
         if little_endian {
             Ok(u64::from_le_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
@@ -377,88 +394,98 @@ impl JSDataView {
     /// Set an 8-bit signed integer at the specified byte offset
     pub fn set_int8(&mut self, offset: usize, value: i8) -> Result<(), JSError> {
         self.check_bounds(offset, 1)?;
-        let mut buffer = self.buffer.borrow_mut();
-        buffer.data[self.byte_offset + offset] = value as u8;
+        let buffer = self.buffer.borrow_mut();
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset] = value as u8;
         Ok(())
     }
 
     /// Set an 8-bit unsigned integer at the specified byte offset
     pub fn set_uint8(&mut self, offset: usize, value: u8) -> Result<(), JSError> {
         self.check_bounds(offset, 1)?;
-        let mut buffer = self.buffer.borrow_mut();
-        buffer.data[self.byte_offset + offset] = value;
+        let buffer = self.buffer.borrow_mut();
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset] = value;
         Ok(())
     }
 
     /// Set a 16-bit signed integer at the specified byte offset
     pub fn set_int16(&mut self, offset: usize, value: i16, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 2)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 2].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 2].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 16-bit unsigned integer at the specified byte offset
     pub fn set_uint16(&mut self, offset: usize, value: u16, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 2)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 2].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 2].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 32-bit signed integer at the specified byte offset
     pub fn set_int32(&mut self, offset: usize, value: i32, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 4)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 32-bit unsigned integer at the specified byte offset
     pub fn set_uint32(&mut self, offset: usize, value: u32, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 4)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 32-bit float at the specified byte offset
     pub fn set_float32(&mut self, offset: usize, value: f32, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 4)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 4].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 64-bit float at the specified byte offset
     pub fn set_float64(&mut self, offset: usize, value: f64, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 8)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 64-bit signed BigInt at the specified byte offset
     pub fn set_big_int64(&mut self, offset: usize, value: i64, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 8)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
         Ok(())
     }
 
     /// Set a 64-bit unsigned BigInt at the specified byte offset
     pub fn set_big_uint64(&mut self, offset: usize, value: u64, little_endian: bool) -> Result<(), JSError> {
         self.check_bounds(offset, 8)?;
-        let mut buffer = self.buffer.borrow_mut();
+        let buffer = self.buffer.borrow_mut();
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
-        buffer.data[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
+        let mut data_lock = buffer.data.lock().unwrap();
+        data_lock[self.byte_offset + offset..self.byte_offset + offset + 8].copy_from_slice(&bytes);
         Ok(())
     }
 

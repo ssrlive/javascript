@@ -49,6 +49,9 @@ jobs:
         cargo run --example js -- js-scripts/test_dataview_js.js
         cargo run --example js -- js-scripts/test_typedarray_constructors.js
         cargo run --example js -- js-scripts/function_object.js
+        cargo run --example js -- js-scripts/atomics_test.js
+        cargo run --example js -- js-scripts/sharedarraybuffer_test.js
+        cargo run --example js -- js-scripts/atomics_wait_notify_test.js
 
     - name: Abort on error
       if: ${{ failure() }}

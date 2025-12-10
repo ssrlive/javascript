@@ -129,6 +129,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             }
                         }
                     }
+                    // Log the pointer about to be bound into the environment for visibility.
+                    if let Value::Object(obj_map) = &val {
+                        log::debug!("DBG Let - binding '{name}' into env -> func_obj ptr={:p}", Rc::as_ptr(obj_map));
+                    } else {
+                        log::debug!("DBG Let - binding '{name}' into env -> value={val:?}");
+                    }
                     env_set(env, name.as_str(), val.clone())?;
                     last_value = val;
                     Ok(None)
@@ -779,7 +785,34 @@ fn statement_try_catch(
                     // RuntimeError, EvaluationError) are converted into
                     // Error-like objects for the catch. Preserve the
                     // original thrown value here.
-                    JSErrorKind::Throw { value } => value.clone(),
+                    JSErrorKind::Throw { value } => {
+                        // Preserve thrown JS object identity but ensure that
+                        // if the object lacks an own `constructor` property
+                        // we expose the prototype's constructor as an own
+                        // property so script code that checks
+                        // `err.constructor === SomeCtor` observes the
+                        // canonical constructor object. This avoids any
+                        // hard-coded Test262Error names in Rust.
+                        let cloned = value.clone();
+                        if let Value::Object(obj_ptr) = &cloned {
+                            // If there is no own `constructor` property,
+                            // try to read it from the object's prototype
+                            // and, if present, copy it as an own property.
+                            let has_ctor = get_own_property(obj_ptr, &"constructor".into()).is_some();
+                            if !has_ctor {
+                                // Look up internal prototype pointer
+                                if let Some(proto_ptr) = &obj_ptr.borrow().prototype {
+                                    if let Some(proto_ctor_rc) = get_own_property(proto_ptr, &"constructor".into()) {
+                                        // Copy the constructor value (usually an object)
+                                        let ctor_val = proto_ctor_rc.borrow().clone();
+                                        // Ignore errors setting the property; best-effort
+                                        let _ = obj_set_value(obj_ptr, &"constructor".into(), ctor_val);
+                                    }
+                                }
+                            }
+                        }
+                        cloned
+                    }
                     JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", &err)?,
                     JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", &err)?,
                     JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", &err)?,
@@ -2132,11 +2165,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
             Ok(v) => Ok(v),
             Err(e) => {
-                log::error!(
-                    "evaluate_expr: evaluate_call error for func_expr={:?} args={:?} error={e}",
-                    func_expr,
-                    args
-                );
+                log::warn!("evaluate_expr: evaluate_call error for func_expr={func_expr:?} args={args:?} error={e}");
                 Err(e)
             }
         },
@@ -2153,6 +2182,15 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // Store the closure under an internal key
             let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
             obj_set_value(&func_obj, &"__closure__".into(), closure_val)?;
+
+            // Diagnostic: record the function object pointer so we can trace
+            // whether the same function wrapper instance is used across bindings
+            // and `new` invocations.
+            log::trace!(
+                "DBG Expr::Function - created func_obj ptr={:p} prototype_ptr={:p}",
+                Rc::as_ptr(&func_obj),
+                Rc::as_ptr(&prototype_obj)
+            );
 
             // Wire up `prototype` and `prototype.constructor`
             obj_set_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
@@ -2270,6 +2308,19 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 }
 
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
+    // First, attempt to resolve the name in the current scope chain.
+    // This ensures script-defined bindings shadow engine-provided helpers
+    // such as `assert` or `Test262Error`.
+    let mut current_opt = Some(env.clone());
+    while let Some(current_env) = current_opt {
+        if let Some(val_rc) = obj_get_value(&current_env, &name.into())? {
+            let resolved = val_rc.borrow().clone();
+            log::trace!("evaluate_var - {} (found in env) -> {:?}", name, resolved);
+            return Ok(resolved);
+        }
+        current_opt = current_env.borrow().prototype.clone();
+    }
+
     if name == "console" {
         let v = Value::Object(make_console_object()?);
         log::trace!("evaluate_var - {} -> {:?}", name, v);
@@ -2448,7 +2499,22 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
             }
             current_opt = current_env.borrow().prototype.clone();
         }
-        log::trace!("evaluate_var - {} not found -> Undefined", name);
+        log::trace!("evaluate_var - {name} not found in scope, try global 'this' object");
+        // As a fallback, some scripts (e.g. test harnesses) install
+        // constructor functions as properties on the global `this` object
+        // rather than as lexical bindings. If the variable wasn't found
+        // in the scope chain, attempt to resolve it as a property of
+        // the global `this` object.
+        if let Ok(this_val) = evaluate_this(env) {
+            if let Value::Object(this_obj) = this_val {
+                if let Some(val_rc) = obj_get_value(&this_obj, &name.into())? {
+                    let resolved = val_rc.borrow().clone();
+                    log::trace!("evaluate_var - {name} found on global 'this' -> {resolved:?}");
+                    return Ok(resolved);
+                }
+            }
+        }
+        log::trace!("evaluate_var - {name} not found -> Undefined");
         Ok(Value::Undefined)
     }
 }
@@ -3207,7 +3273,33 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
 }
 
 fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
-    let val = evaluate_expr(env, expr)?;
+    // `typeof` operator must NOT trigger creation or injection of built-ins
+    // when the identifier is undeclared. Evaluate `Expr::Var` specially by
+    // performing a lexical lookup only (walk the environment chain) and
+    // treat missing bindings as `undefined` per JS semantics.
+    let val = match expr {
+        Expr::Var(name) => {
+            // Walk env chain searching for own properties; do not consult
+            // evaluator fallbacks or built-in helpers here — `typeof` must
+            // act like an existence check for declared bindings.
+            let mut current_opt: Option<JSObjectDataPtr> = Some(env.clone());
+            let mut found_val: Option<Rc<RefCell<Value>>> = None;
+            while let Some(current_env) = current_opt {
+                if let Some(v) = get_own_property(&current_env, &name.as_str().into()) {
+                    found_val = Some(v);
+                    break;
+                }
+                current_opt = current_env.borrow().prototype.clone();
+            }
+            if let Some(rc) = found_val {
+                rc.borrow().clone()
+            } else {
+                // undeclared identifier -> undefined (no builtins injected)
+                Value::Undefined
+            }
+        }
+        _ => evaluate_expr(env, expr)?,
+    };
     let type_str = match &val {
         Value::Undefined => "undefined",
         Value::Boolean(_) => "boolean",

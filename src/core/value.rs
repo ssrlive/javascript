@@ -728,9 +728,9 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::String(sa), Value::String(sb)) => sa == sb,
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
         (Value::Undefined, Value::Undefined) => true,
-        (Value::Object(_), Value::Object(_)) => false, // Objects are not equal unless same reference
+        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b), // Objects equal only if same reference
         (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
-        _ => false,                                    // Different types are not equal
+        _ => false,                                               // Different types are not equal
     }
 }
 
@@ -920,8 +920,16 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                         getter_env.borrow_mut().prototype = Some(env);
                         env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                         let result = evaluate_statements(&getter_env, &body)?;
+                        if let Value::Object(ref obj_ptr) = result {
+                            let ptr = Rc::as_ptr(obj_ptr);
+                            log::trace!("obj_get_value - getter returned object ptr={:p} for key {}", ptr, key);
+                        }
                         return Ok(Some(Rc::new(RefCell::new(result))));
                     } else if let Some(val_rc) = value {
+                        // If the stored value is an object, log its pointer
+                        if let Value::Object(ref obj_ptr) = *val_rc.borrow() {
+                            log::trace!("obj_get_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
+                        }
                         return Ok(Some(val_rc));
                     } else {
                         return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
@@ -933,10 +941,17 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                     getter_env.borrow_mut().prototype = Some(env);
                     env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                     let result = evaluate_statements(&getter_env, &body)?;
+                    if let Value::Object(ref obj_ptr) = result {
+                        let ptr = Rc::as_ptr(obj_ptr);
+                        log::trace!("obj_get_value - getter returned object ptr={:p} for key {}", ptr, key);
+                    }
                     return Ok(Some(Rc::new(RefCell::new(result))));
                 }
                 _ => {
                     log::trace!("obj_get_value - raw value found for key {}", key);
+                    if let Value::Object(ref obj_ptr) = *val.borrow() {
+                        log::trace!("obj_get_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
+                    }
                     return Ok(Some(val.clone()));
                 }
             }
@@ -1280,6 +1295,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                     let value = Some(Rc::new(RefCell::new(val)));
                     let new_prop = Value::Property { value, getter, setter };
                     if let PropertyKey::String(s) = key {
+                        // generic debug: avoid embedding any specific script identifiers
                         if s == "message" {
                             // Try to include any debug id set on the instance for correlation
                             let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())
@@ -1288,6 +1304,17 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                             log::debug!("DBG obj_set_value - inserting 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={new_prop:?}");
                         }
                     }
+                    // Log the property insertion (object target pointer + value info)
+                    let val_ptr_info = match &new_prop {
+                        Value::Object(o) => format!("object_ptr={:p}", Rc::as_ptr(o)),
+                        other => format!("value={:?}", other),
+                    };
+                    log::debug!(
+                        "DBG obj_set_value - setting existing prop '{}' on obj ptr={:p} -> {}",
+                        key,
+                        Rc::as_ptr(js_obj),
+                        val_ptr_info
+                    );
                     js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(new_prop)));
                 }
                 return Ok(());
@@ -1313,6 +1340,17 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
             log::debug!("DBG obj_set_value - direct insert 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={val:?}");
         }
     }
+    // Log general property insertion (target pointer + value pointer/type) for diagnostics
+    let val_ptr_info = match &val {
+        Value::Object(o) => format!("object_ptr={:p}", Rc::as_ptr(o)),
+        other => format!("value={:?}", other),
+    };
+    log::debug!(
+        "DBG obj_set_value - direct insert prop '{}' on obj ptr={:p} -> {}",
+        key,
+        Rc::as_ptr(js_obj),
+        val_ptr_info
+    );
     js_obj.borrow_mut().insert(key.clone(), Rc::new(RefCell::new(val)));
     Ok(())
 }

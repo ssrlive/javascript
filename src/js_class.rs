@@ -59,18 +59,42 @@ pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjec
 }
 
 pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    // Check if 'this' is bound in the current environment
-    if let Some(this_val) = obj_get_value(env, &"this".into())? {
-        Ok(this_val.borrow().clone())
-    } else {
-        // Default to global object if no 'this' binding exists
-        Ok(Value::Object(env.clone()))
+    // Walk the environment/prototype (scope) chain looking for a bound
+    // `this` value. Some nested/temporarily created environments (e.g.
+    // catch-block envs) do not bind `this` themselves but inherit the
+    // effective global `this` from an outer environment. Return the
+    // first `this` value found; if none is present, return the topmost
+    // environment object as the default global object.
+    let mut env_opt: Option<JSObjectDataPtr> = Some(env.clone());
+    let mut last_seen: JSObjectDataPtr = env.clone();
+    while let Some(env_ptr) = env_opt {
+        last_seen = env_ptr.clone();
+        if let Some(this_val_rc) = obj_get_value(&env_ptr, &"this".into())? {
+            return Ok(this_val_rc.borrow().clone());
+        }
+        env_opt = env_ptr.borrow().prototype.clone();
     }
+    Ok(Value::Object(last_seen))
 }
 
 pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     // Evaluate the constructor
     let constructor_val = evaluate_expr(env, constructor)?;
+    // Log pointer/type of the evaluated constructor value for diagnostics
+    match &constructor_val {
+        Value::Object(o) => {
+            log::debug!("DBG evaluate_new - constructor evaluated -> Object ptr={:p}", Rc::as_ptr(o));
+        }
+        Value::Function(name) => {
+            log::debug!("DBG evaluate_new - constructor evaluated -> Builtin Function {}", name);
+        }
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => {
+            log::debug!("DBG evaluate_new - constructor evaluated -> Closure")
+        }
+        other => {
+            log::debug!("DBG evaluate_new - constructor evaluated -> {:?}", other);
+        }
+    }
     log::trace!("evaluate_new - invoking constructor (evaluated)");
 
     match constructor_val {
@@ -85,6 +109,16 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 if let Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) = &*cl_val_rc.borrow() {
                     // Create the instance object
                     let instance = Rc::new(RefCell::new(JSObjectData::new()));
+
+                    // Attach a debug identifier to help correlate runtime instances
+                    // with logs (printed as a pointer string).
+                    let dbg_ptr_str = format!("{:p}", Rc::as_ptr(&instance));
+                    obj_set_value(&instance, &"__dbg_ptr__".into(), Value::String(utf8_to_utf16(&dbg_ptr_str)))?;
+                    log::debug!(
+                        "DBG evaluate_new - created instance ptr={:p} __dbg_ptr__={}",
+                        Rc::as_ptr(&instance),
+                        dbg_ptr_str
+                    );
 
                     // Set prototype from the constructor object's `.prototype` if available
                     if let Some(prototype_val) = obj_get_value(&class_obj, &"prototype".into())? {

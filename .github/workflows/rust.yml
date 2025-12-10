@@ -41,17 +41,18 @@ jobs:
     - name: run js scripts tests
       if: ${{ !cancelled() }}
       run: |
+        cargo run --example js -- js-scripts/atomics_test.js
+        cargo run --example js -- js-scripts/atomics_wait_notify_test.js
         cargo run --example js -- js-scripts/check_dataview_global.js
         cargo run --example js -- js-scripts/comprehensive_dataview_test.js
         cargo run --example js -- js-scripts/dataview_properties_test.js
+        cargo run --example js -- js-scripts/function_object.js
+        cargo run --example js -- js-scripts/globel_assert.js
         cargo run --example js -- js-scripts/proper_dataview_test.js
+        cargo run --example js -- js-scripts/sharedarraybuffer_test.js
         cargo run --example js -- js-scripts/simple_dataview_test.js
         cargo run --example js -- js-scripts/test_dataview_js.js
         cargo run --example js -- js-scripts/test_typedarray_constructors.js
-        cargo run --example js -- js-scripts/function_object.js
-        cargo run --example js -- js-scripts/atomics_test.js
-        cargo run --example js -- js-scripts/sharedarraybuffer_test.js
-        cargo run --example js -- js-scripts/atomics_wait_notify_test.js
 
     - name: Abort on error
       if: ${{ failure() }}

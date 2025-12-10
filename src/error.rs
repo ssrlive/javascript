@@ -56,6 +56,34 @@ impl JSError {
     pub fn kind(&self) -> &JSErrorKind {
         &self.inner.kind
     }
+
+    /// Get a user-friendly error message without internal Rust debugging details
+    pub fn user_message(&self) -> String {
+        match &self.inner.kind {
+            JSErrorKind::TokenizationError => "SyntaxError: Failed to parse input".to_string(),
+            JSErrorKind::ParseError { message } => format!("SyntaxError: {}", message),
+            JSErrorKind::EvaluationError { message } => {
+                if message == "error" {
+                    "Error: An error occurred during evaluation".to_string()
+                } else {
+                    format!("Error: {}", message)
+                }
+            }
+            JSErrorKind::InfiniteLoopError { iterations } => {
+                format!("Error: Infinite loop detected (executed {} iterations)", iterations)
+            }
+            JSErrorKind::VariableNotFound { name } => {
+                format!("ReferenceError: '{}' is not defined", name)
+            }
+            JSErrorKind::TypeError { message } => format!("TypeError: {}", message),
+            JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
+            JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
+            JSErrorKind::Throw { value } => {
+                format!("Uncaught {}", crate::core::value_to_string(value))
+            }
+            JSErrorKind::IoError(e) => format!("IOError: {}", e),
+        }
+    }
 }
 
 // So that all errors automatically get the format "Error: ... at method file:line"

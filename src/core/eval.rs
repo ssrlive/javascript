@@ -475,7 +475,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                         }
                     }
                     _ => {
-                        log::error!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
+                        log::warn!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
                     }
                 }
                 // Capture a minimal JS-style call stack by walking `__frame`/`__caller`
@@ -3521,17 +3521,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::Div => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => {
-                if rn == 0.0 {
-                    Err(raise_eval_error!("error"))
-                } else {
-                    Ok(Value::Number(ln / rn))
-                }
+                // JavaScript behavior: division by zero returns Infinity or -Infinity
+                Ok(Value::Number(ln / rn))
             }
             (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
                 let a = la.refresh_parsed(false)?;
                 let b = rb.refresh_parsed(false)?;
                 if b == BigInt::from(0) {
-                    Err(raise_eval_error!("error"))
+                    Err(raise_eval_error!("Division by zero"))
                 } else {
                     let res = a / b;
                     Ok(Value::BigInt(BigIntHolder::from(res)))

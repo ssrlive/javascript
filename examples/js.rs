@@ -43,7 +43,10 @@ fn main() {
         match evaluate_script(script, cli.file.as_ref()) {
             Ok(result) => print_eval_result(&result),
             Err(err) => {
-                eprintln!("Evaluation failed: {err}");
+                eprintln!("{}", err.user_message());
+                if let Some(file_path) = cli.file.as_ref() {
+                    eprintln!("  in file: {}", file_path.display());
+                }
                 process::exit(1);
             }
         }
@@ -66,7 +69,7 @@ fn print_eval_result(result: &Value) {
         Value::Property { .. } => println!("[Property]"),
         Value::Promise(_) => println!("[object Promise]"),
         Value::Symbol(_) => println!("[object Symbol]"),
-        Value::BigInt(s) => println!("{}", s.raw),
+        Value::BigInt(h) => println!("{h}"),
         Value::Map(_) => println!("[object Map]"),
         Value::Set(_) => println!("[object Set]"),
         Value::WeakMap(_) => println!("[object WeakMap]"),
@@ -141,7 +144,18 @@ fn run_persistent_repl() {
 
                 match repl.eval(&buffer) {
                     Ok(val) => print_eval_result(&val),
-                    Err(e) => eprintln!("Error: {:?}", e),
+                    Err(e) => {
+                        eprintln!("{}", e.user_message());
+                        // Show the code that caused the error for better debugging context
+                        if buffer.lines().count() == 1 {
+                            eprintln!("  at: {}", buffer.trim());
+                        } else {
+                            eprintln!("  in:");
+                            for line in buffer.lines() {
+                                eprintln!("    {}", line);
+                            }
+                        }
+                    }
                 }
 
                 buffer.clear();

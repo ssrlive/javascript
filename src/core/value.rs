@@ -97,7 +97,11 @@ pub struct BigIntHolder {
 
 impl std::fmt::Display for BigIntHolder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.raw)
+        if self.raw.ends_with('n') {
+            write!(f, "{}", self.raw)
+        } else {
+            write!(f, "{}n", self.raw)
+        }
     }
 }
 

@@ -777,6 +777,61 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_index_of() {
+        let script = "'hello world'.indexOf('world')";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
+            _ => panic!("Expected indexOf('world') to return 6.0, got {:?}", result),
+        }
+
+        let script = "'hello world'.indexOf('m')";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected indexOf('m') to return -1.0, got {:?}", result),
+        }
+
+        let script = "'hello world'.indexOf('l', 3)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected indexOf('l', 3) to return 3.0, got {:?}", result),
+        }
+
+        let script = "'hello world'.indexOf('l', 4)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 9.0),
+            _ => panic!("Expected indexOf('l', 4) to return 9.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_last_index_of() {
+        let script = "'hello world'.lastIndexOf('l')";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 9.0),
+            _ => panic!("Expected lastIndexOf('l') to return 9.0, got {:?}", result),
+        }
+
+        let script = "'hello world'.lastIndexOf('m')";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected lastIndexOf('m') to return -1.0, got {:?}", result),
+        }
+
+        let script = "'hello world'.lastIndexOf('l', 8)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
+            _ => panic!("Expected lastIndexOf('l', 8) to return 3.0, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_array_find() {
         let script = "let arr = Array(); let arr2 = arr.push(1); let arr3 = arr2.push(2); let arr4 = arr3.push(3); arr4.find(function(x) { return x > 2; })";
         let result = evaluate_script(script, None::<&std::path::Path>);

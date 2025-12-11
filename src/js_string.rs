@@ -143,35 +143,74 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             }
         }
         "indexOf" => {
-            if args.len() == 1 {
+            if args.len() == 1 || args.len() == 2 {
                 let search_val = evaluate_expr(env, &args[0])?;
+                let from_index = if args.len() == 2 {
+                    let idx_val = evaluate_expr(env, &args[1])?;
+                    if let Value::Number(n) = idx_val { n as isize } else { 0 }
+                } else {
+                    0
+                };
                 if let Value::String(search) = search_val {
-                    if let Some(pos) = utf16_find(s, &search) {
-                        Ok(Value::Number(pos as f64))
-                    } else {
+                    let len = utf16_len(s) as isize;
+                    let start = if from_index < 0 { 0 } else { from_index as usize };
+                    if start >= len as usize {
                         Ok(Value::Number(-1.0))
+                    } else {
+                        let slice = &s[start..];
+                        if let Some(pos) = utf16_find(slice, &search) {
+                            Ok(Value::Number((start + pos) as f64))
+                        } else {
+                            Ok(Value::Number(-1.0))
+                        }
                     }
                 } else {
-                    Err(raise_eval_error!("indexOf: argument must be a string"))
+                    Err(raise_eval_error!("indexOf: first argument must be a string"))
                 }
             } else {
-                Err(raise_eval_error!(format!("indexOf method expects 1 argument, got {}", args.len())))
+                Err(raise_eval_error!(format!(
+                    "indexOf method expects 1 or 2 arguments, got {}",
+                    args.len()
+                )))
             }
         }
         "lastIndexOf" => {
-            if args.len() == 1 {
+            if args.len() == 1 || args.len() == 2 {
                 let search_val = evaluate_expr(env, &args[0])?;
-                if let Value::String(search) = search_val {
-                    if let Some(pos) = utf16_rfind(s, &search) {
-                        Ok(Value::Number(pos as f64))
+                let from_index = if args.len() == 2 {
+                    let idx_val = evaluate_expr(env, &args[1])?;
+                    if let Value::Number(n) = idx_val {
+                        n as isize
                     } else {
-                        Ok(Value::Number(-1.0))
+                        utf16_len(s) as isize
                     }
                 } else {
-                    Err(raise_eval_error!("lastIndexOf: argument must be a string"))
+                    utf16_len(s) as isize
+                };
+                if let Value::String(search) = search_val {
+                    let len = utf16_len(s) as isize;
+                    let start = if from_index < 0 {
+                        0
+                    } else if from_index > len {
+                        len
+                    } else {
+                        from_index
+                    };
+                    if start <= 0 {
+                        Ok(Value::Number(-1.0))
+                    } else {
+                        let slice = &s[0..start as usize];
+                        if let Some(pos) = utf16_rfind(slice, &search) {
+                            Ok(Value::Number(pos as f64))
+                        } else {
+                            Ok(Value::Number(-1.0))
+                        }
+                    }
+                } else {
+                    Err(raise_eval_error!("lastIndexOf: first argument must be a string"))
                 }
             } else {
-                let msg = format!("lastIndexOf method expects 1 argument, got {}", args.len());
+                let msg = format!("lastIndexOf method expects 1 or 2 arguments, got {}", args.len());
                 Err(raise_eval_error!(msg))
             }
         }

@@ -699,5 +699,17 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
         Rc::new(RefCell::new(Value::Object(atomics_obj))),
     );
 
+    // setTimeout function
+    env_borrow.insert(
+        PropertyKey::String("setTimeout".to_string()),
+        Rc::new(RefCell::new(Value::Function("setTimeout".to_string()))),
+    );
+
+    // clearTimeout function
+    env_borrow.insert(
+        PropertyKey::String("clearTimeout".to_string()),
+        Rc::new(RefCell::new(Value::Function("clearTimeout".to_string()))),
+    );
+
     Ok(())
 }

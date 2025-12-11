@@ -27,10 +27,8 @@ use crate::core::{
     Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value,
 };
 use crate::error::JSError;
-use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Asynchronous task types for the promise event loop.
@@ -50,16 +48,21 @@ enum Task {
         promise: Rc<RefCell<JSPromise>>,
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
     },
+    /// Task to execute a setTimeout callback
+    Timeout { id: usize, callback: Value, args: Vec<Value> },
 }
 
 thread_local! {
     /// Global task queue for asynchronous promise operations.
     /// Uses thread-local storage to maintain separate queues per thread.
     /// This enables proper asynchronous execution of promise callbacks.
-    static GLOBAL_TASK_QUEUE: RefCell<VecDeque<Task>> = const { RefCell::new(VecDeque::new()) };
+    static GLOBAL_TASK_QUEUE: RefCell<Vec<Task>> = const { RefCell::new(Vec::new()) };
 
     /// Global storage for AllSettledState instances during Promise.allSettled execution
     static ALLSETTLED_STATES: RefCell<Vec<Rc<RefCell<AllSettledState>>>> = const { RefCell::new(Vec::new()) };
+
+    /// Counter for generating unique timeout IDs
+    static NEXT_TIMEOUT_ID: RefCell<usize> = const { RefCell::new(1) };
 }
 
 /// Add a task to the global task queue for later execution.
@@ -69,7 +72,7 @@ thread_local! {
 fn queue_task(task: Task) {
     log::debug!("queue_task called with {:?}", task);
     GLOBAL_TASK_QUEUE.with(|queue| {
-        queue.borrow_mut().push_back(task);
+        queue.borrow_mut().push(task);
     });
 }
 
@@ -86,7 +89,11 @@ pub fn run_event_loop() -> Result<(), JSError> {
         let task = GLOBAL_TASK_QUEUE.with(|queue| {
             let mut queue_borrow = queue.borrow_mut();
             log::trace!("Task queue size before pop: {}", queue_borrow.len());
-            queue_borrow.pop_front()
+            if queue_borrow.is_empty() {
+                None
+            } else {
+                Some(queue_borrow.remove(0))
+            }
         });
         match task {
             Some(Task::Resolution { promise, callbacks }) => {
@@ -138,6 +145,20 @@ pub fn run_event_loop() -> Result<(), JSError> {
                         // If callback is not a function, resolve with undefined
                         resolve_promise(&new_promise, Value::Undefined);
                     }
+                }
+            }
+            Some(Task::Timeout { id: _, callback, args }) => {
+                log::trace!("Processing Timeout task");
+                // Call the callback with the provided args
+                if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                    for (i, arg) in args.iter().enumerate() {
+                        if i < params.len() {
+                            env_set(&func_env, &params[i], arg.clone())?;
+                        }
+                    }
+                    let _ = evaluate_statements(&func_env, &body)?;
                 }
             }
             None => {
@@ -1897,4 +1918,84 @@ fn create_allsettled_reject_callback(state_index: usize, index: usize) -> Value 
         ))],
         Rc::new(RefCell::new(crate::core::JSObjectData::new())), // Empty environment
     )
+}
+
+/// Handle setTimeout function calls.
+///
+/// Schedules a callback to be executed asynchronously after a delay.
+/// In this implementation, the delay is ignored and the callback is queued
+/// for execution in the next event loop iteration.
+///
+/// # Arguments
+/// * `args` - Function arguments: callback function and optional delay/args
+/// * `env` - Current execution environment
+///
+/// # Returns
+/// * `Result<Value, JSError>` - A numeric timeout ID
+///
+/// # Example
+/// ```javascript
+/// let id = setTimeout(() => console.log("Hello"), 1000);
+/// ```
+pub fn handle_set_timeout(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        return Err(raise_eval_error!("setTimeout requires at least one argument"));
+    }
+
+    let callback = evaluate_expr(env, &args[0])?;
+    let mut timeout_args = Vec::new();
+
+    // Additional arguments to pass to the callback
+    for arg in &args[2..] {
+        timeout_args.push(evaluate_expr(env, arg)?);
+    }
+
+    // Generate a unique timeout ID
+    let id = NEXT_TIMEOUT_ID.with(|counter| {
+        let mut id = counter.borrow_mut();
+        let current_id = *id;
+        *id += 1;
+        current_id
+    });
+
+    // Queue the timeout task
+    queue_task(Task::Timeout {
+        id,
+        callback,
+        args: timeout_args,
+    });
+
+    // Return the timeout ID
+    Ok(Value::Number(id as f64))
+}
+
+/// Handle clearTimeout function calls.
+///
+/// Cancels a scheduled timeout. Removes the timeout task from the queue
+/// if it hasn't been executed yet.
+///
+/// # Arguments
+/// * `args` - Function arguments: timeout ID to cancel
+/// * `_env` - Current execution environment (unused)
+///
+/// # Returns
+/// * `Result<Value, JSError>` - Undefined
+pub fn handle_clear_timeout(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
+
+    let id_val = evaluate_expr(env, &args[0])?;
+    let id = match id_val {
+        Value::Number(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+
+    // Remove the timeout task with the matching ID
+    GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        queue_borrow.retain(|task| !matches!(task, Task::Timeout { id: task_id, .. } if *task_id == id));
+    });
+
+    Ok(Value::Undefined)
 }

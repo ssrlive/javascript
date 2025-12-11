@@ -705,6 +705,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
             Ok(Value::Undefined)
         }
+        "setTimeout" => crate::js_promise::handle_set_timeout(args, env),
+        "clearTimeout" => crate::js_promise::handle_clear_timeout(args, env),
 
         _ => Err(raise_eval_error!(format!("Global function {func_name} is not implemented"))),
     }

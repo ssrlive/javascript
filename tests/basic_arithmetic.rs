@@ -81,4 +81,17 @@ mod basic_arithmetic_tests {
             _ => panic!("Expected number 0.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_addition_associativity() {
+        let script = "54 + 76 + 'yyuiyu'";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "130yyuiyu");
+            }
+            _ => panic!("Expected string '130yyuiyu', got {:?}", result),
+        }
+    }
 }

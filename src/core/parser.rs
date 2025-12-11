@@ -442,48 +442,48 @@ fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_multiplicative(tokens)?;
-    if tokens.is_empty() {
-        return Ok(left);
-    }
-    match &tokens[0] {
-        Token::Plus => {
-            tokens.remove(0);
-            let right = parse_additive(tokens)?;
-            Ok(Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(right)))
+    let mut left = parse_multiplicative(tokens)?;
+    while !tokens.is_empty() {
+        match &tokens[0] {
+            Token::Plus => {
+                tokens.remove(0);
+                let right = parse_multiplicative(tokens)?;
+                left = Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(right));
+            }
+            Token::Minus => {
+                tokens.remove(0);
+                let right = parse_multiplicative(tokens)?;
+                left = Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(right));
+            }
+            _ => break,
         }
-        Token::Minus => {
-            tokens.remove(0);
-            let right = parse_additive(tokens)?;
-            Ok(Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(right)))
-        }
-        _ => Ok(left),
     }
+    Ok(left)
 }
 
 fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_exponentiation(tokens)?;
-    if tokens.is_empty() {
-        return Ok(left);
+    let mut left = parse_exponentiation(tokens)?;
+    while !tokens.is_empty() {
+        match &tokens[0] {
+            Token::Multiply => {
+                tokens.remove(0);
+                let right = parse_exponentiation(tokens)?;
+                left = Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(right));
+            }
+            Token::Divide => {
+                tokens.remove(0);
+                let right = parse_exponentiation(tokens)?;
+                left = Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(right));
+            }
+            Token::Mod => {
+                tokens.remove(0);
+                let right = parse_exponentiation(tokens)?;
+                left = Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(right));
+            }
+            _ => break,
+        }
     }
-    match &tokens[0] {
-        Token::Multiply => {
-            tokens.remove(0);
-            let right = parse_multiplicative(tokens)?;
-            Ok(Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(right)))
-        }
-        Token::Divide => {
-            tokens.remove(0);
-            let right = parse_multiplicative(tokens)?;
-            Ok(Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(right)))
-        }
-        Token::Mod => {
-            tokens.remove(0);
-            let right = parse_multiplicative(tokens)?;
-            Ok(Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(right)))
-        }
-        _ => Ok(left),
-    }
+    Ok(left)
 }
 
 fn parse_exponentiation(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {

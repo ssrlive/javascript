@@ -1339,6 +1339,19 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
         }
     }
     // No setter, just set the value normally
+    // Update array length if setting an indexed property
+    if let PropertyKey::String(s) = key {
+        if let Ok(index) = s.parse::<usize>() {
+            if let Some(length_rc) = get_own_property(js_obj, &"length".into()) {
+                if let Value::Number(current_len) = &*length_rc.borrow() {
+                    if index >= *current_len as usize {
+                        let new_len = (index + 1) as f64;
+                        obj_set_value(js_obj, &"length".into(), Value::Number(new_len))?;
+                    }
+                }
+            }
+        }
+    }
     if let PropertyKey::String(s) = key {
         if s == "message" {
             let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())

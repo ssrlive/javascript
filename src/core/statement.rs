@@ -43,6 +43,7 @@ pub enum Statement {
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
     ForOf(String, Expr, Vec<Statement>),              // variable, iterable, body
+    ForIn(String, Expr, Vec<Statement>),              // variable, object, body
     ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
     ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
     While(Expr, Vec<Statement>),                      // condition, body
@@ -81,6 +82,9 @@ impl std::fmt::Debug for Statement {
             }
             Statement::ForOf(var, iterable, body) => {
                 write!(f, "ForOf({}, {:?}, {:?})", var, iterable, body)
+            }
+            Statement::ForIn(var, object, body) => {
+                write!(f, "ForIn({}, {:?}, {:?})", var, object, body)
             }
             Statement::ForOfDestructuringObject(pat, iterable, body) => {
                 write!(f, "ForOfDestructuringObject({:?}, {:?}, {:?})", pat, iterable, body)
@@ -964,6 +968,31 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         vec![s]
                     };
                     return Ok(Statement::ForOf(var_name, iterable, body));
+                } else if !tokens.is_empty() && matches!(tokens[0], Token::In) {
+                    // This is a for-in loop
+                    tokens.remove(0); // consume in
+                    let object = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
+                        return Err(raise_parse_error!());
+                    }
+                    tokens.remove(0); // consume )
+                    // For-in body may be a block or a single statement
+                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                        tokens.remove(0); // consume {
+                        let b = parse_statements(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                            return Err(raise_parse_error!());
+                        }
+                        tokens.remove(0); // consume }
+                        b
+                    } else {
+                        let s = parse_statement(tokens)?;
+                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                            tokens.remove(0);
+                        }
+                        vec![s]
+                    };
+                    return Ok(Statement::ForIn(var_name, object, body));
                 } else {
                     // This is a regular for loop with variable declaration, put tokens back
                     tokens.insert(0, saved_identifier_token);

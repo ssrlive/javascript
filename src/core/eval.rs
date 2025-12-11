@@ -230,6 +230,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     statement_for_init_condition_increment(env, init, condition, increment, body, &mut last_value)
                 }
                 Statement::ForOf(var, iterable, body) => statement_for_of_var_iter(env, var, iterable, body, &mut last_value),
+                Statement::ForIn(var, object, body) => statement_for_in_var_object(env, var, object, body, &mut last_value),
                 Statement::While(condition, body) => statement_while_condition_body(env, condition, body, &mut last_value),
                 Statement::DoWhile(body, condition) => statement_do_body_while_condition(env, body, condition, &mut last_value),
                 Statement::Switch(expr, cases) => eval_switch_statement(env, expr, cases, &mut last_value, None),
@@ -995,6 +996,45 @@ fn perform_statement_label(
                     }
                 }
                 _ => Err(raise_eval_error!("for-of loop requires an iterable")),
+            }
+        }
+        Statement::ForIn(var, object, body) => {
+            let object_val = evaluate_expr(env, object)?;
+            match object_val {
+                Value::Object(obj_map) => {
+                    let obj_borrow = obj_map.borrow();
+                    for key in obj_borrow.properties.keys() {
+                        if !obj_borrow.non_enumerable.contains(key) {
+                            let key_str = match key {
+                                PropertyKey::String(s) => s.clone(),
+                                PropertyKey::Symbol(_) => continue,
+                            };
+                            env_set_recursive(env, var.as_str(), Value::String(utf8_to_utf16(&key_str)))?;
+                            match evaluate_statements_with_context(env, body)? {
+                                ControlFlow::Normal(val) => *last_value = val,
+                                ControlFlow::Break(None) => break,
+                                ControlFlow::Break(Some(lbl)) => {
+                                    if lbl == *label_name {
+                                        /* break out of labeled loop */
+                                    } else {
+                                        return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                    }
+                                }
+                                ControlFlow::Continue(None) => {}
+                                ControlFlow::Continue(Some(lbl)) => {
+                                    if lbl == *label_name {
+                                        /* continue loop */
+                                    } else {
+                                        return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                    }
+                                }
+                                ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                            }
+                        }
+                    }
+                    Ok(None)
+                }
+                _ => Err(raise_eval_error!("for-in loop requires an object")),
             }
         }
         Statement::ForOfDestructuringObject(pattern, iterable, body) => {
@@ -2021,6 +2061,44 @@ fn statement_for_of_var_iter(
             Ok(None)
         }
         _ => Err(raise_eval_error!("for-of loop requires an iterable")),
+    }
+}
+
+fn statement_for_in_var_object(
+    env: &JSObjectDataPtr,
+    var: &str,
+    object: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let object_val = evaluate_expr(env, object)?;
+    match object_val {
+        Value::Object(obj_map) => {
+            // Iterate over all enumerable properties
+            let obj_borrow = obj_map.borrow();
+            for key in obj_borrow.properties.keys() {
+                if !obj_borrow.non_enumerable.contains(key) {
+                    let key_str = match key {
+                        PropertyKey::String(s) => s.clone(),
+                        PropertyKey::Symbol(_) => continue, // Skip symbols for now
+                    };
+                    env_set_recursive(env, var, Value::String(utf8_to_utf16(&key_str)))?;
+                    let block_env = new_js_object_data();
+                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().is_function_scope = false;
+                    match evaluate_statements_with_context(&block_env, body)? {
+                        ControlFlow::Normal(val) => *last_value = val,
+                        ControlFlow::Break(None) => break,
+                        ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+                        ControlFlow::Continue(None) => {}
+                        ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
+                        ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                    }
+                }
+            }
+            Ok(None)
+        }
+        _ => Err(raise_eval_error!("for-in loop requires an object")),
     }
 }
 
@@ -5675,6 +5753,10 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
                 collect_var_names(body, names);
             }
             Statement::ForOf(_, _, body) => {
+                collect_var_names(body, names);
+            }
+            Statement::ForIn(var, _, body) => {
+                names.insert(var.clone());
                 collect_var_names(body, names);
             }
             Statement::ForOfDestructuringObject(pattern, _, body) => {

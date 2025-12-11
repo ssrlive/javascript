@@ -1452,5 +1452,6 @@ pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
 
 pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) -> Result<(), JSError> {
     obj_set_value(obj, &"length".into(), Value::Number(new_length as f64))?;
+    obj.borrow_mut().set_non_enumerable("length".into());
     Ok(())
 }

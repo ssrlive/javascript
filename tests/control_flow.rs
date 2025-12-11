@@ -225,6 +225,24 @@ mod control_flow_tests {
     }
 
     #[test]
+    fn test_for_of_loop_with_break() {
+        let script = r#"
+            let arr = [10, 20, 30, 40];
+            let sum = 0;
+            for (let x of arr) {
+                if (x == 30) { break; }
+                sum = sum + x;
+            }
+            sum
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 30.0), // 10 + 20 = 30 (breaks before 30)
+            _ => panic!("Expected number 30.0, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_var_hoisting() {
         let script = "function f() { a = 10; return a; var a; } f()";
         let result = evaluate_script(script, None::<&std::path::Path>);
@@ -261,6 +279,92 @@ mod control_flow_tests {
         match result {
             Ok(Value::Number(n)) => assert_eq!(n, 3.0),
             _ => panic!("Expected number 3.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_in_loop_array() {
+        let script = r#"
+            let arr = [10, 20, 30];
+            let sum = 0;
+            for (let key in arr) {
+                sum += arr[key];
+            }
+            sum
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 60.0), // 10 + 20 + 30 = 60 (length is not enumerable)
+            _ => panic!("Expected number 60.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_in_loop_object() {
+        let script = r#"
+            let obj = {a: 1, b: 2, c: 3};
+            let sum = 0;
+            for (let key in obj) {
+                sum = sum + obj[key];
+            }
+            sum
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0), // 1 + 2 + 3 = 6
+            _ => panic!("Expected number 6.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_in_loop_empty_object() {
+        let script = r#"
+            let obj = {};
+            let count = 0;
+            for (let key in obj) {
+                count = count + 1;
+            }
+            count
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 0.0),
+            _ => panic!("Expected number 0.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_in_loop_with_break() {
+        let script = r#"
+            let obj = {a: 1, b: 2, c: 3};
+            let count = 0;
+            for (let key in obj) {
+                if (count > 0) { break; }
+                count = count + 1;
+            }
+            count
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0), // Should break after first iteration
+            _ => panic!("Expected number 1.0, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_for_in_loop_array_length() {
+        let script = r#"
+            let arr = [1, 2];
+            let count = 0;
+            for (var key in arr) {
+                count = count + 1;
+            }
+            count
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0), // "0", "1" (length is not enumerable)
+            _ => panic!("Expected number 2.0, got {:?}", result),
         }
     }
 }

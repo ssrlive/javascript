@@ -583,6 +583,39 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_substring_swap() {
+        let script = "'hello world'.substring(5, 2)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "llo");
+            }
+            _ => panic!("Expected substring(5,2) to return 'llo', got {:?}", result),
+        }
+
+        let script = "'hello world'.substring(-3)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world");
+            }
+            _ => panic!("Expected substring(-3) to return 'hello world', got {:?}", result),
+        }
+
+        let script = "'hello world'.substring(7, -2)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello w");
+            }
+            _ => panic!("Expected substring(7,-2) to return 'hello w', got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_array_map_values() {
         let script = "let arr = Array(); let a2 = arr.push(1); let a3 = a2.push(2); let mapped = a3.map(function(x) { return x * 2; }); mapped.join(',')";
         let result = evaluate_script(script, None::<&std::path::Path>);

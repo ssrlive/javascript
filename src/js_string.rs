@@ -27,20 +27,30 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     None
                 };
                 if let Value::Number(start) = start_val {
-                    let start_idx = start as usize;
-                    let end_idx = if let Some(Value::Number(e)) = end_val {
-                        e as usize
+                    let mut start_idx = start as isize;
+                    let mut end_idx = if let Some(Value::Number(e)) = end_val {
+                        e as isize
                     } else {
-                        utf16_len(s)
+                        utf16_len(s) as isize
                     };
-                    if start_idx <= end_idx && end_idx <= utf16_len(s) {
-                        Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
-                    } else {
-                        let len = utf16_len(s);
-                        Err(raise_eval_error!(format!(
-                            "substring: invalid indices start={start_idx}, end={end_idx}, length={len}",
-                        )))
+                    // Handle negative indices: treat as 0
+                    if start_idx < 0 {
+                        start_idx = 0;
                     }
+                    if end_idx < 0 {
+                        end_idx = 0;
+                    }
+                    // Swap if start > end
+                    if start_idx > end_idx {
+                        std::mem::swap(&mut start_idx, &mut end_idx);
+                    }
+                    let start_idx = start_idx as usize;
+                    let end_idx = end_idx as usize;
+                    // Ensure within bounds
+                    let len = utf16_len(s);
+                    let start_idx = start_idx.min(len);
+                    let end_idx = end_idx.min(len);
+                    Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
                 } else {
                     Err(raise_eval_error!("substring: first argument must be a number"))
                 }

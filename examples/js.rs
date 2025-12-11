@@ -58,7 +58,7 @@ fn print_eval_result(result: &Value) {
         Value::Number(n) => println!("{n}"),
         Value::String(s) => println!("{}", String::from_utf16_lossy(s)),
         Value::Boolean(b) => println!("{b}"),
-        Value::Undefined => {} // println!("undefined"),
+        Value::Undefined => println!("undefined"),
         Value::Object(_) => println!("[object Object]"),
         Value::Function(name) => println!("[Function: {}]", name),
         Value::Closure(_, _, _) => println!("[Function]"),

@@ -71,3 +71,73 @@ fn string_concat_with_undefined_left() {
         _ => panic!("Expected string 'undefinedb', got {:?}", result),
     }
 }
+
+#[test]
+fn number_strict_equality_same() {
+    let script = "10 === 10";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(b),
+        _ => panic!("Expected true for 10 === 10, got {:?}", result),
+    }
+}
+
+#[test]
+fn number_strict_equality_different() {
+    let script = "10 === 20";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(!b),
+        _ => panic!("Expected false for 10 === 20, got {:?}", result),
+    }
+}
+
+#[test]
+fn string_strict_equality_same() {
+    let script = "'hello' === 'hello'";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(b),
+        _ => panic!("Expected true for 'hello' === 'hello', got {:?}", result),
+    }
+}
+
+#[test]
+fn string_strict_equality_different() {
+    let script = "'hello' === 'world'";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(!b),
+        _ => panic!("Expected false for 'hello' === 'world', got {:?}", result),
+    }
+}
+
+#[test]
+fn boolean_strict_equality_true() {
+    let script = "true === true";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(b),
+        _ => panic!("Expected true for true === true, got {:?}", result),
+    }
+}
+
+#[test]
+fn boolean_strict_equality_false() {
+    let script = "true === false";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(!b),
+        _ => panic!("Expected false for true === false, got {:?}", result),
+    }
+}
+
+#[test]
+fn strict_equality_different_types() {
+    let script = "10 === '10'";
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Boolean(b)) => assert!(!b),
+        _ => panic!("Expected false for 10 === '10', got {:?}", result),
+    }
+}

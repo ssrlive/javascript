@@ -3540,114 +3540,28 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             _ => Err(raise_eval_error!("error")),
         },
-        BinaryOp::Equal => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw == rb.raw)),
-            (Value::BigInt(mut la), Value::Number(rn)) => {
-                // If Number is NaN or infinite, it's never equal to a BigInt
-                if rn.is_nan() || !rn.is_finite() {
-                    return Ok(Value::Boolean(false));
-                }
-                // Only integral numbers can equal a BigInt. If the number has a fractional
-                // part it cannot equal a BigInt.
-                if rn.fract() != 0.0 {
-                    return Ok(Value::Boolean(false));
-                }
-
-                // Convert the Number's integer value to a decimal string and parse as BigInt
-                // so we perform an exact integer comparison without floating-point precision pitfalls.
-                let num_str = format!("{:.0}", rn);
-                if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a == num_bi));
-                }
-
-                Ok(Value::Boolean(false))
+        BinaryOp::Equal => {
+            // Abstract equality comparison with type coercion
+            abstract_equality(&l, &r)
+        }
+        BinaryOp::StrictEqual => {
+            // Strict equality comparison without type coercion
+            strict_equality(&l, &r)
+        }
+        BinaryOp::NotEqual => {
+            // Abstract inequality: invert abstract equality
+            match abstract_equality(&l, &r)? {
+                Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                _ => Err(raise_eval_error!("abstract_equality should return boolean")),
             }
-            (Value::Number(ln), Value::BigInt(rb)) => {
-                // If Number is NaN or infinite, it's never equal to a BigInt
-                if ln.is_nan() || !ln.is_finite() {
-                    return Ok(Value::Boolean(false));
-                }
-                if ln.fract() != 0.0 {
-                    return Ok(Value::Boolean(false));
-                }
-
-                let num_str = format!("{:.0}", ln);
-                if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                    let mut rb = rb;
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(b == num_bi));
-                }
-
-                Ok(Value::Boolean(false))
+        }
+        BinaryOp::StrictNotEqual => {
+            // Strict inequality: invert strict equality
+            match strict_equality(&l, &r)? {
+                Value::Boolean(b) => Ok(Value::Boolean(!b)),
+                _ => Err(raise_eval_error!("strict_equality should return boolean")),
             }
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(&sa, &sb))),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(&a, &b))),
-            _ => Ok(Value::Boolean(false)), // Different types are not equal
-        },
-        BinaryOp::StrictEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw == rb.raw)),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(&sa, &sb))),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(&a, &b))),
-            _ => Ok(Value::Boolean(false)), // Different types are not equal
-        },
-        BinaryOp::NotEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln != rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw != rb.raw)),
-            (Value::BigInt(mut la), Value::Number(rn)) => {
-                // reuse equality rules: invert them
-                if rn.is_nan() || !rn.is_finite() {
-                    return Ok(Value::Boolean(true));
-                }
-                if rn.fract() != 0.0 {
-                    return Ok(Value::Boolean(true));
-                }
-                let num_str = format!("{:.0}", rn);
-                if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a != num_bi));
-                }
-                Ok(Value::Boolean(true))
-            }
-            (Value::Number(ln), Value::BigInt(mut rb)) => {
-                if ln.is_nan() || !ln.is_finite() {
-                    return Ok(Value::Boolean(true));
-                }
-                if ln.fract() != 0.0 {
-                    return Ok(Value::Boolean(true));
-                }
-                let num_str = format!("{:.0}", ln);
-                if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(b != num_bi));
-                }
-                Ok(Value::Boolean(true))
-            }
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls != rs)),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb != rb)),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(!Rc::ptr_eq(&sa, &sb))),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(false)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(!Rc::ptr_eq(&a, &b))),
-            _ => Ok(Value::Boolean(true)), // Different types are not equal, so not equal is true
-        },
-        BinaryOp::StrictNotEqual => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln != rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw != rb.raw)),
-            (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls != rs)),
-            (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb != rb)),
-            (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(!Rc::ptr_eq(&sa, &sb))),
-            (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(false)),
-            (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(!Rc::ptr_eq(&a, &b))),
-            _ => Ok(Value::Boolean(true)), // Different types are not equal, so not equal is true
-        },
+        }
         BinaryOp::LessThan => {
             // Follow JS abstract relational comparison with ToPrimitive(Number) hint
             let mut l_prim = if matches!(l, Value::Object(_)) {
@@ -4233,6 +4147,161 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(l),
             }
         }
+    }
+}
+
+fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
+    // Abstract Equality Comparison (==) with type coercion
+    // Based on ECMAScript 2023 specification
+
+    // 1. If Type(x) is the same as Type(y), then return the result of performing Strict Equality Comparison x === y.
+    if std::mem::discriminant(x) == std::mem::discriminant(y) {
+        return strict_equality(x, y);
+    }
+
+    // 2. If x is null and y is undefined, return true.
+    if matches!(x, Value::Undefined) && matches!(y, Value::Object(_)) {
+        // Wait, no: null is not implemented yet. In this engine, null might be Undefined?
+        // Actually, in this code, null is not distinguished from undefined.
+        // For now, assume undefined == undefined is handled above.
+    }
+    // Since null is not implemented, skip null/undefined check.
+
+    // 3. If x is undefined and y is null, return true. (skipped)
+
+    // 4. If Type(x) is Number and Type(y) is String, return the result of the comparison x == ToNumber(y).
+    if let (Value::Number(xn), Value::String(ys)) = (x, y) {
+        let yn = string_to_number(ys)?;
+        return Ok(Value::Boolean(*xn == yn));
+    }
+
+    // 5. If Type(x) is String and Type(y) is Number, return the result of the comparison ToNumber(x) == y.
+    if let (Value::String(xs), Value::Number(yn)) = (x, y) {
+        let xn = string_to_number(xs)?;
+        return Ok(Value::Boolean(xn == *yn));
+    }
+
+    // 6. If Type(x) is Boolean, return the result of the comparison ToNumber(x) == y.
+    if let Value::Boolean(xb) = x {
+        let xn = if *xb { 1.0 } else { 0.0 };
+        return abstract_equality(&Value::Number(xn), y);
+    }
+
+    // 7. If Type(y) is Boolean, return the result of the comparison x == ToNumber(y).
+    if let Value::Boolean(yb) = y {
+        let yn = if *yb { 1.0 } else { 0.0 };
+        return abstract_equality(x, &Value::Number(yn));
+    }
+
+    // 8. If Type(x) is either String, Number, or Symbol and Type(y) is Object, then return the result of the comparison x == ToPrimitive(y).
+    if (matches!(x, Value::String(_) | Value::Number(_) | Value::Symbol(_))) && matches!(y, Value::Object(_)) {
+        let py = to_primitive(y, "default")?;
+        return abstract_equality(x, &py);
+    }
+
+    // 9. If Type(x) is Object and Type(y) is either String, Number, or Symbol, then return the result of the comparison ToPrimitive(x) == y.
+    if matches!(x, Value::Object(_)) && (matches!(y, Value::String(_) | Value::Number(_) | Value::Symbol(_))) {
+        let px = to_primitive(x, "default")?;
+        return abstract_equality(&px, y);
+    }
+
+    // 10. If Type(x) is BigInt and Type(y) is String, then
+    if let (Value::BigInt(xb), Value::String(ys)) = (x, y) {
+        // a. Let n be StringToBigInt(y).
+        if let Ok(yb) = string_to_bigint(ys) {
+            // b. If n is undefined, return false.
+            // c. Return the result of the comparison x == n.
+            let mut xb_clone = xb.clone();
+            let xb_parsed = xb_clone.refresh_parsed(false)?;
+            return Ok(Value::Boolean(xb_parsed == yb));
+        } else {
+            return Ok(Value::Boolean(false));
+        }
+    }
+
+    // 11. If Type(x) is String and Type(y) is BigInt, then
+    if let (Value::String(xs), Value::BigInt(yb)) = (x, y) {
+        if let Ok(xb) = string_to_bigint(xs) {
+            let mut yb_clone = yb.clone();
+            let yb_parsed = yb_clone.refresh_parsed(false)?;
+            return Ok(Value::Boolean(xb == yb_parsed));
+        } else {
+            return Ok(Value::Boolean(false));
+        }
+    }
+
+    // 12. If Type(x) is BigInt and Type(y) is Number, or Type(x) is Number and Type(y) is BigInt, then
+    if let (Value::BigInt(xb), Value::Number(yn)) = (x, y) {
+        let mut xb_clone = xb.clone();
+        let xb_val = xb_clone.refresh_parsed(false)?;
+        let yn_val = *yn;
+        // a. If y is NaN, +∞, or -∞, return false.
+        if yn_val.is_nan() || !yn_val.is_finite() {
+            return Ok(Value::Boolean(false));
+        }
+        // b. If y has a fractional part, return false.
+        if yn_val.fract() != 0.0 {
+            return Ok(Value::Boolean(false));
+        }
+        // c. Return the result of the comparison x == y.
+        let yn_bi = BigInt::from(yn_val as i64);
+        return Ok(Value::Boolean(xb_val == yn_bi));
+    }
+    if let (Value::Number(xn), Value::BigInt(yb)) = (x, y) {
+        let mut yb_clone = yb.clone();
+        let yb_val = yb_clone.refresh_parsed(false)?;
+        let xn_val = *xn;
+        // a. If y is NaN, +∞, or -∞, return false.
+        if xn_val.is_nan() || !xn_val.is_finite() {
+            return Ok(Value::Boolean(false));
+        }
+        // b. If y has a fractional part, return false.
+        if xn_val.fract() != 0.0 {
+            return Ok(Value::Boolean(false));
+        }
+        // c. Return the result of the comparison x == y.
+        let xn_bi = BigInt::from(xn_val as i64);
+        return Ok(Value::Boolean(xn_bi == yb_val));
+    }
+
+    // 13. Return false.
+    Ok(Value::Boolean(false))
+}
+
+fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
+    // Strict Equality Comparison (===)
+    match (x, y) {
+        (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
+        (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw == rb.raw)),
+        (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
+        (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
+        (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(sa, sb))),
+        (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
+        (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
+        _ => Ok(Value::Boolean(false)),
+    }
+}
+
+fn string_to_number(s: &[u16]) -> Result<f64, JSError> {
+    let sstr = String::from_utf16_lossy(s);
+    let t = sstr.trim();
+    if t.is_empty() {
+        Ok(0.0)
+    } else {
+        match t.parse::<f64>() {
+            Ok(v) => Ok(v),
+            Err(_) => Ok(f64::NAN),
+        }
+    }
+}
+
+fn string_to_bigint(s: &[u16]) -> Result<BigInt, JSError> {
+    let sstr = String::from_utf16_lossy(s);
+    let t = sstr.trim();
+    if t.is_empty() {
+        Ok(BigInt::from(0))
+    } else {
+        BigInt::from_str(t).map_err(|_| raise_eval_error!("Invalid BigInt string"))
     }
 }
 

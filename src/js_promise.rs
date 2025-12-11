@@ -24,7 +24,7 @@
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
 use crate::core::{
-    Expr, JSObjectData, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value,
+    Expr, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
 };
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -101,7 +101,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         if !params.is_empty() {
                             env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
@@ -128,7 +128,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         if !params.is_empty() {
                             env_set(&func_env, &params[0], promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
@@ -151,7 +151,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 log::trace!("Processing Timeout task");
                 // Call the callback with the provided args
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     for (i, arg) in args.iter().enumerate() {
                         if i < params.len() {
@@ -1055,8 +1055,8 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             }
 
             // Create state object for coordination
-            let state_obj = Rc::new(RefCell::new(JSObjectData::new()));
-            let results_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let state_obj = new_js_object_data();
+            let results_obj = new_js_object_data();
             crate::core::obj_set_value(&state_obj, &"results".into(), Value::Object(results_obj.clone()))?;
             crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(0.0))?;
             crate::core::obj_set_value(&state_obj, &"total".into(), Value::Number(num_promises as f64))?;

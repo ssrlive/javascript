@@ -1,12 +1,10 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Create the assert object with testing functions
 pub fn make_assert_object() -> Result<JSObjectDataPtr, JSError> {
-    let assert_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let assert_obj = new_js_object_data();
     obj_set_value(&assert_obj, &"sameValue".into(), Value::Function("assert.sameValue".to_string()))?;
     obj_set_value(
         &assert_obj,
@@ -79,7 +77,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
             // If values are the same, this assertion fails — throw a plain error object
             if equal {
-                let err_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                let err_obj = new_js_object_data();
                 obj_set_value(&err_obj, &"message".into(), Value::String(message.encode_utf16().collect()))?;
                 return Err(raise_throw_error!(Value::Object(err_obj)));
             }
@@ -97,7 +95,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let func_val = evaluate_expr(env, &args[1])?;
             match func_val {
                 Value::Closure(_params, body, captured_env) => {
-                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     match evaluate_statements(&func_env, &body) {
                         Ok(_) => Err(raise_eval_error!("assert.throws expected function to throw a value")),

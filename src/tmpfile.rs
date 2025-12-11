@@ -1,11 +1,9 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
-use std::rc::Rc;
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -41,7 +39,7 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             let file_id = get_next_file_id();
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
-            let tmp = Rc::new(RefCell::new(JSObjectData::new()));
+            let tmp = new_js_object_data();
             obj_set_value(&tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
             obj_set_value(&tmp, &"__eof".into(), Value::Boolean(false))?;
             // methods

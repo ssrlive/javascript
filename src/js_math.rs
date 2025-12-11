@@ -1,12 +1,10 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Create the Math object with all mathematical constants and functions
 pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
-    let math_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let math_obj = new_js_object_data();
     obj_set_value(&math_obj, &"PI".into(), Value::Number(std::f64::consts::PI))?;
     obj_set_value(&math_obj, &"E".into(), Value::Number(std::f64::consts::E))?;
     obj_set_value(&math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;

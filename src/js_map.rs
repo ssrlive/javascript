@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value},
+    core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_set_value},
     error::JSError,
     raise_eval_error,
 };
@@ -50,7 +50,7 @@ pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
     }
 
     // Create a wrapper object for the Map
-    let map_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let map_obj = new_js_object_data();
     // Store the actual map data
     map_obj
         .borrow_mut()
@@ -133,7 +133,7 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.keys takes no arguments"));
             }
             // Create an array of keys
-            let keys_array = Rc::new(RefCell::new(JSObjectData::new()));
+            let keys_array = new_js_object_data();
             for (i, (key, _)) in map.borrow().entries.iter().enumerate() {
                 obj_set_value(&keys_array, &i.to_string().into(), key.clone())?;
             }
@@ -146,7 +146,7 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.values takes no arguments"));
             }
             // Create an array of values
-            let values_array = Rc::new(RefCell::new(JSObjectData::new()));
+            let values_array = new_js_object_data();
             for (i, (_, value)) in map.borrow().entries.iter().enumerate() {
                 obj_set_value(&values_array, &i.to_string().into(), value.clone())?;
             }
@@ -159,9 +159,9 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.entries takes no arguments"));
             }
             // Create an array of [key, value] pairs
-            let entries_array = Rc::new(RefCell::new(JSObjectData::new()));
+            let entries_array = new_js_object_data();
             for (i, (key, value)) in map.borrow().entries.iter().enumerate() {
-                let entry_array = Rc::new(RefCell::new(JSObjectData::new()));
+                let entry_array = new_js_object_data();
                 obj_set_value(&entry_array, &"0".into(), key.clone())?;
                 obj_set_value(&entry_array, &"1".into(), value.clone())?;
                 obj_set_value(&entry_array, &"length".into(), Value::Number(2.0))?;

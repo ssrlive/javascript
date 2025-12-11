@@ -1,15 +1,15 @@
 use crate::core::{
-    Expr, JSObjectData, JSObjectDataPtr, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, obj_set_value,
+    Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
+    obj_set_value,
 };
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Create the testIntl object with testing functions
 pub fn make_testintl_object() -> Result<JSObjectDataPtr, JSError> {
-    let testintl_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let testintl_obj = new_js_object_data();
     obj_set_value(
         &testintl_obj,
         &"testWithIntlConstructors".into(),
@@ -137,13 +137,13 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         }
     }
 
-    let instance = Rc::new(RefCell::new(JSObjectData::new()));
+    let instance = new_js_object_data();
 
     // Add resolvedOptions method
     let resolved_options = Value::Closure(
-        vec![],                                     // no parameters
-        vec![],                                     // empty body - we'll handle this in the method call
-        Rc::new(RefCell::new(JSObjectData::new())), // empty captured environment
+        vec![],               // no parameters
+        vec![],               // empty body - we'll handle this in the method call
+        new_js_object_data(), // empty captured environment
     );
     obj_set_value(&instance, &"resolvedOptions".into(), resolved_options)?;
 
@@ -286,7 +286,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
 /// Handle resolvedOptions method on mock Intl instances
 pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Return an object with a locale property
-    let result = Rc::new(RefCell::new(JSObjectData::new()));
+    let result = new_js_object_data();
 
     // Get the stored locale, or default to "en-US"
     let locale = if let Some(locale_val) = crate::core::obj_get_value(instance, &"__locale".into())? {
@@ -341,7 +341,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
             log::debug!("MockIntlConstructor.supportedLocalesOf called with {} args", args.len());
             if args.len() != 1 {
                 // Silently return an empty array when inputs aren't as expected
-                let arr = Rc::new(RefCell::new(JSObjectData::new()));
+                let arr = new_js_object_data();
                 crate::js_array::set_array_length(&arr, 0)?;
                 return Ok(Value::Object(arr));
             }
@@ -351,7 +351,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
             log::debug!("supportedLocalesOf - evaluated arg = {:?}", evaluated);
 
             // Prepare result array
-            let result = Rc::new(RefCell::new(JSObjectData::new()));
+            let result = new_js_object_data();
             let mut idx = 0usize;
 
             if let Value::Object(arr_obj) = evaluated

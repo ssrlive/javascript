@@ -3,13 +3,11 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use std::cell::RefCell;
-use std::rc::Rc;
 
 static OS_FILE_STORE: LazyLock<Mutex<HashMap<u64, File>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static NEXT_OS_FILE_ID: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(1));
@@ -266,7 +264,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     };
                     match std::fs::read_dir(&dirname) {
                         Ok(entries) => {
-                            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                            let obj = new_js_object_data();
                             let mut i = 0;
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
@@ -278,13 +276,13 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
-                            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                            let obj = new_js_object_data();
                             set_array_length(&obj, 0)?;
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
-                let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                let obj = new_js_object_data();
                 set_array_length(&obj, 0)?;
                 return Ok(Value::Object(obj));
             }
@@ -437,7 +435,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
 
 /// Create the OS object with all OS-related functions and constants
 pub fn make_os_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"remove".into(), Value::Function("os.remove".to_string()))?;
     obj_set_value(&obj, &"mkdir".into(), Value::Function("os.mkdir".to_string()))?;
     obj_set_value(&obj, &"open".into(), Value::Function("os.open".to_string()))?;
@@ -478,7 +476,7 @@ pub fn make_os_object() -> Result<JSObjectDataPtr, JSError> {
 
 /// Create the OS path object with path-related functions
 pub fn make_path_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"join".into(), Value::Function("os.path.join".to_string()))?;
     obj_set_value(&obj, &"dirname".into(), Value::Function("os.path.dirname".to_string()))?;
     obj_set_value(&obj, &"basename".into(), Value::Function("os.path.basename".to_string()))?;

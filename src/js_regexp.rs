@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_slice, utf16_to_utf8};
 use fancy_regex::Regex;
@@ -131,8 +131,6 @@ fn modified_to_original_byte_offset(original: &str, modified: &str, mod_byte_off
 
     o_byte.min(original.len())
 }
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Handle RegExp constructor calls
 pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -233,7 +231,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     }
 
     // Create RegExp object
-    let regexp_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let regexp_obj = new_js_object_data();
 
     // Store regex and flags as properties
     obj_set_value(&regexp_obj, &"__regex".into(), Value::String(utf8_to_utf16(&pattern)))?;
@@ -388,7 +386,7 @@ pub(crate) fn handle_regexp_method(
             match regex.captures(&working_input[byte_start..]) {
                 Ok(Some(captures)) => {
                     // Create result array
-                    let result_array = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_array = new_js_object_data();
 
                     // Add matched string
                     if let Some(matched) = captures.get(0) {

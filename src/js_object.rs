@@ -1,14 +1,12 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, get_well_known_symbol_rc, obj_get_value,
-    obj_set_value,
+    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, get_well_known_symbol_rc, new_js_object_data,
+    obj_get_value, obj_set_value,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::utf8_to_utf16;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
@@ -35,7 +33,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                         }
                     }
                     // Create a simple array-like object for keys
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     for (i, key) in keys.into_iter().enumerate() {
                         obj_set_value(&result_obj, &i.to_string().into(), key)?;
                     }
@@ -46,7 +44,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Undefined => Err(raise_type_error!("Object.keys called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }
@@ -75,7 +73,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                         }
                     }
                     // Create a simple array-like object for values
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     for (i, value) in values.into_iter().enumerate() {
                         obj_set_value(&result_obj, &i.to_string().into(), value)?;
                     }
@@ -86,7 +84,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Undefined => Err(raise_type_error!("Object.values called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }
@@ -106,7 +104,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             };
 
             // Create new object
-            let new_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let new_obj = new_js_object_data();
 
             // Set prototype
             if let Some(proto) = proto_obj {
@@ -143,7 +141,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     let mut idx = 0;
                     for (key, _value) in obj.borrow().properties.iter() {
                         if let PropertyKey::Symbol(sym) = key
@@ -167,7 +165,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     let mut idx = 0;
                     for (key, _value) in obj.borrow().properties.iter() {
                         if let PropertyKey::String(s) = key
@@ -190,7 +188,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
 
                     for (key, val_rc) in obj.borrow().properties.iter() {
                         // iterate own properties
@@ -198,7 +196,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                         if !obj.borrow().is_enumerable(key) {
                             // Mark the descriptor's enumerable flag appropriately below
                         }
-                        let desc_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                        let desc_obj = new_js_object_data();
 
                         match &*val_rc.borrow() {
                             Value::Property { value, getter, setter } => {
@@ -271,7 +269,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Object(o) => o,
                 Value::Undefined => return Err(raise_type_error!("Object.assign target cannot be undefined or null")),
                 Value::Number(n) => {
-                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let obj = new_js_object_data();
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Number_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
@@ -280,7 +278,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj
                 }
                 Value::Boolean(b) => {
-                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let obj = new_js_object_data();
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Boolean_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
@@ -289,7 +287,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj
                 }
                 Value::String(s) => {
-                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let obj = new_js_object_data();
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("String_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("String_toString".to_string()))?;
                     obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
@@ -299,7 +297,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj
                 }
                 Value::BigInt(h) => {
-                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let obj = new_js_object_data();
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
@@ -308,7 +306,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj
                 }
                 Value::Symbol(sd) => {
-                    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let obj = new_js_object_data();
                     obj_set_value(&obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
                     obj_set_value(&obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
                     obj_set_value(&obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
@@ -317,7 +315,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     obj
                 }
                 // For other types (functions, closures, etc.), create a plain object
-                _ => Rc::new(RefCell::new(JSObjectData::new())),
+                _ => new_js_object_data(),
             };
 
             // Iterate sources
@@ -683,7 +681,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 let method_val = method_rc.borrow().clone();
                 match method_val {
                     Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         func_env.borrow_mut().is_function_scope = true;
                         // bind `this` to the object
@@ -707,7 +705,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                             return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args);
                         }
 
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().is_function_scope = true;
                         // bind `this` to the object
                         crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
@@ -726,7 +724,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                     if let Some(cl_rc) = obj_get_value(func_obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
                             Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 func_env.borrow_mut().is_function_scope = true;
                                 crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;

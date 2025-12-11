@@ -1,13 +1,12 @@
 use crate::{
     JSError,
     core::{
-        JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors,
+        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors, new_js_object_data,
         obj_get_value, obj_set_value, parse_statements, tokenize, value_to_string,
     },
     js_promise::{PromiseState, run_event_loop},
     raise_eval_error,
 };
-use std::{cell::RefCell, rc::Rc};
 
 /// A small persistent REPL environment wrapper.
 ///
@@ -28,7 +27,7 @@ impl Default for Repl {
 impl Repl {
     /// Create a new persistent REPL environment (with built-ins initialized).
     pub fn new() -> Self {
-        let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
+        let env: JSObjectDataPtr = new_js_object_data();
         env.borrow_mut().is_function_scope = true;
         // Initialize built-in constructors once for the persistent environment
         initialize_global_constructors(&env).unwrap();

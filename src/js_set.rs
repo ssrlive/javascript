@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_set_value},
+    core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_set_value},
     error::JSError,
     raise_eval_error,
 };
@@ -47,7 +47,7 @@ pub(crate) fn handle_set_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
     }
 
     // Create a wrapper object for the Set
-    let set_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let set_obj = new_js_object_data();
     // Store the actual set data
     set_obj
         .borrow_mut()
@@ -117,7 +117,7 @@ pub(crate) fn handle_set_instance_method(
                 return Err(raise_eval_error!("Set.prototype.values takes no arguments"));
             }
             // Create an array of values
-            let values_array = Rc::new(RefCell::new(JSObjectData::new()));
+            let values_array = new_js_object_data();
             for (i, value) in set.borrow().values.iter().enumerate() {
                 obj_set_value(&values_array, &i.to_string().into(), value.clone())?;
             }
@@ -134,9 +134,9 @@ pub(crate) fn handle_set_instance_method(
                 return Err(raise_eval_error!("Set.prototype.entries takes no arguments"));
             }
             // Create an array of [value, value] pairs
-            let entries_array = Rc::new(RefCell::new(JSObjectData::new()));
+            let entries_array = new_js_object_data();
             for (i, value) in set.borrow().values.iter().enumerate() {
-                let entry_array = Rc::new(RefCell::new(JSObjectData::new()));
+                let entry_array = new_js_object_data();
                 obj_set_value(&entry_array, &"0".into(), value.clone())?;
                 obj_set_value(&entry_array, &"1".into(), value.clone())?;
                 obj_set_value(&entry_array, &"length".into(), Value::Number(2.0))?;

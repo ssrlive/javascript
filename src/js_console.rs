@@ -1,12 +1,10 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Create the console object with logging functions
 pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
-    let console_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let console_obj = new_js_object_data();
     obj_set_value(&console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
     Ok(console_obj)
 }

@@ -1,10 +1,8 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Parse a date string into a timestamp (milliseconds since Unix epoch)
 fn parse_date_string(date_str: &str) -> Option<f64> {
@@ -142,7 +140,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     };
 
     // Create a Date object with timestamp
-    let date_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let date_obj = new_js_object_data();
     obj_set_value(&date_obj, &"__timestamp".into(), Value::Number(timestamp))?;
 
     // Add toString method

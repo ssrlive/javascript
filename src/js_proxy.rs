@@ -1,6 +1,6 @@
 use crate::{
     core::{
-        Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value,
+        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
         obj_get_value, obj_set_value,
     },
     error::JSError,
@@ -31,7 +31,7 @@ pub(crate) fn handle_proxy_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
     }));
 
     // Create a wrapper object for the Proxy
-    let proxy_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let proxy_obj = new_js_object_data();
     // Store the actual proxy data
     proxy_obj.borrow_mut().insert(
         PropertyKey::String("__proxy__".to_string()),
@@ -69,7 +69,7 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
         )),
     ];
 
-    let revoke_env = Rc::new(RefCell::new(JSObjectData::new()));
+    let revoke_env = new_js_object_data();
     revoke_env
         .borrow_mut()
         .insert("__revoke_proxy".into(), Rc::new(RefCell::new(Value::Proxy(revoke_proxy_ref))));
@@ -77,7 +77,7 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
     let revoke_func = Value::Closure(Vec::new(), revoke_body, revoke_env);
 
     // Create a wrapper object for the Proxy
-    let proxy_wrapper = Rc::new(RefCell::new(JSObjectData::new()));
+    let proxy_wrapper = new_js_object_data();
     // Store the actual proxy data
     proxy_wrapper.borrow_mut().insert(
         PropertyKey::String("__proxy__".to_string()),
@@ -85,7 +85,7 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
     );
 
     // Create the revocable result object
-    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let result_obj = new_js_object_data();
     obj_set_value(&result_obj, &"proxy".into(), Value::Object(proxy_wrapper))?;
     obj_set_value(&result_obj, &"revoke".into(), revoke_func)?;
 
@@ -113,7 +113,7 @@ pub(crate) fn apply_proxy_trap(
         // stores the executable closure under the internal `__closure__` key.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
             // Create execution environment for the trap
-            let trap_env = Rc::new(RefCell::new(JSObjectData::new()));
+            let trap_env = new_js_object_data();
             trap_env.borrow_mut().prototype = Some(captured_env);
 
             // Bind arguments to parameters

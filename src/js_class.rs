@@ -5,13 +5,13 @@ use crate::js_array::is_array;
 use crate::raise_eval_error;
 use crate::{
     core::{
-        Expr, JSObjectData, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, obj_get_value,
+        Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, new_js_object_data, obj_get_value,
         obj_set_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum ClassMember {
@@ -108,7 +108,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             if let Some(cl_val_rc) = obj_get_value(&class_obj, &"__closure__".into())? {
                 if let Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) = &*cl_val_rc.borrow() {
                     // Create the instance object
-                    let instance = Rc::new(RefCell::new(JSObjectData::new()));
+                    let instance = new_js_object_data();
 
                     // Attach a debug identifier to help correlate runtime instances
                     // with logs (printed as a pointer string).
@@ -131,7 +131,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     }
 
                     // Prepare function environment with 'this' bound to the instance
-                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
@@ -172,7 +172,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 && let Value::ClassDefinition(ref class_def) = *class_def_val.borrow()
             {
                 // Create instance
-                let instance = Rc::new(RefCell::new(JSObjectData::new()));
+                let instance = new_js_object_data();
 
                 // Set prototype (both internal pointer and __proto__ property)
                 if let Some(prototype_val) = obj_get_value(&class_obj, &"prototype".into())? {
@@ -197,7 +197,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 for member in &class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
                         // Create function environment with 'this' bound to instance
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
 
                         // Bind 'this' to the instance
                         obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
@@ -247,7 +247,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 let canonical_ctor = class_obj.clone();
 
                 // Create instance object
-                let instance = Rc::new(RefCell::new(JSObjectData::new()));
+                let instance = new_js_object_data();
 
                 // Attach a debug identifier (pointer string) so we can correlate
                 // runtime-created instances with later logs (e.g. thrown object ptrs).
@@ -375,8 +375,8 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
         }
         Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
             // Handle function constructors
-            let instance = Rc::new(RefCell::new(JSObjectData::new()));
-            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+            let instance = new_js_object_data();
+            let func_env = new_js_object_data();
             func_env.borrow_mut().prototype = Some(captured_env.clone());
 
             // Bind 'this' to the instance
@@ -471,13 +471,13 @@ pub(crate) fn create_class_object(
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a class object (function) that can be instantiated with 'new'
-    let class_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let class_obj = new_js_object_data();
 
     // Set class name
     obj_set_value(&class_obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
 
     // Create the prototype object first
-    let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let prototype_obj = new_js_object_data();
 
     // Handle inheritance if extends is specified
     if let Some(parent_expr) = extends {
@@ -574,7 +574,7 @@ pub(crate) fn call_static_method(
         match &*method_val.borrow() {
             Value::Closure(params, body, _captured_env) | Value::AsyncClosure(params, body, _captured_env) => {
                 // Create function environment
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let func_env = new_js_object_data();
 
                 // Static methods don't have 'this' bound to an instance
                 // 'this' in static methods refers to the class itself
@@ -609,7 +609,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 log::trace!("Method is a closure with {} params", params.len());
                 // Use the closure's captured environment as the base for the
                 // function environment so outer-scope lookups work as expected.
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
 
                 // Bind 'this' to the instance (use env_set to avoid invoking setters)
@@ -701,7 +701,7 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                 for member in &parent_class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
                         // Create function environment with 'this' bound to instance
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
 
                         // Bind 'this' to the instance
                         obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
@@ -760,7 +760,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                 match &*method_val.borrow() {
                     Value::Closure(params, body, _captured_env) | Value::AsyncClosure(params, body, _captured_env) => {
                         // Create function environment with 'this' bound to instance
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
 
                         // Bind 'this' to the instance
                         obj_set_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
@@ -790,7 +790,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
 pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
         // Object() - create empty object
-        let obj = Rc::new(RefCell::new(JSObjectData::new()));
+        let obj = new_js_object_data();
         return Ok(Value::Object(obj));
     }
     // Object(value) - convert value to object
@@ -798,7 +798,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     match arg_val {
         Value::Undefined => {
             // Object(undefined) creates empty object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             Ok(Value::Object(obj))
         }
         Value::Object(obj) => {
@@ -807,7 +807,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
         Value::Number(n) => {
             // Object(number) creates Number object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             obj_set_value(&obj, &"valueOf".into(), Value::Function("Number_valueOf".to_string()))?;
             obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Number(n))?;
@@ -817,7 +817,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
         Value::Boolean(b) => {
             // Object(boolean) creates Boolean object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             obj_set_value(&obj, &"valueOf".into(), Value::Function("Boolean_valueOf".to_string()))?;
             obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::Boolean(b))?;
@@ -827,7 +827,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
         Value::String(s) => {
             // Object(string) creates String object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             obj_set_value(&obj, &"valueOf".into(), Value::Function("String_valueOf".to_string()))?;
             obj_set_value(&obj, &"toString".into(), Value::Function("String_toString".to_string()))?;
             obj_set_value(&obj, &"length".into(), Value::Number(s.len() as f64))?;
@@ -838,7 +838,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
         Value::BigInt(h) => {
             // Object(bigint) creates a boxed BigInt-like object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             obj_set_value(&obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
             obj_set_value(&obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
             obj_set_value(&obj, &"__value__".into(), Value::BigInt(h.clone()))?;
@@ -848,7 +848,7 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         }
         _ => {
             // For other types, return empty object
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             Ok(Value::Object(obj))
         }
     }
@@ -882,7 +882,7 @@ pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     };
 
     // Create Number object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"valueOf".into(), Value::Function("Number_valueOf".to_string()))?;
     obj_set_value(&obj, &"toString".into(), Value::Function("Number_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Number(num_val))?;
@@ -910,7 +910,7 @@ pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -
     };
 
     // Create Boolean object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"valueOf".into(), Value::Function("Boolean_valueOf".to_string()))?;
     obj_set_value(&obj, &"toString".into(), Value::Function("Boolean_toString".to_string()))?;
     obj_set_value(&obj, &"__value__".into(), Value::Boolean(bool_val))?;
@@ -956,7 +956,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     };
 
     // Create String object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"valueOf".into(), Value::Function("String_valueOf".to_string()))?;
     obj_set_value(&obj, &"toString".into(), Value::Function("String_toString".to_string()))?;
     obj_set_value(&obj, &"length".into(), Value::Number(str_val.len() as f64))?;

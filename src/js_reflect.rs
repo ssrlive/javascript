@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, obj_delete, obj_get_value, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_value, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::raise_type_error;
@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 /// Create the Reflect object with all reflection methods
 pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
-    let reflect_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let reflect_obj = new_js_object_data();
     obj_set_value(&reflect_obj, &"apply".into(), Value::Function("Reflect.apply".to_string()))?;
     obj_set_value(&reflect_obj, &"construct".into(), Value::Function("Reflect.construct".to_string()))?;
     obj_set_value(
@@ -100,7 +100,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             match target {
                 Value::Closure(params, body, captured_env) => {
                     // Create function environment and bind 'this'
-                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     func_env.borrow_mut().is_function_scope = true;
                     obj_set_value(&func_env, &"this".into(), this_arg)?;
@@ -125,13 +125,13 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         evaluated_args.push(evaluate_expr(env, ae)?);
                     }
                     let promise = Rc::new(RefCell::new(crate::js_promise::JSPromise::default()));
-                    let promise_obj = Value::Object(Rc::new(RefCell::new(JSObjectData::new())));
+                    let promise_obj = Value::Object(new_js_object_data());
                     if let Value::Object(obj) = &promise_obj {
                         obj.borrow_mut()
                             .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                     }
 
-                    let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     func_env.borrow_mut().is_function_scope = true;
                     obj_set_value(&func_env, &"this".into(), this_arg)?;
@@ -176,7 +176,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 }
 
                                 // Prepare function environment and bind `this`
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 func_env.borrow_mut().is_function_scope = true;
                                 // Use env_set so function scope semantics apply
@@ -345,7 +345,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     };
                     if let Some(value_rc) = obj_get_value(&obj, &prop_key)? {
                         // Create a descriptor object
-                        let descriptor = Rc::new(RefCell::new(JSObjectData::new()));
+                        let descriptor = new_js_object_data();
                         obj_set_value(&descriptor, &"value".into(), value_rc.borrow().clone())?;
                         obj_set_value(&descriptor, &"writable".into(), Value::Boolean(true))?;
                         obj_set_value(&descriptor, &"enumerable".into(), Value::Boolean(true))?;
@@ -425,7 +425,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
                     let keys_len = keys.len();
                     // Create an array-like object for keys
-                    let result_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let result_obj = new_js_object_data();
                     for (i, key) in keys.into_iter().enumerate() {
                         obj_set_value(&result_obj, &i.to_string().into(), key)?;
                     }

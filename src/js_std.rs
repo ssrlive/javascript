@@ -1,8 +1,5 @@
-use crate::core::JSObjectData;
-use crate::core::{JSObjectDataPtr, Value, obj_set_value};
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_set_value};
 use crate::error::JSError;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 // local helper (currently unused but kept for future use)
 #[allow(dead_code)]
@@ -11,7 +8,7 @@ fn utf8_to_utf16_local(s: &str) -> Vec<u16> {
 }
 
 pub fn make_std_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"sprintf".into(), Value::Function("std.sprintf".to_string()))?;
     obj_set_value(&obj, &"tmpfile".into(), Value::Function("std.tmpfile".to_string()))?;
     obj_set_value(&obj, &"loadFile".into(), Value::Function("std.loadFile".to_string()))?;

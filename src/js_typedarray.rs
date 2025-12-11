@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_value, obj_set_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
@@ -17,7 +17,7 @@ static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Con
 
 /// Create an ArrayBuffer constructor object
 pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     // Set the constructor function
     obj_set_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
@@ -31,7 +31,7 @@ pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
 
 /// Create the Atomics object with basic atomic methods
 pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     obj_set_value(&obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
     obj_set_value(&obj, &"store".into(), Value::Function("Atomics.store".to_string()))?;
@@ -335,7 +335,7 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
 /// Create a SharedArrayBuffer constructor object
 pub fn make_sharedarraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     // Set prototype and name
     obj_set_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
@@ -350,7 +350,7 @@ pub fn make_sharedarraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> 
 
 /// Create the ArrayBuffer prototype
 pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
-    let proto = Rc::new(RefCell::new(JSObjectData::new()));
+    let proto = new_js_object_data();
 
     // Add methods to prototype
     obj_set_value(&proto, &"constructor".into(), Value::Function("ArrayBuffer".to_string()))?;
@@ -366,7 +366,7 @@ pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
 
 /// Create a DataView constructor object
 pub fn make_dataview_constructor() -> Result<JSObjectDataPtr, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     obj_set_value(&obj, &"prototype".into(), Value::Object(make_dataview_prototype()?))?;
     obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16("DataView")))?;
@@ -379,7 +379,7 @@ pub fn make_dataview_constructor() -> Result<JSObjectDataPtr, JSError> {
 
 /// Create the DataView prototype
 pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
-    let proto = Rc::new(RefCell::new(JSObjectData::new()));
+    let proto = new_js_object_data();
 
     obj_set_value(&proto, &"constructor".into(), Value::Function("DataView".to_string()))?;
     obj_set_value(&proto, &"buffer".into(), Value::Function("DataView.prototype.buffer".to_string()))?;
@@ -518,7 +518,7 @@ fn make_typedarray_constructor(name: &str, kind: TypedArrayKind) -> Result<JSObj
     // Mark as TypedArray constructor with kind
     let kind_value = typedarray_kind_to_number(&kind);
 
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     obj_set_value(&obj, &"prototype".into(), Value::Object(make_typedarray_prototype(kind)?))?;
     obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
@@ -529,7 +529,7 @@ fn make_typedarray_constructor(name: &str, kind: TypedArrayKind) -> Result<JSObj
 }
 
 fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JSError> {
-    let proto = Rc::new(RefCell::new(JSObjectData::new()));
+    let proto = new_js_object_data();
 
     // Store the kind in the prototype for later use
     let kind_value = match kind {
@@ -595,7 +595,7 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     }));
 
     // Create the ArrayBuffer object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype
@@ -626,7 +626,7 @@ pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr
     }));
 
     // Create the SharedArrayBuffer object wrapper
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype to ArrayBuffer.prototype
@@ -692,7 +692,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     }));
 
     // Create the DataView object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     obj_set_value(&obj, &"__dataview".into(), Value::DataView(data_view))?;
 
     // Set prototype
@@ -850,7 +850,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
     };
 
     // Create the TypedArray object
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
 
     // Set prototype first
     let proto = make_typedarray_prototype(kind.clone())?;
@@ -1346,10 +1346,10 @@ mod atomics_thread_tests {
                 byte_offset: 0,
                 length: 4,
             }));
-            let obj_local = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj_local = new_js_object_data();
             obj_set_value(&obj_local, &"__typedarray".into(), Value::TypedArray(local_ta)).unwrap();
 
-            let env_local = Rc::new(RefCell::new(JSObjectData::new()));
+            let env_local = new_js_object_data();
             env_local.borrow_mut().is_function_scope = true;
             initialize_global_constructors(&env_local).unwrap();
             obj_set_value(&env_local, &"ia".into(), Value::Object(obj_local)).unwrap();
@@ -1381,9 +1381,9 @@ mod atomics_thread_tests {
             byte_offset: 0,
             length: 4,
         }));
-        let obj_notify = Rc::new(RefCell::new(JSObjectData::new()));
+        let obj_notify = new_js_object_data();
         obj_set_value(&obj_notify, &"__typedarray".into(), Value::TypedArray(local_ta2)).unwrap();
-        let env_notify = Rc::new(RefCell::new(JSObjectData::new()));
+        let env_notify = new_js_object_data();
         env_notify.borrow_mut().is_function_scope = true;
         initialize_global_constructors(&env_notify).unwrap();
         obj_set_value(&env_notify, &"ia".into(), Value::Object(obj_notify)).unwrap();

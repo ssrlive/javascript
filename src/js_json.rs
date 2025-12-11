@@ -1,10 +1,8 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use std::cell::RefCell;
-use std::rc::Rc;
 
 pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
@@ -60,7 +58,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
         serde_json::Value::String(s) => Ok(Value::String(utf8_to_utf16(&s))),
         serde_json::Value::Array(arr) => {
             let len = arr.len();
-            let obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let obj = new_js_object_data();
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
                 obj_set_value(&obj, &i.to_string().into(), js_val)?;
@@ -69,7 +67,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             Ok(Value::Object(obj))
         }
         serde_json::Value::Object(obj) => {
-            let js_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let js_obj = new_js_object_data();
             for (key, value) in obj.into_iter() {
                 let js_val = json_value_to_js_value(value)?;
                 obj_set_value(&js_obj, &key.into(), js_val)?;

@@ -1,9 +1,9 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BigIntHolder, BinaryOp, DestructuringElement, Expr, JSObjectData, JSObjectDataPtr, ObjectDestructuringElement, Statement,
-        SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
-        extract_closure_from_value, get_own_property, is_truthy, obj_delete, obj_set_value, to_primitive, value_to_string, values_equal,
+        BigIntHolder, BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, SwitchCase, SymbolData,
+        TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, extract_closure_from_value,
+        get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_value, to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
@@ -176,7 +176,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     Ok(None)
                 }
                 Statement::Block(stmts) => {
-                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let block_env = new_js_object_data();
                     block_env.borrow_mut().prototype = Some(env.clone());
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, stmts)? {
@@ -524,7 +524,7 @@ fn statement_while_condition_body(
         }
 
         // Execute body
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
@@ -546,7 +546,7 @@ fn statement_do_body_while_condition(
 ) -> Result<Option<ControlFlow>, JSError> {
     loop {
         // Execute body first
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
@@ -574,7 +574,7 @@ fn statement_for_init_condition_increment(
     body: &[Statement],
     last_value: &mut Value,
 ) -> Result<Option<ControlFlow>, JSError> {
-    let for_env = Rc::new(RefCell::new(JSObjectData::new()));
+    let for_env = new_js_object_data();
     for_env.borrow_mut().prototype = Some(env.clone());
     for_env.borrow_mut().is_function_scope = false;
     // Execute initialization in for_env
@@ -615,7 +615,7 @@ fn statement_for_init_condition_increment(
         }
 
         // Execute body in block_env
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(for_env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
@@ -660,7 +660,7 @@ fn perform_statement_if_then_else(
     let cond_val = evaluate_expr(env, condition)?;
     if is_truthy(&cond_val) {
         // create new block scope
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, then_body)? {
@@ -668,7 +668,7 @@ fn perform_statement_if_then_else(
             cf => return Ok(Some(cf)),
         }
     } else if let Some(else_stmts) = else_body {
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, else_stmts)? {
@@ -694,7 +694,7 @@ fn statement_try_catch(
             // For any non-normal control flow, execute finally (if present)
             // then propagate the eventual control flow (finally can override).
             if let Some(finally_body) = finally_body_opt {
-                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(env.clone());
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, finally_body)? {
@@ -712,7 +712,7 @@ fn statement_try_catch(
                 }
                 return Err(err);
             } else {
-                let catch_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let catch_env = new_js_object_data();
                 catch_env.borrow_mut().prototype = Some(env.clone());
                 catch_env.borrow_mut().is_function_scope = false;
                 // Helper: construct a JS Error instance from a constructor name and the original JSError
@@ -720,7 +720,7 @@ fn statement_try_catch(
                     // Try to find the constructor in the environment
                     if let Ok(Some(ctor_rc)) = obj_get_value(env, &ctor_name.into()) {
                         if let Value::Object(ctor_obj) = &*ctor_rc.borrow() {
-                            let instance = Rc::new(RefCell::new(JSObjectData::new()));
+                            let instance = new_js_object_data();
                             // Link prototype
                             if let Ok(Some(proto_val)) = obj_get_value(ctor_obj, &"prototype".into()) {
                                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
@@ -759,7 +759,7 @@ fn statement_try_catch(
                         }
                     }
                     // Fallback: plain Error-like object
-                    let error_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                    let error_obj = new_js_object_data();
                     obj_set_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
                     obj_set_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
                     obj_set_value(&error_obj, &"stack".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
@@ -826,7 +826,7 @@ fn statement_try_catch(
                     ControlFlow::Normal(val) => *last_value = val,
                     cf => {
                         if let Some(finally_body) = finally_body_opt {
-                            let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            let block_env = new_js_object_data();
                             block_env.borrow_mut().prototype = Some(env.clone());
                             block_env.borrow_mut().is_function_scope = false;
                             match evaluate_statements_with_context(&block_env, finally_body)? {
@@ -842,7 +842,7 @@ fn statement_try_catch(
     }
     // Finally block executes after try/catch
     if let Some(finally_body) = finally_body_opt {
-        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+        let block_env = new_js_object_data();
         block_env.borrow_mut().prototype = Some(env.clone());
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, finally_body)? {
@@ -864,7 +864,7 @@ fn perform_statement_label(
     // labeled `break/continue` control flow can be handled.
     match inner_stmt {
         Statement::For(init, condition, increment, body) => {
-            let for_env = Rc::new(RefCell::new(JSObjectData::new()));
+            let for_env = new_js_object_data();
             for_env.borrow_mut().prototype = Some(env.clone());
             for_env.borrow_mut().is_function_scope = false;
             // Execute initialization
@@ -902,7 +902,7 @@ fn perform_statement_label(
                     break;
                 }
 
-                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(for_env.clone());
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, body)? {
@@ -957,7 +957,7 @@ fn perform_statement_label(
                             if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                                 let element = element_rc.borrow().clone();
                                 env_set_recursive(env, var.as_str(), element)?;
-                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                let block_env = new_js_object_data();
                                 block_env.borrow_mut().prototype = Some(env.clone());
                                 block_env.borrow_mut().is_function_scope = false;
                                 match evaluate_statements_with_context(&block_env, body)? {
@@ -1017,7 +1017,7 @@ fn perform_statement_label(
                 if !is_truthy(&cond_val) {
                     break Ok(None);
                 }
-                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(env.clone());
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, body)? {
@@ -1043,7 +1043,7 @@ fn perform_statement_label(
         }
         Statement::DoWhile(body, condition) => {
             loop {
-                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(env.clone());
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, body)? {
@@ -1498,7 +1498,7 @@ fn perform_array_destructuring(
                         rest_elements.push(val_rc.borrow().clone());
                     }
                 }
-                let rest_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                let rest_obj = new_js_object_data();
                 let mut rest_index = 0;
                 for elem in rest_elements {
                     obj_set_value(&rest_obj, &rest_index.to_string().into(), elem)?;
@@ -1578,7 +1578,7 @@ fn perform_object_destructuring(
                     }
                     ObjectDestructuringElement::Rest(var) => {
                         // Collect remaining properties
-                        let rest_obj = Rc::new(RefCell::new(JSObjectData::new()));
+                        let rest_obj = new_js_object_data();
                         let mut assigned_keys = std::collections::HashSet::new();
 
                         // Collect keys that were already assigned
@@ -1636,7 +1636,7 @@ fn for_of_destructuring_object_iter(
                         let element = element_rc.borrow().clone();
                         // perform destructuring into env (var semantics)
                         perform_object_destructuring(env, pattern, &element, false)?;
-                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let block_env = new_js_object_data();
                         block_env.borrow_mut().prototype = Some(env.clone());
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
@@ -1699,7 +1699,7 @@ fn for_of_destructuring_array_iter(
                         let element = element_rc.borrow().clone();
                         // perform array destructuring into env (var semantics)
                         perform_array_destructuring(env, pattern, &element, false)?;
-                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let block_env = new_js_object_data();
                         block_env.borrow_mut().prototype = Some(env.clone());
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
@@ -1743,7 +1743,7 @@ fn for_of_destructuring_array_iter(
                         // either a direct closure or a function-object wrapper.
                         let iterator = if let Some((params, body, closure_env)) = extract_closure_from_value(&iterator_factory) {
                             // Call the closure with `this` bound to the original object
-                            let call_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            let call_env = new_js_object_data();
                             call_env.borrow_mut().prototype = Some(closure_env.clone());
                             // Bind `this` to the receiver
                             obj_set_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
@@ -1762,7 +1762,7 @@ fn for_of_destructuring_array_iter(
                                 loop {
                                     // Call next() — accept direct closures or function-objects
                                     if let Some((nparams, nbody, nclosure_env)) = extract_closure_from_value(&next_func) {
-                                        let call_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                        let call_env = new_js_object_data();
                                         call_env.borrow_mut().prototype = Some(nclosure_env.clone());
                                         // Bind `this` to iterator object
                                         obj_set_value(&call_env, &"this".into(), Value::Object(iterator_obj.clone()))?;
@@ -1785,7 +1785,7 @@ fn for_of_destructuring_array_iter(
                                                 let element = value_val.borrow().clone();
                                                 // perform array destructuring into env (var semantics)
                                                 perform_array_destructuring(env, pattern, &element, false)?;
-                                                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                                let block_env = new_js_object_data();
                                                 block_env.borrow_mut().prototype = Some(env.clone());
                                                 block_env.borrow_mut().is_function_scope = false;
                                                 match evaluate_statements_with_context(&block_env, body)? {
@@ -1867,7 +1867,7 @@ fn statement_for_of_var_iter(
                     if let Some(element_rc) = obj_get_value(&obj_map, &key)? {
                         let element = element_rc.borrow().clone();
                         env_set_recursive(env, var, element)?;
-                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let block_env = new_js_object_data();
                         block_env.borrow_mut().prototype = Some(env.clone());
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
@@ -1893,7 +1893,7 @@ fn statement_for_of_var_iter(
                             let method_val = &*method_rc.borrow();
                             if let Some((params, body, captured_env)) = extract_closure_from_value(method_val) {
                                 // Call closure with 'this' bound to the object
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 // mark this as a function scope so var-hoisting and
                                 // env_set_var bind into this frame rather than parent
@@ -1927,7 +1927,7 @@ fn statement_for_of_var_iter(
                                     let next_val = {
                                         let nv = &*next_rc.borrow();
                                         if let Some((nparams, nbody, ncaptured_env)) = extract_closure_from_value(nv) {
-                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            let func_env = new_js_object_data();
                                             func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
                                             obj_set_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
                                             // Bind params to undefined (no args)
@@ -1966,7 +1966,7 @@ fn statement_for_of_var_iter(
                                         };
 
                                         env_set_recursive(env, var, element)?;
-                                        let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                        let block_env = new_js_object_data();
                                         block_env.borrow_mut().prototype = Some(env.clone());
                                         block_env.borrow_mut().is_function_scope = false;
                                         match evaluate_statements_with_context(&block_env, body)? {
@@ -2005,7 +2005,7 @@ fn statement_for_of_var_iter(
             let mut i = 0usize;
             while let Some(ch) = utf16_char_at(&s, i) {
                 env_set_recursive(env, var, Value::String(vec![ch]))?;
-                let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(env.clone());
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, body)? {
@@ -2049,7 +2049,7 @@ fn eval_switch_statement(
                     }
                 }
                 if found_match {
-                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let block_env = new_js_object_data();
                     block_env.borrow_mut().prototype = Some(env.clone());
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, case_stmts)? {
@@ -2072,7 +2072,7 @@ fn eval_switch_statement(
             SwitchCase::Default(default_stmts) => {
                 if !found_match && !executed_default {
                     executed_default = true;
-                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let block_env = new_js_object_data();
                     block_env.borrow_mut().prototype = Some(env.clone());
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, default_stmts)? {
@@ -2091,7 +2091,7 @@ fn eval_switch_statement(
                         cf => return Ok(Some(cf)),
                     }
                 } else if found_match {
-                    let block_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let block_env = new_js_object_data();
                     block_env.borrow_mut().prototype = Some(env.clone());
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, default_stmts)? {
@@ -2174,10 +2174,10 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // script-level assignments like `F.prototype = ...` work. Store
             // the executable closure under an internal `__closure__` key and
             // expose a `prototype` object with a `constructor` backpointer.
-            let func_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let func_obj = new_js_object_data();
 
             // Create the associated prototype object for instances
-            let prototype_obj = Rc::new(RefCell::new(JSObjectData::new()));
+            let prototype_obj = new_js_object_data();
 
             // Store the closure under an internal key
             let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
@@ -2352,7 +2352,7 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "JSON" {
-        let json_obj = Rc::new(RefCell::new(JSObjectData::new()));
+        let json_obj = new_js_object_data();
         obj_set_value(&json_obj, &"parse".into(), Value::Function("JSON.parse".to_string()))?;
         obj_set_value(&json_obj, &"stringify".into(), Value::Function("JSON.stringify".to_string()))?;
         let v = Value::Object(json_obj);
@@ -4567,7 +4567,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         }));
 
         // Wrap the promise in an object with __promise property
-        let promise_obj = Rc::new(RefCell::new(JSObjectData::new()));
+        let promise_obj = new_js_object_data();
         obj_set_value(&promise_obj, &"__promise".into(), Value::Promise(promise))?;
 
         return Ok(Value::Object(promise_obj));
@@ -4756,7 +4756,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                 // Create new environment starting with captured environment
                                 // Use a fresh environment frame whose prototype points to the captured environment
-                                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 // Bind parameters: assign provided args, set missing params to undefined
                                 for (i, param) in params.iter().enumerate() {
@@ -4888,7 +4888,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                             // Create new environment starting with captured environment (fresh frame)
-                                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                                            let func_env = new_js_object_data();
                                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                                             // ensure this env is a proper function scope
                                             func_env.borrow_mut().is_function_scope = true;
@@ -4978,7 +4978,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                 // Create new environment starting with captured environment (fresh frame)
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // ensure this env is a proper function scope
                 func_env.borrow_mut().is_function_scope = true;
@@ -5013,13 +5013,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                 // Create a Promise object
                 let promise = Rc::new(RefCell::new(JSPromise::default()));
-                let promise_obj = Value::Object(Rc::new(RefCell::new(JSObjectData::new())));
+                let promise_obj = Value::Object(new_js_object_data());
                 if let Value::Object(obj) = &promise_obj {
                     obj.borrow_mut()
                         .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                 }
                 // Create new environment
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 func_env.borrow_mut().is_function_scope = true;
                 // Bind parameters
@@ -5055,7 +5055,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                             // Create new environment starting with captured environment (fresh frame)
-                            let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                            let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             // ensure this env is a proper function scope
                             func_env.borrow_mut().is_function_scope = true;
@@ -5357,7 +5357,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                 // Create new environment starting with captured environment (fresh frame)
-                let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // Bind parameters: provide provided args, set missing params to undefined
                 for (i, param) in params.iter().enumerate() {
@@ -5376,7 +5376,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
 }
 
 fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> Result<Value, JSError> {
-    let obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let obj = new_js_object_data();
     // Attempt to set the default prototype for object literals to Object.prototype
     // by finding the global 'Object' constructor and using its 'prototype' property.
     // Walk to the top-level environment
@@ -5535,7 +5535,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
 }
 
 fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
-    let arr = Rc::new(RefCell::new(JSObjectData::new()));
+    let arr = new_js_object_data();
     // Give arrays a default prototype (Object.prototype) until Array.prototype exists
     let mut root_env_opt = Some(env.clone());
     while let Some(r) = root_env_opt.clone() {
@@ -5763,7 +5763,7 @@ fn handle_optional_method_call(
                         let mut evaluated_args = Vec::new();
                         expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                         // Create new environment starting with captured environment (fresh frame)
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         // Bind parameters: provide provided args, set missing params to undefined
                         for (i, param) in params.iter().enumerate() {

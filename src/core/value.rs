@@ -516,6 +516,11 @@ pub enum GeneratorState {
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
 
+#[inline]
+pub fn new_js_object_data() -> JSObjectDataPtr {
+    Rc::new(RefCell::new(JSObjectData::new()))
+}
+
 #[derive(Clone, Default)]
 pub struct JSObjectData {
     pub properties: std::collections::HashMap<PropertyKey, Rc<RefCell<Value>>>,
@@ -805,7 +810,7 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
                     // Accept direct closures or function-objects that wrap a closure
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
                         // Create a new execution env and bind this
-                        let func_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                         // Pass hint as first param if the function declares params
@@ -920,7 +925,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                     log::trace!("obj_get_value - property descriptor found for key {}", key);
                     if let Some((body, env)) = getter {
                         // Create a new environment with this bound to the original object
-                        let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                        let getter_env = new_js_object_data();
                         getter_env.borrow_mut().prototype = Some(env);
                         env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                         let result = evaluate_statements(&getter_env, &body)?;
@@ -941,7 +946,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                 }
                 Value::Getter(body, env) => {
                     log::trace!("obj_get_value - getter found for key {}", key);
-                    let getter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let getter_env = new_js_object_data();
                     getter_env.borrow_mut().prototype = Some(env);
                     env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                     let result = evaluate_statements(&getter_env, &body)?;
@@ -1021,7 +1026,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                     )]))),
                 ];
 
-                let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let captured_env = new_js_object_data();
                 captured_env.borrow_mut().insert(
                     PropertyKey::String("__array".to_string()),
                     Rc::new(RefCell::new(Value::Object(js_obj.clone()))),
@@ -1093,7 +1098,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                         )]))),
                     ];
 
-                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let captured_env = new_js_object_data();
                     // Store map entries in the closure environment
                     let mut entries_obj = JSObjectData::new();
                     for (i, (key, value)) in map_entries.iter().enumerate() {
@@ -1165,7 +1170,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                         )]))),
                     ];
 
-                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let captured_env = new_js_object_data();
                     // Store set values in the closure environment
                     let mut values_obj = JSObjectData::new();
                     for (i, value) in set_values.iter().enumerate() {
@@ -1229,7 +1234,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                         )]))),
                     ];
 
-                    let captured_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let captured_env = new_js_object_data();
                     captured_env.borrow_mut().insert(
                         PropertyKey::String("__s".to_string()),
                         Rc::new(RefCell::new(wrapped.borrow().clone())),
@@ -1289,7 +1294,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
             Value::Property { value: _, getter, setter } => {
                 if let Some((param, body, env)) = setter {
                     // Create a new environment with this bound to the object and the parameter
-                    let setter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                    let setter_env = new_js_object_data();
                     setter_env.borrow_mut().prototype = Some(env);
                     env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                     env_set(&setter_env, &param[0], val)?;
@@ -1325,7 +1330,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
             }
             Value::Setter(param, body, env) => {
                 // Create a new environment with this bound to the object and the parameter
-                let setter_env = Rc::new(RefCell::new(JSObjectData::new()));
+                let setter_env = new_js_object_data();
                 setter_env.borrow_mut().prototype = Some(env);
                 env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                 env_set(&setter_env, &param[0], val)?;

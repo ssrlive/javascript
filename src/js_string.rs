@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::raise_eval_error;
@@ -6,8 +6,6 @@ use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
 };
 use fancy_regex::Regex;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
@@ -171,7 +169,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                             }
                         }
                     }
-                    let arr = Rc::new(RefCell::new(JSObjectData::new()));
+                    let arr = new_js_object_data();
                     for (i, part) in parts.into_iter().enumerate() {
                         obj_set_value(&arr, &i.to_string().into(), Value::String(part))?;
                     }
@@ -241,7 +239,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         }
                     }
 
-                    let arr = Rc::new(RefCell::new(JSObjectData::new()));
+                    let arr = new_js_object_data();
                     for (i, part) in parts_utf8.into_iter().enumerate() {
                         obj_set_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
                     }

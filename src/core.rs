@@ -60,7 +60,7 @@ where
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("stmt[{i}] = {stmt:?}");
     }
-    let env: JSObjectDataPtr = Rc::new(RefCell::new(JSObjectData::new()));
+    let env: JSObjectDataPtr = new_js_object_data();
     env.borrow_mut().is_function_scope = true;
     // Record a script name on the root environment so stack frames can include it.
     let path = script_path.map_or("<script>".to_string(), |p| p.as_ref().to_string_lossy().to_string());
@@ -133,12 +133,12 @@ pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: 
         }
     }
 
-    let ctor = Rc::new(RefCell::new(JSObjectData::new()));
+    let ctor = new_js_object_data();
     // mark constructor
     obj_set_value(&ctor, &marker_key.into(), Value::Boolean(true))?;
 
     // create prototype object
-    let proto = Rc::new(RefCell::new(JSObjectData::new()));
+    let proto = new_js_object_data();
     // link prototype.__proto__ to Object.prototype if available
     if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
         && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
@@ -498,7 +498,7 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     let mut env_borrow = env.borrow_mut();
 
     // Object constructor (object with static methods) and Object.prototype
-    let object_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let object_obj = new_js_object_data();
 
     // Add static Object.* methods (handlers routed by presence of keys)
     obj_set_value(&object_obj, &"keys".into(), Value::Function("Object.keys".to_string()))?;
@@ -522,7 +522,7 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     )?;
 
     // Create Object.prototype and add prototype-level helpers
-    let object_prototype = Rc::new(RefCell::new(JSObjectData::new()));
+    let object_prototype = new_js_object_data();
     obj_set_value(
         &object_prototype,
         &"hasOwnProperty".into(),

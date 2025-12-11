@@ -1,15 +1,13 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{Expr, JSObjectData, JSObjectDataPtr, Value, evaluate_expr, obj_get_value, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_value, obj_set_value};
 use crate::error::JSError;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Create the Number object with all number constants and functions
 pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
-    let number_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let number_obj = new_js_object_data();
     obj_set_value(&number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
     obj_set_value(&number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
     obj_set_value(&number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
@@ -29,7 +27,7 @@ pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_value(&number_obj, &"parseFloat".into(), Value::Function("Number.parseFloat".to_string()))?;
     obj_set_value(&number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
     // Create Number.prototype
-    let number_prototype = Rc::new(RefCell::new(JSObjectData::new()));
+    let number_prototype = new_js_object_data();
     obj_set_value(
         &number_prototype,
         &"toString".into(),
@@ -256,7 +254,7 @@ pub fn handle_number_object_method(
 /// Box a number into a Number object and get a property
 pub fn box_number_and_get_property(n: f64, prop: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Box the number into a Number object
-    let number_obj = Rc::new(RefCell::new(JSObjectData::new()));
+    let number_obj = new_js_object_data();
     obj_set_value(&number_obj, &"__value__".into(), Value::Number(n))?;
     // Set prototype to Number.prototype (if available)
     crate::core::set_internal_prototype_from_constructor(&number_obj, env, "Number")?;

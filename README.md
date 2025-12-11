@@ -9,41 +9,54 @@
 [![Downloads](https://img.shields.io/crates/d/javascript.svg)](https://crates.io/crates/javascript)
 
 A JavaScript engine implementation written in Rust, providing a complete JavaScript runtime
-with support for modern language features.
+with support for modern language features including ES6+ modules, async/await, BigInt, TypedArray, and more.
 
 ## Features
 
-### Core JavaScript Features
-- **Variables and Scoping**: `let`, `const`, `var` declarations
-- **Data Types**: Numbers, strings, booleans, objects, arrays, functions, classes
+### Core JavaScript Features (ES5-ES2020)
+- **Variables and Scoping**: `let`, `const`, `var` declarations with proper scope rules
+- **Data Types**: Numbers, strings, booleans, BigInt, symbols, objects, arrays, functions, classes
 - **Control Flow**: `if/else`, loops (`for`, `while`, `do-while`), `switch`, `try/catch/finally`
-- **Functions**: Regular functions, arrow functions, async/await
-- **Classes**: Class definitions, inheritance, static methods/properties, getters/setters
-- **Promises**: Promise creation, resolution, async/await syntax
-- **Destructuring**: Array and object destructuring
-- **Template Literals**: String interpolation
+- **Functions**: Regular functions, arrow functions, async/await, generators, parameters with defaults and rest/spread
+- **Classes**: Class definitions, inheritance, constructors, static methods/properties, getters/setters
+- **Promises**: Full Promise implementation with async task scheduling
+- **Destructuring**: Array and object destructuring assignments
+- **Template Literals**: String interpolation with embedded expressions
 - **Optional Chaining**: Safe property access (`?.`)
 - **Nullish Coalescing**: `??` operator and assignments (`??=`)
 - **Logical Assignments**: `&&=`, `||=` operators
+- **Modules**: ES6 `import`/`export` syntax and dynamic `import()`
+- **Iterators**: Full `Symbol.iterator` support and `for...of` loops
+- **Generators**: Generator functions (`function*`) and generator objects
 
 ### Built-in Objects and APIs
-- **Array**: Full array methods and static constructors
-- **Object**: Property manipulation, prototype chain
-- **String**: String methods and UTF-16 support
+- **Array**: Complete array methods (`push`, `pop`, `map`, `filter`, `reduce`, etc.)
+- **Object**: Property manipulation, prototype chains, static methods (`keys`, `values`, `assign`, etc.)
+- **String**: String methods with UTF-16 support
 - **Number**: Number parsing and formatting
+- **BigInt**: Large integer arithmetic with Number interop
 - **Math**: Mathematical functions and constants
-- **Date**: Date/time handling with chrono integration
-- **RegExp**: Regular expressions with regex crate
+- **Date**: Date/time handling (powered by chrono)
+- **RegExp**: Regular expressions (powered by fancy-regex)
 - **JSON**: JSON parsing and stringification
-- **Console**: Logging and debugging utilities
-- **OS**: File system operations, path manipulation
-- **File**: File I/O operations
+- **Promise**: Full Promise API with event loop
+- **Symbol**: Symbol primitives including well-known symbols
+- **Map/Set**: Map, Set, WeakMap, WeakSet collections
+- **Proxy**: Complete proxy objects with revocable proxies
+- **Reflect**: Full Reflect API
+- **TypedArray**: All typed arrays (Int8Array, Uint8Array, Float32Array, etc.)
+- **ArrayBuffer**: Binary data buffers
+- **DataView**: Binary data views with endianness support
+- **setTimeout/clearTimeout**: Asynchronous timer functions with cancellation support
+- **Error**: Error types and stack traces
+- **OS**: File system operations and path manipulation
 
 ### Advanced Features
-- **Modules**: Import/export system with `import * as name from "module"`
 - **Event Loop**: Asynchronous task scheduling and execution
-- **Memory Management**: Reference counting and garbage collection
+- **Memory Management**: Reference counting with garbage collection
 - **FFI Integration**: C-compatible API similar to QuickJS
+- **REPL**: Interactive persistent environment
+- **Binary Data**: Complete TypedArray and DataView support
 
 ## Installation
 
@@ -51,7 +64,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-javascript = "0.1.0"
+javascript = "0.1.8"
 ```
 
 ## Usage
@@ -62,13 +75,13 @@ javascript = "0.1.0"
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"
-    let x = 42;
-    let y = x * 2;
-    y + 10
+    let x = 42n;
+    let y = x * 2n;
+    y + 10n
 "#, None::<&std::path::Path>).unwrap();
 
 match result {
-    javascript::Value::Number(n) => println!("Result: {}", n), // Output: Result: 94
+    javascript::Value::BigInt(b) => println!("Result: {b}"), // Output: Result: 94n
     _ => println!("Unexpected result"),
 }
 ```
@@ -88,86 +101,157 @@ let result = evaluate_script(r#"
 "#, None::<&std::path::Path>).unwrap();
 ```
 
+### Working with Promises
+
+```rust
+use javascript::evaluate_script;
+
+let result = evaluate_script(r#"
+    async function example() {
+        let promise = new Promise((resolve) => {
+            setTimeout(() => resolve("Done!"), 100);
+        });
+        return await promise;
+    }
+    example()
+"#, None::<&std::path::Path>).unwrap();
+// The engine automatically runs the event loop to resolve promises
+```
+
+### Using setTimeout
+
+```rust
+use javascript::evaluate_script;
+
+let result = evaluate_script(r#"
+    let timeoutId = setTimeout(() => {
+        console.log("Timeout executed!");
+    }, 1000);
+    
+    // Cancel the timeout
+    clearTimeout(timeoutId);
+    
+    "Timeout scheduled and cancelled"
+"#, None::<&std::path::Path>).unwrap();
+```
+
 ### Command Line Interface
 
-The crate provides an example CLI binary with REPL support:
+The crate provides a CLI binary with REPL support:
 
 #### `js` - Command-line interface with REPL
 ```bash
+# Execute a script string
 cargo run --example js -- -e "console.log('Hello World!')"
-cargo run --example js script.js
-cargo run --example js  # no args -> enter persistent REPL (state is retained across inputs)
+
+# Execute a JavaScript file
+cargo run --example js -- script.js
+
+# Start interactive REPL (persistent environment)
+cargo run --example js
 ```
+
+The REPL maintains state between evaluations, allowing you to define variables and functions that persist across multiple inputs.
 
 ## API Reference
 
 ### Core Functions
 
-- `evaluate_script(code: &str) -> Result<Value, JSError>`: Evaluate JavaScript code
-- `evaluate_script_async(code: &str) -> Result<Value, JSError>`: Evaluate with async support
-- `tokenize(code: &str) -> Result<Vec<Token>, JSError>`: Lexical analysis
-
-### FFI Interface (QuickJS-compatible)
-
-- `JS_NewRuntime() -> *mut JSRuntime`: Create a new runtime
-- `JS_NewContext(rt: *mut JSRuntime) -> *mut JSContext`: Create a context
-- `JS_Eval(ctx, code, len, filename, flags) -> JSValue`: Evaluate code
-- `JS_NewString(ctx, str) -> JSValue`: Create a string value
-- `JS_DefinePropertyValue(ctx, obj, atom, val, flags) -> i32`: Define object property
+- `evaluate_script<T: AsRef<str>, P: AsRef<Path>>(code: T, script_path: Option<P>) -> Result<Value, JSError>`:
+  Evaluate JavaScript code with optional script path for error reporting
+- `tokenize(code: &str) -> Result<Vec<Token>, JSError>`: Perform lexical analysis
+- `parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError>`: Parse tokens into AST
+- `Repl::new() -> Repl`: Create a new persistent REPL environment
+- `Repl::eval(&self, code: &str) -> Result<Value, JSError>`: Evaluate code in REPL context
 
 ### Value Types
 
-The engine uses a `Value` enum to represent JavaScript values. See the source code for the complete definition, which includes variants for numbers, strings, objects, functions, promises, and more.
+The engine uses a comprehensive `Value` enum to represent JavaScript values, including primitives
+(numbers, strings, booleans), objects, functions, promises, symbols, BigInts, collections
+(Map, Set, WeakMap, WeakSet), generators, proxies, and typed arrays.
 
 ## Architecture
 
 The engine consists of several key components:
 
-- **Parser**: Converts JavaScript source code into an AST
-- **Evaluator**: Executes the AST in a managed environment
-- **Object System**: Reference-counted objects with prototype chains
-- **Memory Management**: Custom allocators and garbage collection
+- **Lexer**: Converts source code to tokens (`tokenize`)
+- **Parser**: Builds AST from tokens (`parse_statements`)
+- **Evaluator**: Executes AST in managed environment (`evaluate_statements`)
+- **Object System**: Reference-counted objects with prototype inheritance
+- **Event Loop**: Handles async operations and promise resolution
+- **Built-in Modules**: Standard library implementations (Array, Object, Math, etc.)
 - **FFI Layer**: C-compatible interface for embedding
-- **Built-in Modules**: Standard library implementations
 
 ## Testing
 
-Run the test suite:
+### Unit Tests
+Run the comprehensive test suite:
 
 ```bash
 cargo test
 ```
 
-Run with logging:
+Run with detailed logging:
 
 ```bash
 RUST_LOG=debug cargo test
 ```
 
+### Benchmarks
+Run performance benchmarks:
+
+```bash
+cargo bench
+```
+
 ## Performance
 
 The engine is optimized for:
-- Fast parsing and evaluation
-- Efficient memory usage with Rc<RefCell<>>
-- Minimal allocations during execution
-- QuickJS-compatible FFI for high-performance embedding
+- Fast lexical analysis and parsing
+- Efficient AST evaluation
+- Minimal memory allocations during execution
+- Reference-counted memory management
+- Event loop for async operations
+
+Benchmark results show competitive performance for interpretation workloads.
 
 ## Limitations
 
-- No JIT compilation (interpreted only)
-- Limited browser API compatibility
-- Some ES6+ features may be incomplete
-- Error handling could be more robust
+While the engine supports most modern JavaScript features, some areas are still developing:
+
+- **Web APIs**: No DOM, Fetch, WebSocket, or browser-specific APIs
+- **WebAssembly**: No WASM support
+- **SharedArrayBuffer**: No shared memory support
+- **JIT Compilation**: Interpreted only (no just-in-time compilation)
+- **TypeScript**: No type checking or compilation
+- **Source Maps**: No source map support for debugging
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
+Contributions are welcome! Areas for potential improvement:
 
-- JIT compilation support
-- More comprehensive test coverage
-- Browser API compatibility
-- Performance optimizations
-- Additional language features
+- **Performance**: JIT compilation, optimization passes
+- **Compatibility**: Additional Web APIs, SharedArrayBuffer
+- **Tooling**: TypeScript support, source maps, debugger
+- **Testing**: More comprehensive test coverage, fuzzing
+- **Documentation**: API docs, tutorials, examples
+
+### Development Setup
+
+```bash
+# Clone the repository
+git clone https://github.com/ssrlive/javascript.git
+cd javascript
+
+# Run tests
+cargo test
+
+# Run benchmarks
+cargo bench
+
+# Build documentation
+cargo doc --open
+```
 
 ## License
 
@@ -176,5 +260,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## Acknowledgments
 
 - Inspired by the QuickJS JavaScript engine
-- Built with Rust's powerful type system and memory safety guarantees
-- Uses several excellent Rust crates: `regex`, `chrono`, `serde_json`, etc.
+- Built with Rust's powerful type system and memory safety
+- Uses excellent Rust crates: `chrono`, `fancy-regex`, `num-bigint`, `serde_json`, `thiserror`, etc.
+- Thanks to the Rust community for outstanding tooling and libraries

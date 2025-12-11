@@ -1,7 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_value, obj_set_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
-use crate::raise_type_error;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;

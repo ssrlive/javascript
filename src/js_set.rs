@@ -4,7 +4,6 @@ use crate::{
         values_equal,
     },
     error::JSError,
-    raise_eval_error,
 };
 use std::cell::RefCell;
 use std::rc::Rc;

@@ -2,7 +2,6 @@
 
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_value, obj_set_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 
 /// Create the Number object with all number constants and functions

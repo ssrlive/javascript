@@ -1,6 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_set_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
 
 /// Create the Math object with all mathematical constants and functions
 pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {

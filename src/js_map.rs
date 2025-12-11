@@ -1,15 +1,13 @@
+use crate::core::JSMap;
 use crate::{
     core::{
         Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data, obj_get_value,
         obj_set_value, values_equal,
     },
     error::JSError,
-    raise_eval_error,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-
-use crate::core::JSMap;
 
 /// Handle Map constructor calls
 pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

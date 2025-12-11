@@ -1,6 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
 
 /// Create the assert object with testing functions
 pub fn make_assert_object() -> Result<JSObjectDataPtr, JSError> {

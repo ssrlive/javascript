@@ -2,7 +2,6 @@ use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, to_primi
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
-use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;

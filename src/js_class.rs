@@ -2,7 +2,6 @@
 
 use crate::core::value_to_string;
 use crate::js_array::is_array;
-use crate::raise_eval_error;
 use crate::{
     core::{
         Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, new_js_object_data, obj_get_value,

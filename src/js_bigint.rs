@@ -1,6 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use num_bigint::BigInt;
 use num_bigint::Sign;

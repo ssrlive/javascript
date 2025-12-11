@@ -4,7 +4,6 @@ use crate::{
         obj_get_value, obj_set_value,
     },
     error::JSError,
-    raise_eval_error,
     unicode::utf8_to_utf16,
 };
 use std::cell::RefCell;

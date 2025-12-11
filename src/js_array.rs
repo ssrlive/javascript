@@ -1,7 +1,6 @@
 use crate::{
     core::{JSObjectDataPtr, PropertyKey, extract_closure_from_value, new_js_object_data},
     error::JSError,
-    raise_eval_error,
     unicode::utf8_to_utf16,
 };
 use std::cell::RefCell;

@@ -50,8 +50,8 @@ fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<V
     let module_path = resolve_module_path(module_name, base_path)?;
 
     // Read the file
-    let content = std::fs::read_to_string(&module_path)
-        .map_err(|e| crate::raise_eval_error!(format!("Failed to read module file '{module_path}': {e}")))?;
+    let content =
+        std::fs::read_to_string(&module_path).map_err(|e| raise_eval_error!(format!("Failed to read module file '{module_path}': {e}")))?;
 
     // Execute the module and get the final module value
     execute_module(&content, &module_path)
@@ -71,7 +71,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
         } else {
             // Use current working directory as base when no base_path is provided
             std::env::current_dir()
-                .map_err(|e| crate::raise_eval_error!(format!("Failed to get current directory: {e}")))?
+                .map_err(|e| raise_eval_error!(format!("Failed to get current directory: {e}")))?
                 .join(module_name)
         };
 
@@ -83,7 +83,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
         // Canonicalize the path
         match full_path.canonicalize() {
             Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
-            Err(_) => Err(crate::raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
+            Err(_) => Err(raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
         }
     } else {
         // For now, treat relative paths as relative to current directory
@@ -94,7 +94,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
 
         match full_path.canonicalize() {
             Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
-            Err(_) => Err(crate::raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
+            Err(_) => Err(raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
         }
     }
 }
@@ -167,9 +167,9 @@ pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value
     match module_value {
         Value::Object(obj) => match obj_get_value(obj, &specifier.into())? {
             Some(val) => Ok(val.borrow().clone()),
-            None => Err(crate::raise_eval_error!(format!("Export '{}' not found in module", specifier))),
+            None => Err(raise_eval_error!(format!("Export '{}' not found in module", specifier))),
         },
-        _ => Err(crate::raise_eval_error!("Module is not an object")),
+        _ => Err(raise_eval_error!("Module is not an object")),
     }
 }
 

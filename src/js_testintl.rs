@@ -3,7 +3,6 @@ use crate::core::{
     obj_set_value,
 };
 use crate::error::JSError;
-use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::rc::Rc;
 

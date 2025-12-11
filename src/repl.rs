@@ -5,7 +5,6 @@ use crate::{
         obj_get_value, obj_set_value, parse_statements, tokenize, value_to_string,
     },
     js_promise::{PromiseState, run_event_loop},
-    raise_eval_error,
 };
 
 /// A small persistent REPL environment wrapper.

@@ -1,7 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
-use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

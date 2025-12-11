@@ -1,6 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
 use crate::error::JSError;
-use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 

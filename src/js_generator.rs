@@ -1,7 +1,6 @@
 use crate::{
     core::{Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr},
     error::JSError,
-    raise_eval_error,
 };
 
 use std::cell::RefCell;

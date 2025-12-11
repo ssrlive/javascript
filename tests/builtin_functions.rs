@@ -558,6 +558,18 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_char_at_negative() {
+        let script = "'hello'.charAt(-1)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                assert_eq!(s.len(), 0);
+            }
+            _ => panic!("Expected charAt(-1) to return empty string, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_string_replace_functional() {
         let script = "'hello world'.replace('world', 'there')";
         let result = evaluate_script(script, None::<&std::path::Path>);

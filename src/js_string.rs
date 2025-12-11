@@ -258,16 +258,19 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 let idx_val = evaluate_expr(env, &args[0])?;
                 if let Value::Number(n) = idx_val {
                     let idx = n as isize;
-                    // let len = utf16_len(&s) as isize;
-                    let idx = if idx < 0 { 0 } else { idx } as usize;
-                    if idx < utf16_len(s) {
-                        if let Some(ch) = utf16_char_at(s, idx) {
-                            Ok(Value::String(vec![ch]))
+                    if idx < 0 {
+                        Ok(Value::String(Vec::new()))
+                    } else {
+                        let idx = idx as usize;
+                        if idx < utf16_len(s) {
+                            if let Some(ch) = utf16_char_at(s, idx) {
+                                Ok(Value::String(vec![ch]))
+                            } else {
+                                Ok(Value::String(Vec::new()))
+                            }
                         } else {
                             Ok(Value::String(Vec::new()))
                         }
-                    } else {
-                        Ok(Value::String(Vec::new()))
                     }
                 } else {
                     Err(raise_eval_error!("charAt: argument must be a number"))

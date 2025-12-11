@@ -695,6 +695,32 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_trim_end() {
+        let script = "'  hello world  '.trimEnd()";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "  hello world");
+            }
+            _ => panic!("Expected trimEnd to return '  hello world', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_trim_start() {
+        let script = "'  hello world  '.trimStart()";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world  ");
+            }
+            _ => panic!("Expected trimStart to return 'hello world  ', got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_string_starts_with() {
         let script = "'hello world'.startsWith('hello')";
         let result = evaluate_script(script, None::<&std::path::Path>);

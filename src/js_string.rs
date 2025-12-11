@@ -393,6 +393,26 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 Err(raise_eval_error!(format!("trim method expects no arguments, got {}", args.len())))
             }
         }
+        "trimEnd" => {
+            if args.is_empty() {
+                let str_val = String::from_utf16_lossy(s);
+                let trimmed = str_val.trim_end();
+                Ok(Value::String(utf8_to_utf16(trimmed)))
+            } else {
+                let msg = format!("trimEnd method expects no arguments, got {}", args.len());
+                Err(raise_eval_error!(msg))
+            }
+        }
+        "trimStart" => {
+            if args.is_empty() {
+                let str_val = String::from_utf16_lossy(s);
+                let trimmed = str_val.trim_start();
+                Ok(Value::String(utf8_to_utf16(trimmed)))
+            } else {
+                let msg = format!("trimStart method expects no arguments, got {}", args.len());
+                Err(raise_eval_error!(msg))
+            }
+        }
         "startsWith" => {
             if args.len() == 1 {
                 let search_val = evaluate_expr(env, &args[0])?;

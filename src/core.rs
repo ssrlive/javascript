@@ -195,6 +195,44 @@ pub fn set_internal_prototype_from_constructor(obj: &JSObjectDataPtr, env: &JSOb
     Ok(())
 }
 
+// Helper to initialize a collection from an iterable argument.
+// Used by Map, Set, WeakMap, WeakSet constructors.
+pub fn initialize_collection_from_iterable<F>(
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+    constructor_name: &str,
+    mut process_item: F,
+) -> Result<(), JSError>
+where
+    F: FnMut(Value) -> Result<(), JSError>,
+{
+    if args.is_empty() {
+        return Ok(());
+    }
+    if args.len() > 1 {
+        let msg = format!("{constructor_name} constructor takes at most one argument",);
+        return Err(raise_eval_error!(msg));
+    }
+    let iterable = evaluate_expr(env, &args[0])?;
+    match iterable {
+        Value::Object(obj) => {
+            let mut i = 0;
+            loop {
+                let key = format!("{i}");
+                if let Some(item_val) = obj_get_value(&obj, &key.into())? {
+                    let item = item_val.borrow().clone();
+                    process_item(item)?;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            Ok(())
+        }
+        _ => Err(raise_eval_error!(format!("{constructor_name} constructor requires an iterable"))),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(f64),

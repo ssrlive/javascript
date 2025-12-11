@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr},
+    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_value},
     error::JSError,
     raise_eval_error,
     unicode::utf8_to_utf16,
@@ -16,46 +16,85 @@ pub(crate) fn handle_weakmap_constructor(args: &[Expr], env: &JSObjectDataPtr) -
     if !args.is_empty() {
         if args.len() == 1 {
             // WeakMap(iterable)
-            let iterable = evaluate_expr(env, &args[0])?;
-            match iterable {
-                Value::Object(obj) => {
-                    // Try to iterate over the object
-                    let mut i = 0;
-                    loop {
-                        let key = format!("{}", i);
-                        if let Some(entry_val) = obj_get_value(&obj, &key.into())? {
-                            let entry = entry_val.borrow().clone();
-                            if let Value::Object(entry_obj) = entry
-                                && let (Some(key_val), Some(value_val)) =
-                                    (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
-                            {
-                                let key_obj = key_val.borrow().clone();
-                                let value_obj = value_val.borrow().clone();
-
-                                // Check if key is an object
-                                if let Value::Object(ref obj) = key_obj {
-                                    let weak_key = Rc::downgrade(obj);
-                                    weakmap.borrow_mut().entries.push((weak_key, value_obj));
-                                } else {
-                                    return Err(raise_eval_error!("WeakMap keys must be objects"));
-                                }
-                            }
-                        } else {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => {
-                    return Err(raise_eval_error!("WeakMap constructor requires an iterable"));
-                }
-            }
+            initialize_weakmap_from_iterable(&weakmap, args, env)?;
         } else {
             return Err(raise_eval_error!("WeakMap constructor takes at most one argument"));
         }
     }
 
     Ok(Value::WeakMap(weakmap))
+}
+
+/// Initialize WeakMap from an iterable
+fn initialize_weakmap_from_iterable(weakmap: &Rc<RefCell<JSWeakMap>>, args: &[Expr], env: &JSObjectDataPtr) -> Result<(), JSError> {
+    let iterable = evaluate_expr(env, &args[0])?;
+    match iterable {
+        Value::Object(obj) => {
+            let mut i = 0;
+            loop {
+                let key = format!("{}", i);
+                if let Some(entry_val) = obj_get_value(&obj, &key.into())? {
+                    let entry = entry_val.borrow().clone();
+                    if let Value::Object(entry_obj) = entry
+                        && let (Some(key_val), Some(value_val)) =
+                            (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
+                    {
+                        let key_obj = key_val.borrow().clone();
+                        let value_obj = value_val.borrow().clone();
+
+                        // Check if key is an object
+                        if let Value::Object(ref obj) = key_obj {
+                            let weak_key = Rc::downgrade(obj);
+                            weakmap.borrow_mut().entries.push((weak_key, value_obj));
+                        } else {
+                            return Err(raise_eval_error!("WeakMap keys must be objects"));
+                        }
+                    }
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+        }
+        _ => {
+            return Err(raise_eval_error!("WeakMap constructor requires an iterable"));
+        }
+    }
+    Ok(())
+}
+
+/// Check if WeakMap has a key and clean up dead entries
+fn weakmap_has_key(weakmap: &Rc<RefCell<JSWeakMap>>, key_obj_rc: &JSObjectDataPtr) -> bool {
+    let mut found = false;
+    weakmap.borrow_mut().entries.retain(|(k, _)| {
+        if let Some(strong_k) = k.upgrade() {
+            if Rc::ptr_eq(key_obj_rc, &strong_k) {
+                found = true;
+            }
+            true // Keep alive entries
+        } else {
+            false // Remove dead entries
+        }
+    });
+    found
+}
+
+/// Delete a key from WeakMap and clean up dead entries
+fn weakmap_delete_key(weakmap: &Rc<RefCell<JSWeakMap>>, key_obj_rc: &JSObjectDataPtr) -> bool {
+    let mut deleted = false;
+    weakmap.borrow_mut().entries.retain(|(k, _)| {
+        if let Some(strong_k) = k.upgrade() {
+            if Rc::ptr_eq(key_obj_rc, &strong_k) {
+                deleted = true;
+                false // Remove this entry
+            } else {
+                true // Keep other alive entries
+            }
+        } else {
+            false // Remove dead entries
+        }
+    });
+    deleted
 }
 
 /// Handle WeakMap instance method calls
@@ -132,20 +171,7 @@ pub(crate) fn handle_weakmap_instance_method(
                 _ => return Ok(Value::Boolean(false)),
             };
 
-            // Clean up dead entries and check if key exists
-            let mut found = false;
-            weakmap.borrow_mut().entries.retain(|(k, _)| {
-                if let Some(strong_k) = k.upgrade() {
-                    if Rc::ptr_eq(key_obj_rc, &strong_k) {
-                        found = true;
-                    }
-                    true // Keep alive entries
-                } else {
-                    false // Remove dead entries
-                }
-            });
-
-            Ok(Value::Boolean(found))
+            Ok(Value::Boolean(weakmap_has_key(weakmap, key_obj_rc)))
         }
         "delete" => {
             if args.len() != 1 {
@@ -158,22 +184,7 @@ pub(crate) fn handle_weakmap_instance_method(
                 _ => return Ok(Value::Boolean(false)),
             };
 
-            // Clean up dead entries and remove the key
-            let mut deleted = false;
-            weakmap.borrow_mut().entries.retain(|(k, _)| {
-                if let Some(strong_k) = k.upgrade() {
-                    if Rc::ptr_eq(key_obj_rc, &strong_k) {
-                        deleted = true;
-                        false // Remove this entry
-                    } else {
-                        true // Keep other alive entries
-                    }
-                } else {
-                    false // Remove dead entries
-                }
-            });
-
-            Ok(Value::Boolean(deleted))
+            Ok(Value::Boolean(weakmap_delete_key(weakmap, key_obj_rc)))
         }
         "toString" => {
             if !args.is_empty() {
@@ -183,16 +194,4 @@ pub(crate) fn handle_weakmap_instance_method(
         }
         _ => Err(raise_eval_error!(format!("WeakMap.prototype.{} is not implemented", method))),
     }
-}
-
-// Helper function to get object property value
-fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
-    let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
-    while let Some(cur) = current {
-        if let Some(val) = cur.borrow().properties.get(key) {
-            return Ok(Some(val.clone()));
-        }
-        current = cur.borrow().prototype.clone();
-    }
-    Ok(None)
 }

@@ -1,5 +1,8 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_set_value},
+    core::{
+        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data, obj_get_value,
+        obj_set_value, values_equal,
+    },
     error::JSError,
     raise_eval_error,
 };
@@ -12,42 +15,16 @@ use crate::core::JSMap;
 pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     let map = Rc::new(RefCell::new(JSMap { entries: Vec::new() }));
 
-    if !args.is_empty() {
-        if args.len() == 1 {
-            // Map(iterable)
-            let iterable = evaluate_expr(env, &args[0])?;
-            match iterable {
-                Value::Object(obj) => {
-                    // Try to iterate over the object
-                    // For now, assume it's an array-like or has entries
-                    // TODO: Implement proper iteration protocol
-                    let mut i = 0;
-                    loop {
-                        let key = format!("{}", i);
-                        if let Some(entry_val) = obj_get_value(&obj, &key.into())? {
-                            let entry = entry_val.borrow().clone();
-                            if let Value::Object(entry_obj) = entry
-                                && let (Some(key_val), Some(value_val)) =
-                                    (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
-                            {
-                                map.borrow_mut()
-                                    .entries
-                                    .push((key_val.borrow().clone(), value_val.borrow().clone()));
-                            }
-                        } else {
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                _ => {
-                    return Err(raise_eval_error!("Map constructor requires an iterable"));
-                }
-            }
-        } else {
-            return Err(raise_eval_error!("Map constructor takes at most one argument"));
+    initialize_collection_from_iterable(args, env, "Map", |entry| {
+        if let Value::Object(entry_obj) = entry
+            && let (Some(key_val), Some(value_val)) = (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
+        {
+            map.borrow_mut()
+                .entries
+                .push((key_val.borrow().clone(), value_val.borrow().clone()));
         }
-    }
+        Ok(())
+    })?;
 
     // Create a wrapper object for the Map
     let map_obj = new_js_object_data();
@@ -173,28 +150,4 @@ pub(crate) fn handle_map_instance_method(
         }
         _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method))),
     }
-}
-
-// Helper function to compare two values for equality (simplified version)
-fn values_equal(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(na), Value::Number(nb)) => na == nb,
-        (Value::String(sa), Value::String(sb)) => sa == sb,
-        (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
-        (Value::Undefined, Value::Undefined) => true,
-        (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb),
-        _ => false, // For objects, we use reference equality
-    }
-}
-
-// Helper function to get object property value
-fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
-    let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
-    while let Some(cur) = current {
-        if let Some(val) = cur.borrow().properties.get(key) {
-            return Ok(Some(val.clone()));
-        }
-        current = cur.borrow().prototype.clone();
-    }
-    Ok(None)
 }

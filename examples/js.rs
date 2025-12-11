@@ -41,7 +41,7 @@ fn main() {
     // If we got here we have a script to execute. Prefer the safe evaluate_script
     if let Some(script) = script_content {
         match evaluate_script(script, cli.file.as_ref()) {
-            Ok(result) => print_eval_result(&result),
+            Ok(result) => println!("{result}"),
             Err(err) => {
                 eprintln!("{}", err.user_message());
                 if let Some(file_path) = cli.file.as_ref() {
@@ -50,36 +50,6 @@ fn main() {
                 process::exit(1);
             }
         }
-    }
-}
-
-fn print_eval_result(result: &Value) {
-    match result {
-        Value::Number(n) => println!("{n}"),
-        Value::String(s) => println!("{}", String::from_utf16_lossy(s)),
-        Value::Boolean(b) => println!("{b}"),
-        Value::Undefined => println!("undefined"),
-        Value::Object(_) => println!("[object Object]"),
-        Value::Function(name) => println!("[Function: {}]", name),
-        Value::Closure(_, _, _) => println!("[Function]"),
-        Value::AsyncClosure(_, _, _) => println!("[Function]"),
-        Value::ClassDefinition(_) => println!("[Class]"),
-        Value::Getter(_, _) => println!("[Getter]"),
-        Value::Setter(_, _, _) => println!("[Setter]"),
-        Value::Property { .. } => println!("[Property]"),
-        Value::Promise(_) => println!("[object Promise]"),
-        Value::Symbol(_) => println!("[object Symbol]"),
-        Value::BigInt(h) => println!("{h}"),
-        Value::Map(_) => println!("[object Map]"),
-        Value::Set(_) => println!("[object Set]"),
-        Value::WeakMap(_) => println!("[object WeakMap]"),
-        Value::WeakSet(_) => println!("[object WeakSet]"),
-        Value::GeneratorFunction(_, _, _) => println!("[GeneratorFunction]"),
-        Value::Generator(_) => println!("[object Generator]"),
-        Value::Proxy(_) => println!("[object Proxy]"),
-        Value::ArrayBuffer(_) => println!("[object ArrayBuffer]"),
-        Value::DataView(_) => println!("[object DataView]"),
-        Value::TypedArray(_) => println!("[object TypedArray]"),
     }
 }
 
@@ -143,7 +113,7 @@ fn run_persistent_repl() {
                 let _ = rl.add_history_entry(buffer.clone());
 
                 match repl.eval(&buffer) {
-                    Ok(val) => print_eval_result(&val),
+                    Ok(val) => println!("{val}"),
                     Err(e) => {
                         eprintln!("{}", e.user_message());
                         // Show the code that caused the error for better debugging context

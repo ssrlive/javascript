@@ -1,4 +1,8 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+
+use crate::core::{
+    Expr, JSObjectDataPtr, Value, env_get, evaluate_expr, get_own_property, new_js_object_data, obj_get_value, obj_set_value,
+};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::raise_eval_error;
@@ -228,33 +232,84 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             }
         }
         "split" => {
-            if args.len() == 1 {
-                let sep_val = evaluate_expr(env, &args[0])?;
-                if let Value::String(sep) = sep_val {
+            if args.is_empty() || args.len() == 1 || args.len() == 2 {
+                let sep_val = if args.is_empty() {
+                    Value::Undefined
+                } else {
+                    evaluate_expr(env, &args[0])?
+                };
+                let limit = if args.len() == 2 {
+                    let limit_val = evaluate_expr(env, &args[1])?;
+                    if let Value::Number(n) = limit_val {
+                        if n < 0.0 { usize::MAX } else { n as usize }
+                    } else {
+                        usize::MAX
+                    }
+                } else {
+                    usize::MAX
+                };
+                if let Value::Undefined = sep_val {
+                    // No separator: return array with the whole string
+                    let arr = new_js_object_data();
+                    let array_result = env_get(env, "Array");
+                    if let Some(array_val) = &array_result {
+                        if let Value::Object(array_obj) = &*array_val.borrow() {
+                            if let Ok(Some(proto_val)) = obj_get_value(array_obj, &"prototype".into()) {
+                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                                    arr.borrow_mut().prototype = Some(proto_obj.clone());
+                                }
+                            }
+                        }
+                    }
+                    obj_set_value(&arr, &"0".into(), Value::String(s.to_vec()))?;
+                    set_array_length(&arr, 1)?;
+                    Ok(Value::Object(arr))
+                } else if let Value::String(sep) = sep_val {
                     // Implement split returning an array-like object
                     let mut parts: Vec<Vec<u16>> = Vec::new();
                     if sep.is_empty() {
                         // split by empty separator => each UTF-16 code unit as string
-                        for i in 0..utf16_len(s) {
+                        let len = utf16_len(s).min(limit);
+                        for i in 0..len {
                             if let Some(ch) = utf16_char_at(s, i) {
                                 parts.push(vec![ch]);
                             }
                         }
                     } else {
                         let mut start = 0usize;
-                        while start <= utf16_len(s) {
+                        while parts.len() < limit {
                             if let Some(pos) = utf16_find(&s[start..], &sep) {
-                                let end = start + pos;
-                                parts.push(utf16_slice(s, start, end));
-                                start = end + utf16_len(&sep);
+                                if parts.len() == limit - 1 {
+                                    if pos == 0 {
+                                        parts.push(vec![]);
+                                    } else {
+                                        parts.push(utf16_slice(s, start, utf16_len(s)));
+                                    }
+                                    break;
+                                }
+                                if pos == 0 {
+                                    parts.push(vec![]);
+                                    start += utf16_len(&sep);
+                                } else {
+                                    parts.push(utf16_slice(s, start, start + pos));
+                                    start += pos + utf16_len(&sep);
+                                }
                             } else {
-                                // remainder
                                 parts.push(utf16_slice(s, start, utf16_len(s)));
                                 break;
                             }
                         }
                     }
                     let arr = new_js_object_data();
+                    if let Some(array_val) = env_get(env, "Array") {
+                        if let Value::Object(array_obj) = &*array_val.borrow() {
+                            if let Ok(Some(proto_val)) = obj_get_value(array_obj, &"prototype".into()) {
+                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                                    arr.borrow_mut().prototype = Some(proto_obj.clone());
+                                }
+                            }
+                        }
+                    }
                     for (i, part) in parts.into_iter().enumerate() {
                         obj_set_value(&arr, &i.to_string().into(), Value::String(part))?;
                     }
@@ -304,7 +359,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     let input_utf8 = String::from_utf16_lossy(s);
                     let mut parts_utf8: Vec<String> = Vec::new();
                     let mut start_byte = 0usize;
-                    while start_byte <= input_utf8.len() {
+                    while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
                         match regex.find(&input_utf8[start_byte..]) {
                             Ok(Some(mat)) => {
                                 let match_start = start_byte + mat.start();
@@ -323,8 +378,19 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                             }
                         }
                     }
+                    // If we hit the limit, add the remainder if not already added
+                    // Removed: no longer add remainder for RegExp split
 
                     let arr = new_js_object_data();
+                    if let Some(array_val) = env_get(env, "Array") {
+                        if let Value::Object(array_obj) = &*array_val.borrow() {
+                            if let Ok(Some(proto_val)) = obj_get_value(array_obj, &"prototype".into()) {
+                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                                    arr.borrow_mut().prototype = Some(proto_obj.clone());
+                                }
+                            }
+                        }
+                    }
                     for (i, part) in parts_utf8.into_iter().enumerate() {
                         obj_set_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
                     }
@@ -332,10 +398,11 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     set_array_length(&arr, len)?;
                     Ok(Value::Object(arr))
                 } else {
-                    Err(raise_eval_error!("split: argument must be a string or RegExp"))
+                    Err(raise_eval_error!("split: argument must be a string, RegExp, or undefined"))
                 }
             } else {
-                Err(raise_eval_error!(format!("split method expects 1 argument, got {}", args.len())))
+                let msg = format!("split method expects 0 to 2 arguments, got {}", args.len());
+                Err(raise_eval_error!(msg))
             }
         }
         "charAt" => {

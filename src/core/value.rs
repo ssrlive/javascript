@@ -617,7 +617,7 @@ pub struct SymbolData {
     pub description: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
     /// BigInt literal stored with raw string and optional parsed cache
@@ -652,35 +652,9 @@ pub enum Value {
     TypedArray(Rc<RefCell<JSTypedArray>>),   // TypedArray object
 }
 
-impl std::fmt::Debug for Value {
+impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Number(n) => write!(f, "Number({})", n),
-            Value::BigInt(h) => write!(f, "BigInt({})", h.raw),
-            Value::String(s) => write!(f, "String({})", String::from_utf16_lossy(s)),
-            Value::Boolean(b) => write!(f, "Boolean({})", b),
-            Value::Undefined => write!(f, "Undefined"),
-            Value::Object(obj) => write!(f, "Object({:p})", Rc::as_ptr(obj)),
-            Value::Function(name) => write!(f, "Function({})", name),
-            Value::Closure(_, _, _) => write!(f, "Closure"),
-            Value::AsyncClosure(_, _, _) => write!(f, "AsyncClosure"),
-            Value::GeneratorFunction(_, _, _) => write!(f, "GeneratorFunction"),
-            Value::ClassDefinition(_) => write!(f, "ClassDefinition"),
-            Value::Getter(_, _) => write!(f, "Getter"),
-            Value::Setter(_, _, _) => write!(f, "Setter"),
-            Value::Property { .. } => write!(f, "Property"),
-            Value::Promise(p) => write!(f, "Promise({:p})", Rc::as_ptr(p)),
-            Value::Symbol(_) => write!(f, "Symbol"),
-            Value::Map(m) => write!(f, "Map({:p})", Rc::as_ptr(m)),
-            Value::Set(s) => write!(f, "Set({:p})", Rc::as_ptr(s)),
-            Value::WeakMap(wm) => write!(f, "WeakMap({:p})", Rc::as_ptr(wm)),
-            Value::WeakSet(ws) => write!(f, "WeakSet({:p})", Rc::as_ptr(ws)),
-            Value::Generator(g) => write!(f, "Generator({:p})", Rc::as_ptr(g)),
-            Value::Proxy(p) => write!(f, "Proxy({:p})", Rc::as_ptr(p)),
-            Value::ArrayBuffer(ab) => write!(f, "ArrayBuffer({:p})", Rc::as_ptr(ab)),
-            Value::DataView(dv) => write!(f, "DataView({:p})", Rc::as_ptr(dv)),
-            Value::TypedArray(ta) => write!(f, "TypedArray({:p})", Rc::as_ptr(ta)),
-        }
+        write!(f, "{}", value_to_string(self))
     }
 }
 
@@ -748,10 +722,34 @@ pub fn value_to_string(val: &Value) -> String {
     match val {
         Value::Number(n) => n.to_string(),
         Value::BigInt(h) => h.raw.clone(),
-        Value::String(s) => String::from_utf16_lossy(s),
+        Value::String(s) => format!("\"{}\"", String::from_utf16_lossy(s)),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
-        Value::Object(_) => "[object Object]".to_string(),
+        Value::Object(obj) => {
+            if let Some(length_rc) = get_own_property(obj, &"length".into()) {
+                if let Value::Number(len) = &*length_rc.borrow() {
+                    if len.is_finite() && *len >= 0.0 && len.fract() == 0.0 {
+                        let len_usize = *len as usize;
+                        let mut parts = Vec::new();
+                        for i in 0..len_usize {
+                            let key = i.to_string();
+                            if let Some(val_rc) = get_own_property(obj, &key.into()) {
+                                parts.push(value_to_string(&val_rc.borrow()));
+                            } else {
+                                parts.push("undefined".to_string());
+                            }
+                        }
+                        format!("[{}]", parts.join(", "))
+                    } else {
+                        "[object Object]".to_string()
+                    }
+                } else {
+                    "[object Object]".to_string()
+                }
+            } else {
+                "[object Object]".to_string()
+            }
+        }
         Value::Function(name) => format!("function {}", name),
         Value::Closure(_, _, _) => "function".to_string(),
         Value::AsyncClosure(_, _, _) => "function".to_string(),

@@ -545,6 +545,56 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_split_no_args() {
+        let script = "let parts = 'hello world'.split(); parts.length";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected split no args length to be 1.0, got {:?}", result),
+        }
+
+        let script = "let parts = 'hello world'.split(); parts[0]";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "hello world");
+            }
+            _ => panic!("Expected split no args [0] to be 'hello world', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_string_split_with_limit() {
+        let script = "let parts = 'a,b,c,d'.split(',', 2); parts.length";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 2.0),
+            _ => panic!("Expected split with limit length to be 2.0, got {:?}", result),
+        }
+
+        let script = "let parts = 'a,b,c,d'.split(',', 2); parts[0]";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "a");
+            }
+            _ => panic!("Expected split with limit [0] to be 'a', got {:?}", result),
+        }
+
+        let script = "let parts = 'a,b,c,d'.split(',', 2); parts[1]";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "b,c,d");
+            }
+            _ => panic!("Expected split with limit [1] to be 'b,c,d', got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_string_char_at() {
         let script = "'hello'.charAt(1)";
         let result = evaluate_script(script, None::<&std::path::Path>);

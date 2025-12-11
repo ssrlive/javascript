@@ -59,6 +59,42 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                 Err(raise_eval_error!(msg))
             }
         }
+        "substr" => {
+            // substr(start, length?) - length is optional and defaults to remaining length
+            if args.len() == 1 || args.len() == 2 {
+                let start_val = evaluate_expr(env, &args[0])?;
+                let length_val = if args.len() == 2 {
+                    Some(evaluate_expr(env, &args[1])?)
+                } else {
+                    None
+                };
+                if let Value::Number(start) = start_val {
+                    let len = utf16_len(s) as isize;
+                    let mut start_idx = start as isize;
+                    // Handle negative start: count from end
+                    if start_idx < 0 {
+                        start_idx += len;
+                        if start_idx < 0 {
+                            start_idx = 0;
+                        }
+                    }
+                    let length = if let Some(Value::Number(l)) = length_val {
+                        if l < 0.0 { 0 } else { l as usize }
+                    } else {
+                        (len - start_idx) as usize
+                    };
+                    let end_idx = (start_idx + length as isize).min(len);
+                    let start_idx = start_idx.max(0) as usize;
+                    let end_idx = end_idx.max(0) as usize;
+                    Ok(Value::String(utf16_slice(s, start_idx, end_idx)))
+                } else {
+                    Err(raise_eval_error!("substr: first argument must be a number"))
+                }
+            } else {
+                let msg = format!("substr method expects 1 or 2 arguments, got {}", args.len());
+                Err(raise_eval_error!(msg))
+            }
+        }
         "slice" => {
             let start = if !args.is_empty() {
                 match evaluate_expr(env, &args[0])? {

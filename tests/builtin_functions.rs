@@ -583,6 +583,59 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_string_substr() {
+        let script = "'hello world'.substr(2, 7)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "llo wor");
+            }
+            _ => panic!("Expected substr(2,7) to return 'llo wor', got {:?}", result),
+        }
+
+        let script = "'hello world'.substr(-3)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "rld");
+            }
+            _ => panic!("Expected substr(-3) to return 'rld', got {:?}", result),
+        }
+
+        let script = "'my name is hello'.substr(3)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "name is hello");
+            }
+            _ => panic!("Expected substr(3) to return 'name is hello', got {:?}", result),
+        }
+
+        let script = "'my name is hello'.substr(4, -7)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "");
+            }
+            _ => panic!("Expected substr(4,-7) to return '', got {:?}", result),
+        }
+
+        let script = "'my name is hello'.substr(-7, 5)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let str_val = String::from_utf16_lossy(&s);
+                assert_eq!(str_val, "s hel");
+            }
+            _ => panic!("Expected substr(-7,5) to return 's hel', got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_string_substring_swap() {
         let script = "'hello world'.substring(5, 2)";
         let result = evaluate_script(script, None::<&std::path::Path>);

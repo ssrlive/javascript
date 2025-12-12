@@ -2,7 +2,7 @@ use crate::{
     JSError,
     core::{
         JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors, new_js_object_data,
-        obj_get_value, obj_set_value, parse_statements, tokenize, value_to_string,
+        obj_get_key_value, obj_set_key_value, parse_statements, tokenize, value_to_string,
     },
     js_promise::{PromiseState, run_event_loop},
 };
@@ -59,9 +59,9 @@ impl Repl {
                     if let Some(end_quote) = rest.find(quote_char) {
                         let module = &rest[..end_quote];
                         if module == "std" {
-                            obj_set_value(&self.env, &name, Value::Object(crate::js_std::make_std_object()?))?;
+                            obj_set_key_value(&self.env, &name, Value::Object(crate::js_std::make_std_object()?))?;
                         } else if module == "os" {
-                            obj_set_value(&self.env, &name, Value::Object(crate::js_os::make_os_object()?))?;
+                            obj_set_key_value(&self.env, &name, Value::Object(crate::js_os::make_os_object()?))?;
                         }
                     }
                 }
@@ -72,7 +72,7 @@ impl Repl {
             Ok(v) => {
                 // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
                 if let Value::Object(obj) = &v
-                    && let Some(promise_val_rc) = obj_get_value(obj, &"__promise".into())?
+                    && let Some(promise_val_rc) = obj_get_key_value(obj, &"__promise".into())?
                     && let Value::Promise(promise) = &*promise_val_rc.borrow()
                 {
                     // Run the event loop until the promise is resolved

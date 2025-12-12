@@ -1,8 +1,8 @@
 use crate::core::JSMap;
 use crate::{
     core::{
-        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data, obj_get_value,
-        obj_set_value, values_equal,
+        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data,
+        obj_get_key_value, obj_set_key_value, values_equal,
     },
     error::JSError,
 };
@@ -15,7 +15,10 @@ pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
 
     initialize_collection_from_iterable(args, env, "Map", |entry| {
         if let Value::Object(entry_obj) = entry
-            && let (Some(key_val), Some(value_val)) = (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
+            && let (Some(key_val), Some(value_val)) = (
+                obj_get_key_value(&entry_obj, &"0".into())?,
+                obj_get_key_value(&entry_obj, &"1".into())?,
+            )
         {
             map.borrow_mut()
                 .entries
@@ -110,10 +113,10 @@ pub(crate) fn handle_map_instance_method(
             // Create an array of keys
             let keys_array = new_js_object_data();
             for (i, (key, _)) in map.borrow().entries.iter().enumerate() {
-                obj_set_value(&keys_array, &i.to_string().into(), key.clone())?;
+                obj_set_key_value(&keys_array, &i.to_string().into(), key.clone())?;
             }
             // Set length
-            obj_set_value(&keys_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            obj_set_key_value(&keys_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
             Ok(Value::Object(keys_array))
         }
         "values" => {
@@ -123,10 +126,10 @@ pub(crate) fn handle_map_instance_method(
             // Create an array of values
             let values_array = new_js_object_data();
             for (i, (_, value)) in map.borrow().entries.iter().enumerate() {
-                obj_set_value(&values_array, &i.to_string().into(), value.clone())?;
+                obj_set_key_value(&values_array, &i.to_string().into(), value.clone())?;
             }
             // Set length
-            obj_set_value(&values_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            obj_set_key_value(&values_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
             Ok(Value::Object(values_array))
         }
         "entries" => {
@@ -137,13 +140,13 @@ pub(crate) fn handle_map_instance_method(
             let entries_array = new_js_object_data();
             for (i, (key, value)) in map.borrow().entries.iter().enumerate() {
                 let entry_array = new_js_object_data();
-                obj_set_value(&entry_array, &"0".into(), key.clone())?;
-                obj_set_value(&entry_array, &"1".into(), value.clone())?;
-                obj_set_value(&entry_array, &"length".into(), Value::Number(2.0))?;
-                obj_set_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
+                obj_set_key_value(&entry_array, &"0".into(), key.clone())?;
+                obj_set_key_value(&entry_array, &"1".into(), value.clone())?;
+                obj_set_key_value(&entry_array, &"length".into(), Value::Number(2.0))?;
+                obj_set_key_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
             }
             // Set length
-            obj_set_value(&entries_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            obj_set_key_value(&entries_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
             Ok(Value::Object(entries_array))
         }
         _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method))),

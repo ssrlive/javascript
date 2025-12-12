@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_value, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
@@ -21,11 +21,11 @@ pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
     let obj = new_js_object_data();
 
     // Set the constructor function
-    obj_set_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
-    obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16("ArrayBuffer")))?;
+    obj_set_key_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
+    obj_set_key_value(&obj, &"name".into(), Value::String(utf8_to_utf16("ArrayBuffer")))?;
 
     // Mark as ArrayBuffer constructor
-    obj_set_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
+    obj_set_key_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
 
     Ok(obj)
 }
@@ -34,22 +34,22 @@ pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
 pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
     let obj = new_js_object_data();
 
-    obj_set_value(&obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
-    obj_set_value(&obj, &"store".into(), Value::Function("Atomics.store".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
+    obj_set_key_value(&obj, &"store".into(), Value::Function("Atomics.store".to_string()))?;
+    obj_set_key_value(
         &obj,
         &"compareExchange".into(),
         Value::Function("Atomics.compareExchange".to_string()),
     )?;
-    obj_set_value(&obj, &"exchange".into(), Value::Function("Atomics.exchange".to_string()))?;
-    obj_set_value(&obj, &"add".into(), Value::Function("Atomics.add".to_string()))?;
-    obj_set_value(&obj, &"sub".into(), Value::Function("Atomics.sub".to_string()))?;
-    obj_set_value(&obj, &"and".into(), Value::Function("Atomics.and".to_string()))?;
-    obj_set_value(&obj, &"or".into(), Value::Function("Atomics.or".to_string()))?;
-    obj_set_value(&obj, &"xor".into(), Value::Function("Atomics.xor".to_string()))?;
-    obj_set_value(&obj, &"wait".into(), Value::Function("Atomics.wait".to_string()))?;
-    obj_set_value(&obj, &"notify".into(), Value::Function("Atomics.notify".to_string()))?;
-    obj_set_value(&obj, &"isLockFree".into(), Value::Function("Atomics.isLockFree".to_string()))?;
+    obj_set_key_value(&obj, &"exchange".into(), Value::Function("Atomics.exchange".to_string()))?;
+    obj_set_key_value(&obj, &"add".into(), Value::Function("Atomics.add".to_string()))?;
+    obj_set_key_value(&obj, &"sub".into(), Value::Function("Atomics.sub".to_string()))?;
+    obj_set_key_value(&obj, &"and".into(), Value::Function("Atomics.and".to_string()))?;
+    obj_set_key_value(&obj, &"or".into(), Value::Function("Atomics.or".to_string()))?;
+    obj_set_key_value(&obj, &"xor".into(), Value::Function("Atomics.xor".to_string()))?;
+    obj_set_key_value(&obj, &"wait".into(), Value::Function("Atomics.wait".to_string()))?;
+    obj_set_key_value(&obj, &"notify".into(), Value::Function("Atomics.notify".to_string()))?;
+    obj_set_key_value(&obj, &"isLockFree".into(), Value::Function("Atomics.isLockFree".to_string()))?;
 
     Ok(obj)
 }
@@ -84,7 +84,7 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
     }
     let ta_val = evaluate_expr(env, &args[0])?;
     let ta_obj = if let Value::Object(obj_map) = ta_val {
-        if let Some(ta_rc) = obj_get_value(&obj_map, &"__typedarray".into())? {
+        if let Some(ta_rc) = obj_get_key_value(&obj_map, &"__typedarray".into())? {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 ta.clone()
             } else {
@@ -339,12 +339,12 @@ pub fn make_sharedarraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> 
     let obj = new_js_object_data();
 
     // Set prototype and name
-    obj_set_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
-    obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
+    obj_set_key_value(&obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
+    obj_set_key_value(&obj, &"name".into(), Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
 
     // Mark as ArrayBuffer constructor and indicate it's the shared variant
-    obj_set_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
-    obj_set_value(&obj, &"__sharedarraybuffer".into(), Value::Boolean(true))?;
+    obj_set_key_value(&obj, &"__arraybuffer".into(), Value::Boolean(true))?;
+    obj_set_key_value(&obj, &"__sharedarraybuffer".into(), Value::Boolean(true))?;
 
     Ok(obj)
 }
@@ -354,13 +354,13 @@ pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
     let proto = new_js_object_data();
 
     // Add methods to prototype
-    obj_set_value(&proto, &"constructor".into(), Value::Function("ArrayBuffer".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"constructor".into(), Value::Function("ArrayBuffer".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"byteLength".into(),
         Value::Function("ArrayBuffer.prototype.byteLength".to_string()),
     )?;
-    obj_set_value(&proto, &"slice".into(), Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
+    obj_set_key_value(&proto, &"slice".into(), Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
 
     Ok(proto)
 }
@@ -369,11 +369,11 @@ pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
 pub fn make_dataview_constructor() -> Result<JSObjectDataPtr, JSError> {
     let obj = new_js_object_data();
 
-    obj_set_value(&obj, &"prototype".into(), Value::Object(make_dataview_prototype()?))?;
-    obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16("DataView")))?;
+    obj_set_key_value(&obj, &"prototype".into(), Value::Object(make_dataview_prototype()?))?;
+    obj_set_key_value(&obj, &"name".into(), Value::String(utf8_to_utf16("DataView")))?;
 
     // Mark as DataView constructor
-    obj_set_value(&obj, &"__dataview".into(), Value::Boolean(true))?;
+    obj_set_key_value(&obj, &"__dataview".into(), Value::Boolean(true))?;
 
     Ok(obj)
 }
@@ -382,89 +382,89 @@ pub fn make_dataview_constructor() -> Result<JSObjectDataPtr, JSError> {
 pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
     let proto = new_js_object_data();
 
-    obj_set_value(&proto, &"constructor".into(), Value::Function("DataView".to_string()))?;
-    obj_set_value(&proto, &"buffer".into(), Value::Function("DataView.prototype.buffer".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"constructor".into(), Value::Function("DataView".to_string()))?;
+    obj_set_key_value(&proto, &"buffer".into(), Value::Function("DataView.prototype.buffer".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"byteLength".into(),
         Value::Function("DataView.prototype.byteLength".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"byteOffset".into(),
         Value::Function("DataView.prototype.byteOffset".to_string()),
     )?;
 
     // DataView methods for different data types
-    obj_set_value(&proto, &"getInt8".into(), Value::Function("DataView.prototype.getInt8".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"getInt8".into(), Value::Function("DataView.prototype.getInt8".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"getUint8".into(),
         Value::Function("DataView.prototype.getUint8".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getInt16".into(),
         Value::Function("DataView.prototype.getInt16".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getUint16".into(),
         Value::Function("DataView.prototype.getUint16".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getInt32".into(),
         Value::Function("DataView.prototype.getInt32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getUint32".into(),
         Value::Function("DataView.prototype.getUint32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getFloat32".into(),
         Value::Function("DataView.prototype.getFloat32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"getFloat64".into(),
         Value::Function("DataView.prototype.getFloat64".to_string()),
     )?;
 
-    obj_set_value(&proto, &"setInt8".into(), Value::Function("DataView.prototype.setInt8".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"setInt8".into(), Value::Function("DataView.prototype.setInt8".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"setUint8".into(),
         Value::Function("DataView.prototype.setUint8".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setInt16".into(),
         Value::Function("DataView.prototype.setInt16".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setUint16".into(),
         Value::Function("DataView.prototype.setUint16".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setInt32".into(),
         Value::Function("DataView.prototype.setInt32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setUint32".into(),
         Value::Function("DataView.prototype.setUint32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setFloat32".into(),
         Value::Function("DataView.prototype.setFloat32".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"setFloat64".into(),
         Value::Function("DataView.prototype.setFloat64".to_string()),
@@ -521,10 +521,10 @@ fn make_typedarray_constructor(name: &str, kind: TypedArrayKind) -> Result<JSObj
 
     let obj = new_js_object_data();
 
-    obj_set_value(&obj, &"prototype".into(), Value::Object(make_typedarray_prototype(kind)?))?;
-    obj_set_value(&obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
+    obj_set_key_value(&obj, &"prototype".into(), Value::Object(make_typedarray_prototype(kind)?))?;
+    obj_set_key_value(&obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
 
-    obj_set_value(&obj, &"__kind".into(), Value::Number(kind_value as f64))?;
+    obj_set_key_value(&obj, &"__kind".into(), Value::Number(kind_value as f64))?;
 
     Ok(obj)
 }
@@ -547,26 +547,26 @@ fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JS
         TypedArrayKind::BigUint64 => 10,
     };
 
-    obj_set_value(&proto, &"__kind".into(), Value::Number(kind_value as f64))?;
-    obj_set_value(&proto, &"constructor".into(), Value::Function("TypedArray".to_string()))?;
+    obj_set_key_value(&proto, &"__kind".into(), Value::Number(kind_value as f64))?;
+    obj_set_key_value(&proto, &"constructor".into(), Value::Function("TypedArray".to_string()))?;
 
     // TypedArray properties and methods
-    obj_set_value(&proto, &"buffer".into(), Value::Function("TypedArray.prototype.buffer".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"buffer".into(), Value::Function("TypedArray.prototype.buffer".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"byteLength".into(),
         Value::Function("TypedArray.prototype.byteLength".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &proto,
         &"byteOffset".into(),
         Value::Function("TypedArray.prototype.byteOffset".to_string()),
     )?;
-    obj_set_value(&proto, &"length".into(), Value::Function("TypedArray.prototype.length".to_string()))?;
+    obj_set_key_value(&proto, &"length".into(), Value::Function("TypedArray.prototype.length".to_string()))?;
 
     // Array methods that TypedArrays inherit
-    obj_set_value(&proto, &"set".into(), Value::Function("TypedArray.prototype.set".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&proto, &"set".into(), Value::Function("TypedArray.prototype.set".to_string()))?;
+    obj_set_key_value(
         &proto,
         &"subarray".into(),
         Value::Function("TypedArray.prototype.subarray".to_string()),
@@ -597,7 +597,7 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Create the ArrayBuffer object
     let obj = new_js_object_data();
-    obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
+    obj_set_key_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype
     let proto = make_arraybuffer_prototype()?;
@@ -628,7 +628,7 @@ pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr
 
     // Create the SharedArrayBuffer object wrapper
     let obj = new_js_object_data();
-    obj_set_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
+    obj_set_key_value(&obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype to ArrayBuffer.prototype
     let proto = make_arraybuffer_prototype()?;
@@ -647,7 +647,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     let buffer_val = evaluate_expr(env, &args[0])?;
     let buffer = match buffer_val {
         Value::Object(obj) => {
-            if let Some(ab_val) = obj_get_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     ab.clone()
                 } else {
@@ -694,7 +694,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
 
     // Create the DataView object
     let obj = new_js_object_data();
-    obj_set_value(&obj, &"__dataview".into(), Value::DataView(data_view))?;
+    obj_set_key_value(&obj, &"__dataview".into(), Value::DataView(data_view))?;
 
     // Set prototype
     let proto = make_dataview_prototype()?;
@@ -706,7 +706,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
 /// Handle TypedArray constructor calls
 pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the kind from the constructor
-    let kind_val = obj_get_value(constructor_obj, &"__kind".into())?;
+    let kind_val = obj_get_key_value(constructor_obj, &"__kind".into())?;
     let kind = if let Some(kind_val) = kind_val {
         if let Value::Number(kind_num) = *kind_val.borrow() {
             match kind_num as i32 {
@@ -760,7 +760,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
             }
             Value::Object(obj) => {
                 // Check if it's another TypedArray or ArrayBuffer
-                if let Some(ta_val) = obj_get_value(&obj, &"__typedarray".into())? {
+                if let Some(ta_val) = obj_get_key_value(&obj, &"__typedarray".into())? {
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.borrow().length;
@@ -774,7 +774,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
-                } else if let Some(ab_val) = obj_get_value(&obj, &"__arraybuffer".into())? {
+                } else if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
                         (ab.clone(), 0, ab.borrow().data.lock().unwrap().len() / element_size)
@@ -793,7 +793,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         let offset_val = evaluate_expr(env, &args[1])?;
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = obj_get_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let Value::Number(offset_num) = offset_val {
                         let offset = offset_num as usize;
@@ -822,7 +822,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         let length_val = evaluate_expr(env, &args[2])?;
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = obj_get_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let (Value::Number(offset_num), Value::Number(length_num)) = (offset_val, length_val) {
                         let offset = offset_num as usize;
@@ -865,7 +865,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         length,
     }));
 
-    obj_set_value(&obj, &"__typedarray".into(), Value::TypedArray(typed_array))?;
+    obj_set_key_value(&obj, &"__typedarray".into(), Value::TypedArray(typed_array))?;
 
     Ok(Value::Object(obj))
 }
@@ -873,7 +873,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 /// Handle DataView instance method calls
 pub fn handle_dataview_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the DataView from the object
-    let dv_val = obj_get_value(obj_map, &"__dataview".into())?;
+    let dv_val = obj_get_key_value(obj_map, &"__dataview".into())?;
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
             dv.clone()
@@ -1348,12 +1348,12 @@ mod atomics_thread_tests {
                 length: 4,
             }));
             let obj_local = new_js_object_data();
-            obj_set_value(&obj_local, &"__typedarray".into(), Value::TypedArray(local_ta)).unwrap();
+            obj_set_key_value(&obj_local, &"__typedarray".into(), Value::TypedArray(local_ta)).unwrap();
 
             let env_local = new_js_object_data();
             env_local.borrow_mut().is_function_scope = true;
             initialize_global_constructors(&env_local).unwrap();
-            obj_set_value(&env_local, &"ia".into(), Value::Object(obj_local)).unwrap();
+            obj_set_key_value(&env_local, &"ia".into(), Value::Object(obj_local)).unwrap();
 
             let mut tokens = crate::tokenize("Atomics.wait(ia, 0, 0)").unwrap();
             let stmts = parse_statements(&mut tokens).unwrap();
@@ -1383,11 +1383,11 @@ mod atomics_thread_tests {
             length: 4,
         }));
         let obj_notify = new_js_object_data();
-        obj_set_value(&obj_notify, &"__typedarray".into(), Value::TypedArray(local_ta2)).unwrap();
+        obj_set_key_value(&obj_notify, &"__typedarray".into(), Value::TypedArray(local_ta2)).unwrap();
         let env_notify = new_js_object_data();
         env_notify.borrow_mut().is_function_scope = true;
         initialize_global_constructors(&env_notify).unwrap();
-        obj_set_value(&env_notify, &"ia".into(), Value::Object(obj_notify)).unwrap();
+        obj_set_key_value(&env_notify, &"ia".into(), Value::Object(obj_notify)).unwrap();
 
         let mut tokens2 = crate::tokenize("Atomics.store(ia, 0, 1); Atomics.notify(ia, 0, 1)").unwrap();
         let stmts2 = parse_statements(&mut tokens2).unwrap();

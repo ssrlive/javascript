@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, obj_get_value};
+use javascript::{Value, evaluate_script, obj_get_key_value};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -111,12 +111,12 @@ mod promise_tests {
         match result {
             Ok(Value::Object(arr)) => {
                 // Check that we have an array with 2 elements
-                if let Ok(Some(length_val)) = obj_get_value(&arr, &"length".into()) {
+                if let Ok(Some(length_val)) = obj_get_key_value(&arr, &"length".into()) {
                     if let Value::Number(len) = *length_val.borrow() {
                         assert_eq!(len, 2.0, "Array should have 2 elements");
 
                         // Check first element is "sync"
-                        if let Ok(Some(first_val)) = obj_get_value(&arr, &"0".into()) {
+                        if let Ok(Some(first_val)) = obj_get_key_value(&arr, &"0".into()) {
                             if let Value::String(first) = &*first_val.borrow() {
                                 assert_eq!(String::from_utf16_lossy(first), "sync");
                             } else {
@@ -125,7 +125,7 @@ mod promise_tests {
                         }
 
                         // Check second element is "async result"
-                        if let Ok(Some(second_val)) = obj_get_value(&arr, &"1".into()) {
+                        if let Ok(Some(second_val)) = obj_get_key_value(&arr, &"1".into()) {
                             if let Value::String(second) = &*second_val.borrow() {
                                 assert_eq!(String::from_utf16_lossy(second), "async result");
                             } else {
@@ -178,20 +178,20 @@ mod promise_tests {
         match result {
             Ok(Value::Object(arr)) => {
                 // Check that we have an array with 3 elements
-                if let Ok(Some(length_val)) = obj_get_value(&arr, &"length".into()) {
+                if let Ok(Some(length_val)) = obj_get_key_value(&arr, &"length".into()) {
                     if let Value::Number(len) = *length_val.borrow() {
                         assert_eq!(len, 3.0, "Array should have 3 elements");
 
                         // Check first element (fulfilled with value 1)
-                        if let Ok(Some(first_val)) = obj_get_value(&arr, &"0".into())
+                        if let Ok(Some(first_val)) = obj_get_key_value(&arr, &"0".into())
                             && let Value::Object(settled) = &*first_val.borrow()
                         {
-                            if let Ok(Some(status_val)) = obj_get_value(settled, &"status".into())
+                            if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
                                 assert_eq!(String::from_utf16_lossy(status), "fulfilled");
                             }
-                            if let Ok(Some(value_val)) = obj_get_value(settled, &"value".into())
+                            if let Ok(Some(value_val)) = obj_get_key_value(settled, &"value".into())
                                 && let Value::Number(val) = *value_val.borrow()
                             {
                                 assert_eq!(val, 1.0);
@@ -199,15 +199,15 @@ mod promise_tests {
                         }
 
                         // Check second element (rejected with reason "error")
-                        if let Ok(Some(second_val)) = obj_get_value(&arr, &"1".into())
+                        if let Ok(Some(second_val)) = obj_get_key_value(&arr, &"1".into())
                             && let Value::Object(settled) = &*second_val.borrow()
                         {
-                            if let Ok(Some(status_val)) = obj_get_value(settled, &"status".into())
+                            if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
                                 assert_eq!(String::from_utf16_lossy(status), "rejected");
                             }
-                            if let Ok(Some(reason_val)) = obj_get_value(settled, &"reason".into())
+                            if let Ok(Some(reason_val)) = obj_get_key_value(settled, &"reason".into())
                                 && let Value::String(reason) = &*reason_val.borrow()
                             {
                                 assert_eq!(String::from_utf16_lossy(reason), "error");
@@ -215,15 +215,15 @@ mod promise_tests {
                         }
 
                         // Check third element (fulfilled with value 3)
-                        if let Ok(Some(third_val)) = obj_get_value(&arr, &"2".into())
+                        if let Ok(Some(third_val)) = obj_get_key_value(&arr, &"2".into())
                             && let Value::Object(settled) = &*third_val.borrow()
                         {
-                            if let Ok(Some(status_val)) = obj_get_value(settled, &"status".into())
+                            if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
                                 assert_eq!(String::from_utf16_lossy(status), "fulfilled");
                             }
-                            if let Ok(Some(value_val)) = obj_get_value(settled, &"value".into())
+                            if let Ok(Some(value_val)) = obj_get_key_value(settled, &"value".into())
                                 && let Value::Number(val) = *value_val.borrow()
                             {
                                 assert_eq!(val, 3.0);

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_value, parse_bigint_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_key_value, parse_bigint_string};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use num_bigint::BigInt;
@@ -11,7 +11,7 @@ pub fn handle_bigint_object_method(
     args: &[Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
-    if let Some(value_val) = obj_get_value(obj_map, &"__value__".into())? {
+    if let Some(value_val) = obj_get_key_value(obj_map, &"__value__".into())? {
         if let Value::BigInt(h) = &*value_val.borrow() {
             match method {
                 "toString" => {

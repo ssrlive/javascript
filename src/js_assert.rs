@@ -1,11 +1,11 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 
 /// Create the assert object with testing functions
 pub fn make_assert_object() -> Result<JSObjectDataPtr, JSError> {
     let assert_obj = new_js_object_data();
-    obj_set_value(&assert_obj, &"sameValue".into(), Value::Function("assert.sameValue".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&assert_obj, &"sameValue".into(), Value::Function("assert.sameValue".to_string()))?;
+    obj_set_key_value(
         &assert_obj,
         &"notSameValue".into(),
         Value::Function("assert.notSameValue".to_string()),
@@ -77,7 +77,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             // If values are the same, this assertion fails — throw a plain error object
             if equal {
                 let err_obj = new_js_object_data();
-                obj_set_value(&err_obj, &"message".into(), Value::String(message.encode_utf16().collect()))?;
+                obj_set_key_value(&err_obj, &"message".into(), Value::String(message.encode_utf16().collect()))?;
                 return Err(raise_throw_error!(Value::Object(err_obj)));
             }
 

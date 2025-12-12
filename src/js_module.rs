@@ -1,6 +1,6 @@
 use crate::{
     JSError, Value,
-    core::{obj_get_value, obj_set_value},
+    core::{obj_get_key_value, obj_set_key_value},
 };
 use std::cell::RefCell;
 use std::path::Path;
@@ -16,8 +16,8 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         let pi = Value::Number(std::f64::consts::PI);
         let e = Value::Number(std::f64::consts::E);
 
-        obj_set_value(&module_exports, &"PI".into(), pi)?;
-        obj_set_value(&module_exports, &"E".into(), e)?;
+        obj_set_key_value(&module_exports, &"PI".into(), pi)?;
+        obj_set_key_value(&module_exports, &"E".into(), e)?;
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(
@@ -25,12 +25,12 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
             vec![crate::core::Statement::Return(Some(crate::core::Expr::Var("x".to_string())))],
             module_exports.clone(),
         );
-        obj_set_value(&module_exports, &"identity".into(), identity_func)?;
+        obj_set_key_value(&module_exports, &"identity".into(), identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
-        obj_set_value(&module_exports, &"log".into(), log_func)?;
+        obj_set_key_value(&module_exports, &"log".into(), log_func)?;
     } else {
         // Try to load as a file
         match load_module_from_file(module_name, base_path) {
@@ -110,7 +110,7 @@ fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__script_name` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    obj_set_value(&env, &"__script_name".into(), val)?;
+    obj_set_key_value(&env, &"__script_name".into(), val)?;
 
     // Add exports object to the environment
     env.borrow_mut().insert(
@@ -146,7 +146,7 @@ fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
     }
 
     // Check if module.exports was reassigned (CommonJS style)
-    if let Some(module_exports_val) = obj_get_value(&module_obj, &"exports".into())? {
+    if let Some(module_exports_val) = obj_get_key_value(&module_obj, &"exports".into())? {
         match &*module_exports_val.borrow() {
             Value::Object(obj) if Rc::ptr_eq(obj, &module_exports) => {
                 // exports was not reassigned, return the exports object
@@ -165,7 +165,7 @@ fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
 
 pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value, JSError> {
     match module_value {
-        Value::Object(obj) => match obj_get_value(obj, &specifier.into())? {
+        Value::Object(obj) => match obj_get_key_value(obj, &specifier.into())? {
             Some(val) => Ok(val.borrow().clone()),
             None => Err(raise_eval_error!(format!("Export '{}' not found in module", specifier))),
         },

@@ -1,50 +1,50 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_value, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
 /// Create the Number object with all number constants and functions
 pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
     let number_obj = new_js_object_data();
-    obj_set_value(&number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
-    obj_set_value(&number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
-    obj_set_value(&number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
-    obj_set_value(&number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
-    obj_set_value(&number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;
-    obj_set_value(&number_obj, &"EPSILON".into(), Value::Number(f64::EPSILON))?;
-    obj_set_value(&number_obj, &"MAX_SAFE_INTEGER".into(), Value::Number(9007199254740991.0))?;
-    obj_set_value(&number_obj, &"MIN_SAFE_INTEGER".into(), Value::Number(-9007199254740991.0))?;
-    obj_set_value(&number_obj, &"isNaN".into(), Value::Function("Number.isNaN".to_string()))?;
-    obj_set_value(&number_obj, &"isFinite".into(), Value::Function("Number.isFinite".to_string()))?;
-    obj_set_value(&number_obj, &"isInteger".into(), Value::Function("Number.isInteger".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
+    obj_set_key_value(&number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
+    obj_set_key_value(&number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
+    obj_set_key_value(&number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
+    obj_set_key_value(&number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;
+    obj_set_key_value(&number_obj, &"EPSILON".into(), Value::Number(f64::EPSILON))?;
+    obj_set_key_value(&number_obj, &"MAX_SAFE_INTEGER".into(), Value::Number(9007199254740991.0))?;
+    obj_set_key_value(&number_obj, &"MIN_SAFE_INTEGER".into(), Value::Number(-9007199254740991.0))?;
+    obj_set_key_value(&number_obj, &"isNaN".into(), Value::Function("Number.isNaN".to_string()))?;
+    obj_set_key_value(&number_obj, &"isFinite".into(), Value::Function("Number.isFinite".to_string()))?;
+    obj_set_key_value(&number_obj, &"isInteger".into(), Value::Function("Number.isInteger".to_string()))?;
+    obj_set_key_value(
         &number_obj,
         &"isSafeInteger".into(),
         Value::Function("Number.isSafeInteger".to_string()),
     )?;
-    obj_set_value(&number_obj, &"parseFloat".into(), Value::Function("Number.parseFloat".to_string()))?;
-    obj_set_value(&number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
+    obj_set_key_value(&number_obj, &"parseFloat".into(), Value::Function("Number.parseFloat".to_string()))?;
+    obj_set_key_value(&number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
     // Create Number.prototype
     let number_prototype = new_js_object_data();
-    obj_set_value(
+    obj_set_key_value(
         &number_prototype,
         &"toString".into(),
         Value::Function("Number.prototype.toString".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &number_prototype,
         &"valueOf".into(),
         Value::Function("Number.prototype.valueOf".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &number_prototype,
         &"toLocaleString".into(),
         Value::Function("Number.prototype.toLocaleString".to_string()),
     )?;
 
     // Set prototype on Number constructor
-    obj_set_value(&number_obj, &"prototype".into(), Value::Object(number_prototype))?;
+    obj_set_key_value(&number_obj, &"prototype".into(), Value::Object(number_prototype))?;
 
     Ok(number_obj)
 }
@@ -234,7 +234,7 @@ pub fn handle_number_object_method(
     _env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Handle Number instance methods
-    if let Some(value_val) = crate::core::obj_get_value(obj_map, &"__value__".into())? {
+    if let Some(value_val) = obj_get_key_value(obj_map, &"__value__".into())? {
         if let Value::Number(n) = *value_val.borrow() {
             match method {
                 "toString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
@@ -254,11 +254,11 @@ pub fn handle_number_object_method(
 pub fn box_number_and_get_property(n: f64, prop: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Box the number into a Number object
     let number_obj = new_js_object_data();
-    obj_set_value(&number_obj, &"__value__".into(), Value::Number(n))?;
+    obj_set_key_value(&number_obj, &"__value__".into(), Value::Number(n))?;
     // Set prototype to Number.prototype (if available)
     crate::core::set_internal_prototype_from_constructor(&number_obj, env, "Number")?;
     // Now look up the property on the boxed object
-    if let Some(val) = obj_get_value(&number_obj, &prop.into())? {
+    if let Some(val) = obj_get_key_value(&number_obj, &prop.into())? {
         Ok(val.borrow().clone())
     } else {
         Ok(Value::Undefined)

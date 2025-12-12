@@ -1,7 +1,7 @@
 use crate::{
     core::{
-        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data, obj_set_value,
-        values_equal,
+        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data,
+        obj_set_key_value, values_equal,
     },
     error::JSError,
 };
@@ -96,10 +96,10 @@ pub(crate) fn handle_set_instance_method(
             // Create an array of values
             let values_array = new_js_object_data();
             for (i, value) in set.borrow().values.iter().enumerate() {
-                obj_set_value(&values_array, &i.to_string().into(), value.clone())?;
+                obj_set_key_value(&values_array, &i.to_string().into(), value.clone())?;
             }
             // Set length
-            obj_set_value(&values_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
+            obj_set_key_value(&values_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
             Ok(Value::Object(values_array))
         }
         "keys" => {
@@ -114,13 +114,13 @@ pub(crate) fn handle_set_instance_method(
             let entries_array = new_js_object_data();
             for (i, value) in set.borrow().values.iter().enumerate() {
                 let entry_array = new_js_object_data();
-                obj_set_value(&entry_array, &"0".into(), value.clone())?;
-                obj_set_value(&entry_array, &"1".into(), value.clone())?;
-                obj_set_value(&entry_array, &"length".into(), Value::Number(2.0))?;
-                obj_set_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
+                obj_set_key_value(&entry_array, &"0".into(), value.clone())?;
+                obj_set_key_value(&entry_array, &"1".into(), value.clone())?;
+                obj_set_key_value(&entry_array, &"length".into(), Value::Number(2.0))?;
+                obj_set_key_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
             }
             // Set length
-            obj_set_value(&entries_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
+            obj_set_key_value(&entries_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
             Ok(Value::Object(entries_array))
         }
         _ => Err(raise_eval_error!(format!("Set.prototype.{} is not implemented", method))),

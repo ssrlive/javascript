@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, obj_get_value};
+use javascript::{Value, evaluate_script, obj_get_key_value};
 
 #[test]
 fn test_promise_async_resolution() {
@@ -94,51 +94,51 @@ fn test_promise_allsettled() {
             match value {
                 Value::Object(arr) => {
                     // Check that we have 3 elements
-                    if let Some(len_val) = obj_get_value(&arr, &"length".into()).unwrap()
+                    if let Some(len_val) = obj_get_key_value(&arr, &"length".into()).unwrap()
                         && let Value::Number(len) = *len_val.borrow()
                     {
                         assert_eq!(len, 3.0);
                     }
                     // Check first element is fulfilled with 1
-                    if let Some(elem0) = obj_get_value(&arr, &"0".into()).unwrap()
+                    if let Some(elem0) = obj_get_key_value(&arr, &"0".into()).unwrap()
                         && let Value::Object(result_obj) = &*elem0.borrow()
                     {
-                        if let Some(status) = obj_get_value(result_obj, &"status".into()).unwrap()
+                        if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
                             assert_eq!(String::from_utf16_lossy(s), "fulfilled");
                         }
-                        if let Some(value) = obj_get_value(result_obj, &"value".into()).unwrap()
+                        if let Some(value) = obj_get_key_value(result_obj, &"value".into()).unwrap()
                             && let Value::Number(n) = *value.borrow()
                         {
                             assert_eq!(n, 1.0);
                         }
                     }
                     // Check second element is rejected with 2
-                    if let Some(elem1) = obj_get_value(&arr, &"1".into()).unwrap()
+                    if let Some(elem1) = obj_get_key_value(&arr, &"1".into()).unwrap()
                         && let Value::Object(result_obj) = &*elem1.borrow()
                     {
-                        if let Some(status) = obj_get_value(result_obj, &"status".into()).unwrap()
+                        if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
                             assert_eq!(String::from_utf16_lossy(s), "rejected");
                         }
-                        if let Some(reason) = obj_get_value(result_obj, &"reason".into()).unwrap()
+                        if let Some(reason) = obj_get_key_value(result_obj, &"reason".into()).unwrap()
                             && let Value::Number(n) = *reason.borrow()
                         {
                             assert_eq!(n, 2.0);
                         }
                     }
                     // Check third element is fulfilled with 3
-                    if let Some(elem2) = obj_get_value(&arr, &"2".into()).unwrap()
+                    if let Some(elem2) = obj_get_key_value(&arr, &"2".into()).unwrap()
                         && let Value::Object(result_obj) = &*elem2.borrow()
                     {
-                        if let Some(status) = obj_get_value(result_obj, &"status".into()).unwrap()
+                        if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
                             assert_eq!(String::from_utf16_lossy(s), "fulfilled");
                         }
-                        if let Some(value) = obj_get_value(result_obj, &"value".into()).unwrap()
+                        if let Some(value) = obj_get_key_value(result_obj, &"value".into()).unwrap()
                             && let Value::Number(n) = *value.borrow()
                         {
                             assert_eq!(n, 3.0);

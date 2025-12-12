@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
@@ -140,7 +140,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Create a Date object with timestamp
     let date_obj = new_js_object_data();
-    obj_set_value(&date_obj, &"__timestamp".into(), Value::Number(timestamp))?;
+    obj_set_key_value(&date_obj, &"__timestamp".into(), Value::Number(timestamp))?;
 
     // Add toString method
     Ok(Value::Object(date_obj))

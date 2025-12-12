@@ -64,7 +64,7 @@ where
     env.borrow_mut().is_function_scope = true;
     // Record a script name on the root environment so stack frames can include it.
     let path = script_path.map_or("<script>".to_string(), |p| p.as_ref().to_string_lossy().to_string());
-    let _ = obj_set_value(&env, &"__script_name".into(), Value::String(utf8_to_utf16(&path)));
+    let _ = obj_set_key_value(&env, &"__script_name".into(), Value::String(utf8_to_utf16(&path)));
 
     // Inject simple host `std` / `os` shims when importing with the pattern:
     //   import * as NAME from "std";
@@ -82,9 +82,9 @@ where
                 if let Some(end_quote) = rest.find(quote_char) {
                     let module = &rest[..end_quote];
                     if module == "std" {
-                        obj_set_value(&env, &name, Value::Object(crate::js_std::make_std_object()?))?;
+                        obj_set_key_value(&env, &name, Value::Object(crate::js_std::make_std_object()?))?;
                     } else if module == "os" {
-                        obj_set_value(&env, &name, Value::Object(crate::js_os::make_os_object()?))?;
+                        obj_set_key_value(&env, &name, Value::Object(crate::js_os::make_os_object()?))?;
                     }
                 }
             }
@@ -97,7 +97,7 @@ where
     let v = evaluate_statements(&env, &statements)?;
     // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
     if let Value::Object(obj) = &v
-        && let Some(promise_val_rc) = obj_get_value(obj, &"__promise".into())?
+        && let Some(promise_val_rc) = obj_get_key_value(obj, &"__promise".into())?
         && let Value::Promise(promise) = &*promise_val_rc.borrow()
     {
         // Run the event loop until the promise is resolved
@@ -127,7 +127,7 @@ where
 // `name`, and returns the constructor object pointer.
 pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: &str) -> Result<JSObjectDataPtr, JSError> {
     // If already present and is an object, return it
-    if let Some(val_rc) = obj_get_value(env, &name.into())? {
+    if let Some(val_rc) = obj_get_key_value(env, &name.into())? {
         if let Value::Object(obj) = &*val_rc.borrow() {
             return Ok(obj.clone());
         }
@@ -135,33 +135,33 @@ pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: 
 
     let ctor = new_js_object_data();
     // mark constructor
-    obj_set_value(&ctor, &marker_key.into(), Value::Boolean(true))?;
+    obj_set_key_value(&ctor, &marker_key.into(), Value::Boolean(true))?;
 
     // create prototype object
     let proto = new_js_object_data();
     // link prototype.__proto__ to Object.prototype if available
-    if let Some(object_ctor_val) = obj_get_value(env, &"Object".into())?
+    if let Some(object_ctor_val) = obj_get_key_value(env, &"Object".into())?
         && let Value::Object(object_ctor) = &*object_ctor_val.borrow()
-        && let Some(obj_proto_val) = obj_get_value(object_ctor, &"prototype".into())?
+        && let Some(obj_proto_val) = obj_get_key_value(object_ctor, &"prototype".into())?
         && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
     {
         proto.borrow_mut().prototype = Some(obj_proto_obj.clone());
     }
 
-    obj_set_value(&ctor, &"prototype".into(), Value::Object(proto.clone()))?;
+    obj_set_key_value(&ctor, &"prototype".into(), Value::Object(proto.clone()))?;
     // Ensure prototype.constructor points back to the constructor object
-    obj_set_value(&proto, &"constructor".into(), Value::Object(ctor.clone()))?;
+    obj_set_key_value(&proto, &"constructor".into(), Value::Object(ctor.clone()))?;
 
-    obj_set_value(env, &name.into(), Value::Object(ctor.clone()))?;
+    obj_set_key_value(env, &name.into(), Value::Object(ctor.clone()))?;
     Ok(ctor)
 }
 
 // Helper to resolve a constructor's prototype object if present in `env`.
 pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Option<JSObjectDataPtr>, JSError> {
     // First try to find a constructor object already stored in the environment
-    if let Some(val_rc) = obj_get_value(env, &name.into())? {
+    if let Some(val_rc) = obj_get_key_value(env, &name.into())? {
         if let Value::Object(ctor_obj) = &*val_rc.borrow() {
-            if let Some(proto_val_rc) = obj_get_value(ctor_obj, &"prototype".into())? {
+            if let Some(proto_val_rc) = obj_get_key_value(ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -172,7 +172,7 @@ pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Op
     // If not found, attempt to evaluate the variable to force lazy creation
     match evaluate_expr(env, &Expr::Var(name.to_string())) {
         Ok(Value::Object(ctor_obj)) => {
-            if let Some(proto_val_rc) = obj_get_value(&ctor_obj, &"prototype".into())? {
+            if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -219,7 +219,7 @@ where
             let mut i = 0;
             loop {
                 let key = format!("{i}");
-                if let Some(item_val) = obj_get_value(&obj, &key.into())? {
+                if let Some(item_val) = obj_get_key_value(&obj, &key.into())? {
                     let item = item_val.borrow().clone();
                     process_item(item)?;
                 } else {
@@ -508,9 +508,9 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     let error_ctor = ensure_constructor_object(env, "Error", "__is_error_constructor")?;
 
     // Ensure Error.prototype.toString uses our handler
-    if let Some(proto_val) = obj_get_value(&error_ctor, &"prototype".into())? {
+    if let Some(proto_val) = obj_get_key_value(&error_ctor, &"prototype".into())? {
         if let Value::Object(proto_obj) = &*proto_val.borrow() {
-            obj_set_value(
+            obj_set_key_value(
                 proto_obj,
                 &"toString".into(),
                 Value::Function("Error.prototype.toString".to_string()),
@@ -522,9 +522,9 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     let error_types = ["TypeError", "SyntaxError", "ReferenceError", "RangeError", "EvalError", "URIError"];
     for t in error_types.iter() {
         let ctor = ensure_constructor_object(env, t, &format!("__is_{}_constructor", t.to_lowercase()))?;
-        if let Some(proto_val) = obj_get_value(&ctor, &"prototype".into())? {
+        if let Some(proto_val) = obj_get_key_value(&ctor, &"prototype".into())? {
             if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                obj_set_value(
+                obj_set_key_value(
                     proto_obj,
                     &"toString".into(),
                     Value::Function("Error.prototype.toString".to_string()),
@@ -539,21 +539,21 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     let object_obj = new_js_object_data();
 
     // Add static Object.* methods (handlers routed by presence of keys)
-    obj_set_value(&object_obj, &"keys".into(), Value::Function("Object.keys".to_string()))?;
-    obj_set_value(&object_obj, &"values".into(), Value::Function("Object.values".to_string()))?;
-    obj_set_value(&object_obj, &"assign".into(), Value::Function("Object.assign".to_string()))?;
-    obj_set_value(&object_obj, &"create".into(), Value::Function("Object.create".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&object_obj, &"keys".into(), Value::Function("Object.keys".to_string()))?;
+    obj_set_key_value(&object_obj, &"values".into(), Value::Function("Object.values".to_string()))?;
+    obj_set_key_value(&object_obj, &"assign".into(), Value::Function("Object.assign".to_string()))?;
+    obj_set_key_value(&object_obj, &"create".into(), Value::Function("Object.create".to_string()))?;
+    obj_set_key_value(
         &object_obj,
         &"getOwnPropertySymbols".into(),
         Value::Function("Object.getOwnPropertySymbols".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_obj,
         &"getOwnPropertyNames".into(),
         Value::Function("Object.getOwnPropertyNames".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_obj,
         &"getOwnPropertyDescriptors".into(),
         Value::Function("Object.getOwnPropertyDescriptors".to_string()),
@@ -561,40 +561,40 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
 
     // Create Object.prototype and add prototype-level helpers
     let object_prototype = new_js_object_data();
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"hasOwnProperty".into(),
         Value::Function("Object.prototype.hasOwnProperty".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"isPrototypeOf".into(),
         Value::Function("Object.prototype.isPrototypeOf".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"propertyIsEnumerable".into(),
         Value::Function("Object.prototype.propertyIsEnumerable".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"toString".into(),
         Value::Function("Object.prototype.toString".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"valueOf".into(),
         Value::Function("Object.prototype.valueOf".to_string()),
     )?;
     // Add toLocaleString to Object.prototype that delegates to toString/locale handling
-    obj_set_value(
+    obj_set_key_value(
         &object_prototype,
         &"toLocaleString".into(),
         Value::Function("Object.prototype.toLocaleString".to_string()),
     )?;
 
     // wire prototype reference onto constructor
-    obj_set_value(&object_obj, &"prototype".into(), Value::Object(object_prototype.clone()))?;
+    obj_set_key_value(&object_obj, &"prototype".into(), Value::Object(object_prototype.clone()))?;
 
     // expose Object constructor as an object with static methods
     env_borrow.insert(

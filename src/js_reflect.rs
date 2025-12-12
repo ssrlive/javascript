@@ -1,4 +1,6 @@
-use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_value, obj_set_value};
+use crate::core::{
+    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_key_value, obj_set_key_value,
+};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
@@ -7,43 +9,43 @@ use std::rc::Rc;
 /// Create the Reflect object with all reflection methods
 pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
     let reflect_obj = new_js_object_data();
-    obj_set_value(&reflect_obj, &"apply".into(), Value::Function("Reflect.apply".to_string()))?;
-    obj_set_value(&reflect_obj, &"construct".into(), Value::Function("Reflect.construct".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&reflect_obj, &"apply".into(), Value::Function("Reflect.apply".to_string()))?;
+    obj_set_key_value(&reflect_obj, &"construct".into(), Value::Function("Reflect.construct".to_string()))?;
+    obj_set_key_value(
         &reflect_obj,
         &"defineProperty".into(),
         Value::Function("Reflect.defineProperty".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &reflect_obj,
         &"deleteProperty".into(),
         Value::Function("Reflect.deleteProperty".to_string()),
     )?;
-    obj_set_value(&reflect_obj, &"get".into(), Value::Function("Reflect.get".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&reflect_obj, &"get".into(), Value::Function("Reflect.get".to_string()))?;
+    obj_set_key_value(
         &reflect_obj,
         &"getOwnPropertyDescriptor".into(),
         Value::Function("Reflect.getOwnPropertyDescriptor".to_string()),
     )?;
-    obj_set_value(
+    obj_set_key_value(
         &reflect_obj,
         &"getPrototypeOf".into(),
         Value::Function("Reflect.getPrototypeOf".to_string()),
     )?;
-    obj_set_value(&reflect_obj, &"has".into(), Value::Function("Reflect.has".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&reflect_obj, &"has".into(), Value::Function("Reflect.has".to_string()))?;
+    obj_set_key_value(
         &reflect_obj,
         &"isExtensible".into(),
         Value::Function("Reflect.isExtensible".to_string()),
     )?;
-    obj_set_value(&reflect_obj, &"ownKeys".into(), Value::Function("Reflect.ownKeys".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&reflect_obj, &"ownKeys".into(), Value::Function("Reflect.ownKeys".to_string()))?;
+    obj_set_key_value(
         &reflect_obj,
         &"preventExtensions".into(),
         Value::Function("Reflect.preventExtensions".to_string()),
     )?;
-    obj_set_value(&reflect_obj, &"set".into(), Value::Function("Reflect.set".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&reflect_obj, &"set".into(), Value::Function("Reflect.set".to_string()))?;
+    obj_set_key_value(
         &reflect_obj,
         &"setPrototypeOf".into(),
         Value::Function("Reflect.setPrototypeOf".to_string()),
@@ -79,7 +81,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     if crate::js_array::is_array(&arr_obj) {
                         if let Some(len) = crate::js_array::get_array_length(&arr_obj) {
                             for i in 0..len {
-                                if let Some(val_rc) = obj_get_value(&arr_obj, &i.to_string().into())? {
+                                if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
                                     arg_exprs.push(Expr::Value(val_rc.borrow().clone()));
                                 } else {
                                     arg_exprs.push(Expr::Value(Value::Undefined));
@@ -101,7 +103,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     func_env.borrow_mut().is_function_scope = true;
-                    obj_set_value(&func_env, &"this".into(), this_arg)?;
+                    obj_set_key_value(&func_env, &"this".into(), this_arg)?;
 
                     // Bind parameters using evaluated values (Expr::Value will evaluate to exact Value)
                     for (i, param) in params.iter().enumerate() {
@@ -132,7 +134,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     func_env.borrow_mut().is_function_scope = true;
-                    obj_set_value(&func_env, &"this".into(), this_arg)?;
+                    obj_set_key_value(&func_env, &"this".into(), this_arg)?;
                     for (i, param) in params.iter().enumerate() {
                         let val = if i < evaluated_args.len() {
                             evaluated_args[i].clone()
@@ -164,7 +166,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // the provided argument list. This preserves the correct
                     // `this` binding for `Reflect.apply` when the target is a
                     // script-defined function stored as an object.
-                    if let Some(cl_rc) = obj_get_value(&obj_map, &"__closure__".into())? {
+                    if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
                             Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
                                 // Evaluate argument expressions to Values
@@ -228,7 +230,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     if crate::js_array::is_array(&arr_obj) {
                         if let Some(len) = crate::js_array::get_array_length(&arr_obj) {
                             for i in 0..len {
-                                if let Some(val_rc) = obj_get_value(&arr_obj, &i.to_string().into())? {
+                                if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
                                     arg_exprs.push(Expr::Value(val_rc.borrow().clone()));
                                 } else {
                                     arg_exprs.push(Expr::Value(Value::Undefined));
@@ -260,13 +262,13 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // For now, just set the property with the value from attributes
                     // This is a simplified implementation
                     if let Value::Object(attr_obj) = &attributes {
-                        if let Some(value_rc) = obj_get_value(attr_obj, &"value".into())? {
+                        if let Some(value_rc) = obj_get_key_value(attr_obj, &"value".into())? {
                             let prop_key = match property_key {
                                 Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
                                 Value::Number(n) => PropertyKey::String(n.to_string()),
                                 _ => return Err(raise_type_error!("Invalid property key")),
                             };
-                            obj_set_value(&obj, &prop_key, value_rc.borrow().clone())?;
+                            obj_set_key_value(&obj, &prop_key, value_rc.borrow().clone())?;
                             Ok(Value::Boolean(true))
                         } else {
                             Ok(Value::Boolean(false))
@@ -318,7 +320,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    if let Some(value_rc) = obj_get_value(&obj, &prop_key)? {
+                    if let Some(value_rc) = obj_get_key_value(&obj, &prop_key)? {
                         Ok(value_rc.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
@@ -341,13 +343,13 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    if let Some(value_rc) = obj_get_value(&obj, &prop_key)? {
+                    if let Some(value_rc) = obj_get_key_value(&obj, &prop_key)? {
                         // Create a descriptor object
                         let descriptor = new_js_object_data();
-                        obj_set_value(&descriptor, &"value".into(), value_rc.borrow().clone())?;
-                        obj_set_value(&descriptor, &"writable".into(), Value::Boolean(true))?;
-                        obj_set_value(&descriptor, &"enumerable".into(), Value::Boolean(true))?;
-                        obj_set_value(&descriptor, &"configurable".into(), Value::Boolean(true))?;
+                        obj_set_key_value(&descriptor, &"value".into(), value_rc.borrow().clone())?;
+                        obj_set_key_value(&descriptor, &"writable".into(), Value::Boolean(true))?;
+                        obj_set_key_value(&descriptor, &"enumerable".into(), Value::Boolean(true))?;
+                        obj_set_key_value(&descriptor, &"configurable".into(), Value::Boolean(true))?;
                         Ok(Value::Object(descriptor))
                     } else {
                         Ok(Value::Undefined)
@@ -387,7 +389,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    let has_prop = obj_get_value(&obj, &prop_key)?.is_some();
+                    let has_prop = obj_get_key_value(&obj, &prop_key)?.is_some();
                     Ok(Value::Boolean(has_prop))
                 }
                 _ => Err(raise_type_error!("Reflect.has target must be an object")),
@@ -425,10 +427,10 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // Create an array-like object for keys
                     let result_obj = new_js_object_data();
                     for (i, key) in keys.into_iter().enumerate() {
-                        obj_set_value(&result_obj, &i.to_string().into(), key)?;
+                        obj_set_key_value(&result_obj, &i.to_string().into(), key)?;
                     }
                     // Set length property
-                    obj_set_value(&result_obj, &"length".into(), Value::Number(keys_len as f64))?;
+                    obj_set_key_value(&result_obj, &"length".into(), Value::Number(keys_len as f64))?;
                     Ok(Value::Object(result_obj))
                 }
                 _ => Err(raise_type_error!("Reflect.ownKeys target must be an object")),
@@ -468,7 +470,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    obj_set_value(&obj, &prop_key, value)?;
+                    obj_set_key_value(&obj, &prop_key, value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.set target must be an object")),

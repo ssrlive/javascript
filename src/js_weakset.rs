@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_value},
+    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -32,7 +32,7 @@ fn initialize_weakset_from_iterable(weakset: &Rc<RefCell<JSWeakSet>>, args: &[Ex
             let mut i = 0;
             loop {
                 let key = format!("{}", i);
-                if let Some(value_val) = obj_get_value(&obj, &key.into())? {
+                if let Some(value_val) = obj_get_key_value(&obj, &key.into())? {
                     let value = value_val.borrow().clone();
 
                     // Check if value is an object

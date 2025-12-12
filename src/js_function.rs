@@ -1,4 +1,5 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, parse_bigint_string, to_primitive, value_to_string};
+use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
@@ -630,26 +631,26 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             let value = args[1].clone();
             if let Value::Object(state_obj) = args[2].clone() {
                 // Store value in results[idx]
-                if let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, &"results".into())?
+                if let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
                     && let Value::Object(results_obj) = &*results_val_rc.borrow()
                 {
-                    crate::core::obj_set_value(results_obj, &idx.to_string().into(), value)?;
+                    obj_set_key_value(results_obj, &idx.to_string().into(), value)?;
                 }
                 // Increment completed
-                if let Some(completed_val_rc) = crate::core::obj_get_value(&state_obj, &"completed".into())?
+                if let Some(completed_val_rc) = obj_get_key_value(&state_obj, &"completed".into())?
                     && let Value::Number(completed) = &*completed_val_rc.borrow()
                 {
                     let new_completed = completed + 1.0;
-                    crate::core::obj_set_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
+                    obj_set_key_value(&state_obj, &"completed".into(), Value::Number(new_completed))?;
                     // Check if all completed
-                    if let Some(total_val_rc) = crate::core::obj_get_value(&state_obj, &"total".into())?
+                    if let Some(total_val_rc) = obj_get_key_value(&state_obj, &"total".into())?
                         && let Value::Number(total) = &*total_val_rc.borrow()
                         && new_completed == *total
                     {
                         // Resolve result_promise with results array
-                        if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
+                        if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
                             && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
-                            && let Some(results_val_rc) = crate::core::obj_get_value(&state_obj, &"results".into())?
+                            && let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
                             && let Value::Object(results_obj) = &*results_val_rc.borrow()
                         {
                             crate::js_promise::resolve_promise(result_promise, Value::Object(results_obj.clone()));
@@ -665,7 +666,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             let reason = args[0].clone();
             if let Value::Object(state_obj) = args[1].clone() {
                 // Reject result_promise
-                if let Some(promise_val_rc) = crate::core::obj_get_value(&state_obj, &"result_promise".into())?
+                if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
                     && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
                 {
                     crate::js_promise::reject_promise(result_promise, reason);

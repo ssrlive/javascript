@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_value},
+    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -32,11 +32,13 @@ fn initialize_weakmap_from_iterable(weakmap: &Rc<RefCell<JSWeakMap>>, args: &[Ex
             let mut i = 0;
             loop {
                 let key = format!("{}", i);
-                if let Some(entry_val) = obj_get_value(&obj, &key.into())? {
+                if let Some(entry_val) = obj_get_key_value(&obj, &key.into())? {
                     let entry = entry_val.borrow().clone();
                     if let Value::Object(entry_obj) = entry
-                        && let (Some(key_val), Some(value_val)) =
-                            (obj_get_value(&entry_obj, &"0".into())?, obj_get_value(&entry_obj, &"1".into())?)
+                        && let (Some(key_val), Some(value_val)) = (
+                            obj_get_key_value(&entry_obj, &"0".into())?,
+                            obj_get_key_value(&entry_obj, &"1".into())?,
+                        )
                     {
                         let key_obj = key_val.borrow().clone();
                         let value_obj = value_val.borrow().clone();

@@ -1,7 +1,7 @@
 use crate::{
     core::{
         Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
-        obj_get_value, obj_set_value,
+        obj_get_key_value, obj_set_key_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
@@ -85,8 +85,8 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
 
     // Create the revocable result object
     let result_obj = new_js_object_data();
-    obj_set_value(&result_obj, &"proxy".into(), Value::Object(proxy_wrapper))?;
-    obj_set_value(&result_obj, &"revoke".into(), revoke_func)?;
+    obj_set_key_value(&result_obj, &"proxy".into(), Value::Object(proxy_wrapper))?;
+    obj_set_key_value(&result_obj, &"revoke".into(), revoke_func)?;
 
     Ok(Value::Object(result_obj))
 }
@@ -105,7 +105,7 @@ pub(crate) fn apply_proxy_trap(
 
     // Check if handler has the trap
     if let Value::Object(handler_obj) = &proxy_borrow.handler
-        && let Some(trap_val) = obj_get_value(handler_obj, &trap_name.into())?
+        && let Some(trap_val) = obj_get_key_value(handler_obj, &trap_name.into())?
     {
         let trap = trap_val.borrow().clone();
         // Accept either a direct `Value::Closure` or a function-object that
@@ -118,7 +118,7 @@ pub(crate) fn apply_proxy_trap(
             // Bind arguments to parameters
             for (i, arg) in args.iter().enumerate() {
                 if i < params.len() {
-                    obj_set_value(&trap_env, &params[i].clone().into(), arg.clone())?;
+                    obj_set_key_value(&trap_env, &params[i].clone().into(), arg.clone())?;
                 }
             }
 
@@ -146,7 +146,7 @@ pub(crate) fn proxy_get_property(proxy: &Rc<RefCell<JSProxy>>, key: &PropertyKey
             // Default behavior: get property from target
             match &proxy.borrow().target {
                 Value::Object(obj) => {
-                    let val_opt = obj_get_value(obj, key)?;
+                    let val_opt = obj_get_key_value(obj, key)?;
                     match val_opt {
                         Some(val_rc) => Ok(val_rc.borrow().clone()),
                         None => Ok(Value::Undefined),
@@ -173,7 +173,7 @@ pub(crate) fn proxy_set_property(proxy: &Rc<RefCell<JSProxy>>, key: &PropertyKey
             // Default behavior: set property on target
             match &proxy.borrow().target {
                 Value::Object(obj) => {
-                    obj_set_value(obj, key, value)?;
+                    obj_set_key_value(obj, key, value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
@@ -196,7 +196,7 @@ pub(crate) fn _proxy_has_property(proxy: &Rc<RefCell<JSProxy>>, key: &PropertyKe
         || {
             // Default behavior: check if property exists on target
             match &proxy.borrow().target {
-                Value::Object(obj) => Ok(Value::Boolean(obj_get_value(obj, key)?.is_some())),
+                Value::Object(obj) => Ok(Value::Boolean(obj_get_key_value(obj, key)?.is_some())),
                 _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
             }
         },

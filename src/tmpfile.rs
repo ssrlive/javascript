@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
@@ -39,18 +39,18 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
             let tmp = new_js_object_data();
-            obj_set_value(&tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
-            obj_set_value(&tmp, &"__eof".into(), Value::Boolean(false))?;
+            obj_set_key_value(&tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
+            obj_set_key_value(&tmp, &"__eof".into(), Value::Boolean(false))?;
             // methods
-            obj_set_value(&tmp, &"puts".into(), Value::Function("tmp.puts".to_string()))?;
-            obj_set_value(&tmp, &"readAsString".into(), Value::Function("tmp.readAsString".to_string()))?;
-            obj_set_value(&tmp, &"seek".into(), Value::Function("tmp.seek".to_string()))?;
-            obj_set_value(&tmp, &"tell".into(), Value::Function("tmp.tell".to_string()))?;
-            obj_set_value(&tmp, &"putByte".into(), Value::Function("tmp.putByte".to_string()))?;
-            obj_set_value(&tmp, &"getByte".into(), Value::Function("tmp.getByte".to_string()))?;
-            obj_set_value(&tmp, &"getline".into(), Value::Function("tmp.getline".to_string()))?;
-            obj_set_value(&tmp, &"eof".into(), Value::Function("tmp.eof".to_string()))?;
-            obj_set_value(&tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
+            obj_set_key_value(&tmp, &"puts".into(), Value::Function("tmp.puts".to_string()))?;
+            obj_set_key_value(&tmp, &"readAsString".into(), Value::Function("tmp.readAsString".to_string()))?;
+            obj_set_key_value(&tmp, &"seek".into(), Value::Function("tmp.seek".to_string()))?;
+            obj_set_key_value(&tmp, &"tell".into(), Value::Function("tmp.tell".to_string()))?;
+            obj_set_key_value(&tmp, &"putByte".into(), Value::Function("tmp.putByte".to_string()))?;
+            obj_set_key_value(&tmp, &"getByte".into(), Value::Function("tmp.getByte".to_string()))?;
+            obj_set_key_value(&tmp, &"getline".into(), Value::Function("tmp.getline".to_string()))?;
+            obj_set_key_value(&tmp, &"eof".into(), Value::Function("tmp.eof".to_string()))?;
+            obj_set_key_value(&tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(raise_eval_error!(format!("Failed to create temporary file: {e}"))),

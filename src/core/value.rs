@@ -727,7 +727,7 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate
     match val {
         Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
         Value::Object(obj_map) => {
-            if let Ok(Some(cl_rc)) = obj_get_value(obj_map, &"__closure__".into()) {
+            if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
                     Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
                     _ => None,
@@ -748,7 +748,7 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
             // Prefer explicit [Symbol.toPrimitive] if present and callable
             if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
                 let key = PropertyKey::Symbol(tp_sym.clone());
-                if let Some(method_rc) = obj_get_value(obj_map, &key)? {
+                if let Some(method_rc) = obj_get_key_value(obj_map, &key)? {
                     let method_val = method_rc.borrow().clone();
                     // Accept direct closures or function-objects that wrap a closure
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
@@ -844,7 +844,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
 }
 
 // Helper accessors for objects and environments
-pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
+pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Option<Rc<RefCell<Value>>>, JSError> {
     // Check if this object is a proxy wrapper
     // Avoid holding a Ref borrow across calls by extracting the optional Rc first.
     let proxy_opt = get_own_property(js_obj, &"__proxy__".into());
@@ -865,7 +865,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
             let val_clone = val.borrow().clone();
             match val_clone {
                 Value::Property { value, getter, .. } => {
-                    log::trace!("obj_get_value - property descriptor found for key {}", key);
+                    log::trace!("obj_get_key_value - property descriptor found for key {}", key);
                     if let Some((body, env)) = getter {
                         // Create a new environment with this bound to the original object
                         let getter_env = new_js_object_data();
@@ -874,13 +874,13 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                         let result = evaluate_statements(&getter_env, &body)?;
                         if let Value::Object(ref obj_ptr) = result {
                             let ptr = Rc::as_ptr(obj_ptr);
-                            log::trace!("obj_get_value - getter returned object ptr={:p} for key {}", ptr, key);
+                            log::trace!("obj_get_key_value - getter returned object ptr={:p} for key {}", ptr, key);
                         }
                         return Ok(Some(Rc::new(RefCell::new(result))));
                     } else if let Some(val_rc) = value {
                         // If the stored value is an object, log its pointer
                         if let Value::Object(ref obj_ptr) = *val_rc.borrow() {
-                            log::trace!("obj_get_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
+                            log::trace!("obj_get_key_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
                         }
                         return Ok(Some(val_rc));
                     } else {
@@ -888,21 +888,21 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
                     }
                 }
                 Value::Getter(body, env) => {
-                    log::trace!("obj_get_value - getter found for key {}", key);
+                    log::trace!("obj_get_key_value - getter found for key {}", key);
                     let getter_env = new_js_object_data();
                     getter_env.borrow_mut().prototype = Some(env);
                     env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                     let result = evaluate_statements(&getter_env, &body)?;
                     if let Value::Object(ref obj_ptr) = result {
                         let ptr = Rc::as_ptr(obj_ptr);
-                        log::trace!("obj_get_value - getter returned object ptr={:p} for key {}", ptr, key);
+                        log::trace!("obj_get_key_value - getter returned object ptr={:p} for key {}", ptr, key);
                     }
                     return Ok(Some(Rc::new(RefCell::new(result))));
                 }
                 _ => {
-                    log::trace!("obj_get_value - raw value found for key {}", key);
+                    log::trace!("obj_get_key_value - raw value found for key {}", key);
                     if let Value::Object(ref obj_ptr) = *val.borrow() {
-                        log::trace!("obj_get_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
+                        log::trace!("obj_get_key_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
                     }
                     return Ok(Some(val.clone()));
                 }
@@ -1212,7 +1212,7 @@ pub fn obj_get_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<Opti
     Ok(None)
 }
 
-pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
+pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) -> Result<(), JSError> {
     // Check if this object is a proxy wrapper
     let proxy_opt = get_own_property(js_obj, &"__proxy__".into());
     if let Some(proxy_val) = proxy_opt {
@@ -1253,7 +1253,9 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                             let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())
                                 .map(|r| format!("{:?}", r.borrow()))
                                 .unwrap_or_else(|| "<none>".to_string());
-                            log::debug!("DBG obj_set_value - inserting 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={new_prop:?}");
+                            log::debug!(
+                                "DBG obj_set_key_value - inserting 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={new_prop:?}"
+                            );
                         }
                     }
                     // Log the property insertion (object target pointer + value info)
@@ -1262,7 +1264,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                         other => format!("value={:?}", other),
                     };
                     log::debug!(
-                        "DBG obj_set_value - setting existing prop '{}' on obj ptr={:p} -> {}",
+                        "DBG obj_set_key_value - setting existing prop '{}' on obj ptr={:p} -> {}",
                         key,
                         Rc::as_ptr(js_obj),
                         val_ptr_info
@@ -1291,7 +1293,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
                 if let Value::Number(current_len) = &*length_rc.borrow() {
                     if index >= *current_len as usize {
                         let new_len = (index + 1) as f64;
-                        obj_set_value(js_obj, &"length".into(), Value::Number(new_len))?;
+                        obj_set_key_value(js_obj, &"length".into(), Value::Number(new_len))?;
                     }
                 }
             }
@@ -1302,7 +1304,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
             let dbg_id = get_own_property(js_obj, &"__dbg_ptr__".into())
                 .map(|r| format!("{:?}", r.borrow()))
                 .unwrap_or_else(|| "<none>".to_string());
-            log::debug!("DBG obj_set_value - direct insert 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={val:?}");
+            log::debug!("DBG obj_set_key_value - direct insert 'message' on obj ptr={js_obj:p} dbg_id={dbg_id} value={val:?}");
         }
     }
     // Log general property insertion (target pointer + value pointer/type) for diagnostics
@@ -1311,7 +1313,7 @@ pub fn obj_set_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value) ->
         other => format!("value={:?}", other),
     };
     log::debug!(
-        "DBG obj_set_value - direct insert prop '{}' on obj ptr={:p} -> {}",
+        "DBG obj_set_key_value - direct insert prop '{}' on obj ptr={:p} -> {}",
         key,
         Rc::as_ptr(js_obj),
         val_ptr_info

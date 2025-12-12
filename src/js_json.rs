@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -60,7 +60,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let obj = new_js_object_data();
             for (i, item) in arr.into_iter().enumerate() {
                 let js_val = json_value_to_js_value(item)?;
-                obj_set_value(&obj, &i.to_string().into(), js_val)?;
+                obj_set_key_value(&obj, &i.to_string().into(), js_val)?;
             }
             set_array_length(&obj, len)?;
             Ok(Value::Object(obj))
@@ -69,7 +69,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
             let js_obj = new_js_object_data();
             for (key, value) in obj.into_iter() {
                 let js_val = json_value_to_js_value(value)?;
-                obj_set_value(&js_obj, &key.into(), js_val)?;
+                obj_set_key_value(&js_obj, &key.into(), js_val)?;
             }
             Ok(Value::Object(js_obj))
         }

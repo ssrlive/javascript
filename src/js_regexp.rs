@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_slice, utf16_to_utf8};
 use fancy_regex::Regex;
@@ -234,22 +234,22 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     let regexp_obj = new_js_object_data();
 
     // Store regex and flags as properties
-    obj_set_value(&regexp_obj, &"__regex".into(), Value::String(utf8_to_utf16(&pattern)))?;
-    obj_set_value(&regexp_obj, &"__flags".into(), Value::String(utf8_to_utf16(&flags)))?;
-    obj_set_value(&regexp_obj, &"__global".into(), Value::Boolean(global))?;
-    obj_set_value(&regexp_obj, &"__ignoreCase".into(), Value::Boolean(ignore_case))?;
-    obj_set_value(&regexp_obj, &"__multiline".into(), Value::Boolean(multiline))?;
-    obj_set_value(&regexp_obj, &"__dotAll".into(), Value::Boolean(dot_matches_new_line))?;
-    obj_set_value(&regexp_obj, &"__unicode".into(), Value::Boolean(unicode))?;
-    obj_set_value(&regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
-    obj_set_value(&regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
-    obj_set_value(&regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
-    obj_set_value(&regexp_obj, &"__lastIndex".into(), Value::Number(0.0))?;
+    obj_set_key_value(&regexp_obj, &"__regex".into(), Value::String(utf8_to_utf16(&pattern)))?;
+    obj_set_key_value(&regexp_obj, &"__flags".into(), Value::String(utf8_to_utf16(&flags)))?;
+    obj_set_key_value(&regexp_obj, &"__global".into(), Value::Boolean(global))?;
+    obj_set_key_value(&regexp_obj, &"__ignoreCase".into(), Value::Boolean(ignore_case))?;
+    obj_set_key_value(&regexp_obj, &"__multiline".into(), Value::Boolean(multiline))?;
+    obj_set_key_value(&regexp_obj, &"__dotAll".into(), Value::Boolean(dot_matches_new_line))?;
+    obj_set_key_value(&regexp_obj, &"__unicode".into(), Value::Boolean(unicode))?;
+    obj_set_key_value(&regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
+    obj_set_key_value(&regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
+    obj_set_key_value(&regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
+    obj_set_key_value(&regexp_obj, &"__lastIndex".into(), Value::Number(0.0))?;
 
     // Add methods
-    obj_set_value(&regexp_obj, &"exec".into(), Value::Function("RegExp.prototype.exec".to_string()))?;
-    obj_set_value(&regexp_obj, &"test".into(), Value::Function("RegExp.prototype.test".to_string()))?;
-    obj_set_value(
+    obj_set_key_value(&regexp_obj, &"exec".into(), Value::Function("RegExp.prototype.exec".to_string()))?;
+    obj_set_key_value(&regexp_obj, &"test".into(), Value::Function("RegExp.prototype.test".to_string()))?;
+    obj_set_key_value(
         &regexp_obj,
         &"toString".into(),
         Value::Function("RegExp.prototype.toString".to_string()),
@@ -409,35 +409,35 @@ pub(crate) fn handle_regexp_method(
                             } else {
                                 matched.as_str()
                             };
-                            obj_set_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(real_match)))?;
+                            obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(real_match)))?;
                         } else {
-                            obj_set_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
+                            obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
                         }
 
                         // Compute index in UTF-16 code units: last_index + utf16_len(prefix within match start)
                         let prefix_bytes = &input[byte_start..byte_start + matched.start()];
                         let prefix_u16_len = utf8_to_utf16(prefix_bytes).len();
-                        obj_set_value(&result_array, &"index".into(), Value::Number((last_index + prefix_u16_len) as f64))?;
-                        obj_set_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
+                        obj_set_key_value(&result_array, &"index".into(), Value::Number((last_index + prefix_u16_len) as f64))?;
+                        obj_set_key_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
                     }
 
                     // Add capture groups
                     let mut group_index = 1;
                     for capture in captures.iter().skip(1) {
                         if let Some(capture_match) = capture {
-                            obj_set_value(
+                            obj_set_key_value(
                                 &result_array,
                                 &group_index.to_string().into(),
                                 Value::String(utf8_to_utf16(capture_match.as_str())),
                             )?;
                         } else {
-                            obj_set_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                            obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
                         }
                         group_index += 1;
                     }
 
                     // Set length
-                    obj_set_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+                    obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
 
                     // Update lastIndex for global or sticky regex
                     if use_last && let Some(matched) = captures.get(0) {
@@ -477,7 +477,7 @@ pub(crate) fn handle_regexp_method(
                             // fallback to the previous calculation
                             last_index + utf8_to_utf16(&matched_str).len()
                         };
-                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
                         log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
                     }
 
@@ -486,7 +486,7 @@ pub(crate) fn handle_regexp_method(
                 Ok(None) => {
                     // Reset lastIndex for global regex on no match
                     if global {
-                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
                     }
                     // RegExp.exec returns null on no match, but we use Undefined
                     Ok(Value::Undefined)
@@ -644,7 +644,7 @@ pub(crate) fn handle_regexp_method(
                         } else {
                             last_index + utf8_to_utf16(matched_prefix).len()
                         };
-                        obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -652,7 +652,7 @@ pub(crate) fn handle_regexp_method(
                     }
                 }
             } else if global && !is_match {
-                obj_set_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
             }
 
             Ok(Value::Boolean(is_match))

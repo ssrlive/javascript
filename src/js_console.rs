@@ -1,10 +1,10 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_set_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 
 /// Create the console object with logging functions
 pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
     let console_obj = new_js_object_data();
-    obj_set_value(&console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
+    obj_set_key_value(&console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
     Ok(console_obj)
 }
 
@@ -33,7 +33,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 if i > 0 {
                                     print!(",");
                                 }
-                                if let Some(val_rc) = crate::core::obj_get_value(&obj, &i.to_string().into())? {
+                                if let Some(val_rc) = obj_get_key_value(&obj, &i.to_string().into())? {
                                     match &*val_rc.borrow() {
                                         Value::Number(n) => print!("{}", n),
                                         Value::BigInt(h) => print!("{h}"),

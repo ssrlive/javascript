@@ -675,7 +675,12 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
         Value::Object(obj) => {
-            if let Some(length_rc) = get_own_property(obj, &"length".into()) {
+            // Check if this is a function object (has __closure__ property)
+            let has_closure = get_own_property(obj, &"__closure__".into()).is_some();
+            log::trace!("DEBUG: has_closure = {has_closure}");
+            if has_closure {
+                "function".to_string()
+            } else if let Some(length_rc) = get_own_property(obj, &"length".into()) {
                 if let Value::Number(len) = &*length_rc.borrow() {
                     if len.is_finite() && *len >= 0.0 && len.fract() == 0.0 {
                         let len_usize = *len as usize;
@@ -735,10 +740,14 @@ pub fn value_to_string(val: &Value) -> String {
 pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate::core::Statement>, crate::core::JSObjectDataPtr)> {
     match val {
         Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+        Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+        Value::GeneratorFunction(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
         Value::Object(obj_map) => {
             if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
                     Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::GeneratorFunction(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
                     _ => None,
                 }
             } else {

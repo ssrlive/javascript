@@ -105,9 +105,23 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
     for stmt in statements {
         if let Statement::FunctionDeclaration(name, params, body, is_generator) = stmt {
             let func_val = if *is_generator {
-                Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+                // For generator functions, create a function object wrapper
+                let func_obj = new_js_object_data();
+                let prototype_obj = new_js_object_data();
+                let generator_val = Value::GeneratorFunction(params.clone(), body.clone(), env.clone());
+                obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
+                obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                Value::Object(func_obj)
             } else {
-                Value::Closure(params.clone(), body.clone(), env.clone())
+                // For regular functions, create a function object wrapper
+                let func_obj = new_js_object_data();
+                let prototype_obj = new_js_object_data();
+                let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
+                obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
+                obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                Value::Object(func_obj)
             };
             env_set(env, name, func_val)?;
         }
@@ -186,8 +200,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     last_value = val;
                     Ok(None)
                 }
-                Statement::FunctionDeclaration(name, params, body, _is_generator) => {
-                    let closure = Value::Closure(params.clone(), body.clone(), env.clone());
+                Statement::FunctionDeclaration(name, params, body, is_generator) => {
+                    let closure = if *is_generator {
+                        Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+                    } else {
+                        Value::Closure(params.clone(), body.clone(), env.clone())
+                    };
                     env_set(env, name, closure)?;
                     last_value = Value::Undefined;
                     Ok(None)
@@ -405,9 +423,21 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             }
                             Statement::FunctionDeclaration(name, params, body, is_generator) => {
                                 let func_val = if *is_generator {
-                                    Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+                                    let func_obj = new_js_object_data();
+                                    let prototype_obj = new_js_object_data();
+                                    let generator_val = Value::GeneratorFunction(params.clone(), body.clone(), env.clone());
+                                    obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
+                                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                                    Value::Object(func_obj)
                                 } else {
-                                    Value::Closure(params.clone(), body.clone(), env.clone())
+                                    let func_obj = new_js_object_data();
+                                    let prototype_obj = new_js_object_data();
+                                    let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
+                                    obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
+                                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                                    Value::Object(func_obj)
                                 };
                                 env_set(env, name.as_str(), func_val)?;
                             }
@@ -4971,6 +5001,54 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             Value::GeneratorFunction(params, body, captured_env) => {
                 // Generator function call - return a generator object
                 crate::js_generator::handle_generator_function_call(&params, &body, args, &captured_env)
+            }
+            Value::Object(obj_map) if get_own_property(&obj_map, &"__closure__".into()).is_some() => {
+                // Function object call - extract the closure and call it
+                if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
+                    match &*cl_rc.borrow() {
+                        Value::Closure(params, body, captured_env) => {
+                            // Function call
+                            // Collect all arguments, expanding spreads
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            // Create new environment starting with captured environment (fresh frame)
+                            let func_env = new_js_object_data();
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // ensure this env is a proper function scope
+                            func_env.borrow_mut().is_function_scope = true;
+                            // Attach minimal frame info (try to derive a name from captured_env, else anonymous)
+                            let frame_name = if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
+                                if let Value::String(s) = &*name_rc.borrow() {
+                                    String::from_utf16_lossy(s)
+                                } else {
+                                    "<anonymous>".to_string()
+                                }
+                            } else {
+                                "<anonymous>".to_string()
+                            };
+                            let frame = build_frame_name(env, &frame_name);
+                            let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                            let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
+                            // Bind parameters: provide provided args, set missing params to undefined
+                            for (i, param) in params.iter().enumerate() {
+                                if i < evaluated_args.len() {
+                                    env_set(&func_env, param.as_str(), evaluated_args[i].clone())?;
+                                } else {
+                                    env_set(&func_env, param.as_str(), Value::Undefined)?;
+                                }
+                            }
+                            // Execute function body
+                            evaluate_statements(&func_env, body)
+                        }
+                        Value::GeneratorFunction(params, body, captured_env) => {
+                            // Generator function call - return a generator object
+                            crate::js_generator::handle_generator_function_call(params, body, args, captured_env)
+                        }
+                        _ => Err(raise_eval_error!("Object is not callable")),
+                    }
+                } else {
+                    Err(raise_eval_error!("Object is not callable"))
+                }
             }
             Value::Closure(params, body, captured_env) => {
                 // Function call

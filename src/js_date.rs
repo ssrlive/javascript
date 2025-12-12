@@ -37,6 +37,11 @@ fn parse_date_string(date_str: &str) -> Option<f64> {
         return Some(dt.timestamp_millis() as f64);
     }
 
+    // Try parsing "Aug 9, 1995" format manually
+    if let Some(timestamp) = parse_month_day_year(date_str) {
+        return Some(timestamp);
+    }
+
     // Try common formats
     let formats = [
         "%Y-%m-%dT%H:%M:%S%.fZ", // ISO with milliseconds
@@ -68,6 +73,40 @@ fn parse_date_string(date_str: &str) -> Option<f64> {
         }
     }
 
+    None
+}
+
+/// Parse dates in "Aug 9, 1995" format
+fn parse_month_day_year(date_str: &str) -> Option<f64> {
+    let trimmed = date_str.trim();
+    let parts: Vec<&str> = trimmed.split_whitespace().collect();
+    if parts.len() == 3 {
+        let month_str = parts[0];
+        let day_str = parts[1].trim_end_matches(',');
+        let year_str = parts[2];
+
+        let month = match month_str {
+            "Jan" => 1,
+            "Feb" => 2,
+            "Mar" => 3,
+            "Apr" => 4,
+            "May" => 5,
+            "Jun" => 6,
+            "Jul" => 7,
+            "Aug" => 8,
+            "Sep" => 9,
+            "Oct" => 10,
+            "Nov" => 11,
+            "Dec" => 12,
+            _ => return None,
+        };
+
+        if let (Ok(day), Ok(year)) = (day_str.parse::<u32>(), year_str.parse::<i32>())
+            && let Some(date) = Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()
+        {
+            return Some(date.timestamp_millis() as f64);
+        }
+    }
     None
 }
 
@@ -445,6 +484,23 @@ pub(crate) fn handle_date_method(obj_map: &JSObjectDataPtr, method: &str, args: 
                 Err(raise_type_error!("Invalid Date object"))
             }
         }
+        "setTime" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Date.setTime() takes exactly 1 argument"));
+            }
+
+            // Evaluate the time argument
+            let time_val = evaluate_expr(env, &args[0])?;
+            let time = if let Value::Number(t) = time_val {
+                t
+            } else {
+                return Err(raise_type_error!("Date.setTime() argument must be a number"));
+            };
+
+            // Set the timestamp
+            set_time_stamp_value(obj_map, time)?;
+            Ok(Value::Number(time))
+        }
         "toDateString" => {
             if !args.is_empty() {
                 return Err(raise_type_error!("Date.toDateString() takes no arguments"));
@@ -630,6 +686,23 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
             use std::time::{SystemTime, UNIX_EPOCH};
             let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
             Ok(Value::Number(duration.as_millis() as f64))
+        }
+        "parse" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Date.parse() takes exactly 1 argument"));
+            }
+            // Evaluate the argument
+            let arg_val = evaluate_expr(_env, &args[0])?;
+            if let Value::String(s) = arg_val {
+                let date_str = String::from_utf16_lossy(&s);
+                if let Some(timestamp) = parse_date_string(&date_str) {
+                    Ok(Value::Number(timestamp))
+                } else {
+                    Ok(Value::Number(f64::NAN))
+                }
+            } else {
+                Ok(Value::Number(f64::NAN))
+            }
         }
         _ => Err(raise_eval_error!(format!("Date has no static method '{method}'"))),
     }

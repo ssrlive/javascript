@@ -6,3 +6,7 @@ const msPerDay = 24 * 60 * 60 * 1000; // Number of milliseconds in a day
 let daysLeft = (endYear.getTime() - today.getTime()) / msPerDay;
 daysLeft = Math.round(daysLeft); // Return the number of days left in this year
 console.log(`There are ${daysLeft} days left until the end of this year`);
+
+const ipoDate = new Date();
+ipoDate.setTime(Date.parse("Aug 9, 1995"));
+console.log(`The IPO of Amazon was on ${ipoDate.toDateString()}`);

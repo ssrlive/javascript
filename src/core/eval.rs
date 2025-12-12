@@ -1,9 +1,10 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BigIntHolder, BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, SwitchCase, SymbolData,
+        BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, SwitchCase, SymbolData,
         TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, extract_closure_from_value,
-        get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_value, to_primitive, value_to_string, values_equal,
+        get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_value, parse_bigint_string, to_primitive, value_to_string,
+        values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
@@ -1165,7 +1166,6 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
                     let val_num = match &mut v {
                         Value::Number(num) => *num as i64,
                         Value::BigInt(h) => h
-                            .refresh_parsed(false)?
                             .to_i64()
                             .ok_or(raise_eval_error!("TypedArray assignment value must be a number"))?,
                         _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
@@ -2197,7 +2197,7 @@ fn eval_switch_statement(
 pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     match expr {
         Expr::Number(n) => evaluate_number(*n),
-        Expr::BigInt(s) => Ok(Value::BigInt(BigIntHolder::try_from(s.as_str())?)),
+        Expr::BigInt(s) => Ok(Value::BigInt(parse_bigint_string(s)?)),
         Expr::StringLit(s) => evaluate_string_lit(s),
         Expr::Boolean(b) => evaluate_boolean(*b),
         Expr::Var(name) => evaluate_var(env, name),
@@ -2247,35 +2247,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 Err(e)
             }
         },
-        Expr::Function(params, body) => {
-            // Create a callable function *object* that wraps the closure so
-            // script-level assignments like `F.prototype = ...` work. Store
-            // the executable closure under an internal `__closure__` key and
-            // expose a `prototype` object with a `constructor` backpointer.
-            let func_obj = new_js_object_data();
-
-            // Create the associated prototype object for instances
-            let prototype_obj = new_js_object_data();
-
-            // Store the closure under an internal key
-            let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
-            obj_set_value(&func_obj, &"__closure__".into(), closure_val)?;
-
-            // Diagnostic: record the function object pointer so we can trace
-            // whether the same function wrapper instance is used across bindings
-            // and `new` invocations.
-            log::trace!(
-                "DBG Expr::Function - created func_obj ptr={:p} prototype_ptr={:p}",
-                Rc::as_ptr(&func_obj),
-                Rc::as_ptr(&prototype_obj)
-            );
-
-            // Wire up `prototype` and `prototype.constructor`
-            obj_set_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
-            obj_set_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
-
-            Ok(Value::Object(func_obj))
-        }
+        Expr::Function(params, body) => evaluate_function_expression(env, params, body),
         Expr::GeneratorFunction(params, body) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
@@ -2301,50 +2273,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::ArrayDestructuring(pattern) => evaluate_array_destructuring(env, pattern),
         Expr::ObjectDestructuring(pattern) => evaluate_object_destructuring(env, pattern),
         Expr::AsyncFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
-        Expr::Await(expr) => {
-            let promise_val = evaluate_expr(env, expr)?;
-            match promise_val {
-                Value::Promise(promise) => {
-                    // Wait for the promise to resolve by running the event loop
-                    loop {
-                        run_event_loop()?;
-                        let promise_borrow = promise.borrow();
-                        match &promise_borrow.state {
-                            PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                            PromiseState::Rejected(reason) => {
-                                return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
-                            }
-                            PromiseState::Pending => {
-                                // Continue running the event loop
-                            }
-                        }
-                    }
-                }
-                Value::Object(obj) => {
-                    // Check if this is a Promise object with __promise property
-                    if let Some(promise_rc) = obj_get_value(&obj, &"__promise".into())?
-                        && let Value::Promise(promise) = promise_rc.borrow().clone()
-                    {
-                        // Wait for the promise to resolve by running the event loop
-                        loop {
-                            run_event_loop()?;
-                            let promise_borrow = promise.borrow();
-                            match &promise_borrow.state {
-                                PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                                PromiseState::Rejected(reason) => {
-                                    return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
-                                }
-                                PromiseState::Pending => {
-                                    // Continue running the event loop
-                                }
-                            }
-                        }
-                    }
-                    Err(raise_eval_error!("await can only be used with promises"))
-                }
-                _ => Err(raise_eval_error!("await can only be used with promises")),
-            }
-        }
+        Expr::Await(expr) => evaluate_await_expression(env, expr),
         Expr::Yield(_expr) => {
             // Yield expressions are only valid in generator functions
             Err(raise_eval_error!("yield expression is only valid in generator functions"))
@@ -2371,6 +2300,81 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             }
         }
     }
+}
+
+fn evaluate_await_expression(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    let promise_val = evaluate_expr(env, expr)?;
+    match promise_val {
+        Value::Promise(promise) => {
+            // Wait for the promise to resolve by running the event loop
+            loop {
+                run_event_loop()?;
+                let promise_borrow = promise.borrow();
+                match &promise_borrow.state {
+                    PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                    PromiseState::Rejected(reason) => {
+                        return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
+                    }
+                    PromiseState::Pending => {
+                        // Continue running the event loop
+                    }
+                }
+            }
+        }
+        Value::Object(obj) => {
+            // Check if this is a Promise object with __promise property
+            if let Some(promise_rc) = obj_get_value(&obj, &"__promise".into())?
+                && let Value::Promise(promise) = promise_rc.borrow().clone()
+            {
+                // Wait for the promise to resolve by running the event loop
+                loop {
+                    run_event_loop()?;
+                    let promise_borrow = promise.borrow();
+                    match &promise_borrow.state {
+                        PromiseState::Fulfilled(val) => return Ok(val.clone()),
+                        PromiseState::Rejected(reason) => {
+                            return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
+                        }
+                        PromiseState::Pending => {
+                            // Continue running the event loop
+                        }
+                    }
+                }
+            }
+            Err(raise_eval_error!("await can only be used with promises"))
+        }
+        _ => Err(raise_eval_error!("await can only be used with promises")),
+    }
+}
+
+fn evaluate_function_expression(env: &JSObjectDataPtr, params: &[String], body: &[Statement]) -> Result<Value, JSError> {
+    // Create a callable function *object* that wraps the closure so
+    // script-level assignments like `F.prototype = ...` work. Store
+    // the executable closure under an internal `__closure__` key and
+    // expose a `prototype` object with a `constructor` backpointer.
+    let func_obj = new_js_object_data();
+
+    // Create the associated prototype object for instances
+    let prototype_obj = new_js_object_data();
+
+    // Store the closure under an internal key
+    let closure_val = Value::Closure(params.to_vec(), body.to_vec(), env.clone());
+    obj_set_value(&func_obj, &"__closure__".into(), closure_val)?;
+
+    // Diagnostic: record the function object pointer so we can trace
+    // whether the same function wrapper instance is used across bindings
+    // and `new` invocations.
+    log::trace!(
+        "DBG Expr::Function - created func_obj ptr={:p} prototype_ptr={:p}",
+        Rc::as_ptr(&func_obj),
+        Rc::as_ptr(&prototype_obj)
+    );
+
+    // Wire up `prototype` and `prototype.constructor`
+    obj_set_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+    obj_set_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+
+    Ok(Value::Object(func_obj))
 }
 
 fn evaluate_number(n: f64) -> Result<Value, JSError> {
@@ -2647,11 +2651,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            Value::BigInt(BigIntHolder::from(a + b))
-        }
+        (Value::BigInt(la), Value::BigInt(rb)) => Value::BigInt(la + rb),
         (Value::String(ls), Value::String(rs)) => {
             let mut result = ls.clone();
             result.extend_from_slice(&rs);
@@ -2678,7 +2678,7 @@ fn evaluate_add_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let assignment_expr = match &result {
         Value::Number(n) => Expr::Number(*n),
         Value::String(s) => Expr::StringLit(s.clone()),
-        Value::BigInt(s) => Expr::BigInt(s.raw.clone()),
+        Value::BigInt(s) => Expr::BigInt(s.to_string()),
         _ => unreachable!(),
     };
     evaluate_assignment_expr(env, target, &assignment_expr)?;
@@ -2691,11 +2691,7 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln - rn),
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            Value::BigInt(BigIntHolder::from(a - b))
-        }
+        (Value::BigInt(la), Value::BigInt(rb)) => Value::BigInt(la - rb),
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
@@ -2709,7 +2705,7 @@ fn evaluate_sub_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2722,11 +2718,7 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln * rn),
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            Value::BigInt(BigIntHolder::from(a * b))
-        }
+        (Value::BigInt(la), Value::BigInt(rb)) => Value::BigInt(la * rb),
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
         }
@@ -2739,7 +2731,7 @@ fn evaluate_mul_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2752,14 +2744,12 @@ fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
     let right_val = evaluate_expr(env, value)?;
     let result = match (left_val, right_val) {
         (Value::Number(ln), Value::Number(rn)) => Value::Number(ln.powf(rn)),
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            if b < BigInt::from(0) {
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            if rb < BigInt::from(0) {
                 return Err(raise_eval_error!("negative exponent for bigint"));
             }
-            let exp = b.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
-            Value::BigInt(BigIntHolder::from(a.pow(exp)))
+            let exp = rb.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
+            Value::BigInt(la.pow(exp))
         }
         // Mixing BigInt and Number is disallowed for exponentiation
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
@@ -2776,7 +2766,7 @@ fn evaluate_pow_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2794,13 +2784,11 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             }
             Value::Number(ln / rn)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            if b == BigInt::from(0) {
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            if rb == BigInt::from(0) {
                 return Err(raise_eval_error!("Division by zero"));
             }
-            Value::BigInt(BigIntHolder::from(a / b))
+            Value::BigInt(la / rb)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2814,7 +2802,7 @@ fn evaluate_div_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2832,13 +2820,11 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             }
             Value::Number(ln % rn)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
-            if b == BigInt::from(0) {
+        (Value::BigInt(la), Value::BigInt(rb)) => {
+            if rb == BigInt::from(0) {
                 return Err(raise_eval_error!("Division by zero"));
             }
-            Value::BigInt(BigIntHolder::from(a % b))
+            Value::BigInt(la % rb)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2852,7 +2838,7 @@ fn evaluate_mod_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Re
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2867,12 +2853,10 @@ fn evaluate_bitxor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
         (Value::Number(ln), Value::Number(rn)) => {
             Value::Number((crate::core::number::to_int32(ln) ^ crate::core::number::to_int32(rn)) as f64)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
+        (Value::BigInt(la), Value::BigInt(rb)) => {
             use std::ops::BitXor;
-            let res = a.bitxor(&b);
-            Value::BigInt(BigIntHolder::from(res))
+            let res = la.bitxor(&rb);
+            Value::BigInt(res)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2886,7 +2870,7 @@ fn evaluate_bitxor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2901,12 +2885,10 @@ fn evaluate_bitand_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
         (Value::Number(ln), Value::Number(rn)) => {
             Value::Number((crate::core::number::to_int32(ln) & crate::core::number::to_int32(rn)) as f64)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
+        (Value::BigInt(la), Value::BigInt(rb)) => {
             use std::ops::BitAnd;
-            let res = a.bitand(&b);
-            Value::BigInt(BigIntHolder::from(res))
+            let res = la.bitand(&rb);
+            Value::BigInt(res)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2920,7 +2902,7 @@ fn evaluate_bitand_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) ->
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2935,12 +2917,10 @@ fn evaluate_bitor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> 
         (Value::Number(ln), Value::Number(rn)) => {
             Value::Number((crate::core::number::to_int32(ln) | crate::core::number::to_int32(rn)) as f64)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
+        (Value::BigInt(la), Value::BigInt(rb)) => {
             use std::ops::BitOr;
-            let res = a.bitor(&b);
-            Value::BigInt(BigIntHolder::from(res))
+            let res = la.bitor(&rb);
+            Value::BigInt(res)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2954,7 +2934,7 @@ fn evaluate_bitor_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> 
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -2971,14 +2951,12 @@ fn evaluate_left_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr
             let s = crate::core::number::to_uint32(rn) & 0x1f;
             Value::Number(((a << s) as i32) as f64)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
+        (Value::BigInt(la), Value::BigInt(rb)) => {
             use std::ops::Shl;
             // try to convert shift amount to usize
-            let shift = b.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
-            let res = a.shl(shift);
-            Value::BigInt(BigIntHolder::from(res))
+            let shift = rb.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
+            let res = la.shl(shift);
+            Value::BigInt(res)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -2992,7 +2970,7 @@ fn evaluate_left_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Expr
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -3009,13 +2987,11 @@ fn evaluate_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Exp
             let s = crate::core::number::to_uint32(rn) & 0x1f;
             Value::Number((a >> s) as f64)
         }
-        (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-            let a = la.refresh_parsed(false)?;
-            let b = rb.refresh_parsed(false)?;
+        (Value::BigInt(la), Value::BigInt(rb)) => {
             use std::ops::Shr;
-            let shift = b.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
-            let res = a.shr(shift);
-            Value::BigInt(BigIntHolder::from(res))
+            let shift = rb.to_usize().ok_or(raise_eval_error!("invalid bigint shift"))?;
+            let res = la.shr(shift);
+            Value::BigInt(res)
         }
         (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
             return Err(raise_type_error!("Cannot mix BigInt and other types"));
@@ -3029,7 +3005,7 @@ fn evaluate_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, value: &Exp
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -3062,7 +3038,7 @@ fn evaluate_unsigned_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, va
             let _ = evaluate_assignment_expr(env, target, &Expr::Number(*n))?;
         }
         Value::BigInt(s) => {
-            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.raw.clone()))?;
+            let _ = evaluate_assignment_expr(env, target, &Expr::BigInt(s.to_string()))?;
         }
         _ => unreachable!(),
     }
@@ -3106,7 +3082,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                         let idx = n as usize;
                         let val_num = match &val {
                             Value::Number(num) => *num as i64,
-                            Value::BigInt(s) => s.raw.parse().unwrap_or(0),
+                            Value::BigInt(s) => s.to_i64().ok_or(raise_eval_error!("TypedArray assignment value out of range"))?,
                             _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
                         };
                         ta.borrow_mut()
@@ -3340,12 +3316,7 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     let val = evaluate_expr(env, expr)?;
     match val {
         Value::Number(n) => Ok(Value::Number(-n)),
-        Value::BigInt(mut s) => {
-            // Negate BigInt (use cached parse)
-            let a = s.refresh_parsed(false)?;
-            let neg = -a;
-            Ok(Value::BigInt(BigIntHolder::from(neg)))
-        }
+        Value::BigInt(s) => Ok(Value::BigInt(-s)),
         _ => Err(raise_eval_error!("error")),
     }
 }
@@ -3467,6 +3438,36 @@ fn evaluate_void(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     Ok(Value::Undefined)
 }
 
+// Helper to convert a value to f64 for comparison (ToNumber semantics simplified)
+fn to_num(v: &Value) -> Result<f64, JSError> {
+    match v {
+        Value::Number(n) => Ok(*n),
+        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
+        Value::BigInt(s) => {
+            if let Some(f) = s.to_f64() {
+                Ok(f)
+            } else {
+                Ok(f64::NAN)
+            }
+        }
+        Value::String(s) => {
+            let sstr = String::from_utf16_lossy(s);
+            let t = sstr.trim();
+            if t.is_empty() {
+                Ok(0.0)
+            } else {
+                match t.parse::<f64>() {
+                    Ok(v) => Ok(v),
+                    Err(_) => Ok(f64::NAN),
+                }
+            }
+        }
+        Value::Undefined => Ok(f64::NAN),
+        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
+        _ => Err(raise_eval_error!("error")),
+    }
+}
+
 fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
     let l = evaluate_expr(env, left)?;
     let r = evaluate_expr(env, right)?;
@@ -3489,13 +3490,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
             match (l_prim, r_prim) {
                 (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
-                (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                    // BigInt + BigInt -> BigInt (use cached parse)
-                    let a = la.refresh_parsed(false)?;
-                    let b = rb.refresh_parsed(false)?;
-                    let res = a + b;
-                    Ok(Value::BigInt(BigIntHolder::from(res)))
-                }
+                (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la + rb)),
                 (Value::String(ls), Value::String(rs)) => {
                     let mut result = ls.clone();
                     result.extend_from_slice(&rs);
@@ -3535,12 +3530,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 (Value::String(ls), Value::BigInt(rb)) => {
                     // String + BigInt -> concatenation (use raw string)
                     let mut result = ls.clone();
-                    result.extend_from_slice(&utf8_to_utf16(&rb.raw));
+                    result.extend_from_slice(&utf8_to_utf16(&rb.to_string()));
                     Ok(Value::String(result))
                 }
                 (Value::BigInt(la), Value::String(rs)) => {
                     // BigInt + String -> concatenation
-                    let mut result = utf8_to_utf16(&la.raw);
+                    let mut result = utf8_to_utf16(&la.to_string());
                     result.extend_from_slice(&rs);
                     Ok(Value::String(result))
                 }
@@ -3553,12 +3548,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::Sub => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                let res = a - b;
-                Ok(Value::BigInt(BigIntHolder::from(res)))
-            }
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la - rb)),
             // Mixing BigInt and Number is not allowed for arithmetic
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -3567,12 +3557,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::Mul => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                let res = a * b;
-                Ok(Value::BigInt(BigIntHolder::from(res)))
-            }
+            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la * rb)),
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
             }
@@ -3580,16 +3565,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::Pow => match (l, r) {
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln.powf(rn))),
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
+            (Value::BigInt(la), Value::BigInt(rb)) => {
                 // exponent must be non-negative and fit into u32 for pow
-                if b < BigInt::from(0) {
+                if rb < BigInt::from(0) {
                     return Err(raise_eval_error!("negative exponent for bigint"));
                 }
-                let exp = b.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
-                let res = a.pow(exp);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let exp = rb.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
+                let res = la.pow(exp);
+                Ok(Value::BigInt(res))
             }
             // Mixing BigInt and Number is disallowed for exponentiation
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
@@ -3602,15 +3585,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 // JavaScript behavior: division by zero returns Infinity or -Infinity
                 Ok(Value::Number(ln / rn))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                if b == BigInt::from(0) {
-                    Err(raise_eval_error!("Division by zero"))
-                } else {
-                    let res = a / b;
-                    Ok(Value::BigInt(BigIntHolder::from(res)))
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                if rb == BigInt::from(0) {
+                    return Err(raise_eval_error!("Division by zero"));
                 }
+                Ok(Value::BigInt(la / rb))
             }
             // Mixing BigInt and Number is not allowed
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
@@ -3642,12 +3621,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::LessThan => {
             // Follow JS abstract relational comparison with ToPrimitive(Number) hint
-            let mut l_prim = if matches!(l, Value::Object(_)) {
+            let l_prim = if matches!(l, Value::Object(_)) {
                 to_primitive(&l, "number")?
             } else {
                 l.clone()
             };
-            let mut r_prim = if matches!(r, Value::Object(_)) {
+            let r_prim = if matches!(r, Value::Object(_)) {
                 to_primitive(&r, "number")?
             } else {
                 r.clone()
@@ -3657,12 +3636,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
                 return Ok(Value::Boolean(ls < rs));
             }
-            if let (Value::BigInt(la), Value::BigInt(rb)) = (&mut l_prim, &mut r_prim) {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                return Ok(Value::Boolean(a < b));
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                return Ok(Value::Boolean(la < rb));
             }
-            if let (Value::BigInt(la), Value::Number(rn)) = (&mut l_prim, &r_prim) {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
                 // NaN / infinite are always false for relational comparisons with BigInt
                 if rn.is_nan() || !rn.is_finite() {
@@ -3672,8 +3649,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if rn.fract() == 0.0 {
                     let num_str = format!("{:.0}", rn);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let a = la.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(a < num_bi));
+                        return Ok(Value::Boolean(la < &num_bi));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3681,12 +3657,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let floor = rn.floor();
                 let floor_str = format!("{:.0}", floor);
                 if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a <= floor_bi));
+                    return Ok(Value::Boolean(la <= &floor_bi));
                 }
                 return Ok(Value::Boolean(false));
             }
-            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &mut r_prim) {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
                 if ln.is_nan() || !ln.is_finite() {
                     return Ok(Value::Boolean(false));
@@ -3694,8 +3669,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if ln.fract() == 0.0 {
                     let num_str = format!("{:.0}", ln);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let b = rb.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(num_bi < b));
+                        return Ok(Value::Boolean(&num_bi < rb));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3703,45 +3677,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let floor = ln.floor();
                 let floor_str = format!("{:.0}", floor);
                 if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(floor_bi < b));
+                    return Ok(Value::Boolean(&floor_bi < rb));
                 }
                 return Ok(Value::Boolean(false));
             }
             // Fallback: convert values to numbers and compare. Non-coercible symbols/types will error.
             {
-                // Helper to convert a value to f64 for comparison (ToNumber semantics simplified)
-                let to_num = |v: &mut Value| -> Result<f64, JSError> {
-                    match v {
-                        Value::Number(n) => Ok(*n),
-                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
-                        Value::BigInt(s) => {
-                            if let Some(f) = s.refresh_parsed(true)?.to_f64() {
-                                Ok(f)
-                            } else {
-                                Ok(f64::NAN)
-                            }
-                        }
-                        Value::String(s) => {
-                            let sstr = String::from_utf16_lossy(s);
-                            let t = sstr.trim();
-                            if t.is_empty() {
-                                Ok(0.0)
-                            } else {
-                                match t.parse::<f64>() {
-                                    Ok(v) => Ok(v),
-                                    Err(_) => Ok(f64::NAN),
-                                }
-                            }
-                        }
-                        Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
-                        _ => Err(raise_eval_error!("error")),
-                    }
-                };
-
-                let ln = to_num(&mut l_prim)?;
-                let rn = to_num(&mut r_prim)?;
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
                     return Ok(Value::Boolean(false));
                 }
@@ -3750,12 +3693,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::GreaterThan => {
             // Abstract relational comparison with ToPrimitive(Number) hint
-            let mut l_prim = if matches!(l, Value::Object(_)) {
+            let l_prim = if matches!(l, Value::Object(_)) {
                 to_primitive(&l, "number")?
             } else {
                 l.clone()
             };
-            let mut r_prim = if matches!(r, Value::Object(_)) {
+            let r_prim = if matches!(r, Value::Object(_)) {
                 to_primitive(&r, "number")?
             } else {
                 r.clone()
@@ -3765,12 +3708,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
                 return Ok(Value::Boolean(ls > rs));
             }
-            if let (Value::BigInt(la), Value::BigInt(rb)) = (&mut l_prim, &mut r_prim) {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                return Ok(Value::Boolean(a > b));
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                return Ok(Value::Boolean(la > rb));
             }
-            if let (Value::BigInt(la), Value::Number(rn)) = (&mut l_prim, &r_prim) {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
                 if rn.is_nan() || !rn.is_finite() {
                     return Ok(Value::Boolean(false));
@@ -3779,8 +3720,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if rn.fract() == 0.0 {
                     let num_str = format!("{:.0}", rn);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let a = la.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(a > num_bi));
+                        return Ok(Value::Boolean(la > &num_bi));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3788,12 +3728,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ceil = rn.ceil();
                 let ceil_str = format!("{:.0}", ceil);
                 if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a >= ceil_bi));
+                    return Ok(Value::Boolean(la >= &ceil_bi));
                 }
                 return Ok(Value::Boolean(false));
             }
-            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &mut r_prim) {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
                 if ln.is_nan() || !ln.is_finite() {
                     return Ok(Value::Boolean(false));
@@ -3801,8 +3740,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if ln.fract() == 0.0 {
                     let num_str = format!("{:.0}", ln);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let b = rb.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(num_bi > b));
+                        return Ok(Value::Boolean(&num_bi > rb));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3810,43 +3748,13 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ceil = ln.ceil();
                 let ceil_str = format!("{:.0}", ceil);
                 if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(ceil_bi > b));
+                    return Ok(Value::Boolean(&ceil_bi > rb));
                 }
                 return Ok(Value::Boolean(false));
             }
             {
-                let to_num = |v: &mut Value| -> Result<f64, JSError> {
-                    match v {
-                        Value::Number(n) => Ok(*n),
-                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
-                        Value::BigInt(s) => {
-                            if let Some(f) = s.refresh_parsed(true)?.to_f64() {
-                                Ok(f)
-                            } else {
-                                Ok(f64::NAN)
-                            }
-                        }
-                        Value::String(s) => {
-                            let sstr = String::from_utf16_lossy(s);
-                            let t = sstr.trim();
-                            if t.is_empty() {
-                                Ok(0.0)
-                            } else {
-                                match t.parse::<f64>() {
-                                    Ok(v) => Ok(v),
-                                    Err(_) => Ok(f64::NAN),
-                                }
-                            }
-                        }
-                        Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
-                        _ => Err(raise_eval_error!("error")),
-                    }
-                };
-
-                let ln = to_num(&mut l_prim)?;
-                let rn = to_num(&mut r_prim)?;
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
                     return Ok(Value::Boolean(false));
                 }
@@ -3855,12 +3763,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::LessEqual => {
             // Use ToPrimitive(Number) hint then compare, strings compare lexicographically
-            let mut l_prim = if matches!(l, Value::Object(_)) {
+            let l_prim = if matches!(l, Value::Object(_)) {
                 to_primitive(&l, "number")?
             } else {
                 l.clone()
             };
-            let mut r_prim = if matches!(r, Value::Object(_)) {
+            let r_prim = if matches!(r, Value::Object(_)) {
                 to_primitive(&r, "number")?
             } else {
                 r.clone()
@@ -3869,20 +3777,17 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
                 return Ok(Value::Boolean(ls <= rs));
             }
-            if let (Value::BigInt(la), Value::BigInt(rb)) = (&mut l_prim, &mut r_prim) {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                return Ok(Value::Boolean(a <= b));
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                return Ok(Value::Boolean(la <= rb));
             }
-            if let (Value::BigInt(la), Value::Number(rn)) = (&mut l_prim, &r_prim) {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 if rn.is_nan() || !rn.is_finite() {
                     return Ok(Value::Boolean(false));
                 }
                 if rn.fract() == 0.0 {
                     let num_str = format!("{:.0}", rn);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let a = la.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(a <= num_bi));
+                        return Ok(Value::Boolean(la <= &num_bi));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3890,20 +3795,18 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let floor = rn.floor();
                 let floor_str = format!("{:.0}", floor);
                 if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a <= floor_bi));
+                    return Ok(Value::Boolean(la <= &floor_bi));
                 }
                 return Ok(Value::Boolean(false));
             }
-            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &mut r_prim) {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 if ln.is_nan() || !ln.is_finite() {
                     return Ok(Value::Boolean(false));
                 }
                 if ln.fract() == 0.0 {
                     let num_str = format!("{:.0}", ln);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let b = rb.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(num_bi <= b));
+                        return Ok(Value::Boolean(&num_bi <= rb));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3911,43 +3814,13 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let floor = ln.floor();
                 let floor_str = format!("{:.0}", floor);
                 if let Ok(floor_bi) = BigInt::from_str(&floor_str) {
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(floor_bi < b));
+                    return Ok(Value::Boolean(&floor_bi < rb));
                 }
                 return Ok(Value::Boolean(false));
             }
             {
-                let to_num = |v: &mut Value| -> Result<f64, JSError> {
-                    match v {
-                        Value::Number(n) => Ok(*n),
-                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
-                        Value::BigInt(s) => {
-                            if let Some(f) = s.refresh_parsed(false)?.to_f64() {
-                                Ok(f)
-                            } else {
-                                Ok(f64::NAN)
-                            }
-                        }
-                        Value::String(s) => {
-                            let sstr = String::from_utf16_lossy(s);
-                            let t = sstr.trim();
-                            if t.is_empty() {
-                                Ok(0.0)
-                            } else {
-                                match t.parse::<f64>() {
-                                    Ok(v) => Ok(v),
-                                    Err(_) => Ok(f64::NAN),
-                                }
-                            }
-                        }
-                        Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
-                        _ => Err(raise_eval_error!("error")),
-                    }
-                };
-
-                let ln = to_num(&mut l_prim)?;
-                let rn = to_num(&mut r_prim)?;
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
                     return Ok(Value::Boolean(false));
                 }
@@ -3956,12 +3829,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::GreaterEqual => {
             // ToPrimitive(Number) hint with fallback to numeric comparison; strings compare lexicographically
-            let mut l_prim = if matches!(l, Value::Object(_)) {
+            let l_prim = if matches!(l, Value::Object(_)) {
                 to_primitive(&l, "number")?
             } else {
                 l.clone()
             };
-            let mut r_prim = if matches!(r, Value::Object(_)) {
+            let r_prim = if matches!(r, Value::Object(_)) {
                 to_primitive(&r, "number")?
             } else {
                 r.clone()
@@ -3970,12 +3843,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             if let (Value::String(ls), Value::String(rs)) = (&l_prim, &r_prim) {
                 return Ok(Value::Boolean(ls >= rs));
             }
-            if let (Value::BigInt(la), Value::BigInt(rb)) = (&mut l_prim, &mut r_prim) {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                return Ok(Value::Boolean(a >= b));
+            if let (Value::BigInt(la), Value::BigInt(rb)) = (&l_prim, &r_prim) {
+                return Ok(Value::Boolean(la >= rb));
             }
-            if let (Value::BigInt(la), Value::Number(rn)) = (&mut l_prim, &r_prim) {
+            if let (Value::BigInt(la), Value::Number(rn)) = (&l_prim, &r_prim) {
                 let rn = *rn;
                 if rn.is_nan() || !rn.is_finite() {
                     return Ok(Value::Boolean(false));
@@ -3983,8 +3854,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if rn.fract() == 0.0 {
                     let num_str = format!("{:.0}", rn);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let a = la.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(a >= num_bi));
+                        return Ok(Value::Boolean(la >= &num_bi));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -3992,12 +3862,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ceil = rn.ceil();
                 let ceil_str = format!("{:.0}", ceil);
                 if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
-                    let a = la.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(a >= ceil_bi));
+                    return Ok(Value::Boolean(la >= &ceil_bi));
                 }
                 return Ok(Value::Boolean(false));
             }
-            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &mut r_prim) {
+            if let (Value::Number(ln), Value::BigInt(rb)) = (&l_prim, &r_prim) {
                 let ln = *ln;
                 if ln.is_nan() || !ln.is_finite() {
                     return Ok(Value::Boolean(false));
@@ -4005,8 +3874,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 if ln.fract() == 0.0 {
                     let num_str = format!("{:.0}", ln);
                     if let Ok(num_bi) = BigInt::from_str(&num_str) {
-                        let b = rb.refresh_parsed(false)?;
-                        return Ok(Value::Boolean(num_bi >= b));
+                        return Ok(Value::Boolean(&num_bi >= rb));
                     }
                     return Ok(Value::Boolean(false));
                 }
@@ -4014,43 +3882,13 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let ceil = ln.ceil();
                 let ceil_str = format!("{:.0}", ceil);
                 if let Ok(ceil_bi) = BigInt::from_str(&ceil_str) {
-                    let b = rb.refresh_parsed(false)?;
-                    return Ok(Value::Boolean(ceil_bi > b));
+                    return Ok(Value::Boolean(&ceil_bi > rb));
                 }
                 return Ok(Value::Boolean(false));
             }
             {
-                let to_num = |v: &mut Value| -> Result<f64, JSError> {
-                    match v {
-                        Value::Number(n) => Ok(*n),
-                        Value::Boolean(b) => Ok(if *b { 1.0 } else { 0.0 }),
-                        Value::BigInt(s) => {
-                            if let Some(f) = s.refresh_parsed(false)?.to_f64() {
-                                Ok(f)
-                            } else {
-                                Ok(f64::NAN)
-                            }
-                        }
-                        Value::String(s) => {
-                            let sstr = String::from_utf16_lossy(s);
-                            let t = sstr.trim();
-                            if t.is_empty() {
-                                Ok(0.0)
-                            } else {
-                                match t.parse::<f64>() {
-                                    Ok(v) => Ok(v),
-                                    Err(_) => Ok(f64::NAN),
-                                }
-                            }
-                        }
-                        Value::Undefined => Ok(f64::NAN),
-                        Value::Symbol(_) => Err(raise_type_error!("Cannot convert Symbol to number")),
-                        _ => Err(raise_eval_error!("error")),
-                    }
-                };
-
-                let ln = to_num(&mut l_prim)?;
-                let rn = to_num(&mut r_prim)?;
+                let ln = to_num(&l_prim)?;
+                let rn = to_num(&r_prim)?;
                 if ln.is_nan() || rn.is_nan() {
                     return Ok(Value::Boolean(false));
                 }
@@ -4065,13 +3903,11 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::Number(ln % rn))
                 }
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                if b == BigInt::from(0) {
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                if rb == BigInt::from(0) {
                     Err(raise_eval_error!("Division by zero"))
                 } else {
-                    Ok(Value::BigInt(BigIntHolder::from(a % b)))
+                    Ok(Value::BigInt(la % rb))
                 }
             }
             // Mixing BigInt and Number is not allowed
@@ -4101,12 +3937,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let b = crate::core::number::to_int32(rn);
                 Ok(Value::Number((a ^ b) as f64))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
+            (Value::BigInt(la), Value::BigInt(rb)) => {
                 use std::ops::BitXor;
-                let res = a.bitxor(&b);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let res = la.bitxor(&rb);
+                Ok(Value::BigInt(res))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -4129,12 +3963,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let b = crate::core::number::to_int32(rn);
                 Ok(Value::Number((a & b) as f64))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
+            (Value::BigInt(la), Value::BigInt(rb)) => {
                 use std::ops::BitAnd;
-                let res = a.bitand(&b);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let res = la.bitand(&rb);
+                Ok(Value::BigInt(res))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -4147,12 +3979,10 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let b = crate::core::number::to_int32(rn);
                 Ok(Value::Number((a | b) as f64))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
+            (Value::BigInt(la), Value::BigInt(rb)) => {
                 use std::ops::BitOr;
-                let res = a.bitor(&b);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let res = la.bitor(&rb);
+                Ok(Value::BigInt(res))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -4166,16 +3996,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let res = a.wrapping_shl(shift);
                 Ok(Value::Number(res as f64))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                if b < BigInt::from(0) {
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                if rb < BigInt::from(0) {
                     return Err(raise_eval_error!("negative shift count"));
                 }
-                let shift = b.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
                 use std::ops::Shl;
-                let res = a.shl(shift);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let res = la.shl(shift);
+                Ok(Value::BigInt(res))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -4189,16 +4017,14 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let res = a >> shift;
                 Ok(Value::Number(res as f64))
             }
-            (Value::BigInt(mut la), Value::BigInt(mut rb)) => {
-                let a = la.refresh_parsed(false)?;
-                let b = rb.refresh_parsed(false)?;
-                if b < BigInt::from(0) {
+            (Value::BigInt(la), Value::BigInt(rb)) => {
+                if rb < BigInt::from(0) {
                     return Err(raise_eval_error!("negative shift count"));
                 }
-                let shift = b.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
                 use std::ops::Shr;
-                let res = a.shr(shift);
-                Ok(Value::BigInt(BigIntHolder::from(res)))
+                let res = la.shr(shift);
+                Ok(Value::BigInt(res))
             }
             (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
                 Err(raise_type_error!("Cannot mix BigInt and other types"))
@@ -4289,8 +4115,8 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         if let Ok(yb) = string_to_bigint(ys) {
             // b. If n is undefined, return false.
             // c. Return the result of the comparison x == n.
-            let mut xb_clone = xb.clone();
-            let xb_parsed = xb_clone.refresh_parsed(false)?;
+            let xb_clone = xb.clone();
+            let xb_parsed = xb_clone;
             return Ok(Value::Boolean(xb_parsed == yb));
         } else {
             return Ok(Value::Boolean(false));
@@ -4300,9 +4126,7 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
     // 11. If Type(x) is String and Type(y) is BigInt, then
     if let (Value::String(xs), Value::BigInt(yb)) = (x, y) {
         if let Ok(xb) = string_to_bigint(xs) {
-            let mut yb_clone = yb.clone();
-            let yb_parsed = yb_clone.refresh_parsed(false)?;
-            return Ok(Value::Boolean(xb == yb_parsed));
+            return Ok(Value::Boolean(&xb == yb));
         } else {
             return Ok(Value::Boolean(false));
         }
@@ -4310,8 +4134,8 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
 
     // 12. If Type(x) is BigInt and Type(y) is Number, or Type(x) is Number and Type(y) is BigInt, then
     if let (Value::BigInt(xb), Value::Number(yn)) = (x, y) {
-        let mut xb_clone = xb.clone();
-        let xb_val = xb_clone.refresh_parsed(false)?;
+        let xb_clone = xb.clone();
+        let xb_val = xb_clone;
         let yn_val = *yn;
         // a. If y is NaN, +∞, or -∞, return false.
         if yn_val.is_nan() || !yn_val.is_finite() {
@@ -4326,8 +4150,6 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         return Ok(Value::Boolean(xb_val == yn_bi));
     }
     if let (Value::Number(xn), Value::BigInt(yb)) = (x, y) {
-        let mut yb_clone = yb.clone();
-        let yb_val = yb_clone.refresh_parsed(false)?;
         let xn_val = *xn;
         // a. If y is NaN, +∞, or -∞, return false.
         if xn_val.is_nan() || !xn_val.is_finite() {
@@ -4339,7 +4161,7 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         }
         // c. Return the result of the comparison x == y.
         let xn_bi = BigInt::from(xn_val as i64);
-        return Ok(Value::Boolean(xn_bi == yb_val));
+        return Ok(Value::Boolean(&xn_bi == yb));
     }
 
     // 13. Return false.
@@ -4350,7 +4172,7 @@ fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
     // Strict Equality Comparison (===)
     match (x, y) {
         (Value::Number(ln), Value::Number(rn)) => Ok(Value::Boolean(ln == rn)),
-        (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la.raw == rb.raw)),
+        (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::Boolean(la == rb)),
         (Value::String(ls), Value::String(rs)) => Ok(Value::Boolean(ls == rs)),
         (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
         (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(sa, sb))),
@@ -4412,7 +4234,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
                                 // This is a simplified conversion - in practice we'd need proper float handling
                                 Value::Number(val as f64)
                             }
-                            TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => Value::BigInt(BigIntHolder::from(BigInt::from(val))),
+                            TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => Value::BigInt(BigInt::from(val)),
                             _ => {
                                 // For integer types
                                 Value::Number(val as f64)

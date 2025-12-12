@@ -2,6 +2,7 @@ use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_dat
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
+use num_traits::ToPrimitive;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -121,7 +122,7 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             };
             let v = match val_val {
                 Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                Value::BigInt(b) => b.to_i64().unwrap_or(0),
                 _ => return Err(raise_eval_error!("Atomics value must be a number or BigInt")),
             };
             let old = ta_obj.borrow().get(idx)?;
@@ -141,12 +142,12 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             };
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                Value::BigInt(b) => b.to_i64().unwrap_or(0),
                 _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
             };
             let replacement = match replacement_val {
                 Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                Value::BigInt(b) => b.to_i64().unwrap_or(0),
                 _ => return Err(raise_eval_error!("Atomics replacement must be a number or BigInt")),
             };
             let old = ta_obj.borrow().get(idx)?;
@@ -168,7 +169,7 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                 let v = evaluate_expr(env, &args[2])?;
                 match v {
                     Value::Number(n) => n as i64,
-                    Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                    Value::BigInt(b) => b.to_i64().unwrap_or(0),
                     _ => return Err(raise_eval_error!("Atomics operand must be a number or BigInt")),
                 }
             } else {
@@ -200,7 +201,7 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             let expected_val = evaluate_expr(env, &args[2])?;
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
-                Value::BigInt(b) => b.raw.parse().unwrap_or(0),
+                Value::BigInt(b) => b.to_i64().unwrap_or(0),
                 _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
             };
 

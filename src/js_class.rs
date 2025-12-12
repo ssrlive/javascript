@@ -940,7 +940,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Property { .. } => utf8_to_utf16("[Property]"),
             Value::Promise(_) => utf8_to_utf16("[object Promise]"),
             Value::Symbol(_) => utf8_to_utf16("[object Symbol]"),
-            Value::BigInt(s) => utf8_to_utf16(&s.raw),
+            Value::BigInt(s) => utf8_to_utf16(&s.to_string()),
             Value::Map(_) => utf8_to_utf16("[object Map]"),
             Value::Set(_) => utf8_to_utf16("[object Set]"),
             Value::WeakMap(_) => utf8_to_utf16("[object WeakMap]"),

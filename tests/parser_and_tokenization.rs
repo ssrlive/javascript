@@ -81,7 +81,7 @@ fn exponentiation_and_numeric_separators_supported() {
     // BigInt with separators and exponentiation
     let res4 = evaluate_script("1_000n ** 2n;", None::<&std::path::Path>);
     match res4 {
-        Ok(crate::Value::BigInt(s)) => assert_eq!(s.raw, "1000000".to_string()),
+        Ok(crate::Value::BigInt(s)) => assert_eq!(s.to_string(), "1000000".to_string()),
         _ => panic!("expected bigint result for 1_000n ** 2n"),
     }
 }

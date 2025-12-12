@@ -89,57 +89,18 @@ pub struct JSTypedArray {
     pub length: usize,                      // Number of elements
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BigIntHolder {
-    pub raw: String,
-    pub parsed: Option<Rc<BigInt>>,
-}
-
-impl std::fmt::Display for BigIntHolder {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.raw.ends_with('n') {
-            write!(f, "{}", self.raw)
-        } else {
-            write!(f, "{}n", self.raw)
-        }
-    }
-}
-
-impl From<BigInt> for BigIntHolder {
-    fn from(bigint: BigInt) -> Self {
-        BigIntHolder {
-            raw: bigint.to_string(),
-            parsed: Some(Rc::new(bigint)),
-        }
-    }
-}
-
-impl TryFrom<&str> for BigIntHolder {
-    type Error = JSError;
-
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Ok(BigIntHolder {
-            raw: value.trim().to_string(),
-            parsed: Some(Rc::new(Self::parse_bigint_string(value.trim())?)),
-        })
-    }
-}
-
-impl BigIntHolder {
-    pub fn refresh_parsed(&mut self, force: bool) -> Result<BigInt, JSError> {
-        if !force && let Some(rc) = &self.parsed {
-            return Ok((**rc).clone());
-        }
-        let p = Self::parse_bigint_string(&self.raw)?;
-        self.parsed = Some(Rc::new(p.clone()));
-        Ok(p)
-    }
-
-    fn parse_bigint_string(raw: &str) -> Result<BigInt, JSError> {
-        let s = if let Some(st) = raw.strip_suffix('n') { st } else { raw };
-        let parsed = BigInt::parse_bytes(s.as_bytes(), 10).ok_or(raise_eval_error!("invalid bigint"))?;
-        Ok(parsed)
-    }
+pub fn parse_bigint_string(raw: &str) -> Result<BigInt, JSError> {
+    let s = if let Some(st) = raw.strip_suffix('n') { st } else { raw };
+    let (radix, num_str) = if s.starts_with("0x") || s.starts_with("0X") {
+        (16, &s[2..])
+    } else if s.starts_with("0b") || s.starts_with("0B") {
+        (2, &s[2..])
+    } else if s.starts_with("0o") || s.starts_with("0O") {
+        (8, &s[2..])
+    } else {
+        (10, s)
+    };
+    BigInt::parse_bytes(num_str.as_bytes(), radix).ok_or(raise_eval_error!("invalid bigint"))
 }
 
 impl JSTypedArray {
@@ -620,8 +581,7 @@ pub struct SymbolData {
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
-    /// BigInt literal stored with raw string and optional parsed cache
-    BigInt(BigIntHolder),
+    BigInt(BigInt),
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
@@ -660,22 +620,7 @@ impl std::fmt::Display for Value {
 
 pub fn is_truthy(val: &Value) -> bool {
     match val {
-        Value::BigInt(h) => {
-            // Simple check: treat bigint as falsy only when it's zero (0n, 0x0n, 0b0n, 0o0n).
-            let s = &h.raw;
-            let s_no_n = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
-            #[allow(clippy::if_same_then_else)]
-            let s_no_prefix = if s_no_n.starts_with("0x") || s_no_n.starts_with("0X") {
-                &s_no_n[2..]
-            } else if s_no_n.starts_with("0b") || s_no_n.starts_with("0B") {
-                &s_no_n[2..]
-            } else if s_no_n.starts_with("0o") || s_no_n.starts_with("0O") {
-                &s_no_n[2..]
-            } else {
-                s_no_n
-            };
-            !s_no_prefix.chars().all(|c| c == '0')
-        }
+        Value::BigInt(b) => b != &BigInt::from(0),
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
         Value::String(s) => !s.is_empty(),
         Value::Boolean(b) => *b,
@@ -706,7 +651,7 @@ pub fn is_truthy(val: &Value) -> bool {
 // Helper function to compare two values for equality
 pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::BigInt(sa), Value::BigInt(sb)) => sa.raw == sb.raw,
+        (Value::BigInt(sa), Value::BigInt(sb)) => sa == sb,
         (Value::Number(na), Value::Number(nb)) => na == nb,
         (Value::String(sa), Value::String(sb)) => sa == sb,
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
@@ -721,7 +666,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 pub fn value_to_string(val: &Value) -> String {
     match val {
         Value::Number(n) => n.to_string(),
-        Value::BigInt(h) => h.raw.clone(),
+        Value::BigInt(b) => format!("{b}n"),
         Value::String(s) => format!("\"{}\"", String::from_utf16_lossy(s)),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
@@ -873,7 +818,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
                 n.to_string()
             }
         }
-        Value::BigInt(h) => h.raw.clone(),
+        Value::BigInt(b) => b.to_string(),
         Value::String(s) => String::from_utf16_lossy(s),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),

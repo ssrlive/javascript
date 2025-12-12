@@ -1,8 +1,9 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, to_primitive, value_to_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, parse_bigint_string, to_primitive, value_to_string};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
 use crate::unicode::utf8_to_utf16;
+use num_bigint::BigInt;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -120,7 +121,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
                         None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
                     },
-                    Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.raw))),
+                    Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
                     Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
                     Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
                     Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
@@ -337,21 +338,20 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             }
             let arg_val = evaluate_expr(env, &args[0])?;
             match arg_val {
-                Value::BigInt(h) => Ok(Value::BigInt(h.clone())),
+                Value::BigInt(b) => Ok(Value::BigInt(b)),
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                         return Err(raise_type_error!("Cannot convert number to BigInt"));
                     }
-                    let s = format!("{:.0}", n);
-                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s.as_str())?))
+                    Ok(Value::BigInt(BigInt::from(n as i64)))
                 }
                 Value::String(s) => {
                     let st = String::from_utf16_lossy(&s);
-                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(st.as_str())?))
+                    Ok(Value::BigInt(parse_bigint_string(&st)?))
                 }
                 Value::Boolean(b) => {
-                    let s = if b { "1" } else { "0" };
-                    Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s)?))
+                    let bigint = if b { BigInt::from(1) } else { BigInt::from(0) };
+                    Ok(Value::BigInt(bigint))
                 }
                 Value::Object(obj) => {
                     // Try ToPrimitive with number hint first
@@ -361,14 +361,13 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                                 return Err(raise_type_error!("Cannot convert number to BigInt"));
                             }
-                            let s = format!("{:.0}", n);
-                            Ok(Value::BigInt(crate::core::BigIntHolder::try_from(s.as_str())?))
+                            Ok(Value::BigInt(BigInt::from(n as i64)))
                         }
                         Value::String(s) => {
                             let st = String::from_utf16_lossy(&s);
-                            Ok(Value::BigInt(crate::core::BigIntHolder::try_from(st.as_str())?))
+                            Ok(Value::BigInt(parse_bigint_string(&st)?))
                         }
-                        Value::BigInt(h) => Ok(Value::BigInt(h.clone())),
+                        Value::BigInt(b) => Ok(Value::BigInt(b)),
                         _ => Err(raise_type_error!("Cannot convert object to BigInt")),
                     }
                 }

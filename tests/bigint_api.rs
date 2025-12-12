@@ -10,14 +10,14 @@ fn bigint_global_and_prototype_to_string_value_of() {
     // BigInt with numeric literal string
     let r1 = evaluate_script("BigInt('123')", None::<&std::path::Path>);
     match r1 {
-        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "123"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.to_string(), "123"),
         other => panic!("expected BigInt result for BigInt('123'), got {:?}", other),
     }
 
     // BigInt with number argument (integer)
     let r2 = evaluate_script("BigInt(42)", None::<&std::path::Path>);
     match r2 {
-        Ok(Value::BigInt(h)) => assert_eq!(h.raw, "42"),
+        Ok(Value::BigInt(h)) => assert_eq!(h.to_string(), "42"),
         other => panic!("expected BigInt result for BigInt(42), got {:?}", other),
     }
 

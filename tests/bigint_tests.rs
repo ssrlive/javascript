@@ -12,7 +12,7 @@ fn test_bigint_literal() {
     let script = "123n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "123"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "123"),
         other => panic!("expected BigInt(123), got {:?}", other),
     }
 }
@@ -22,7 +22,7 @@ fn test_bigint_addition() {
     let script = "1n + 2n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "3"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "3"),
         other => panic!("expected BigInt(3), got {:?}", other),
     }
 }
@@ -32,7 +32,7 @@ fn test_bigint_bitwise_and() {
     let script = "6n & 3n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "2"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "2"),
         other => panic!("expected BigInt(2), got {:?}", other),
     }
 }
@@ -42,7 +42,7 @@ fn test_bigint_bitwise_or() {
     let script = "6n | 1n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "7"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "7"),
         other => panic!("expected BigInt(7), got {:?}", other),
     }
 }
@@ -52,7 +52,7 @@ fn test_bigint_bitwise_xor() {
     let script = "5n ^ 3n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "6"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "6"),
         other => panic!("expected BigInt(6), got {:?}", other),
     }
 }
@@ -62,7 +62,7 @@ fn test_bigint_left_shift() {
     let script = "1n << 3n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "8"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "8"),
         other => panic!("expected BigInt(8), got {:?}", other),
     }
 }
@@ -72,7 +72,7 @@ fn test_bigint_right_shift() {
     let script = "8n >> 2n";
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "2"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "2"),
         other => panic!("expected BigInt(2), got {:?}", other),
     }
 }
@@ -89,7 +89,7 @@ fn test_bigint_division_truncates() {
     let script = "5n / 2n"; // integer division
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::BigInt(h) => assert_eq!(h.raw, "2"),
+        Value::BigInt(h) => assert_eq!(h.to_string(), "2"),
         other => panic!("expected BigInt(2), got {:?}", other),
     }
 }

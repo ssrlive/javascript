@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_value, parse_bigint_string};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use num_bigint::BigInt;
@@ -16,7 +16,7 @@ pub fn handle_bigint_object_method(
             match method {
                 "toString" => {
                     if args.is_empty() {
-                        return Ok(Value::String(utf8_to_utf16(&h.raw)));
+                        return Ok(Value::String(utf8_to_utf16(&h.to_string())));
                     } else {
                         // radix support: expect a number argument
                         let arg0 = crate::core::evaluate_expr(env, &args[0])?;
@@ -25,8 +25,8 @@ pub fn handle_bigint_object_method(
                             if !(2..=36).contains(&r) {
                                 return Err(raise_eval_error!("toString() radix out of range"));
                             }
-                            let mut h_clone = h.clone();
-                            let bi = h_clone.refresh_parsed(false)?;
+                            let h_clone = h.clone();
+                            let bi = h_clone;
                             let s = bi.to_str_radix(r as u32);
                             return Ok(Value::String(utf8_to_utf16(&s)));
                         } else {
@@ -79,24 +79,23 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     // bigint argument: accept BigInt, Number (integer), String, Boolean, or Object (ToPrimitive)
     let bigint_val = crate::core::evaluate_expr(env, &args[1])?;
     let bi = match bigint_val {
-        Value::BigInt(h) => h.clone().refresh_parsed(false)?,
+        Value::BigInt(b) => b,
         Value::Number(n) => {
             if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                 return Err(raise_eval_error!("Cannot convert number to BigInt"));
             }
-            let s = format!("{:.0}", n);
-            let mut holder = crate::core::BigIntHolder::try_from(s.as_str())?;
-            holder.refresh_parsed(false)?
+            BigInt::from(n as i64)
         }
         Value::String(s) => {
             let st = String::from_utf16_lossy(&s);
-            let mut holder = crate::core::BigIntHolder::try_from(st.as_str())?;
-            holder.refresh_parsed(false)?
+            parse_bigint_string(&st)?
         }
         Value::Boolean(b) => {
-            let s = if b { "1" } else { "0" };
-            let mut holder = crate::core::BigIntHolder::try_from(s)?;
-            holder.refresh_parsed(false)?
+            if b {
+                BigInt::from(1)
+            } else {
+                BigInt::from(0)
+            }
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
@@ -106,16 +105,13 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
                         return Err(raise_eval_error!("Cannot convert number to BigInt"));
                     }
-                    let s = format!("{:.0}", n);
-                    let mut holder = crate::core::BigIntHolder::try_from(s.as_str())?;
-                    holder.refresh_parsed(false)?
+                    BigInt::from(n as i64)
                 }
                 Value::String(s) => {
                     let st = String::from_utf16_lossy(&s);
-                    let mut holder = crate::core::BigIntHolder::try_from(st.as_str())?;
-                    holder.refresh_parsed(false)?
+                    parse_bigint_string(&st)?
                 }
-                Value::BigInt(h) => h.clone().refresh_parsed(false)?,
+                Value::BigInt(b) => b,
                 _ => return Err(raise_eval_error!("Cannot convert object to BigInt")),
             }
         }
@@ -132,16 +128,16 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     }
 
     if method == "asUintN" {
-        return Ok(Value::BigInt(r.into()));
+        return Ok(Value::BigInt(r));
     }
 
     // asIntN: if r >= 2^(bits-1) then r -= 2^bits
     if bits == 0 {
-        return Ok(Value::BigInt(BigInt::from(0).into()));
+        return Ok(Value::BigInt(BigInt::from(0)));
     }
     let half = &modulus >> 1;
     if r >= half {
         r -= &modulus;
     }
-    Ok(Value::BigInt(r.into()))
+    Ok(Value::BigInt(r))
 }

@@ -5,7 +5,7 @@ fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
     // BigInt + BigInt -> BigInt
     let r1 = evaluate_script("1n + 2n", None::<&std::path::Path>);
     match r1 {
-        Ok(Value::BigInt(h)) => assert!(h.raw == "3"),
+        Ok(Value::BigInt(h)) => assert!(h.to_string() == "3"),
         _ => panic!("expected BigInt result for 1n + 2n, got {:?}", r1),
     }
 

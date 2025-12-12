@@ -1,11 +1,12 @@
 [package]
 name = "javascript"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
+authors = ["ssrlive"]
 license = "MIT"
 description = "A JavaScript engine implementation in Rust"
 repository = "https://github.com/ssrlive/javascript"
-homepage = "https://github.com/ssrlive/javascript"
+homepage = "https://crates.io/crates/javascript"
 documentation = "https://docs.rs/javascript"
 readme = "README.md"
 keywords = ["javascript", "engine", "interpreter", "runtime"]

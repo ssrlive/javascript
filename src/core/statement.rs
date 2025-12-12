@@ -32,12 +32,13 @@ pub enum Statement {
     Let(String, Option<Expr>),
     Var(String, Option<Expr>),
     Const(String, Expr),
-    LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
-    ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
-    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
+    FunctionDeclaration(String, Vec<String>, Vec<Statement>, bool), // name, params, body, is_generator
+    LetDestructuringArray(Vec<DestructuringElement>, Expr),         // array destructuring: let [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr),       // const [a, b] = [1, 2];
+    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),  // object destructuring: let {a, b} = {a: 1, b: 2};
     ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
-    Class(String, Option<crate::core::Expr>, Vec<ClassMember>), // name, extends, members
-    Assign(String, Expr),                                   // variable assignment
+    Class(String, Option<crate::core::Expr>, Vec<ClassMember>),     // name, extends, members
+    Assign(String, Expr),                                           // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
@@ -65,6 +66,9 @@ impl std::fmt::Debug for Statement {
             Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
             Statement::Var(var, expr) => write!(f, "Var({}, {:?})", var, expr),
             Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
+            Statement::FunctionDeclaration(name, params, body, is_gen) => {
+                write!(f, "FunctionDeclaration({}, {:?}, {:?}, {})", name, params, body, is_gen)
+            }
             Statement::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
             Statement::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),
             Statement::LetDestructuringObject(pattern, expr) => write!(f, "LetDestructuringObject({:?}, {:?})", pattern, expr),
@@ -407,6 +411,10 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
                 Statement::Class(name, _, _) => {
+                    specifiers.push(ExportSpecifier::Named(name, None));
+                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                }
+                Statement::FunctionDeclaration(name, _, _, _) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
                     return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
                 }
@@ -778,11 +786,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     return Err(raise_parse_error!());
                 }
                 tokens.remove(0); // consume }
-                if is_generator {
-                    return Ok(Statement::Let(name, Some(Expr::GeneratorFunction(params, body))));
-                } else {
-                    return Ok(Statement::Let(name, Some(Expr::Function(params, body))));
-                }
+                return Ok(Statement::FunctionDeclaration(name, params, body, is_generator));
             }
         }
     }

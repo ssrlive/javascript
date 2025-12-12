@@ -155,4 +155,14 @@ mod function_tests {
             _ => panic!("Expected number 6.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_function_declaration_hoisting() {
+        let script = "hoistedFunction(); function hoistedFunction() { return 42; }";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected number 42.0, got {:?}", result),
+        }
+    }
 }

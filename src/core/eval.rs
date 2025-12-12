@@ -101,12 +101,28 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
         }
     }
 
+    // Hoist function declarations
+    for stmt in statements {
+        if let Statement::FunctionDeclaration(name, params, body, is_generator) = stmt {
+            let func_val = if *is_generator {
+                Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+            } else {
+                Value::Closure(params.clone(), body.clone(), env.clone())
+            };
+            env_set(env, name, func_val)?;
+        }
+    }
+
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
         // Attach statement index to the current env so callsites can include
         // an approximate source location in stack frames.
         let _ = obj_set_key_value(env, &"__stmt_index".into(), Value::Number(i as f64));
+        // Skip function declarations as they are already hoisted
+        if let Statement::FunctionDeclaration(..) = stmt {
+            continue;
+        }
         // Evaluate the statement inside a closure so we can log the
         // statement index and AST if an error occurs while preserving
         // control-flow returns. The closure returns
@@ -168,6 +184,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     }
                     env_set_const(env, name.as_str(), val.clone());
                     last_value = val;
+                    Ok(None)
+                }
+                Statement::FunctionDeclaration(name, params, body, _is_generator) => {
+                    let closure = Value::Closure(params.clone(), body.clone(), env.clone());
+                    env_set(env, name, closure)?;
+                    last_value = Value::Undefined;
                     Ok(None)
                 }
                 Statement::Class(name, extends, members) => {
@@ -380,6 +402,14 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                             Statement::Class(name, extends, members) => {
                                 let class_obj = create_class_object(name.as_str(), extends, members.as_slice(), env)?;
                                 env_set(env, name.as_str(), class_obj)?;
+                            }
+                            Statement::FunctionDeclaration(name, params, body, is_generator) => {
+                                let func_val = if *is_generator {
+                                    Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+                                } else {
+                                    Value::Closure(params.clone(), body.clone(), env.clone())
+                                };
+                                env_set(env, name.as_str(), func_val)?;
                             }
                             _ => {
                                 return Err(raise_eval_error!("Invalid export declaration"));

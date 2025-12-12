@@ -13,6 +13,7 @@ use crate::{
         evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
     },
     js_console::{handle_console_method, make_console_object},
+    js_date::is_date_object,
     js_math::{handle_math_method, make_math_object},
     js_number::make_number_object,
     js_promise::{JSPromise, PromiseState, handle_promise_method, run_event_loop},
@@ -3536,12 +3537,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::Add => {
             // If either side is an object, attempt ToPrimitive coercion (default hint) first
             let l_prim = if matches!(l, Value::Object(_)) {
-                to_primitive(&l, "default")?
+                to_primitive(&l, "default", env)?
             } else {
                 l.clone()
             };
             let r_prim = if matches!(r, Value::Object(_)) {
-                to_primitive(&r, "default")?
+                to_primitive(&r, "default", env)?
             } else {
                 r.clone()
             };
@@ -3660,7 +3661,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         },
         BinaryOp::Equal => {
             // Abstract equality comparison with type coercion
-            abstract_equality(&l, &r)
+            abstract_equality(&l, &r, env)
         }
         BinaryOp::StrictEqual => {
             // Strict equality comparison without type coercion
@@ -3668,7 +3669,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::NotEqual => {
             // Abstract inequality: invert abstract equality
-            match abstract_equality(&l, &r)? {
+            match abstract_equality(&l, &r, env)? {
                 Value::Boolean(b) => Ok(Value::Boolean(!b)),
                 _ => Err(raise_eval_error!("abstract_equality should return boolean")),
             }
@@ -3683,12 +3684,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::LessThan => {
             // Follow JS abstract relational comparison with ToPrimitive(Number) hint
             let l_prim = if matches!(l, Value::Object(_)) {
-                to_primitive(&l, "number")?
+                to_primitive(&l, "number", env)?
             } else {
                 l.clone()
             };
             let r_prim = if matches!(r, Value::Object(_)) {
-                to_primitive(&r, "number")?
+                to_primitive(&r, "number", env)?
             } else {
                 r.clone()
             };
@@ -3755,12 +3756,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::GreaterThan => {
             // Abstract relational comparison with ToPrimitive(Number) hint
             let l_prim = if matches!(l, Value::Object(_)) {
-                to_primitive(&l, "number")?
+                to_primitive(&l, "number", env)?
             } else {
                 l.clone()
             };
             let r_prim = if matches!(r, Value::Object(_)) {
-                to_primitive(&r, "number")?
+                to_primitive(&r, "number", env)?
             } else {
                 r.clone()
             };
@@ -3825,12 +3826,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::LessEqual => {
             // Use ToPrimitive(Number) hint then compare, strings compare lexicographically
             let l_prim = if matches!(l, Value::Object(_)) {
-                to_primitive(&l, "number")?
+                to_primitive(&l, "number", env)?
             } else {
                 l.clone()
             };
             let r_prim = if matches!(r, Value::Object(_)) {
-                to_primitive(&r, "number")?
+                to_primitive(&r, "number", env)?
             } else {
                 r.clone()
             };
@@ -3891,12 +3892,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::GreaterEqual => {
             // ToPrimitive(Number) hint with fallback to numeric comparison; strings compare lexicographically
             let l_prim = if matches!(l, Value::Object(_)) {
-                to_primitive(&l, "number")?
+                to_primitive(&l, "number", env)?
             } else {
                 l.clone()
             };
             let r_prim = if matches!(r, Value::Object(_)) {
-                to_primitive(&r, "number")?
+                to_primitive(&r, "number", env)?
             } else {
                 r.clone()
             };
@@ -4115,7 +4116,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
     }
 }
 
-fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
+fn abstract_equality(x: &Value, y: &Value, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Abstract Equality Comparison (==) with type coercion
     // Based on ECMAScript 2023 specification
 
@@ -4148,25 +4149,25 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
     // 6. If Type(x) is Boolean, return the result of the comparison ToNumber(x) == y.
     if let Value::Boolean(xb) = x {
         let xn = if *xb { 1.0 } else { 0.0 };
-        return abstract_equality(&Value::Number(xn), y);
+        return abstract_equality(&Value::Number(xn), y, env);
     }
 
     // 7. If Type(y) is Boolean, return the result of the comparison x == ToNumber(y).
     if let Value::Boolean(yb) = y {
         let yn = if *yb { 1.0 } else { 0.0 };
-        return abstract_equality(x, &Value::Number(yn));
+        return abstract_equality(x, &Value::Number(yn), env);
     }
 
     // 8. If Type(x) is either String, Number, or Symbol and Type(y) is Object, then return the result of the comparison x == ToPrimitive(y).
     if (matches!(x, Value::String(_) | Value::Number(_) | Value::Symbol(_))) && matches!(y, Value::Object(_)) {
-        let py = to_primitive(y, "default")?;
-        return abstract_equality(x, &py);
+        let py = to_primitive(y, "default", env)?;
+        return abstract_equality(x, &py, env);
     }
 
     // 9. If Type(x) is Object and Type(y) is either String, Number, or Symbol, then return the result of the comparison ToPrimitive(x) == y.
     if matches!(x, Value::Object(_)) && (matches!(y, Value::String(_) | Value::Number(_) | Value::Symbol(_))) {
-        let px = to_primitive(x, "default")?;
-        return abstract_equality(&px, y);
+        let px = to_primitive(x, "default", env)?;
+        return abstract_equality(&px, y, env);
     }
 
     // 10. If Type(x) is BigInt and Type(y) is String, then
@@ -4636,8 +4637,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             // don't go through the object-path below). For other cases (objects)
             // normal property lookup is used so user overrides take precedence
             // and Object.prototype functions act as fallbacks.
-            (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args),
-            (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args),
+            (Value::Symbol(sd), "toString") => crate::js_object::handle_to_string_method(&Value::Symbol(sd.clone()), args, env),
+            (Value::Symbol(sd), "valueOf") => crate::js_object::handle_value_of_method(&Value::Symbol(sd.clone()), args, env),
             (Value::Object(obj_map), method) if get_own_property(&obj_map, &"__map__".into()).is_some() => {
                 if let Some(map_val) = get_own_property(&obj_map, &"__map__".into()) {
                     if let Value::Map(map) = &*map_val.borrow() {
@@ -4745,9 +4746,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     } else {
                         Err(raise_eval_error!("__value__ not found on instance"))
                     }
-                } else if get_own_property(&obj_map, &"__timestamp".into()).is_some() {
+                } else if is_date_object(&obj_map) {
                     // Date instance methods
-                    crate::js_date::handle_date_method(&obj_map, method, args)
+                    crate::js_date::handle_date_method(&obj_map, method, args, env)
                 } else if get_own_property(&obj_map, &"__regex".into()).is_some() {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
@@ -4863,7 +4864,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                         "Object.prototype.toLocaleString" => {
                                             // Delegate Object.prototype.toLocaleString to the
                                             // same handler as toString (defaults to toString)
-                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args)
+                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env)
                                         }
                                         "Error.prototype.toString" => {
                                             crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args)
@@ -4892,11 +4893,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             // Delegate the built-in toString behavior to js_object::handle_to_string_method
                                             // which handles wrapped primitives, arrays, and Symbol.toStringTag
                                             // The function is invoked with `this` bound to obj_map (receiver)
-                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args)
+                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env)
                                         }
                                         "Object.prototype.valueOf" => {
                                             // Delegate to handle_value_of_method
-                                            crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args)
+                                            crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args, env)
                                         }
                                         _ => crate::js_function::handle_global_function(&func_name, args, env),
                                     }
@@ -5389,9 +5390,9 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     } else {
                         Err(raise_eval_error!("__value__ not found on instance"))
                     }
-                } else if get_own_property(&obj_map, &"__timestamp".into()).is_some() {
+                } else if is_date_object(&obj_map) {
                     // Date instance methods
-                    crate::js_date::handle_date_method(&obj_map, method_name, args)
+                    crate::js_date::handle_date_method(&obj_map, method_name, args, env)
                 } else if get_own_property(&obj_map, &"__regex".into()).is_some() {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env)
@@ -5789,8 +5790,8 @@ fn handle_optional_method_call(
 ) -> Result<Value, JSError> {
     match method {
         "log" if get_own_property(obj_map, &"log".into()).is_some() => handle_console_method(method, args, env),
-        "toString" => crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args),
-        "valueOf" => crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args),
+        "toString" => crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env),
+        "valueOf" => crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args, env),
         method => {
             // If this object looks like the `std` module (we used 'sprintf' as marker)
             if get_own_property(obj_map, &"sprintf".into()).is_some() {
@@ -5821,9 +5822,9 @@ fn handle_optional_method_call(
                 crate::js_json::handle_json_method(method, args, env)
             } else if get_own_property(obj_map, &"keys".into()).is_some() && get_own_property(obj_map, &"values".into()).is_some() {
                 crate::js_object::handle_object_method(method, args, env)
-            } else if get_own_property(obj_map, &"__timestamp".into()).is_some() {
+            } else if is_date_object(obj_map) {
                 // Date instance methods
-                crate::js_date::handle_date_method(obj_map, method, args)
+                crate::js_date::handle_date_method(obj_map, method, args, env)
             } else if get_own_property(obj_map, &"__regex".into()).is_some() {
                 // RegExp instance methods
                 crate::js_regexp::handle_regexp_method(obj_map, method, args, env)

@@ -84,7 +84,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             // object behavior are consistent.
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return crate::js_object::handle_value_of_method(&this_val, args);
+                return crate::js_object::handle_value_of_method(&this_val, args, env);
             }
             Err(raise_eval_error!("Object.prototype.valueOf called without this"))
         }
@@ -100,7 +100,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
                     Value::Object(obj) => {
                         // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                        let prim = to_primitive(&Value::Object(obj.clone()), "string")?;
+                        let prim = to_primitive(&Value::Object(obj.clone()), "string", env)?;
                         match prim {
                             Value::String(s) => Ok(Value::String(s)),
                             Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
@@ -357,7 +357,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                 }
                 Value::Object(obj) => {
                     // Try ToPrimitive with number hint first
-                    let prim = to_primitive(&Value::Object(obj.clone()), "number")?;
+                    let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
                     match prim {
                         Value::Number(n) => {
                             if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
@@ -392,7 +392,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
                     Value::Object(obj) => {
                         // Try ToPrimitive with 'number' hint
-                        let prim = to_primitive(&Value::Object(obj.clone()), "number")?;
+                        let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
                         match prim {
                             Value::Number(n) => Ok(Value::Number(n)),
                             Value::String(s) => {

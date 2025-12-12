@@ -26,7 +26,14 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::Undefined => print!("undefined"),
                     Value::Null => print!("null"),
                     Value::Object(obj) => {
-                        if crate::js_array::is_array(&obj) {
+                        // Check if this is a Date object
+                        if crate::js_date::is_date_object(&obj) {
+                            // For Date objects, call toString method
+                            match crate::js_date::handle_date_method(&obj, "toISOString", &[], env) {
+                                Ok(Value::String(s)) => print!("{}", String::from_utf16_lossy(&s)),
+                                _ => print!("[object Date]"),
+                            }
+                        } else if crate::js_array::is_array(&obj) {
                             // Print array contents
                             let len = crate::js_array::get_array_length(&obj).unwrap_or(0);
                             print!("[");

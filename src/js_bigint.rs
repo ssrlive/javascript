@@ -99,7 +99,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = crate::core::to_primitive(&Value::Object(obj.clone()), "number")?;
+            let prim = crate::core::to_primitive(&Value::Object(obj.clone()), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {

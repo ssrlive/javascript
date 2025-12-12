@@ -4,6 +4,7 @@ use num_bigint::BigInt;
 use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
+use crate::js_date::is_date_object;
 use crate::{
     JSError,
     core::{BinaryOp, Expr, PropertyKey, Statement, evaluate_statements, get_well_known_symbol_rc, utf8_to_utf16},
@@ -578,6 +579,8 @@ pub struct SymbolData {
     pub description: Option<String>,
 }
 
+pub type ValuePtr = Rc<RefCell<Value>>;
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
@@ -759,7 +762,7 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate
 }
 
 // Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
-pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
+pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match val {
         Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => Ok(val.clone()),
         Value::Object(obj_map) => {
@@ -796,21 +799,21 @@ pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
             // Default algorithm: order depends on hint
             if hint == "string" {
                 // toString -> valueOf
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[], env)?;
                 if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[], env)?;
                 if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
             } else {
                 // number or default: valueOf -> toString
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[])?;
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[], env)?;
                 if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[])?;
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[], env)?;
                 if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }
@@ -1222,7 +1225,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     _ => {}
                 }
             }
-            if get_own_property(js_obj, &"__timestamp".into()).is_some() {
+            if is_date_object(js_obj) {
                 return Ok(Some(Rc::new(RefCell::new(Value::String(utf8_to_utf16("Date"))))));
             }
         }

@@ -1,11 +1,12 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, get_well_known_symbol_rc, new_js_object_data,
-    obj_get_key_value, obj_set_key_value,
+    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, new_js_object_data, obj_get_key_value,
+    obj_set_key_value,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
+use crate::js_date::is_date_object;
 use crate::unicode::utf8_to_utf16;
 
 pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -482,7 +483,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
     }
 }
 
-pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!(format!(
             "{}.toString() takes no arguments, but {} were provided",
@@ -536,8 +537,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
             }
 
             // If this object looks like a Date (has __timestamp), call Date.toString()
-            if get_own_property(obj_map, &"__timestamp".into()).is_some() {
-                return crate::js_date::handle_date_method(obj_map, "toString", args);
+            if is_date_object(obj_map) {
+                return crate::js_date::handle_date_method(obj_map, "toString", args, env);
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
@@ -637,7 +638,7 @@ pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> R
     }
 }
 
-pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!(format!(
             "{}.valueOf() takes no arguments, but {} were provided",
@@ -710,7 +711,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                             return Ok(Value::Object(obj_map.clone()));
                         }
                         if func_name == "Object.prototype.toString" {
-                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args);
+                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
                         }
 
                         let func_env = new_js_object_data();
@@ -750,8 +751,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 }
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
-            if get_own_property(obj_map, &"__timestamp".into()).is_some() {
-                return crate::js_date::handle_date_method(obj_map, "valueOf", args);
+            if is_date_object(obj_map) {
+                return crate::js_date::handle_date_method(obj_map, "valueOf", args, env);
             }
             // For regular objects, return the object itself
             Ok(Value::Object(obj_map.clone()))

@@ -97,6 +97,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                     Value::String(s) => Ok(Value::String(s.clone())),
                     Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
+                    Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
                     Value::Object(obj) => {
                         // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
                         let prim = to_primitive(&Value::Object(obj.clone()), "string")?;

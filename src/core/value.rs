@@ -585,6 +585,7 @@ pub enum Value {
     String(Vec<u16>), // UTF-16 code units
     Boolean(bool),
     Undefined,
+    Null,
     Object(JSObjectDataPtr),                                         // Object with properties
     Function(String),                                                // Function name
     Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr),           // parameters, body, captured environment
@@ -625,6 +626,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::String(s) => !s.is_empty(),
         Value::Boolean(b) => *b,
         Value::Undefined => false,
+        Value::Null => false,
         Value::Object(_) => true,
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
@@ -656,6 +658,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::String(sa), Value::String(sb)) => sa == sb,
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
         (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b), // Objects equal only if same reference
         (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
         _ => false,                                               // Different types are not equal
@@ -670,6 +673,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::String(s) => format!("\"{}\"", String::from_utf16_lossy(s)),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
+        Value::Null => "null".to_string(),
         Value::Object(obj) => {
             if let Some(length_rc) = get_own_property(obj, &"length".into()) {
                 if let Value::Number(len) = &*length_rc.borrow() {
@@ -677,9 +681,14 @@ pub fn value_to_string(val: &Value) -> String {
                         let len_usize = *len as usize;
                         let mut parts = Vec::new();
                         for i in 0..len_usize {
-                            let key = i.to_string();
-                            if let Some(val_rc) = get_own_property(obj, &key.into()) {
-                                parts.push(value_to_string(&val_rc.borrow()));
+                            if let Some(val_rc) = get_own_property(obj, &i.to_string().into()) {
+                                let val = val_rc.borrow();
+                                let display = match *val {
+                                    Value::Null => "null".to_string(),
+                                    Value::Undefined => "undefined".to_string(),
+                                    _ => value_to_string(&val),
+                                };
+                                parts.push(display);
                             } else {
                                 parts.push("undefined".to_string());
                             }
@@ -743,7 +752,7 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate
 // Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
 pub fn to_primitive(val: &Value, hint: &str) -> Result<Value, JSError> {
     match val {
-        Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Symbol(_) => Ok(val.clone()),
+        Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => Ok(val.clone()),
         Value::Object(obj_map) => {
             // Prefer explicit [Symbol.toPrimitive] if present and callable
             if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
@@ -822,6 +831,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::String(s) => String::from_utf16_lossy(s),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
+        Value::Null => "null".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
         Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "[function]".to_string(),

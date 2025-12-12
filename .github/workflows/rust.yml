@@ -51,6 +51,7 @@ jobs:
         cargo run --example js -- js-scripts/proper_dataview_test.js
         cargo run --example js -- js-scripts/sharedarraybuffer_test.js
         cargo run --example js -- js-scripts/simple_dataview_test.js
+        cargo run --example js -- js-scripts/test_array_join_split.js
         cargo run --example js -- js-scripts/test_dataview_js.js
         cargo run --example js -- js-scripts/test_typedarray_constructors.js
 

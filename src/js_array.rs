@@ -239,9 +239,11 @@ pub(crate) fn handle_array_instance_method(
                 }
                 if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
                     match &*val.borrow() {
+                        Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
                         Value::Boolean(b) => result.push_str(&b.to_string()),
+                        Value::BigInt(b) => result.push_str(&format!("{}n", b)),
                         _ => result.push_str("[object Object]"),
                     }
                 }
@@ -1110,6 +1112,7 @@ pub(crate) fn handle_array_instance_method(
             Ok(Value::Number(-1.0))
         }
         "toString" => {
+            // Array.prototype.toString() is equivalent to join(",")
             let current_len = get_array_length(obj_map).unwrap_or(0);
 
             let mut result = String::new();
@@ -1119,9 +1122,11 @@ pub(crate) fn handle_array_instance_method(
                 }
                 if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
                     match &*val.borrow() {
+                        Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
                         Value::Boolean(b) => result.push_str(&b.to_string()),
+                        Value::BigInt(b) => result.push_str(&format!("{}n", b)),
                         _ => result.push_str("[object Object]"),
                     }
                 }

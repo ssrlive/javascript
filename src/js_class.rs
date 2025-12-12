@@ -925,6 +925,7 @@ pub(crate) fn handle_string_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Number(n) => utf8_to_utf16(&n.to_string()),
             Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
             Value::Undefined => utf8_to_utf16("undefined"),
+            Value::Null => utf8_to_utf16("null"),
             Value::Object(_) => utf8_to_utf16("[object Object]"),
             Value::Function(name) => utf8_to_utf16(&format!("[Function: {}]", name)),
             Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => utf8_to_utf16("[Function]"),

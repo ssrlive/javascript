@@ -488,8 +488,8 @@ pub(crate) fn handle_regexp_method(
                     if global {
                         obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
                     }
-                    // RegExp.exec returns null on no match, but we use Undefined
-                    Ok(Value::Undefined)
+                    // RegExp.exec returns null on no match
+                    Ok(Value::Null)
                 }
                 Err(e) => Err(raise_syntax_error!(format!("Invalid RegExp: {e}"))),
             }

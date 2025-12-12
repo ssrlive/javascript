@@ -24,6 +24,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
                     Value::Boolean(b) => print!("{}", b),
                     Value::Undefined => print!("undefined"),
+                    Value::Null => print!("null"),
                     Value::Object(obj) => {
                         if crate::js_array::is_array(&obj) {
                             // Print array contents
@@ -40,6 +41,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                         Value::String(s) => print!("\"{}\"", String::from_utf16_lossy(s)),
                                         Value::Boolean(b) => print!("{}", b),
                                         Value::Undefined => print!("undefined"),
+                                        Value::Null => print!("null"),
                                         _ => print!("[object Object]"),
                                     }
                                 }

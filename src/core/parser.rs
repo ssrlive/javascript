@@ -516,6 +516,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::StringLit(s) => Expr::StringLit(s),
         Token::True => Expr::Boolean(true),
         Token::False => Expr::Boolean(false),
+        Token::Null => Expr::Value(Value::Null),
         Token::TypeOf => {
             let inner = parse_primary(tokens)?;
             Expr::TypeOf(Box::new(inner))

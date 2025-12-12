@@ -3351,6 +3351,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
     };
     let type_str = match &val {
         Value::Undefined => "undefined",
+        Value::Null => "null",
         Value::Boolean(_) => "boolean",
         Value::Number(_) => "number",
         Value::String(_) => "string",
@@ -4047,7 +4048,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         BinaryOp::NullishCoalescing => {
             // Nullish coalescing: return right if left is null or undefined, otherwise left
             match l {
-                Value::Undefined => Ok(r),
+                Value::Undefined | Value::Null => Ok(r),
                 _ => Ok(l),
             }
         }
@@ -4064,14 +4065,13 @@ fn abstract_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
     }
 
     // 2. If x is null and y is undefined, return true.
-    if matches!(x, Value::Undefined) && matches!(y, Value::Object(_)) {
-        // Wait, no: null is not implemented yet. In this engine, null might be Undefined?
-        // Actually, in this code, null is not distinguished from undefined.
-        // For now, assume undefined == undefined is handled above.
+    if matches!(x, Value::Null) && matches!(y, Value::Undefined) {
+        return Ok(Value::Boolean(true));
     }
-    // Since null is not implemented, skip null/undefined check.
-
-    // 3. If x is undefined and y is null, return true. (skipped)
+    // 3. If x is undefined and y is null, return true.
+    if matches!(x, Value::Undefined) && matches!(y, Value::Null) {
+        return Ok(Value::Boolean(true));
+    }
 
     // 4. If Type(x) is Number and Type(y) is String, return the result of the comparison x == ToNumber(y).
     if let (Value::Number(xn), Value::String(ys)) = (x, y) {
@@ -4177,6 +4177,7 @@ fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         (Value::Boolean(lb), Value::Boolean(rb)) => Ok(Value::Boolean(lb == rb)),
         (Value::Symbol(sa), Value::Symbol(sb)) => Ok(Value::Boolean(Rc::ptr_eq(sa, sb))),
         (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
+        (Value::Null, Value::Null) => Ok(Value::Boolean(true)),
         (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
         _ => Ok(Value::Boolean(false)),
     }
@@ -4416,7 +4417,7 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
     let obj_val = evaluate_expr(env, obj)?;
     log::trace!("Optional property access prop={prop}");
     match obj_val {
-        Value::Undefined => Ok(Value::Undefined),
+        Value::Undefined | Value::Null => Ok(Value::Undefined),
         Value::Object(obj_map) => {
             if let Some(val) = obj_get_key_value(&obj_map, &prop.into())? {
                 Ok(val.borrow().clone())
@@ -4447,8 +4448,8 @@ fn evaluate_optional_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> 
 
 fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value, JSError> {
     let obj_val = evaluate_expr(env, obj)?;
-    // If the base is undefined, optional chaining returns undefined
-    if let Value::Undefined = obj_val {
+    // If the base is undefined or null, optional chaining returns undefined
+    if matches!(obj_val, Value::Undefined | Value::Null) {
         return Ok(Value::Undefined);
     }
 
@@ -4911,7 +4912,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         // Optional method call
         let obj_val = evaluate_expr(env, obj_expr)?;
         match obj_val {
-            Value::Undefined => Ok(Value::Undefined),
+            Value::Undefined | Value::Null => Ok(Value::Undefined),
             Value::Object(obj_map) => handle_optional_method_call(&obj_map, method_name, args, env, obj_expr),
             Value::Function(func_name) => {
                 // Handle constructor static methods
@@ -5220,7 +5221,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
         let obj_val = evaluate_expr(env, obj_expr)?;
         log::trace!("evaluate_optional_call - object eval result: {obj_val:?}");
         match obj_val {
-            Value::Undefined => Ok(Value::Undefined),
+            Value::Undefined | Value::Null => Ok(Value::Undefined),
             Value::Object(obj_map) => {
                 // If this object looks like the `std` module (we used 'sprintf' as marker)
                 if get_own_property(&obj_map, &"sprintf".into()).is_some() {

@@ -68,6 +68,7 @@ pub enum Token {
     GreaterEqual,
     True,
     False,
+    Null,
     Arrow,
     Spread,
     OptionalChain,
@@ -151,6 +152,7 @@ impl Token {
             Token::Throw => Some("throw".to_string()),
             Token::True => Some("true".to_string()),
             Token::False => Some("false".to_string()),
+            Token::Null => Some("null".to_string()),
             Token::Async => Some("async".to_string()),
             Token::Await => Some("await".to_string()),
             Token::Yield => Some("yield".to_string()),
@@ -664,6 +666,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     "continue" => tokens.push(Token::Continue),
                     "true" => tokens.push(Token::True),
                     "false" => tokens.push(Token::False),
+                    "null" => tokens.push(Token::Null),
                     "async" => tokens.push(Token::Async),
                     "await" => tokens.push(Token::Await),
                     "yield" => {

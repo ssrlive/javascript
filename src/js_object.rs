@@ -97,9 +97,9 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let proto_val = evaluate_expr(env, &args[0])?;
             let proto_obj = match proto_val {
                 Value::Object(obj) => Some(obj),
-                Value::Undefined => None,
+                Value::Undefined | Value::Null => None,
                 _ => {
-                    return Err(raise_type_error!("Object.create prototype must be an object or undefined"));
+                    return Err(raise_type_error!("Object.create prototype must be an object, null, or undefined"));
                 }
             };
 
@@ -495,6 +495,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 Value::Function(_) => "Function",
                 Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
                 Value::Undefined => "undefined",
+                Value::Null => "null",
                 Value::ClassDefinition(_) => "Class",
                 Value::Getter(_, _) => "Getter",
                 Value::Setter(_, _, _) => "Setter",
@@ -521,6 +522,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
+        Value::Null => Err(raise_type_error!("Cannot convert null to object")),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {
@@ -545,9 +547,11 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<
                 for i in 0..current_len {
                     if let Some(val_rc) = obj_get_key_value(obj_map, &i.to_string().into())? {
                         match &*val_rc.borrow() {
+                            Value::Undefined | Value::Null => parts.push("".to_string()), // push empty string for null and undefined
                             Value::String(s) => parts.push(String::from_utf16_lossy(s)),
                             Value::Number(n) => parts.push(n.to_string()),
                             Value::Boolean(b) => parts.push(b.to_string()),
+                            Value::BigInt(b) => parts.push(format!("{}n", b)),
                             _ => parts.push("[object Object]".to_string()),
                         }
                     } else {
@@ -645,6 +649,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
                 Value::Function(_) => "Function",
                 Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
                 Value::Undefined => "undefined",
+                Value::Null => "null",
                 Value::ClassDefinition(_) => "Class",
                 &Value::Getter(_, _) => "Getter",
                 &Value::Setter(_, _, _) => "Setter",
@@ -672,6 +677,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr]) -> Result<V
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
         Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
+        Value::Null => Err(raise_type_error!("Cannot convert null to object")),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {

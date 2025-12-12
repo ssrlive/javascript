@@ -22,7 +22,7 @@ mod nullish_coalescing_tests {
             _ => panic!("Expected string result"),
         }
 
-        // Test null ?? default (null is represented as undefined in this engine)
+        // Test null ?? default
         let result = evaluate_script("null ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {

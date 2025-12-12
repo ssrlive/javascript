@@ -749,5 +749,15 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
         Rc::new(RefCell::new(Value::Function("clearTimeout".to_string()))),
     );
 
+    // Global NaN and Infinity properties
+    env_borrow.insert(
+        PropertyKey::String("NaN".to_string()),
+        Rc::new(RefCell::new(Value::Number(f64::NAN))),
+    );
+    env_borrow.insert(
+        PropertyKey::String("Infinity".to_string()),
+        Rc::new(RefCell::new(Value::Number(f64::INFINITY))),
+    );
+
     Ok(())
 }

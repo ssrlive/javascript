@@ -159,6 +159,108 @@ mod builtin_functions_tests {
     }
 
     #[test]
+    fn test_math_max() {
+        // Test max with multiple arguments
+        let script = "Math.max(1, 5, 3, 9, 2)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 9.0),
+            _ => panic!("Expected Math.max(1, 5, 3, 9, 2) to be 9.0, got {:?}", result),
+        }
+
+        // Test max with two arguments
+        let script2 = "Math.max(10, 20)";
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 20.0),
+            _ => panic!("Expected Math.max(10, 20) to be 20.0, got {:?}", result2),
+        }
+
+        // Test max with single argument
+        let script3 = "Math.max(42)";
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected Math.max(42) to be 42.0, got {:?}", result3),
+        }
+
+        // Test max with no arguments (should return -Infinity)
+        let script4 = "Math.max()";
+        let result4 = evaluate_script(script4, None::<&std::path::Path>);
+        match result4 {
+            Ok(Value::Number(n)) => assert!(n.is_infinite() && n.is_sign_negative()),
+            _ => panic!("Expected Math.max() to be -Infinity, got {:?}", result4),
+        }
+
+        // Test max with NaN argument (should return NaN)
+        let script5 = "Math.max(1, NaN, 3)";
+        let result5 = evaluate_script(script5, None::<&std::path::Path>);
+        match result5 {
+            Ok(Value::Number(n)) => assert!(n.is_nan()),
+            _ => panic!("Expected Math.max(1, NaN, 3) to be NaN, got {:?}", result5),
+        }
+
+        // Test max with negative numbers
+        let script6 = "Math.max(-5, -1, -10)";
+        let result6 = evaluate_script(script6, None::<&std::path::Path>);
+        match result6 {
+            Ok(Value::Number(n)) => assert_eq!(n, -1.0),
+            _ => panic!("Expected Math.max(-5, -1, -10) to be -1.0, got {:?}", result6),
+        }
+    }
+
+    #[test]
+    fn test_math_min() {
+        // Test min with multiple arguments
+        let script = "Math.min(1, 5, 3, 9, 2)";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+            _ => panic!("Expected Math.min(1, 5, 3, 9, 2) to be 1.0, got {:?}", result),
+        }
+
+        // Test min with two arguments
+        let script2 = "Math.min(10, 20)";
+        let result2 = evaluate_script(script2, None::<&std::path::Path>);
+        match result2 {
+            Ok(Value::Number(n)) => assert_eq!(n, 10.0),
+            _ => panic!("Expected Math.min(10, 20) to be 10.0, got {:?}", result2),
+        }
+
+        // Test min with single argument
+        let script3 = "Math.min(42)";
+        let result3 = evaluate_script(script3, None::<&std::path::Path>);
+        match result3 {
+            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
+            _ => panic!("Expected Math.min(42) to be 42.0, got {:?}", result3),
+        }
+
+        // Test min with no arguments (should return +Infinity)
+        let script4 = "Math.min()";
+        let result4 = evaluate_script(script4, None::<&std::path::Path>);
+        match result4 {
+            Ok(Value::Number(n)) => assert!(n.is_infinite() && n.is_sign_positive()),
+            _ => panic!("Expected Math.min() to be +Infinity, got {:?}", result4),
+        }
+
+        // Test min with NaN argument (should return NaN)
+        let script5 = "Math.min(1, NaN, 3)";
+        let result5 = evaluate_script(script5, None::<&std::path::Path>);
+        match result5 {
+            Ok(Value::Number(n)) => assert!(n.is_nan()),
+            _ => panic!("Expected Math.min(1, NaN, 3) to be NaN, got {:?}", result5),
+        }
+
+        // Test min with negative numbers
+        let script6 = "Math.min(-5, -1, -10)";
+        let result6 = evaluate_script(script6, None::<&std::path::Path>);
+        match result6 {
+            Ok(Value::Number(n)) => assert_eq!(n, -10.0),
+            _ => panic!("Expected Math.min(-5, -1, -10) to be -10.0, got {:?}", result6),
+        }
+    }
+
+    #[test]
     fn test_parse_int() {
         let script = "parseInt('42')";
         let result = evaluate_script(script, None::<&std::path::Path>);

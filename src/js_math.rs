@@ -18,6 +18,8 @@ pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_key_value(&math_obj, &"random".into(), Value::Function("Math.random".to_string()))?;
     obj_set_key_value(&math_obj, &"clz32".into(), Value::Function("Math.clz32".to_string()))?;
     obj_set_key_value(&math_obj, &"imul".into(), Value::Function("Math.imul".to_string()))?;
+    obj_set_key_value(&math_obj, &"max".into(), Value::Function("Math.max".to_string()))?;
+    obj_set_key_value(&math_obj, &"min".into(), Value::Function("Math.min".to_string()))?;
     Ok(math_obj)
 }
 
@@ -179,6 +181,50 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                 }
             } else {
                 Err(raise_eval_error!("Math.imul expects exactly two arguments"))
+            }
+        }
+        "max" => {
+            if args.is_empty() {
+                Ok(Value::Number(f64::NEG_INFINITY))
+            } else {
+                let mut max_val = f64::NEG_INFINITY;
+                for arg in args {
+                    let arg_val = evaluate_expr(env, arg)?;
+                    if let Value::Number(n) = arg_val {
+                        if n.is_nan() {
+                            return Ok(Value::Number(f64::NAN));
+                        }
+                        if n > max_val {
+                            max_val = n;
+                        }
+                    } else {
+                        // If any argument is not a number, return NaN
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                }
+                Ok(Value::Number(max_val))
+            }
+        }
+        "min" => {
+            if args.is_empty() {
+                Ok(Value::Number(f64::INFINITY))
+            } else {
+                let mut min_val = f64::INFINITY;
+                for arg in args {
+                    let arg_val = evaluate_expr(env, arg)?;
+                    if let Value::Number(n) = arg_val {
+                        if n.is_nan() {
+                            return Ok(Value::Number(f64::NAN));
+                        }
+                        if n < min_val {
+                            min_val = n;
+                        }
+                    } else {
+                        // If any argument is not a number, return NaN
+                        return Ok(Value::Number(f64::NAN));
+                    }
+                }
+                Ok(Value::Number(min_val))
             }
         }
         _ => Err(raise_eval_error!(format!("Math.{method} is not implemented"))),

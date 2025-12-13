@@ -268,6 +268,34 @@ mod regexp_tests {
     }
 
     #[test]
+    fn test_string_match_global_behavior() {
+        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/g)[0]"#, None::<&std::path::Path>);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        match value {
+            Value::String(s) => {
+                let s_val = String::from_utf16_lossy(&s);
+                assert_eq!(s_val, "dbbd");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
+    fn test_string_match_non_global_captures() {
+        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/)[1]"#, None::<&std::path::Path>);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        match value {
+            Value::String(s) => {
+                let s_val = String::from_utf16_lossy(&s);
+                assert_eq!(s_val, "bb");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
     fn test_regexp_swap_greed_complex_patterns() {
         // Test nested quantifiers and brace ranges that could be tricky for swapping greediness
         let script = r#"

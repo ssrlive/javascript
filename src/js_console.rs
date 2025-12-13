@@ -43,22 +43,29 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                             // Print array contents
                             let len = crate::js_array::get_array_length(&obj).unwrap_or(0);
                             print!("[");
+                            // Print elements
                             for i in 0..len {
                                 if i > 0 {
-                                    print!(",");
+                                    print!(", ");
                                 }
                                 if let Some(val_rc) = obj_get_key_value(&obj, &i.to_string().into())? {
                                     match &*val_rc.borrow() {
                                         Value::Number(n) => print!("{}", n),
                                         Value::BigInt(h) => print!("{h}"),
-                                        Value::String(s) => print!("\"{}\"", String::from_utf16_lossy(s)),
+                                        Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
                                         Value::Boolean(b) => print!("{}", b),
                                         Value::Undefined => print!("undefined"),
                                         Value::Null => print!("null"),
                                         _ => print!("[object Object]"),
                                     }
+                                } else {
+                                    // missing element -> print nothing (sparse arrays not shown)
                                 }
                             }
+
+                            // Print additional own non-index properties, not enabled by default
+                            // _print_additional_info_for_array(&obj)?;
+
                             print!("]");
                         } else {
                             // Print object properties
@@ -137,4 +144,100 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
         }
         _ => Err(raise_eval_error!(format!("Console method {method} not implemented"))),
     }
+}
+
+/// Print additional own non-index properties of an array object
+/// Not enabled by default; can be called from handle_console_method if desired
+fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError> {
+    // Collect and print own non-index properties.
+    // Print common RegExp-related props in a stable order for readability.
+
+    let Some(len) = crate::js_array::get_array_length(obj) else {
+        return Ok(());
+    };
+
+    let mut printed_any = false;
+    let mut need_sep = len > 0;
+
+    // Helper to print a single property if present
+    let mut print_prop = |k: &str| -> Result<bool, JSError> {
+        if let Some(vrc) = obj_get_key_value(obj, &k.into())? {
+            if need_sep {
+                print!(", ");
+            }
+            need_sep = true;
+            printed_any = true;
+            print!("{}: ", k);
+            match &*vrc.borrow() {
+                Value::Number(n) => print!("{}", n),
+                Value::BigInt(h) => print!("{h}"),
+                Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
+                Value::Boolean(b) => print!("{}", b),
+                Value::Undefined => print!("undefined"),
+                Value::Null => print!("null"),
+                Value::Object(inner_obj) => {
+                    if crate::js_array::is_array(inner_obj) {
+                        print!("[Array]");
+                    } else {
+                        print!("[object Object]");
+                    }
+                }
+                _ => print!("[object Object]"),
+            }
+            return Ok(true);
+        }
+        Ok(false)
+    };
+
+    // stable order: index, input, groups
+    let _ = print_prop("index")?;
+    let _ = print_prop("input")?;
+    let _ = print_prop("groups")?;
+
+    // Now print any other own string-key properties not already printed and not numeric indices
+    for (key, val_rc) in obj.borrow().properties.iter() {
+        // skip length and already-printed common props and numeric indices
+        let skip = match key {
+            crate::core::PropertyKey::String(s) if s == "length" => true,
+            crate::core::PropertyKey::String(s) => {
+                if s == "index" || s == "input" || s == "groups" {
+                    true
+                } else if let Ok(idx) = s.parse::<usize>() {
+                    idx < len
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if skip {
+            continue;
+        }
+
+        // print separator
+        if need_sep {
+            print!(", ");
+        }
+        need_sep = true;
+
+        // key: value -- rely on Display for key
+        print!("{}: ", key);
+        match &*val_rc.borrow() {
+            Value::Number(n) => print!("{}", n),
+            Value::BigInt(h) => print!("{h}"),
+            Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
+            Value::Boolean(b) => print!("{}", b),
+            Value::Undefined => print!("undefined"),
+            Value::Null => print!("null"),
+            Value::Object(inner_obj) => {
+                if crate::js_array::is_array(inner_obj) {
+                    print!("[Array]");
+                } else {
+                    print!("[object Object]");
+                }
+            }
+            _ => print!("[object Object]"),
+        }
+    }
+    Ok(())
 }

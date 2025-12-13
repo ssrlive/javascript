@@ -25,4 +25,18 @@ assert(result, "The regex should match the original string");
 var re = /ab+c/;
 console.log(re);
 
+var myRe = new RegExp("d(b+)d", "g");
+var myArray = myRe.exec("cdbbdbsbz");
+console.log(myArray); // ["dbbd","bb"]
+
+var myRe = /d(b+)d/g;
+var myArray = myRe.exec("cdbbdbsbz");
+console.log(myArray); // ["dbbd","bb"]
+
+var myArray = /d(b+)d/g.exec("cdbbdbsbz");
+console.log(myArray); // ["dbbd","bb"]
+
+var expectedArray = "cdbbdbsbz".match(/d(b+)d/g);
+console.log(expectedArray); // ["dbbd"]
+
 result

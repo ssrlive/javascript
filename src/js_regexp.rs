@@ -527,6 +527,8 @@ pub(crate) fn handle_regexp_method(
 
                         // Set length
                         obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+                        // Always set `groups` property to undefined to match Node.js behavior
+                        obj_set_key_value(&result_array, &"groups".into(), Value::Undefined)?;
 
                         // Update lastIndex for global or sticky regex
                         if use_last && let Some(matched) = captures.get(0) {
@@ -633,6 +635,8 @@ pub(crate) fn handle_regexp_method(
 
                         // Set length
                         obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+                        // Always set `groups` property to undefined to match Node.js behavior
+                        obj_set_key_value(&result_array, &"groups".into(), Value::Undefined)?;
 
                         // Update lastIndex for global or sticky regex
                         if use_last && let Some(matched) = captures.get(0) {

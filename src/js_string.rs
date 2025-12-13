@@ -805,10 +805,10 @@ fn string_match_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
     let exec_args = vec![exec_arg.clone()];
 
     if global {
-        // Save lastIndex
-        let prev_last_index = get_own_property(&regexp_obj, &"__lastIndex".into());
+        // Save lastIndex (prefer user-visible `lastIndex`)
+        let prev_last_index = get_own_property(&regexp_obj, &"lastIndex".into());
         // Reset lastIndex to 0 for global matching
-        obj_set_key_value(&regexp_obj, &"__lastIndex".into(), Value::Number(0.0))?;
+        obj_set_key_value(&regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
 
         let mut matches: Vec<String> = Vec::new();
         loop {
@@ -835,9 +835,9 @@ fn string_match_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
 
         // Restore lastIndex
         if let Some(val) = prev_last_index {
-            obj_set_key_value(&regexp_obj, &"__lastIndex".into(), val.borrow().clone())?;
+            obj_set_key_value(&regexp_obj, &"lastIndex".into(), val.borrow().clone())?;
         } else {
-            obj_set_key_value(&regexp_obj, &"__lastIndex".into(), Value::Number(0.0))?;
+            obj_set_key_value(&regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
         }
 
         if matches.is_empty() {

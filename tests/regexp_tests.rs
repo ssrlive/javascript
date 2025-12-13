@@ -157,7 +157,7 @@ mod regexp_tests {
         (function(){
             var s = 'abc 123 xyz';
             var r = new RegExp('\\d+','y');
-            r.__lastIndex = 4; // position of '1'
+            r.lastIndex = 4; // position of '1'
             var m = r.exec(s);
             return m ? m[0] : 'nomatch';
         })()
@@ -245,7 +245,7 @@ mod regexp_tests {
             var m;
             while ((m = r.exec(s)) !== null) {
                 matches.push(m[0]);
-                matches.push(r.__lastIndex);
+                matches.push(r.lastIndex);
             }
             // matches will be alternating values [match0, idx0, match1, idx1, ...]
             return JSON.stringify(matches);

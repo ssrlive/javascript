@@ -39,4 +39,9 @@ console.log(myArray); // ["dbbd","bb"]
 var expectedArray = "cdbbdbsbz".match(/d(b+)d/g);
 console.log(expectedArray); // ["dbbd"]
 
+var myRe = /d(b+)d/g;
+var myArray = myRe.exec("cdbbdbsbz");
+console.log(myRe.lastIndex); // 5
+console.log("The value of lastIndex is " + myRe.lastIndex);
+
 result

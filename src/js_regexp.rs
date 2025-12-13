@@ -335,7 +335,8 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_key_value(&regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
     obj_set_key_value(&regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
     obj_set_key_value(&regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
-    obj_set_key_value(&regexp_obj, &"__lastIndex".into(), Value::Number(0.0))?;
+    // Expose user-visible lastIndex property
+    obj_set_key_value(&regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
 
     // Add methods
     obj_set_key_value(&regexp_obj, &"exec".into(), Value::Function("RegExp.prototype.exec".to_string()))?;
@@ -433,7 +434,7 @@ pub(crate) fn handle_regexp_method(
             let global = flags.contains('g');
             let use_last = global || flags.contains('y');
             if use_last
-                && let Some(last_index_val) = get_own_property(obj_map, &"__lastIndex".into())
+                && let Some(last_index_val) = get_own_property(obj_map, &"lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 // Clamp and use as UTF-16 code unit index
@@ -568,8 +569,9 @@ pub(crate) fn handle_regexp_method(
                                 // fallback to the previous calculation
                                 last_index + utf8_to_utf16(&matched_str).len()
                             };
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
-                            log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
+                            // Update visible `lastIndex`
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            log::debug!("RegExp.exec: new lastIndex={}", new_last_index);
                         }
 
                         Ok(Value::Object(result_array))
@@ -577,7 +579,7 @@ pub(crate) fn handle_regexp_method(
                     Ok(None) => {
                         // Reset lastIndex for global regex on no match
                         if global {
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(0.0))?;
                         }
                         // RegExp.exec returns null on no match
                         Ok(Value::Null)
@@ -669,8 +671,8 @@ pub(crate) fn handle_regexp_method(
                             } else {
                                 last_index + utf8_to_utf16(&matched_str).len()
                             };
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
-                            log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            log::debug!("RegExp.exec: new lastIndex={}", new_last_index);
                         }
 
                         Ok(Value::Object(result_array))
@@ -678,7 +680,7 @@ pub(crate) fn handle_regexp_method(
                     None => {
                         // Reset lastIndex for global regex on no match
                         if global {
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(0.0))?;
                         }
                         // RegExp.exec returns null on no match
                         Ok(Value::Null)
@@ -755,7 +757,7 @@ pub(crate) fn handle_regexp_method(
             let global = flags.contains('g');
             let use_last = global || flags.contains('y');
             if use_last
-                && let Some(last_index_val) = get_own_property(obj_map, &"__lastIndex".into())
+                && let Some(last_index_val) = get_own_property(obj_map, &"lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 let mut li = *n as isize;
@@ -833,7 +835,7 @@ pub(crate) fn handle_regexp_method(
                             } else {
                                 last_index + utf8_to_utf16(matched_prefix).len()
                             };
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(new_last_index as f64))?;
                         }
                         Ok(None) => {}
                         Err(e) => {
@@ -870,12 +872,12 @@ pub(crate) fn handle_regexp_method(
                             } else {
                                 last_index + utf8_to_utf16(matched_prefix).len()
                             };
-                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(new_last_index as f64))?;
                         }
                     }
                 }
             } else if global && !is_match {
-                obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(0.0))?;
             }
 
             Ok(Value::Boolean(is_match))

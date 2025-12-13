@@ -5,10 +5,13 @@ use crate::core::{
 };
 use crate::error::JSError;
 use crate::js_array::set_array_length;
+use crate::js_regexp::{RegexKind, get_regex_pattern, is_regex_object, sanitize_js_pattern};
 use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
+    utf16_to_utf8,
 };
-use fancy_regex::Regex;
+use fancy_regex::Regex as FancyRegex;
+use regex::Regex as StdRegex;
 
 pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
@@ -221,7 +224,117 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
             if args.len() == 2 {
                 let search_val = evaluate_expr(env, &args[0])?;
                 let replace_val = evaluate_expr(env, &args[1])?;
-                if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
+                // If search is a RegExp object, process accordingly
+                if let Value::Object(obj_map) = search_val {
+                    if is_regex_object(&obj_map) {
+                        // get flags
+                        let flags = match get_own_property(&obj_map, &"__flags".into()) {
+                            Some(val) => match &*val.borrow() {
+                                Value::String(s) => utf16_to_utf8(s),
+                                _ => "".to_string(),
+                            },
+                            None => "".to_string(),
+                        };
+                        let global = flags.contains('g');
+
+                        // Extract pattern to build effective pattern
+                        let pattern = get_regex_pattern(&obj_map)?;
+
+                        // build regex_kind
+                        let mut inline = String::new();
+                        if flags.contains('i') {
+                            inline.push('i');
+                        }
+                        if flags.contains('m') {
+                            inline.push('m');
+                        }
+                        if flags.contains('s') {
+                            inline.push('s');
+                        }
+                        let eff_pat = if inline.is_empty() {
+                            pattern.clone()
+                        } else {
+                            format!("(?{}){}", inline, pattern)
+                        };
+                        let eff_pat = sanitize_js_pattern(&eff_pat);
+                        let regex_kind = match FancyRegex::new(&eff_pat) {
+                            Ok(r) => RegexKind::Fancy(r),
+                            Err(_) => {
+                                let sr = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+                                RegexKind::Std(sr)
+                            }
+                        };
+
+                        // replacement string must be string (function replacement not supported yet)
+                        if let Value::String(repl_u16) = replace_val {
+                            let repl = utf16_to_utf8(&repl_u16);
+                            let input_utf8 = String::from_utf16_lossy(s);
+                            let mut out = String::new();
+                            let mut last_pos = 0usize;
+
+                            // helper to expand replacement tokens ($& only)
+                            fn expand_replacement(repl: &str, matched: &str) -> String {
+                                let mut out = String::new();
+                                let mut chars = repl.chars().peekable();
+                                while let Some(ch) = chars.next() {
+                                    if ch == '$' {
+                                        if let Some(&next) = chars.peek() {
+                                            if next == '&' {
+                                                chars.next();
+                                                out.push_str(matched);
+                                                continue;
+                                            }
+                                        }
+                                        out.push('$');
+                                    } else {
+                                        out.push(ch);
+                                    }
+                                }
+                                out
+                            }
+
+                            // depending on regex_kind, find matches
+                            match regex_kind {
+                                RegexKind::Fancy(r) => {
+                                    let mut search_slice = &input_utf8[..];
+                                    while let Ok(Some(mat)) = r.find(search_slice) {
+                                        let start = input_utf8.len() - search_slice.len() + mat.start();
+                                        let end = input_utf8.len() - search_slice.len() + mat.end();
+                                        out.push_str(&input_utf8[last_pos..start]);
+                                        out.push_str(&expand_replacement(&repl, &input_utf8[start..end]));
+                                        last_pos = end;
+                                        if !global {
+                                            break;
+                                        }
+                                        search_slice = &input_utf8[end..];
+                                    }
+                                }
+                                RegexKind::Std(r) => {
+                                    let mut offset = 0usize;
+                                    while let Some(mat) = r.find(&input_utf8[offset..]) {
+                                        let start = offset + mat.start();
+                                        let end = offset + mat.end();
+                                        out.push_str(&input_utf8[last_pos..start]);
+                                        out.push_str(&expand_replacement(&repl, &input_utf8[start..end]));
+                                        last_pos = end;
+                                        if !global {
+                                            break;
+                                        }
+                                        offset = end;
+                                    }
+                                }
+                            }
+                            out.push_str(&input_utf8[last_pos..]);
+                            Ok(Value::String(utf8_to_utf16(&out)))
+                        } else {
+                            Err(raise_eval_error!(
+                                "replace only supports string as replacement argument for RegExp search"
+                            ))
+                        }
+                    } else {
+                        Err(raise_eval_error!("replace: search argument must be a string or RegExp"))
+                    }
+                } else if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
                     Ok(Value::String(utf16_replace(s, &search, &replace)))
                 } else {
                     Err(raise_eval_error!("replace: both arguments must be strings"))
@@ -317,14 +430,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                     Ok(Value::Object(arr))
                 } else if let Value::Object(obj_map) = sep_val {
                     // Separator is a RegExp-like object
-                    let pattern_opt = get_own_property(&obj_map, &"__regex".into());
-                    let pattern = match pattern_opt {
-                        Some(val_rc) => match &*val_rc.borrow() {
-                            Value::String(s) => String::from_utf16_lossy(s),
-                            _ => return Err(raise_eval_error!("split: invalid regex pattern")),
-                        },
-                        None => return Err(raise_eval_error!("split: invalid regex object")),
-                    };
+                    let pattern = get_regex_pattern(&obj_map)?;
 
                     let flags_opt = get_own_property(&obj_map, &"__flags".into());
                     let flags = match flags_opt {
@@ -352,50 +458,80 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
                         format!("(?{}){}", inline, pattern)
                     };
 
-                    let regex = Regex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
-
-                    // Use UTF-8 slices for splitting — test files use ASCII so this is safe
+                    // Try fancy_regex first, then fall back to StdRegex
+                    let eff_pat = sanitize_js_pattern(&eff_pat);
+                    let regex_kind_fancy = FancyRegex::new(&eff_pat);
                     let input_utf8 = String::from_utf16_lossy(s);
-                    let mut parts_utf8: Vec<String> = Vec::new();
-                    let mut start_byte = 0usize;
-                    while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
-                        match regex.find(&input_utf8[start_byte..]) {
-                            Ok(Some(mat)) => {
-                                let match_start = start_byte + mat.start();
-                                parts_utf8.push(input_utf8[start_byte..match_start].to_string());
-                                start_byte += mat.end();
-                                if start_byte > input_utf8.len() {
-                                    break;
-                                }
-                            }
-                            Ok(None) => {
-                                parts_utf8.push(input_utf8[start_byte..].to_string());
-                                break;
-                            }
-                            Err(e) => {
-                                return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
-                            }
-                        }
-                    }
-                    // If we hit the limit, add the remainder if not already added
-                    // Removed: no longer add remainder for RegExp split
 
-                    let arr = new_js_object_data();
-                    if let Some(array_val) = env_get(env, "Array") {
-                        if let Value::Object(array_obj) = &*array_val.borrow() {
-                            if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                                    arr.borrow_mut().prototype = Some(proto_obj.clone());
+                    match regex_kind_fancy {
+                        Ok(ref fancy) => {
+                            let mut parts_utf8: Vec<String> = Vec::new();
+                            let mut start_byte = 0usize;
+                            while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
+                                match fancy.find(&input_utf8[start_byte..]) {
+                                    Ok(Some(mat)) => {
+                                        let match_start = start_byte + mat.start();
+                                        parts_utf8.push(input_utf8[start_byte..match_start].to_string());
+                                        start_byte += mat.end();
+                                        if start_byte > input_utf8.len() {
+                                            break;
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        parts_utf8.push(input_utf8[start_byte..].to_string());
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
+                                    }
                                 }
                             }
+
+                            // continue with parts_utf8
+                            let parts_iter = parts_utf8.into_iter();
+                            let arr = new_js_object_data();
+                            let mut idx = 0usize;
+                            for part in parts_iter {
+                                obj_set_key_value(&arr, &idx.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
+                                idx += 1;
+                            }
+                            obj_set_key_value(&arr, &"length".into(), Value::Number(idx as f64))?;
+                            Ok(Value::Object(arr))
+                        }
+                        Err(_) => {
+                            let stdregex = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+                            let mut parts_utf8: Vec<String> = Vec::new();
+                            let mut start_byte = 0usize;
+                            while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
+                                match stdregex.find(&input_utf8[start_byte..]) {
+                                    Some(mat) => {
+                                        let match_start = start_byte + mat.start();
+                                        parts_utf8.push(input_utf8[start_byte..match_start].to_string());
+                                        start_byte += mat.end();
+                                        if start_byte > input_utf8.len() {
+                                            break;
+                                        }
+                                    }
+                                    None => {
+                                        parts_utf8.push(input_utf8[start_byte..].to_string());
+                                        break;
+                                    }
+                                }
+                            }
+
+                            let parts_iter = parts_utf8.into_iter();
+                            let arr = new_js_object_data();
+                            let mut idx = 0usize;
+                            for part in parts_iter {
+                                obj_set_key_value(&arr, &idx.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
+                                idx += 1;
+                            }
+                            obj_set_key_value(&arr, &"length".into(), Value::Number(idx as f64))?;
+                            Ok(Value::Object(arr))
                         }
                     }
-                    for (i, part) in parts_utf8.into_iter().enumerate() {
-                        obj_set_key_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
-                    }
-                    let len = arr.borrow().properties.len();
-                    set_array_length(&arr, len)?;
-                    Ok(Value::Object(arr))
+                    // All paths above return a constructed array result.
+                    // This code path should be unreachable because both branches returned.
                 } else {
                     Err(raise_eval_error!("split: argument must be a string, RegExp, or undefined"))
                 }

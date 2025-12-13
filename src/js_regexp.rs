@@ -1,7 +1,79 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_slice, utf16_to_utf8};
-use fancy_regex::Regex;
+use fancy_regex::Regex as FancyRegex;
+use regex::Regex as StdRegex;
+
+pub(crate) enum RegexKind {
+    Fancy(FancyRegex),
+    Std(StdRegex),
+}
+
+fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSError> {
+    match get_own_property(obj, &"__regex".into()) {
+        Some(val) => match &*val.borrow() {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(raise_type_error!("Invalid regex pattern")),
+        },
+        None => Err(raise_type_error!("Invalid regex object")),
+    }
+}
+
+pub fn is_regex_object(obj: &JSObjectDataPtr) -> bool {
+    internal_get_regex_pattern(obj).is_ok()
+}
+
+pub fn get_regex_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
+    let pattern_utf16 = internal_get_regex_pattern(obj)?;
+    Ok(utf16_to_utf8(&pattern_utf16))
+}
+
+// Sanitize JS-style regex pattern to be more acceptable to Rust regex engines.
+// Specifically, when encountering '[' inside a character class we escape it to
+// avoid nested unclosed classes that engines like `regex` or `fancy_regex`
+// reject. This is a minimal heuristic to handle common JS patterns that legal
+// in JS but rejected by these crates.
+pub(crate) fn sanitize_js_pattern(pat: &str) -> String {
+    let mut out = String::with_capacity(pat.len());
+    let mut in_class = false;
+    let chars = pat.chars().peekable();
+    let mut escaped = false;
+    for ch in chars {
+        if escaped {
+            // Preserve the escape sequence as-is
+            out.push('\\');
+            out.push(ch);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue; // push in next iteration
+        }
+        if ch == '[' && !in_class {
+            in_class = true;
+            out.push('[');
+            continue;
+        }
+        if ch == ']' && in_class {
+            in_class = false;
+            out.push(']');
+            continue;
+        }
+        if in_class && ch == '[' {
+            // Escape '[' inside a character class to avoid nested classes
+            out.push('\\');
+            out.push('[');
+            continue;
+        }
+        out.push(ch);
+    }
+    // If an escape was dangling at the end, re-emit the backslash
+    if escaped {
+        out.push('\\');
+    }
+    out
+}
 
 // Best-effort transform to swap greediness of quantifiers: greedy <-> lazy.
 fn swap_greed_transform(pattern: &str) -> String {
@@ -225,8 +297,11 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         format!("(?{}){}", inline_flags, regex_pattern)
     };
 
-    // Validate the regex pattern by trying to compile it via fancy-regex
-    if let Err(e) = Regex::new(&effective_pattern) {
+    // Validate the regex pattern: try fancy-regex first, then fall back to std regex
+    let effective_pattern = sanitize_js_pattern(&effective_pattern);
+    if FancyRegex::new(&effective_pattern).is_err()
+        && let Err(e) = StdRegex::new(&effective_pattern)
+    {
         return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
     }
 
@@ -280,17 +355,7 @@ pub(crate) fn handle_regexp_method(
             };
 
             // Get regex pattern and flags
-            let pattern = match get_own_property(obj_map, &"__regex".into()) {
-                Some(val) => match &*val.borrow() {
-                    Value::String(s) => utf16_to_utf8(s),
-                    _ => {
-                        return Err(raise_type_error!("Invalid regex pattern"));
-                    }
-                },
-                None => {
-                    return Err(raise_type_error!("Invalid regex object"));
-                }
-            };
+            let pattern = utf16_to_utf8(&internal_get_regex_pattern(obj_map)?);
 
             let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
@@ -336,8 +401,15 @@ pub(crate) fn handle_regexp_method(
                 format!("(?{}){}", inline, base_pattern)
             };
 
+            let eff_pat = sanitize_js_pattern(&eff_pat);
             log::debug!("RegExp.exec: effective_pattern='{}'", eff_pat);
-            let regex = Regex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+            let regex_kind = match FancyRegex::new(&eff_pat) {
+                Ok(r) => RegexKind::Fancy(r),
+                Err(_) => {
+                    let sr = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+                    RegexKind::Std(sr)
+                }
+            };
 
             // Get lastIndex for global regex
             // Per ECMAScript, lastIndex is a UTF-16 code unit index. We'll treat it as such.
@@ -383,115 +455,215 @@ pub(crate) fn handle_regexp_method(
                 byte_start,
                 working_input.len()
             );
-            match regex.captures(&working_input[byte_start..]) {
-                Ok(Some(captures)) => {
-                    // Create result array
-                    let result_array = new_js_object_data();
+            match &regex_kind {
+                RegexKind::Fancy(regex) => match regex.captures(&working_input[byte_start..]) {
+                    Ok(Some(captures)) => {
+                        // Create result array
+                        let result_array = new_js_object_data();
 
-                    // Add matched string
-                    if let Some(matched) = captures.get(0) {
-                        log::debug!(
-                            "RegExp.exec: found match start={} end={} matched='{}'",
-                            matched.start(),
-                            matched.end(),
-                            matched.as_str()
-                        );
-                        // If CRLF normalization was used for matching, map the matched
-                        // substring back to the original input so the returned value
-                        // reflects the original content (with CRLF sequences).
-                        if crlf {
+                        // Add matched string
+                        if let Some(matched) = captures.get(0) {
+                            log::debug!(
+                                "RegExp.exec: found match start={} end={} matched='{}'",
+                                matched.start(),
+                                matched.end(),
+                                matched.as_str()
+                            );
+                            // If CRLF normalization was used for matching, map the matched
+                            // substring back to the original input so the returned value
+                            // reflects the original content (with CRLF sequences).
+                            if crlf {
+                                let matched_byte_start_in_working = byte_start + matched.start();
+                                let matched_byte_end_in_working = byte_start + matched.end();
+                                let orig_start = modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working);
+                                let orig_end = modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working);
+                                let real_match = if orig_end <= input.len() && orig_start <= orig_end {
+                                    &input[orig_start..orig_end]
+                                } else {
+                                    matched.as_str()
+                                };
+                                obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(real_match)))?;
+                            } else {
+                                obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
+                            }
+
+                            // Compute index in UTF-16 code units: last_index + utf16_len(prefix within match start)
+                            let prefix_bytes = &input[byte_start..byte_start + matched.start()];
+                            let prefix_u16_len = utf8_to_utf16(prefix_bytes).len();
+                            obj_set_key_value(&result_array, &"index".into(), Value::Number((last_index + prefix_u16_len) as f64))?;
+                            obj_set_key_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
+                        }
+
+                        // Add capture groups
+                        let mut group_index = 1;
+                        for capture in captures.iter().skip(1) {
+                            if let Some(capture_match) = capture {
+                                obj_set_key_value(
+                                    &result_array,
+                                    &group_index.to_string().into(),
+                                    Value::String(utf8_to_utf16(capture_match.as_str())),
+                                )?;
+                            } else {
+                                obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                            }
+                            group_index += 1;
+                        }
+
+                        // Set length
+                        obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+
+                        // Update lastIndex for global or sticky regex
+                        if use_last && let Some(matched) = captures.get(0) {
+                            log::debug!(
+                                "RegExp.exec: updating lastIndex from {} (utf16 units) using matched.as_str()='{}'",
+                                last_index,
+                                matched.as_str()
+                            );
+                            // matched.end() is bytes into the sliced substring (working input). We must
+                            // map that back to the original string before computing UTF-16 length.
+                            let mut matched_str = matched.as_str().to_string();
                             let matched_byte_start_in_working = byte_start + matched.start();
                             let matched_byte_end_in_working = byte_start + matched.end();
-                            let orig_start = modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working);
-                            let orig_end = modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working);
-                            let real_match = if orig_end <= input.len() && orig_start <= orig_end {
-                                &input[orig_start..orig_end]
+                            let orig_start = if crlf {
+                                let working_input = input.replace("\r\n", "\n");
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
                             } else {
-                                matched.as_str()
+                                matched_byte_start_in_working
                             };
-                            obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(real_match)))?;
-                        } else {
-                            obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
+                            let orig_end = if crlf {
+                                let working_input = input.replace("\r\n", "\n");
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
+                            } else {
+                                matched_byte_end_in_working
+                            };
+                            // Ensure we don't slice out of bounds
+                            if orig_end <= input.len() && orig_start <= orig_end {
+                                matched_str = input[orig_start..orig_end].to_string();
+                            }
+
+                            // Compute new_last_index as the UTF-16 code unit length up to the
+                            // end of the match in the original input so lastIndex is an
+                            // absolute UTF-16 code unit index.
+                            let new_last_index = if orig_end <= input.len() {
+                                utf8_to_utf16(&input[..orig_end]).len()
+                            } else {
+                                // fallback to the previous calculation
+                                last_index + utf8_to_utf16(&matched_str).len()
+                            };
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
                         }
 
-                        // Compute index in UTF-16 code units: last_index + utf16_len(prefix within match start)
-                        let prefix_bytes = &input[byte_start..byte_start + matched.start()];
-                        let prefix_u16_len = utf8_to_utf16(prefix_bytes).len();
-                        obj_set_key_value(&result_array, &"index".into(), Value::Number((last_index + prefix_u16_len) as f64))?;
-                        obj_set_key_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
+                        Ok(Value::Object(result_array))
                     }
-
-                    // Add capture groups
-                    let mut group_index = 1;
-                    for capture in captures.iter().skip(1) {
-                        if let Some(capture_match) = capture {
-                            obj_set_key_value(
-                                &result_array,
-                                &group_index.to_string().into(),
-                                Value::String(utf8_to_utf16(capture_match.as_str())),
-                            )?;
-                        } else {
-                            obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                    Ok(None) => {
+                        // Reset lastIndex for global regex on no match
+                        if global {
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
                         }
-                        group_index += 1;
+                        // RegExp.exec returns null on no match
+                        Ok(Value::Null)
                     }
+                    Err(e) => Err(raise_eval_error!(format!("RegExp execution error: {}", e))),
+                },
+                RegexKind::Std(regex) => match regex.captures(&working_input[byte_start..]) {
+                    Some(captures) => {
+                        // Create result array
+                        let result_array = new_js_object_data();
 
-                    // Set length
-                    obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+                        // Add matched string
+                        if let Some(matched) = captures.get(0) {
+                            log::debug!(
+                                "RegExp.exec: found match start={} end={} matched='{}'",
+                                matched.start(),
+                                matched.end(),
+                                matched.as_str()
+                            );
+                            if crlf {
+                                let matched_byte_start_in_working = byte_start + matched.start();
+                                let matched_byte_end_in_working = byte_start + matched.end();
+                                let orig_start = modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working);
+                                let orig_end = modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working);
+                                let real_match = if orig_end <= input.len() && orig_start <= orig_end {
+                                    &input[orig_start..orig_end]
+                                } else {
+                                    matched.as_str()
+                                };
+                                obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(real_match)))?;
+                            } else {
+                                obj_set_key_value(&result_array, &"0".into(), Value::String(utf8_to_utf16(matched.as_str())))?;
+                            }
 
-                    // Update lastIndex for global or sticky regex
-                    if use_last && let Some(matched) = captures.get(0) {
-                        log::debug!(
-                            "RegExp.exec: updating lastIndex from {} (utf16 units) using matched.as_str()='{}'",
-                            last_index,
-                            matched.as_str()
-                        );
-                        // matched.end() is bytes into the sliced substring (working input). We must
-                        // map that back to the original string before computing UTF-16 length.
-                        let mut matched_str = matched.as_str().to_string();
-                        let matched_byte_start_in_working = byte_start + matched.start();
-                        let matched_byte_end_in_working = byte_start + matched.end();
-                        let orig_start = if crlf {
-                            let working_input = input.replace("\r\n", "\n");
-                            modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
-                        } else {
-                            matched_byte_start_in_working
-                        };
-                        let orig_end = if crlf {
-                            let working_input = input.replace("\r\n", "\n");
-                            modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
-                        } else {
-                            matched_byte_end_in_working
-                        };
-                        // Ensure we don't slice out of bounds
-                        if orig_end <= input.len() && orig_start <= orig_end {
-                            matched_str = input[orig_start..orig_end].to_string();
+                            let prefix_bytes = &input[byte_start..byte_start + matched.start()];
+                            let prefix_u16_len = utf8_to_utf16(prefix_bytes).len();
+                            obj_set_key_value(&result_array, &"index".into(), Value::Number((last_index + prefix_u16_len) as f64))?;
+                            obj_set_key_value(&result_array, &"input".into(), Value::String(utf8_to_utf16(&input)))?;
                         }
 
-                        // Compute new_last_index as the UTF-16 code unit length up to the
-                        // end of the match in the original input so lastIndex is an
-                        // absolute UTF-16 code unit index.
-                        let new_last_index = if orig_end <= input.len() {
-                            utf8_to_utf16(&input[..orig_end]).len()
-                        } else {
-                            // fallback to the previous calculation
-                            last_index + utf8_to_utf16(&matched_str).len()
-                        };
-                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
-                        log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
-                    }
+                        // Add capture groups
+                        let mut group_index = 1;
+                        for i in 1..captures.len() {
+                            if let Some(capture_match) = captures.get(i) {
+                                obj_set_key_value(
+                                    &result_array,
+                                    &group_index.to_string().into(),
+                                    Value::String(utf8_to_utf16(capture_match.as_str())),
+                                )?;
+                            } else {
+                                obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                            }
+                            group_index += 1;
+                        }
 
-                    Ok(Value::Object(result_array))
-                }
-                Ok(None) => {
-                    // Reset lastIndex for global regex on no match
-                    if global {
-                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                        // Set length
+                        obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
+
+                        // Update lastIndex for global or sticky regex
+                        if use_last && let Some(matched) = captures.get(0) {
+                            log::debug!(
+                                "RegExp.exec: updating lastIndex from {} (utf16 units) using matched.as_str()='{}'",
+                                last_index,
+                                matched.as_str()
+                            );
+                            let mut matched_str = matched.as_str().to_string();
+                            let matched_byte_start_in_working = byte_start + matched.start();
+                            let matched_byte_end_in_working = byte_start + matched.end();
+                            let orig_start = if crlf {
+                                let working_input = input.replace("\r\n", "\n");
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
+                            } else {
+                                matched_byte_start_in_working
+                            };
+                            let orig_end = if crlf {
+                                let working_input = input.replace("\r\n", "\n");
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
+                            } else {
+                                matched_byte_end_in_working
+                            };
+                            if orig_end <= input.len() && orig_start <= orig_end {
+                                matched_str = input[orig_start..orig_end].to_string();
+                            }
+
+                            let new_last_index = if orig_end <= input.len() {
+                                utf8_to_utf16(&input[..orig_end]).len()
+                            } else {
+                                last_index + utf8_to_utf16(&matched_str).len()
+                            };
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                            log::debug!("RegExp.exec: new __lastIndex={}", new_last_index);
+                        }
+
+                        Ok(Value::Object(result_array))
                     }
-                    // RegExp.exec returns null on no match
-                    Ok(Value::Null)
-                }
-                Err(e) => Err(raise_syntax_error!(format!("Invalid RegExp: {e}"))),
+                    None => {
+                        // Reset lastIndex for global regex on no match
+                        if global {
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(0.0))?;
+                        }
+                        // RegExp.exec returns null on no match
+                        Ok(Value::Null)
+                    }
+                },
             }
         }
         "test" => {
@@ -507,18 +679,7 @@ pub(crate) fn handle_regexp_method(
                 }
             };
 
-            // Get regex pattern and flags
-            let pattern = match get_own_property(obj_map, &"__regex".into()) {
-                Some(val) => match &*val.borrow() {
-                    Value::String(s) => utf16_to_utf8(s),
-                    _ => {
-                        return Err(raise_type_error!("Invalid regex pattern"));
-                    }
-                },
-                None => {
-                    return Err(raise_type_error!("Invalid regex object"));
-                }
-            };
+            let pattern = utf16_to_utf8(&internal_get_regex_pattern(obj_map)?);
 
             let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
@@ -558,8 +719,15 @@ pub(crate) fn handle_regexp_method(
             } else {
                 format!("(?{}){}", inline, base_pattern)
             };
+            let eff_pat = sanitize_js_pattern(&eff_pat);
             log::debug!("RegExp.test: effective_pattern='{}'", eff_pat);
-            let regex = Regex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+            let regex_kind = match FancyRegex::new(&eff_pat) {
+                Ok(r) => RegexKind::Fancy(r),
+                Err(_) => {
+                    let sr = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
+                    RegexKind::Std(sr)
+                }
+            };
 
             // Get lastIndex for global regex
             // Per ECMAScript, lastIndex is a UTF-16 code unit index; use if global or sticky.
@@ -602,53 +770,88 @@ pub(crate) fn handle_regexp_method(
                 working_input.len()
             );
 
-            let is_match = match regex.is_match(&working_input[byte_start..]) {
-                Ok(b) => b,
-                Err(e) => {
-                    return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
-                }
+            let is_match = match &regex_kind {
+                RegexKind::Fancy(r) => r
+                    .is_match(&working_input[byte_start..])
+                    .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?,
+                RegexKind::Std(r) => r.is_match(&working_input[byte_start..]),
             };
 
             // Update lastIndex for global or sticky regex
             if use_last && is_match {
                 log::debug!("RegExp.test: is_match=true; updating lastIndex (global/sticky)");
-                match regex.find(&working_input[byte_start..]) {
-                    Ok(Some(mat)) => {
-                        log::debug!(
-                            "RegExp.test: found match start={} end={} in working; mat.as_str()='{}'",
-                            mat.start(),
-                            mat.end(),
-                            mat.as_str()
-                        );
-                        // matched is relative to working_input; map start/end back to original bytes
-                        let matched_byte_start_in_working = byte_start + mat.start();
-                        let matched_byte_end_in_working = byte_start + mat.end();
-                        let orig_start = if crlf {
-                            modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
-                        } else {
-                            matched_byte_start_in_working
-                        };
-                        let orig_end = if crlf {
-                            modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
-                        } else {
-                            matched_byte_end_in_working
-                        };
-                        let matched_prefix = if orig_end <= input.len() && orig_start <= orig_end {
-                            &input[orig_start..orig_end]
-                        } else {
-                            mat.as_str()
-                        };
-                        // Compute new_last_index as absolute UTF-16 code unit count up to match end
-                        let new_last_index = if orig_end <= input.len() {
-                            utf8_to_utf16(&input[..orig_end]).len()
-                        } else {
-                            last_index + utf8_to_utf16(matched_prefix).len()
-                        };
-                        obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
+                match &regex_kind {
+                    RegexKind::Fancy(r) => match r.find(&working_input[byte_start..]) {
+                        Ok(Some(mat)) => {
+                            log::debug!(
+                                "RegExp.test: found match start={} end={} in working; mat.as_str()='{}'",
+                                mat.start(),
+                                mat.end(),
+                                mat.as_str()
+                            );
+                            // matched is relative to working_input; map start/end back to original bytes
+                            let matched_byte_start_in_working = byte_start + mat.start();
+                            let matched_byte_end_in_working = byte_start + mat.end();
+                            let orig_start = if crlf {
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
+                            } else {
+                                matched_byte_start_in_working
+                            };
+                            let orig_end = if crlf {
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
+                            } else {
+                                matched_byte_end_in_working
+                            };
+                            let matched_prefix = if orig_end <= input.len() && orig_start <= orig_end {
+                                &input[orig_start..orig_end]
+                            } else {
+                                mat.as_str()
+                            };
+                            // Compute new_last_index as absolute UTF-16 code unit count up to match end
+                            let new_last_index = if orig_end <= input.len() {
+                                utf8_to_utf16(&input[..orig_end]).len()
+                            } else {
+                                last_index + utf8_to_utf16(matched_prefix).len()
+                            };
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
+                        }
+                    },
+                    RegexKind::Std(r) => {
+                        if let Some(mat) = r.find(&working_input[byte_start..]) {
+                            log::debug!(
+                                "RegExp.test: found match start={} end={} in working; mat.as_str()='{}'",
+                                mat.start(),
+                                mat.end(),
+                                mat.as_str()
+                            );
+                            let matched_byte_start_in_working = byte_start + mat.start();
+                            let matched_byte_end_in_working = byte_start + mat.end();
+                            let orig_start = if crlf {
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_start_in_working)
+                            } else {
+                                matched_byte_start_in_working
+                            };
+                            let orig_end = if crlf {
+                                modified_to_original_byte_offset(&input, &working_input, matched_byte_end_in_working)
+                            } else {
+                                matched_byte_end_in_working
+                            };
+                            let matched_prefix = if orig_end <= input.len() && orig_start <= orig_end {
+                                &input[orig_start..orig_end]
+                            } else {
+                                mat.as_str()
+                            };
+                            let new_last_index = if orig_end <= input.len() {
+                                utf8_to_utf16(&input[..orig_end]).len()
+                            } else {
+                                last_index + utf8_to_utf16(matched_prefix).len()
+                            };
+                            obj_set_key_value(obj_map, &"__lastIndex".into(), Value::Number(new_last_index as f64))?;
+                        }
                     }
                 }
             } else if global && !is_match {
@@ -659,13 +862,7 @@ pub(crate) fn handle_regexp_method(
         }
         "toString" => {
             // Get pattern and flags (two-step get to avoid long-lived borrows)
-            let pattern = match get_own_property(obj_map, &"__regex".into()) {
-                Some(val) => match &*val.borrow() {
-                    Value::String(s) => utf16_to_utf8(s),
-                    _ => "".to_string(),
-                },
-                None => "".to_string(),
-            };
+            let pattern = utf16_to_utf8(&internal_get_regex_pattern(obj_map).unwrap_or_default());
 
             let flags = match get_own_property(obj_map, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {

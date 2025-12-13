@@ -18,6 +18,7 @@ use crate::{
     js_number::make_number_object,
     js_promise::{JSPromise, PromiseState, handle_promise_method, run_event_loop},
     js_reflect::make_reflect_object,
+    js_regexp::is_regex_object,
     js_testintl::make_testintl_object,
     obj_get_key_value, raise_eval_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
@@ -4749,7 +4750,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if is_date_object(&obj_map) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method, args, env)
-                } else if get_own_property(&obj_map, &"__regex".into()).is_some() {
+                } else if is_regex_object(&obj_map) {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
                 } else if is_array(&obj_map) {
@@ -5393,7 +5394,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 } else if is_date_object(&obj_map) {
                     // Date instance methods
                     crate::js_date::handle_date_method(&obj_map, method_name, args, env)
-                } else if get_own_property(&obj_map, &"__regex".into()).is_some() {
+                } else if is_regex_object(&obj_map) {
                     // RegExp instance methods
                     crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env)
                 } else if is_array(&obj_map) {
@@ -5825,7 +5826,7 @@ fn handle_optional_method_call(
             } else if is_date_object(obj_map) {
                 // Date instance methods
                 crate::js_date::handle_date_method(obj_map, method, args, env)
-            } else if get_own_property(obj_map, &"__regex".into()).is_some() {
+            } else if is_regex_object(obj_map) {
                 // RegExp instance methods
                 crate::js_regexp::handle_regexp_method(obj_map, method, args, env)
             } else if is_array(obj_map) {

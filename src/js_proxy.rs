@@ -118,7 +118,8 @@ pub(crate) fn apply_proxy_trap(
             // Bind arguments to parameters
             for (i, arg) in args.iter().enumerate() {
                 if i < params.len() {
-                    obj_set_key_value(&trap_env, &params[i].clone().into(), arg.clone())?;
+                    let name = params[i].0.clone();
+                    obj_set_key_value(&trap_env, &name.into(), arg.clone())?;
                 }
             }
 

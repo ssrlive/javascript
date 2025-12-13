@@ -52,4 +52,20 @@ var str = "John Smith";
 var newstr = str.replace(re, "$2, $1");
 console.log(newstr); // "Smith, John"
 
+var re = /\w+\s/g;
+var str = "fee fi fo fum";
+var myArray = str.match(re);
+console.log(myArray); // ["fee ", "fi ", "fo "]
+
+var re_01 = /\w+\s/g;
+var re_02 = new RegExp("\\w+\\s", "g");
+assert(re_01.source === re_02.source, "RegExp source properties should match");
+
+var xArray;
+var str2 = "fee fi fo fum";
+var re_03 = new RegExp("\\w+\\s", "g");
+while ((xArray = re_03.exec(str2))) {
+    console.log(xArray, xArray.index, `lastIndex of regexp: ${re_03.lastIndex}`);
+}
+
 result

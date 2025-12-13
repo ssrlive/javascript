@@ -14,7 +14,7 @@ pub fn _handle_generator_function_constructor(_args: &[Expr], _env: &JSObjectDat
 
 /// Handle generator function calls (creating generator objects)
 pub fn handle_generator_function_call(
-    params: &[String],
+    params: &[(String, Option<Box<Expr>>)],
     body: &[Statement],
     _args: &[Expr],
     env: &JSObjectDataPtr,

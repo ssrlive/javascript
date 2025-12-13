@@ -316,7 +316,8 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
                 let func_env = captured_env.clone();
                 // Bind the mock constructor as the first parameter
                 if !params.is_empty() {
-                    env_set(&func_env, params[0].as_str(), mock_constructor)?;
+                    let name = &params[0].0;
+                    env_set(&func_env, name.as_str(), mock_constructor)?;
                 }
 
                 // Execute the callback body

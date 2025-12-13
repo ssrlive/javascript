@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_well_known_symbol_rc, new_js_object_data, obj_get_key_value,
+    Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc, new_js_object_data, obj_get_key_value,
     obj_set_key_value,
 };
 use crate::error::JSError;
@@ -455,7 +455,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }
             }
 
-            let mut setter_opt: Option<(Vec<String>, Vec<crate::core::Statement>, JSObjectDataPtr)> = None;
+            #[allow(clippy::type_complexity)]
+            let mut setter_opt: Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)> = None;
             if let Some(set_rc) = obj_get_key_value(&desc_obj, &"set".into())? {
                 match &*set_rc.borrow() {
                     Value::Closure(params, body, senv) => {

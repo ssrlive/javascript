@@ -4,21 +4,39 @@ use crate::{
     raise_parse_error,
 };
 
-pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<String>, JSError> {
+// Helper: Flatten nested Comma expressions into a vector of expressions.
+fn flatten_commas(expr: Expr) -> Vec<Expr> {
+    match expr {
+        Expr::Comma(l, r) => {
+            let mut out = flatten_commas(*l);
+            out.extend(flatten_commas(*r));
+            out
+        }
+        other => vec![other],
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<(String, Option<Box<Expr>>)>, JSError> {
     let mut params = Vec::new();
+    log::trace!(
+        "parse_parameters: starting tokens (first 16): {:?}",
+        tokens.iter().take(16).collect::<Vec<_>>()
+    );
     if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
         loop {
             if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                 tokens.remove(0);
-                params.push(param.clone());
+                let mut default_expr: Option<Box<Expr>> = None;
                 // Support default initializers: identifier '=' expression
                 if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
-                    // consume '=' and parse the default expression
                     tokens.remove(0);
-                    // parse_expression will consume tokens belonging to the default
-                    // initializer and leave a trailing ',' or ')' for the parameter list.
-                    let _ = parse_expression(tokens)?;
+                    let expr = parse_assignment(tokens)?;
+                    default_expr = Some(Box::new(expr));
                 }
+                params.push((param.clone(), default_expr));
+                // Support default initializers: identifier '=' expression
+
                 if tokens.is_empty() {
                     return Err(raise_parse_error!(format!(
                         "Unexpected end of parameters; next tokens: {:?}",
@@ -50,6 +68,10 @@ pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<String>, JSError>
         )));
     }
     tokens.remove(0); // consume )
+    log::trace!(
+        "parse_parameters: consumed ')', remaining tokens (first 16): {:?}",
+        tokens.iter().take(16).collect::<Vec<_>>()
+    );
     Ok(params)
 }
 
@@ -77,7 +99,13 @@ pub fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         "parse_object_destructuring_pattern: tokens after initial skip (first 8): {:?}",
         tokens.iter().take(8).collect::<Vec<_>>()
     );
-    parse_assignment(tokens)
+    let mut left = parse_assignment(tokens)?;
+    while !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+        tokens.remove(0); // consume ,
+        let right = parse_assignment(tokens)?;
+        left = Expr::Comma(Box::new(left), Box::new(right));
+    }
+    Ok(left)
 }
 
 pub fn parse_conditional(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
@@ -568,7 +596,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 let mut args = Vec::new();
                 if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                     loop {
-                        let arg = parse_expression(tokens)?;
+                        let arg = parse_assignment(tokens)?;
                         args.push(arg);
                         if tokens.is_empty() {
                             return Err(raise_parse_error!());
@@ -597,6 +625,13 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     return Err(raise_parse_error!());
                 }
                 tokens.remove(0); // consume ')'
+                if args.len() == 1 {
+                    if let Expr::Comma(_, _) = &args[0] {
+                        let first = args.remove(0);
+                        let new_args = flatten_commas(first);
+                        args.extend(new_args);
+                    }
+                }
                 args
             } else {
                 Vec::new()
@@ -657,7 +692,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             if !tokens.is_empty() && matches!(tokens[0], Token::Arrow) {
                 tokens.remove(0);
                 let body = parse_arrow_body(tokens)?;
-                expr = Expr::ArrowFunction(vec![name], body);
+                expr = Expr::ArrowFunction(vec![(name, None)], body);
             }
             expr
         }
@@ -671,7 +706,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 let mut args = Vec::new();
                 if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                     loop {
-                        let arg = parse_expression(tokens)?;
+                        let arg = parse_assignment(tokens)?;
                         args.push(arg);
                         if tokens.is_empty() {
                             return Err(raise_parse_error!());
@@ -706,7 +741,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     let mut args = Vec::new();
                     if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                         loop {
-                            let arg = parse_expression(tokens)?;
+                            let arg = parse_assignment(tokens)?;
                             args.push(arg);
                             if tokens.is_empty() {
                                 return Err(raise_parse_error!());
@@ -734,6 +769,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         return Err(raise_parse_error!());
                     }
                     tokens.remove(0); // consume ')'
+                    // Flatten accidental single-Comma argument
+                    if args.len() == 1 {
+                        if let Expr::Comma(_, _) = &args[0] {
+                            let first = args.remove(0);
+                            let new_args = flatten_commas(first);
+                            args.extend(new_args);
+                        }
+                    }
                     Expr::SuperMethod(prop, args)
                 } else {
                     Expr::SuperProperty(prop)
@@ -782,7 +825,10 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         tokens.iter().take(8).collect::<Vec<_>>()
                     );
                     tokens.remove(0); // consume ...
-                    let expr = parse_expression(tokens)?;
+                    // Use parse_assignment here so a spread is a single expression
+                    // and doesn't accidentally capture following comma-separated
+                    // properties via the comma operator.
+                    let expr = parse_assignment(tokens)?;
                     properties.push(("".to_string(), Expr::Spread(Box::new(expr))));
                 } else {
                     // Check for getter/setter: only treat as getter/setter if the
@@ -899,33 +945,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                                 }
                                 key_str.push(']');
 
-                                // parse parameters
                                 tokens.remove(0); // consume '('
-                                let mut params = Vec::new();
-                                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                                    loop {
-                                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                                            tokens.remove(0);
-                                            params.push(param);
-                                            if tokens.is_empty() {
-                                                return Err(raise_parse_error!());
-                                            }
-                                            if matches!(tokens[0], Token::RParen) {
-                                                break;
-                                            }
-                                            if !matches!(tokens[0], Token::Comma) {
-                                                return Err(raise_parse_error!());
-                                            }
-                                            tokens.remove(0);
-                                        } else {
-                                            return Err(raise_parse_error!());
-                                        }
-                                    }
-                                }
-                                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                                    return Err(raise_parse_error!());
-                                }
-                                tokens.remove(0); // consume ')'
+                                let params = parse_parameters(tokens)?;
                                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                                     return Err(raise_parse_error!());
                                 }
@@ -963,32 +984,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             && let Token::Identifier(name) = tokens.remove(0)
                         {
                             // tokens[0] is '('
-                            tokens.remove(0);
-                            let mut params = Vec::new();
-                            if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                                loop {
-                                    if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                                        tokens.remove(0);
-                                        params.push(param);
-                                        if tokens.is_empty() {
-                                            return Err(raise_parse_error!());
-                                        }
-                                        if matches!(tokens[0], Token::RParen) {
-                                            break;
-                                        }
-                                        if !matches!(tokens[0], Token::Comma) {
-                                            return Err(raise_parse_error!());
-                                        }
-                                        tokens.remove(0);
-                                    } else {
-                                        return Err(raise_parse_error!());
-                                    }
-                                }
-                            }
-                            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                                return Err(raise_parse_error!());
-                            }
-                            tokens.remove(0); // consume ')'
+                            tokens.remove(0); // consume '('
+                            let params = parse_parameters(tokens)?;
                             if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                                 return Err(raise_parse_error!());
                             }
@@ -1096,7 +1093,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             // Setter should have exactly one parameter
                             if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                                 tokens.remove(0);
-                                params.push(param);
+                                params.push((param, None));
                             } else {
                                 return Err(raise_parse_error!());
                             }
@@ -1140,7 +1137,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                                 key,
                                 tokens.iter().take(8).collect::<Vec<_>>()
                             );
-                            let value = parse_expression(tokens)?;
+                            let value = parse_assignment(tokens)?;
                             properties.push((key, value));
                         } else {
                             // Shorthand property: `{ key }` means `key: key` where the value
@@ -1215,7 +1212,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
 
                 // Parse element expression
-                let elem = parse_expression(tokens)?;
+                let elem = parse_assignment(tokens)?;
                 elements.push(elem);
 
                 // Check for comma or end. Allow intervening line terminators
@@ -1242,32 +1239,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             let is_generator = matches!(tokens[0], Token::FunctionStar);
             // Parse function expression
             if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                tokens.remove(0); // consume (
-                let mut params = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                    loop {
-                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                            tokens.remove(0);
-                            params.push(param);
-                            if tokens.is_empty() {
-                                return Err(raise_parse_error!());
-                            }
-                            if matches!(tokens[0], Token::RParen) {
-                                break;
-                            }
-                            if !matches!(tokens[0], Token::Comma) {
-                                return Err(raise_parse_error!());
-                            }
-                            tokens.remove(0); // consume ,
-                        } else {
-                            return Err(raise_parse_error!());
-                        }
-                    }
-                }
-                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(raise_parse_error!());
-                }
-                tokens.remove(0); // consume )
+                tokens.remove(0); // consume "("
+                let params = parse_parameters(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                     return Err(raise_parse_error!());
                 }
@@ -1291,32 +1264,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
                 tokens.remove(0); // consume function
                 if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                    tokens.remove(0); // consume (
-                    let mut params = Vec::new();
-                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                        loop {
-                            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                                tokens.remove(0);
-                                params.push(param);
-                                if tokens.is_empty() {
-                                    return Err(raise_parse_error!());
-                                }
-                                if matches!(tokens[0], Token::RParen) {
-                                    break;
-                                }
-                                if !matches!(tokens[0], Token::Comma) {
-                                    return Err(raise_parse_error!());
-                                }
-                                tokens.remove(0); // consume ,
-                            } else {
-                                return Err(raise_parse_error!());
-                            }
-                        }
-                    }
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
-                    }
-                    tokens.remove(0); // consume )
+                    tokens.remove(0); // consume "("
+                    let params = parse_parameters(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                         return Err(raise_parse_error!());
                     }
@@ -1333,7 +1282,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             } else if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                 // Async arrow function
                 tokens.remove(0); // consume (
-                let mut params = Vec::new();
+                let mut params: Vec<(String, Option<Box<Expr>>)> = Vec::new();
                 let mut is_arrow = false;
                 if matches!(tokens.first(), Some(&Token::RParen)) {
                     tokens.remove(0);
@@ -1345,14 +1294,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     }
                 } else {
                     // Try to parse params
-                    let mut param_names = Vec::new();
+                    let mut param_names: Vec<(String, Option<Box<Expr>>)> = Vec::new();
                     let mut local_consumed = Vec::new();
                     let mut valid = true;
                     loop {
                         if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                             tokens.remove(0);
                             local_consumed.push(Token::Identifier(name.clone()));
-                            param_names.push(name);
+                            param_names.push((name, None));
                             if tokens.is_empty() {
                                 valid = false;
                                 break;
@@ -1402,7 +1351,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         }
         Token::LParen => {
             // Check if it's arrow function
-            let mut params = Vec::new();
+            let mut params: Vec<(String, Option<Box<Expr>>)> = Vec::new();
             let mut is_arrow = false;
             let mut result_expr = None;
             if matches!(tokens.first(), Some(&Token::RParen)) {
@@ -1415,14 +1364,20 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
             } else {
                 // Try to parse params
-                let mut param_names = Vec::new();
+                let mut param_names: Vec<(String, Option<Box<Expr>>)> = Vec::new();
                 let mut local_consumed = Vec::new();
                 let mut valid = true;
                 loop {
+                    log::trace!(
+                        "parse_primary LParen param loop: tokens first={:?} local_consumed_len={} param_names_len={}",
+                        tokens.first(),
+                        local_consumed.len(),
+                        param_names.len()
+                    );
                     if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                         tokens.remove(0);
                         local_consumed.push(Token::Identifier(name.clone()));
-                        param_names.push(name);
+                        param_names.push((name, None));
                         if tokens.is_empty() {
                             valid = false;
                             break;
@@ -1576,7 +1531,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     let mut args = Vec::new();
                     if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                         loop {
-                            let arg = parse_expression(tokens)?;
+                            let arg = parse_assignment(tokens)?;
                             args.push(arg);
                             if tokens.is_empty() {
                                 return Err(raise_parse_error!());
@@ -1620,7 +1575,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         let mut args = Vec::new();
                         if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                             loop {
-                                let arg = parse_expression(tokens)?;
+                                let arg = parse_assignment(tokens)?;
                                 args.push(arg);
                                 if tokens.is_empty() {
                                     return Err(raise_parse_error!());
@@ -1638,6 +1593,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                             return Err(raise_parse_error!());
                         }
                         tokens.remove(0); // consume ')'
+                        // Flatten accidental single-Comma argument
+                        if args.len() == 1 {
+                            if let Expr::Comma(_, _) = &args[0] {
+                                let first = args.remove(0);
+                                let new_args = flatten_commas(first);
+                                args.extend(new_args);
+                            }
+                        }
                         expr = Expr::OptionalCall(Box::new(Expr::Index(Box::new(expr), Box::new(index_expr))), args);
                     } else {
                         expr = Expr::OptionalIndex(Box::new(expr), Box::new(index_expr));
@@ -1651,7 +1614,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 let mut args = Vec::new();
                 if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
                     loop {
-                        let arg = parse_expression(tokens)?;
+                        let arg = parse_assignment(tokens)?;
                         args.push(arg);
                         if tokens.is_empty() {
                             return Err(raise_parse_error!());
@@ -1679,6 +1642,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                     return Err(raise_parse_error!());
                 }
                 tokens.remove(0); // consume ')'
+                // Flatten accidental single-Comma argument
+                if args.len() == 1 {
+                    if let Expr::Comma(_, _) = &args[0] {
+                        let first = args.remove(0);
+                        let new_args = flatten_commas(first);
+                        args.extend(new_args);
+                    }
+                }
                 expr = Expr::Call(Box::new(expr), args);
             }
             Token::Increment => {

@@ -102,7 +102,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                             if i > 0 {
                                 print!(", ");
                             }
-                            print!("{}", param);
+                            print!("{}", param.0);
                         }
                         print!(") {{ [closure code] }}");
                     }

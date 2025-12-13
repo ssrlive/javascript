@@ -36,7 +36,7 @@ pub struct JSWeakSet {
 
 #[derive(Clone, Debug)]
 pub struct JSGenerator {
-    pub params: Vec<String>,
+    pub params: Vec<(String, Option<Box<Expr>>)>,
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr, // captured environment
     pub state: GeneratorState,
@@ -589,19 +589,20 @@ pub enum Value {
     Boolean(bool),
     Undefined,
     Null,
-    Object(JSObjectDataPtr),                                         // Object with properties
-    Function(String),                                                // Function name
-    Closure(Vec<String>, Vec<Statement>, JSObjectDataPtr),           // parameters, body, captured environment
-    AsyncClosure(Vec<String>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
-    GeneratorFunction(Vec<String>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
-    ClassDefinition(Rc<ClassDefinition>),                            // Class definition
-    Getter(Vec<Statement>, JSObjectDataPtr),                         // getter body, captured environment
-    Setter(Vec<String>, Vec<Statement>, JSObjectDataPtr),            // setter parameter, body, captured environment
+    Object(JSObjectDataPtr),                                                              // Object with properties
+    Function(String),                                                                     // Function name
+    Closure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),           // parameters, body, captured environment
+    AsyncClosure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
+    GeneratorFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
+    ClassDefinition(Rc<ClassDefinition>),                                                 // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr),                                              // getter body, captured environment
+    Setter(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),            // setter parameter, body, captured environment
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
         getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
-        setter: Option<(Vec<String>, Vec<Statement>, JSObjectDataPtr)>,
+        #[allow(clippy::type_complexity)]
+        setter: Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)>,
     },
     Promise(Rc<RefCell<JSPromise>>),         // Promise object
     Symbol(Rc<SymbolData>),                  // Symbol primitive with description
@@ -748,7 +749,8 @@ pub fn value_to_string(val: &Value) -> String {
 // Helper: extract a closure (params, body, env) from a Value. This accepts
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.
-pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<String>, Vec<crate::core::Statement>, crate::core::JSObjectDataPtr)> {
+#[allow(clippy::type_complexity)]
+pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)> {
     match val {
         Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
         Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
@@ -787,7 +789,8 @@ pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Va
                         env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                         // Pass hint as first param if the function declares params
                         if !params.is_empty() {
-                            env_set(&func_env, &params[0], Value::String(utf8_to_utf16(hint)))?;
+                            let name = &params[0].0;
+                            env_set(&func_env, name.as_str(), Value::String(utf8_to_utf16(hint)))?;
                         }
                         let result = evaluate_statements(&func_env, &body)?;
                         match result {
@@ -1270,7 +1273,8 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                     let setter_env = new_js_object_data();
                     setter_env.borrow_mut().prototype = Some(env);
                     env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
-                    env_set(&setter_env, &param[0], val)?;
+                    let name = &param[0].0;
+                    env_set(&setter_env, name.as_str(), val)?;
                     let _v = evaluate_statements(&setter_env, &body)?;
                 } else {
                     // No setter, update value
@@ -1308,7 +1312,8 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                 let setter_env = new_js_object_data();
                 setter_env.borrow_mut().prototype = Some(env);
                 env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
-                env_set(&setter_env, &param[0], val)?;
+                let name = &param[0].0;
+                env_set(&setter_env, name.as_str(), val)?;
                 evaluate_statements(&setter_env, &body)?;
                 return Ok(());
             }

@@ -21,7 +21,7 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(
-            vec!["x".to_string()],
+            vec![("x".to_string(), None)],
             vec![crate::core::Statement::Return(Some(crate::core::Expr::Var("x".to_string())))],
             module_exports.clone(),
         );

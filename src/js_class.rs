@@ -8,15 +8,15 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum ClassMember {
-    Constructor(Vec<String>, Vec<Statement>),          // parameters, body
-    Method(String, Vec<String>, Vec<Statement>),       // name, parameters, body
-    StaticMethod(String, Vec<String>, Vec<Statement>), // name, parameters, body
-    Property(String, Expr),                            // name, value
-    StaticProperty(String, Expr),                      // name, value
-    Getter(String, Vec<Statement>),                    // name, body
-    Setter(String, Vec<String>, Vec<Statement>),       // name, parameter, body
-    StaticGetter(String, Vec<Statement>),              // name, body
-    StaticSetter(String, Vec<String>, Vec<Statement>), // name, parameter, body
+    Constructor(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body
+    Method(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameters, body
+    StaticMethod(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameters, body
+    Property(String, Expr),                                        // name, value
+    StaticProperty(String, Expr),                                  // name, value
+    Getter(String, Vec<Statement>),                                // name, body
+    Setter(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameter, body
+    StaticGetter(String, Vec<Statement>),                          // name, body
+    StaticSetter(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameter, body
 }
 
 #[derive(Debug, Clone)]
@@ -130,9 +130,13 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
                     // Bind parameters from args
                     for (i, param) in params.iter().enumerate() {
+                        let (name, default_expr_opt) = param;
                         if i < args.len() {
                             let arg_val = evaluate_expr(env, &args[i])?;
-                            obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                            obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                        } else if let Some(expr) = default_expr_opt {
+                            let val = evaluate_expr(&func_env, expr)?;
+                            obj_set_key_value(&func_env, &name.into(), val)?;
                         }
                     }
 
@@ -197,9 +201,13 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
                         // Bind parameters
                         for (i, param) in params.iter().enumerate() {
+                            let (name, default_expr_opt) = param;
                             if i < args.len() {
                                 let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                            } else if let Some(expr) = default_expr_opt {
+                                let val = evaluate_expr(&func_env, expr)?;
+                                obj_set_key_value(&func_env, &name.into(), val)?;
                             }
                         }
 
@@ -377,9 +385,13 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
             // Bind parameters
             for (i, param) in params.iter().enumerate() {
+                let (name, default_expr_opt) = param;
                 if i < args.len() {
                     let arg_val = evaluate_expr(env, &args[i])?;
-                    obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                    obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                } else if let Some(expr) = default_expr_opt {
+                    let val = evaluate_expr(&func_env, expr)?;
+                    obj_set_key_value(&func_env, &name.into(), val)?;
                 }
             }
 
@@ -575,9 +587,13 @@ pub(crate) fn call_static_method(
 
                 // Bind parameters
                 for (i, param) in params.iter().enumerate() {
+                    let (name, default_expr_opt) = param;
                     if i < args.len() {
                         let arg_val = evaluate_expr(env, &args[i])?;
-                        obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                        obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                    } else if let Some(expr) = default_expr_opt {
+                        let val = crate::core::evaluate_expr(&func_env, expr)?;
+                        obj_set_key_value(&func_env, &name.into(), val)?;
                     }
                 }
 
@@ -611,11 +627,15 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
 
                 // Bind parameters (missing params become undefined)
                 for (i, param) in params.iter().enumerate() {
+                    let (name, default_expr_opt) = param;
                     if i < args.len() {
                         let arg_val = evaluate_expr(env, &args[i])?;
-                        crate::core::env_set(&func_env, param.as_str(), arg_val)?;
+                        crate::core::env_set(&func_env, name.as_str(), arg_val)?;
+                    } else if let Some(expr) = default_expr_opt {
+                        let val = crate::core::evaluate_expr(&func_env, expr)?;
+                        crate::core::env_set(&func_env, name.as_str(), val)?;
                     } else {
-                        crate::core::env_set(&func_env, param.as_str(), Value::Undefined)?;
+                        crate::core::env_set(&func_env, name.as_str(), Value::Undefined)?;
                     }
                 }
 
@@ -701,9 +721,13 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
 
                         // Bind parameters
                         for (i, param) in params.iter().enumerate() {
+                            let (name, default_expr_opt) = param;
                             if i < args.len() {
                                 let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                            } else if let Some(expr) = default_expr_opt {
+                                let val = evaluate_expr(&func_env, expr)?;
+                                obj_set_key_value(&func_env, &name.into(), val)?;
                             }
                         }
 
@@ -760,9 +784,13 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
 
                         // Bind parameters
                         for (i, param) in params.iter().enumerate() {
+                            let (name, default_expr_opt) = param;
                             if i < args.len() {
                                 let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &param.into(), arg_val)?;
+                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
+                            } else if let Some(expr) = default_expr_opt {
+                                let val = evaluate_expr(&func_env, expr)?;
+                                obj_set_key_value(&func_env, &name.into(), val)?;
                             }
                         }
 

@@ -32,13 +32,13 @@ pub enum Statement {
     Let(String, Option<Expr>),
     Var(String, Option<Expr>),
     Const(String, Expr),
-    FunctionDeclaration(String, Vec<String>, Vec<Statement>, bool), // name, params, body, is_generator
-    LetDestructuringArray(Vec<DestructuringElement>, Expr),         // array destructuring: let [a, b] = [1, 2];
-    ConstDestructuringArray(Vec<DestructuringElement>, Expr),       // const [a, b] = [1, 2];
-    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),  // object destructuring: let {a, b} = {a: 1, b: 2};
-    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
-    Class(String, Option<crate::core::Expr>, Vec<ClassMember>),     // name, extends, members
-    Assign(String, Expr),                                           // variable assignment
+    FunctionDeclaration(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, bool), // name, params, body, is_generator
+    LetDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: let [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr),                            // const [a, b] = [1, 2];
+    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                       // object destructuring: let {a, b} = {a: 1, b: 2};
+    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                     // const {a, b} = {a: 1, b: 2};
+    Class(String, Option<crate::core::Expr>, Vec<ClassMember>),                          // name, extends, members
+    Assign(String, Expr),                                                                // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body
@@ -316,32 +316,8 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
                     return Err(raise_parse_error!());
                 }
-                tokens.remove(0); // consume (
-                let mut params = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                    loop {
-                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                            tokens.remove(0);
-                            params.push(param);
-                            if tokens.is_empty() {
-                                return Err(raise_parse_error!());
-                            }
-                            if matches!(tokens[0], Token::RParen) {
-                                break;
-                            }
-                            if !matches!(tokens[0], Token::Comma) {
-                                return Err(raise_parse_error!());
-                            }
-                            tokens.remove(0); // consume ,
-                        } else {
-                            return Err(raise_parse_error!());
-                        }
-                    }
-                }
-                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(raise_parse_error!());
-                }
-                tokens.remove(0); // consume )
+                tokens.remove(0); // consume "("
+                let params = crate::core::parser::parse_parameters(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                     return Err(raise_parse_error!());
                 }
@@ -686,32 +662,8 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             if let Some(Token::Identifier(name)) = tokens.first().cloned() {
                 tokens.remove(0);
                 if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                    tokens.remove(0); // consume (
-                    let mut params = Vec::new();
-                    if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                        loop {
-                            if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                                tokens.remove(0);
-                                params.push(param);
-                                if tokens.is_empty() {
-                                    return Err(raise_parse_error!());
-                                }
-                                if matches!(tokens[0], Token::RParen) {
-                                    break;
-                                }
-                                if !matches!(tokens[0], Token::Comma) {
-                                    return Err(raise_parse_error!());
-                                }
-                                tokens.remove(0); // consume ,
-                            } else {
-                                return Err(raise_parse_error!());
-                            }
-                        }
-                    }
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
-                    }
-                    tokens.remove(0); // consume )
+                    tokens.remove(0); // consume "("
+                    let params = crate::core::parser::parse_parameters(tokens)?;
                     if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                         return Err(raise_parse_error!());
                     }
@@ -742,32 +694,8 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 tokens.iter().take(12).collect::<Vec<_>>()
             );
             if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                tokens.remove(0); // consume (
-                let mut params = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0], Token::RParen) {
-                    loop {
-                        if let Some(Token::Identifier(param)) = tokens.first().cloned() {
-                            tokens.remove(0);
-                            params.push(param);
-                            if tokens.is_empty() {
-                                return Err(raise_parse_error!());
-                            }
-                            if matches!(tokens[0], Token::RParen) {
-                                break;
-                            }
-                            if !matches!(tokens[0], Token::Comma) {
-                                return Err(raise_parse_error!());
-                            }
-                            tokens.remove(0); // consume ,
-                        } else {
-                            return Err(raise_parse_error!());
-                        }
-                    }
-                }
-                if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                    return Err(raise_parse_error!());
-                }
-                tokens.remove(0); // consume )
+                tokens.remove(0); // consume "("
+                let params = crate::core::parser::parse_parameters(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                     return Err(raise_parse_error!());
                 }

@@ -698,7 +698,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
             let func_env = callback_func.2.clone();
             // Bind the mock constructor to the first parameter
             if !callback_func.0.is_empty() {
-                env_set(&func_env, &callback_func.0[0], mock_constructor)?;
+                let name = &callback_func.0[0].0;
+                env_set(&func_env, name.as_str(), mock_constructor)?;
             }
             // Execute function body
             crate::core::evaluate_statements(&func_env, &callback_func.1)?;

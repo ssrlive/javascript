@@ -157,6 +157,16 @@ mod function_tests {
     }
 
     #[test]
+    fn test_default_param_comma_operator() {
+        let script = "function g(a = (1,2), b = 4) { return a + b; } g()";
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 6.0), // (1,2) -> 2, so 2+4 = 6
+            _ => panic!("Expected number 6.0, got {:?}", result),
+        }
+    }
+
+    #[test]
     fn test_function_declaration_hoisting() {
         let script = "hoistedFunction(); function hoistedFunction() { return 42; }";
         let result = evaluate_script(script, None::<&std::path::Path>);

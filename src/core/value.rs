@@ -678,6 +678,14 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
         Value::Object(obj) => {
+            // Handle RegExp objects specially so they display as /pattern/flags
+            if crate::js_regexp::is_regex_object(obj) {
+                if let Ok(pat) = crate::js_regexp::get_regex_literal_pattern(obj) {
+                    return pat;
+                } else {
+                    return "[object RegExp]".to_string();
+                }
+            }
             // Check if this is a function object (has __closure__ property)
             let has_closure = get_own_property(obj, &"__closure__".into()).is_some();
             log::trace!("DEBUG: has_closure = {has_closure}");

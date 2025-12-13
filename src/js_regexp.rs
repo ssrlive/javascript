@@ -28,6 +28,22 @@ pub fn get_regex_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
     Ok(utf16_to_utf8(&pattern_utf16))
 }
 
+pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
+    let pat = crate::js_regexp::get_regex_pattern(obj)?;
+    let flags = match get_own_property(obj, &"__flags".into()) {
+        Some(val) => match &*val.borrow() {
+            Value::String(s) => utf16_to_utf8(s),
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
+    if flags.is_empty() {
+        Ok(format!("/{pat}/"))
+    } else {
+        Ok(format!("/{pat}/{flags}"))
+    }
+}
+
 // Sanitize JS-style regex pattern to be more acceptable to Rust regex engines.
 // Specifically, when encountering '[' inside a character class we escape it to
 // avoid nested unclosed classes that engines like `regex` or `fancy_regex`

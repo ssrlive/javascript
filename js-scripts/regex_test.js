@@ -20,4 +20,9 @@ var result = regex.test(a);
 console.log(result); // Output: true
 
 assert(result, "The regex should match the original string");
+
+// Verify console.log prints RegExp objects as /pattern/flags
+var re = /ab+c/;
+console.log(re);
+
 result

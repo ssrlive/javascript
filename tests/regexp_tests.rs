@@ -220,6 +220,20 @@ mod regexp_tests {
     }
 
     #[test]
+    fn test_regexp_to_string() {
+        let result = evaluate_script("new RegExp('ab+c').toString()", None::<&std::path::Path>);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        match value {
+            Value::String(s) => {
+                let s_val = String::from_utf16_lossy(&s);
+                assert_eq!(s_val, "/ab+c/");
+            }
+            _ => panic!("Expected string result"),
+        }
+    }
+
+    #[test]
     fn test_regexp_unicode_lastindex_u_flag() {
         // Ensure lastIndex and returned index behave correctly with surrogate pairs
         // construct a string containing a surrogate pair (emoji) between ascii chars

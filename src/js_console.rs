@@ -26,8 +26,14 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     Value::Undefined => print!("undefined"),
                     Value::Null => print!("null"),
                     Value::Object(obj) => {
-                        // Check if this is a Date object
-                        if crate::js_date::is_date_object(&obj) {
+                        // Check if this is a RegExp object
+                        if crate::js_regexp::is_regex_object(&obj) {
+                            // Print regex in /pattern/flags form
+                            match crate::js_regexp::get_regex_literal_pattern(&obj) {
+                                Ok(pat) => print!("{}", pat),
+                                Err(_) => print!("[object RegExp]"),
+                            }
+                        } else if crate::js_date::is_date_object(&obj) {
                             // For Date objects, call toString method
                             match crate::js_date::handle_date_method(&obj, "toISOString", &[], env) {
                                 Ok(Value::String(s)) => print!("{}", String::from_utf16_lossy(&s)),

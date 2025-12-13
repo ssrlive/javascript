@@ -77,11 +77,11 @@ pub fn parse_expression(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         "parse_object_destructuring_pattern: tokens after initial skip (first 8): {:?}",
         tokens.iter().take(8).collect::<Vec<_>>()
     );
-    parse_conditional(tokens)
+    parse_assignment(tokens)
 }
 
 pub fn parse_conditional(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let condition = parse_assignment(tokens)?;
+    let condition = parse_nullish(tokens)?;
     if tokens.is_empty() {
         return Ok(condition);
     }
@@ -103,7 +103,7 @@ pub fn parse_conditional(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let left = parse_nullish(tokens)?;
+    let left = parse_conditional(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
@@ -147,82 +147,82 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     match &tokens[0] {
         Token::Assign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::Assign(Box::new(left), Box::new(right)))
         }
         Token::LogicalAndAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::LogicalAndAssign(Box::new(left), Box::new(right)))
         }
         Token::LogicalOrAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::LogicalOrAssign(Box::new(left), Box::new(right)))
         }
         Token::NullishAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::NullishAssign(Box::new(left), Box::new(right)))
         }
         Token::AddAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::AddAssign(Box::new(left), Box::new(right)))
         }
         Token::SubAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::SubAssign(Box::new(left), Box::new(right)))
         }
         Token::PowAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::PowAssign(Box::new(left), Box::new(right)))
         }
         Token::MulAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::MulAssign(Box::new(left), Box::new(right)))
         }
         Token::DivAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::DivAssign(Box::new(left), Box::new(right)))
         }
         Token::ModAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::ModAssign(Box::new(left), Box::new(right)))
         }
         Token::BitXorAssign => {
             tokens.remove(0);
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::BitXorAssign(Box::new(left), Box::new(right)))
         }
         Token::BitAndAssign => {
             tokens.remove(0); // consume '&='
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::BitAndAssign(Box::new(left), Box::new(right)))
         }
         Token::BitOrAssign => {
             tokens.remove(0); // consume '|='
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::BitOrAssign(Box::new(left), Box::new(right)))
         }
         Token::LeftShiftAssign => {
             tokens.remove(0); // consume '<<='
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::LeftShiftAssign(Box::new(left), Box::new(right)))
         }
         Token::RightShiftAssign => {
             tokens.remove(0); // consume '>>='
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::RightShiftAssign(Box::new(left), Box::new(right)))
         }
         Token::UnsignedRightShiftAssign => {
             tokens.remove(0); // consume '>>>='
-            let right = parse_assignment(tokens)?;
+            let right = parse_conditional(tokens)?;
             Ok(Expr::UnsignedRightShiftAssign(Box::new(left), Box::new(right)))
         }
         _ => Ok(left),

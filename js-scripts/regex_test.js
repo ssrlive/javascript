@@ -44,4 +44,12 @@ var myArray = myRe.exec("cdbbdbsbz");
 console.log(myRe.lastIndex); // 5
 console.log("The value of lastIndex is " + myRe.lastIndex);
 
+var myArray = /d(b+)d/g.exec("cdbbdbsbz");
+console.log("The value of lastIndex is " + /d(b+)d/g.lastIndex); // 0
+
+var re = /(\w+)\s(\w+)/;
+var str = "John Smith";
+var newstr = str.replace(re, "$2, $1");
+console.log(newstr); // "Smith, John"
+
 result

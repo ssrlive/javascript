@@ -464,20 +464,54 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                     let mut out = String::new();
                     let mut last_pos = 0usize;
 
-                    // helper to expand replacement tokens ($& only)
-                    fn expand_replacement(repl: &str, matched: &str) -> String {
+                    // helper to expand replacement tokens ($&, $1, $2, $`, $', $$)
+                    fn expand_replacement(repl: &str, matched: &str, captures: &[Option<String>], before: &str, after: &str) -> String {
                         let mut out = String::new();
                         let mut chars = repl.chars().peekable();
                         while let Some(ch) = chars.next() {
                             if ch == '$' {
                                 if let Some(&next) = chars.peek() {
-                                    if next == '&' {
-                                        chars.next();
-                                        out.push_str(matched);
-                                        continue;
+                                    match next {
+                                        '&' => {
+                                            chars.next();
+                                            out.push_str(matched);
+                                        }
+                                        '`' => {
+                                            chars.next();
+                                            out.push_str(before);
+                                        }
+                                        '\'' => {
+                                            chars.next();
+                                            out.push_str(after);
+                                        }
+                                        '$' => {
+                                            chars.next();
+                                            out.push('$');
+                                        }
+                                        '0'..='9' => {
+                                            // $1, $2, etc.
+                                            let mut num_str = String::new();
+                                            num_str.push(next);
+                                            chars.next();
+                                            while let Some(&digit @ '0'..='9') = chars.peek() {
+                                                num_str.push(digit);
+                                                chars.next();
+                                            }
+                                            if let Ok(n) = num_str.parse::<usize>() {
+                                                if n > 0 && n < captures.len() {
+                                                    if let Some(ref cap) = captures[n] {
+                                                        out.push_str(cap);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            out.push('$');
+                                        }
                                     }
+                                } else {
+                                    out.push('$');
                                 }
-                                out.push('$');
                             } else {
                                 out.push(ch);
                             }
@@ -485,34 +519,52 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                         out
                     }
 
-                    // depending on regex_kind, find matches
+                    // depending on regex_kind, find matches with captures
                     match regex_kind {
                         RegexKind::Fancy(r) => {
-                            let mut search_slice = &input_utf8[..];
-                            while let Ok(Some(mat)) = r.find(search_slice) {
-                                let start = input_utf8.len() - search_slice.len() + mat.start();
-                                let end = input_utf8.len() - search_slice.len() + mat.end();
-                                out.push_str(&input_utf8[last_pos..start]);
-                                out.push_str(&expand_replacement(&repl, &input_utf8[start..end]));
-                                last_pos = end;
-                                if !global {
+                            let mut offset = 0usize;
+                            while let Ok(Some(caps)) = r.captures(&input_utf8[offset..]) {
+                                if let Some(mat) = caps.get(0) {
+                                    let start = offset + mat.start();
+                                    let end = offset + mat.end();
+                                    let before = &input_utf8[..start];
+                                    let after = &input_utf8[end..];
+                                    let matched = &input_utf8[start..end];
+                                    let capture_groups: Vec<Option<String>> =
+                                        (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str().to_string())).collect();
+                                    out.push_str(&input_utf8[last_pos..start]);
+                                    out.push_str(&expand_replacement(&repl, matched, &capture_groups, before, after));
+                                    last_pos = end;
+                                    if !global {
+                                        break;
+                                    }
+                                    offset = end;
+                                } else {
                                     break;
                                 }
-                                search_slice = &input_utf8[end..];
                             }
                         }
                         RegexKind::Std(r) => {
                             let mut offset = 0usize;
-                            while let Some(mat) = r.find(&input_utf8[offset..]) {
-                                let start = offset + mat.start();
-                                let end = offset + mat.end();
-                                out.push_str(&input_utf8[last_pos..start]);
-                                out.push_str(&expand_replacement(&repl, &input_utf8[start..end]));
-                                last_pos = end;
-                                if !global {
+                            while let Some(caps) = r.captures(&input_utf8[offset..]) {
+                                if let Some(mat) = caps.get(0) {
+                                    let start = offset + mat.start();
+                                    let end = offset + mat.end();
+                                    let before = &input_utf8[..start];
+                                    let after = &input_utf8[end..];
+                                    let matched = &input_utf8[start..end];
+                                    let capture_groups: Vec<Option<String>> =
+                                        (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str().to_string())).collect();
+                                    out.push_str(&input_utf8[last_pos..start]);
+                                    out.push_str(&expand_replacement(&repl, matched, &capture_groups, before, after));
+                                    last_pos = end;
+                                    if !global {
+                                        break;
+                                    }
+                                    offset = end;
+                                } else {
                                     break;
                                 }
-                                offset = end;
                             }
                         }
                     }

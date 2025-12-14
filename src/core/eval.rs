@@ -1114,66 +1114,6 @@ fn perform_statement_label(
             }
             Ok(None)
         }
-        Statement::While(condition, body) => {
-            loop {
-                let cond_val = evaluate_expr(env, condition)?;
-                if !is_truthy(&cond_val) {
-                    break Ok(None);
-                }
-                let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(env.clone());
-                block_env.borrow_mut().is_function_scope = false;
-                match evaluate_statements_with_context(&block_env, body)? {
-                    ControlFlow::Normal(val) => *last_value = val,
-                    ControlFlow::Break(None) => break Ok(None),
-                    ControlFlow::Break(Some(lbl)) => {
-                        if lbl == *label_name {
-                            break Ok(None);
-                        } else {
-                            return Ok(Some(ControlFlow::Break(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Continue(None) => {}
-                    ControlFlow::Continue(Some(lbl)) => {
-                        if lbl == *label_name { /* continue */
-                        } else {
-                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                }
-            }
-        }
-        Statement::DoWhile(body, condition) => {
-            loop {
-                let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(env.clone());
-                block_env.borrow_mut().is_function_scope = false;
-                match evaluate_statements_with_context(&block_env, body)? {
-                    ControlFlow::Normal(val) => *last_value = val,
-                    ControlFlow::Break(None) => break Ok(None),
-                    ControlFlow::Break(Some(lbl)) => {
-                        if lbl == *label_name {
-                            break Ok(None);
-                        } else {
-                            return Ok(Some(ControlFlow::Break(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Continue(None) => {}
-                    ControlFlow::Continue(Some(lbl)) => {
-                        if lbl == *label_name { /* continue */
-                        } else {
-                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                }
-                let cond_val = evaluate_expr(env, condition)?;
-                if !is_truthy(&cond_val) {
-                    break Ok(None);
-                }
-            }
-        }
         Statement::Switch(expr, cases) => eval_switch_statement(env, expr, cases, last_value, Some(label_name)),
         // If it's some other statement type, just evaluate it here. Important: a
         // Normal control flow result from the inner statement should *not*
@@ -5045,7 +4985,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // to be callable as methods.
                                 if let Some(cl_rc) = obj_get_key_value(&func_obj_map, &"__closure__".into())? {
                                     match &*cl_rc.borrow() {
-                                        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                                        Value::Closure(params, body, captured_env) => {
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -5074,6 +5014,63 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                             // Execute function body
                                             evaluate_statements(&func_env, body)
+                                        }
+                                        Value::GeneratorFunction(_, params, body, captured_env) => {
+                                            // Generator method-style call - return a generator object
+                                            let mut evaluated_args = Vec::new();
+                                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                                            let func_env = new_js_object_data();
+                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                            func_env.borrow_mut().is_function_scope = true;
+                                            // Bind `this` to the receiver object
+                                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                            // Attach frame/caller information for stack traces
+                                            let frame = build_frame_name(env, method);
+                                            let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                            let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
+                                            crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
+                                        }
+                                        Value::AsyncClosure(params, body, captured_env) => {
+                                            // Async method-style call: returns a Promise object
+                                            let mut evaluated_args = Vec::new();
+                                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                                            // Create a Promise object
+                                            let promise = Rc::new(RefCell::new(JSPromise::default()));
+                                            let promise_obj = Value::Object(new_js_object_data());
+                                            if let Value::Object(obj) = &promise_obj {
+                                                obj.borrow_mut()
+                                                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                                            }
+                                            // Create new environment
+                                            let func_env = new_js_object_data();
+                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                            func_env.borrow_mut().is_function_scope = true;
+                                            // Bind `this` to the receiver object
+                                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                            // Bind parameters
+                                            for (i, param) in params.iter().enumerate() {
+                                                let (name, default_expr_opt) = param;
+                                                let val = if i < evaluated_args.len() {
+                                                    evaluated_args[i].clone()
+                                                } else if let Some(expr) = default_expr_opt {
+                                                    evaluate_expr(&func_env, expr)?
+                                                } else {
+                                                    Value::Undefined
+                                                };
+                                                env_set(&func_env, name.as_str(), val)?;
+                                            }
+                                            // Execute function body synchronously (for now)
+                                            let result = evaluate_statements(&func_env, body);
+                                            match result {
+                                                Ok(val) => crate::js_promise::resolve_promise(&promise, val),
+                                                Err(e) => {
+                                                    crate::js_promise::reject_promise(
+                                                        &promise,
+                                                        Value::String(utf8_to_utf16(&format!("{}", e))),
+                                                    );
+                                                }
+                                            }
+                                            Ok(promise_obj)
                                         }
                                         _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
                                     }
@@ -5142,6 +5139,45 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Function object call - extract the closure and call it
                 if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                     match &*cl_rc.borrow() {
+                        Value::AsyncClosure(params, body, captured_env) => {
+                            // Async function call (direct call on a function-object): returns a Promise
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            // Create a Promise object
+                            let promise = Rc::new(RefCell::new(JSPromise::default()));
+                            let promise_obj = Value::Object(new_js_object_data());
+                            if let Value::Object(obj) = &promise_obj {
+                                obj.borrow_mut()
+                                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                            }
+                            // Create new environment
+                            let func_env = new_js_object_data();
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            func_env.borrow_mut().is_function_scope = true;
+                            // For direct calls, `this` is undefined
+                            env_set(&func_env, "this", Value::Undefined)?;
+                            // Bind parameters
+                            for (i, param) in params.iter().enumerate() {
+                                let (name, default_expr_opt) = param;
+                                let val = if i < evaluated_args.len() {
+                                    evaluated_args[i].clone()
+                                } else if let Some(expr) = default_expr_opt {
+                                    evaluate_expr(&func_env, expr)?
+                                } else {
+                                    Value::Undefined
+                                };
+                                env_set(&func_env, name.as_str(), val)?;
+                            }
+                            // Execute function body and resolve/reject promise
+                            let result = evaluate_statements(&func_env, body);
+                            match result {
+                                Ok(val) => crate::js_promise::resolve_promise(&promise, val),
+                                Err(e) => {
+                                    crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
+                                }
+                            }
+                            Ok(promise_obj)
+                        }
                         Value::Closure(params, body, captured_env) => {
                             // Function call
                             // Collect all arguments, expanding spreads
@@ -5180,45 +5216,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             // Execute function body
                             evaluate_statements(&func_env, body)
                         }
-                        Value::AsyncClosure(params, body, captured_env) => {
-                            // Async method-style call: returns a Promise object
-                            let mut evaluated_args = Vec::new();
-                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                            // Create a Promise object
-                            let promise = Rc::new(RefCell::new(JSPromise::default()));
-                            let promise_obj = Value::Object(new_js_object_data());
-                            if let Value::Object(obj) = &promise_obj {
-                                obj.borrow_mut()
-                                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
-                            }
-                            // Create new environment
-                            let func_env = new_js_object_data();
-                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            func_env.borrow_mut().is_function_scope = true;
-                            // Bind `this` to the receiver object
-                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
-                            // Bind parameters
-                            for (i, param) in params.iter().enumerate() {
-                                let (name, default_expr_opt) = param;
-                                let val = if i < evaluated_args.len() {
-                                    evaluated_args[i].clone()
-                                } else if let Some(expr) = default_expr_opt {
-                                    evaluate_expr(&func_env, expr)?
-                                } else {
-                                    Value::Undefined
-                                };
-                                env_set(&func_env, name.as_str(), val)?;
-                            }
-                            // Execute function body synchronously (for now)
-                            let result = evaluate_statements(&func_env, body);
-                            match result {
-                                Ok(val) => promise.borrow_mut().state = PromiseState::Fulfilled(val),
-                                Err(e) => {
-                                    promise.borrow_mut().state = PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))))
-                                }
-                            }
-                            Ok(promise_obj)
-                        }
+
                         Value::GeneratorFunction(_, params, body, captured_env) => {
                             // Generator function call - return a generator object
                             crate::js_generator::handle_generator_function_call(params, body, args, captured_env)
@@ -5299,10 +5297,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 let result = evaluate_statements(&func_env, &body);
                 match result {
                     Ok(val) => {
-                        promise.borrow_mut().state = PromiseState::Fulfilled(val);
+                        crate::js_promise::resolve_promise(&promise, val);
                     }
                     Err(e) => {
-                        promise.borrow_mut().state = PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
+                        crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
                     }
                 }
                 Ok(promise_obj)

@@ -153,11 +153,10 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     let result = crate::core::evaluate_statements(&func_env, &body);
                     match result {
                         Ok(val) => {
-                            promise.borrow_mut().state = crate::js_promise::PromiseState::Fulfilled(val);
+                            crate::js_promise::resolve_promise(&promise, val);
                         }
                         Err(e) => {
-                            promise.borrow_mut().state =
-                                crate::js_promise::PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
+                            crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
                         }
                     }
                     Ok(promise_obj)

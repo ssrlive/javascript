@@ -1,8 +1,52 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, obj_get_key_value, parse_bigint_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value, parse_bigint_string, to_primitive};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use num_bigint::BigInt;
 use num_bigint::Sign;
+
+pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // BigInt(value) conversion per simplified rules:
+    if args.len() != 1 {
+        return Err(raise_type_error!("BigInt requires exactly one argument"));
+    }
+    let arg_val = evaluate_expr(env, &args[0])?;
+    match arg_val {
+        Value::BigInt(b) => Ok(Value::BigInt(b)),
+        Value::Number(n) => {
+            if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                return Err(raise_type_error!("Cannot convert number to BigInt"));
+            }
+            Ok(Value::BigInt(BigInt::from(n as i64)))
+        }
+        Value::String(s) => {
+            let st = String::from_utf16_lossy(&s);
+            Ok(Value::BigInt(parse_bigint_string(&st)?))
+        }
+        Value::Boolean(b) => {
+            let bigint = if b { BigInt::from(1) } else { BigInt::from(0) };
+            Ok(Value::BigInt(bigint))
+        }
+        Value::Object(obj) => {
+            // Try ToPrimitive with number hint first
+            let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+            match prim {
+                Value::Number(n) => {
+                    if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
+                        return Err(raise_type_error!("Cannot convert number to BigInt"));
+                    }
+                    Ok(Value::BigInt(BigInt::from(n as i64)))
+                }
+                Value::String(s) => {
+                    let st = String::from_utf16_lossy(&s);
+                    Ok(Value::BigInt(parse_bigint_string(&st)?))
+                }
+                Value::BigInt(b) => Ok(Value::BigInt(b)),
+                _ => Err(raise_type_error!("Cannot convert object to BigInt")),
+            }
+        }
+        _ => Err(raise_type_error!("Cannot convert value to BigInt")),
+    }
+}
 
 /// Handle boxed BigInt object methods (toString, valueOf)
 pub fn handle_bigint_object_method(

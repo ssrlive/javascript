@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
@@ -47,6 +47,43 @@ pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_key_value(&number_obj, &"prototype".into(), Value::Object(number_prototype))?;
 
     Ok(number_obj)
+}
+
+pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Number constructor
+    if args.len() == 1 {
+        let arg_val = evaluate_expr(env, &args[0])?;
+        match arg_val {
+            Value::Number(n) => Ok(Value::Number(n)),
+            Value::String(s) => {
+                let str_val = String::from_utf16_lossy(&s);
+                match str_val.trim().parse::<f64>() {
+                    Ok(n) => Ok(Value::Number(n)),
+                    Err(_) => Ok(Value::Number(f64::NAN)),
+                }
+            }
+            Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+            Value::Object(obj) => {
+                // Try ToPrimitive with 'number' hint
+                let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+                match prim {
+                    Value::Number(n) => Ok(Value::Number(n)),
+                    Value::String(s) => {
+                        let str_val = String::from_utf16_lossy(&s);
+                        match str_val.trim().parse::<f64>() {
+                            Ok(n) => Ok(Value::Number(n)),
+                            Err(_) => Ok(Value::Number(f64::NAN)),
+                        }
+                    }
+                    Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+                    _ => Ok(Value::Number(f64::NAN)),
+                }
+            }
+            _ => Ok(Value::Number(f64::NAN)),
+        }
+    } else {
+        Ok(Value::Number(0.0)) // Number() with no args returns 0
+    }
 }
 
 /// Handle Number object method calls

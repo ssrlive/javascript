@@ -110,7 +110,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 // For generator functions, create a function object wrapper
                 let func_obj = new_js_object_data();
                 let prototype_obj = new_js_object_data();
-                let generator_val = Value::GeneratorFunction(params.clone(), body.clone(), env.clone());
+                let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone());
                 obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                 obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -204,7 +204,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::FunctionDeclaration(name, params, body, is_generator) => {
                     let closure = if *is_generator {
-                        Value::GeneratorFunction(params.clone(), body.clone(), env.clone())
+                        Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone())
                     } else {
                         Value::Closure(params.clone(), body.clone(), env.clone())
                     };
@@ -427,7 +427,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                                 let func_val = if *is_generator {
                                     let func_obj = new_js_object_data();
                                     let prototype_obj = new_js_object_data();
-                                    let generator_val = Value::GeneratorFunction(params.clone(), body.clone(), env.clone());
+                                    let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone());
                                     obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
                                     obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                                     obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -2384,8 +2384,21 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
                 Err(e)
             }
         },
-        Expr::Function(params, body) => evaluate_function_expression(env, params, body),
-        Expr::GeneratorFunction(params, body) => Ok(Value::GeneratorFunction(params.clone(), body.clone(), env.clone())),
+        Expr::Function(name, params, body) => evaluate_function_expression(env, name.clone(), params, body),
+        Expr::GeneratorFunction(name, params, body) => {
+            // Create a callable function object wrapper for generator expressions
+            let func_obj = new_js_object_data();
+            let prototype_obj = new_js_object_data();
+            let generator_val = Value::GeneratorFunction(name.clone(), params.clone(), body.clone(), env.clone());
+            obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
+            // If this is a named generator expression, expose the `name` property
+            if let Some(n) = name.clone() {
+                obj_set_key_value(&func_obj, &"name".into(), Value::String(utf8_to_utf16(&n)))?;
+            }
+            obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+            obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+            Ok(Value::Object(func_obj))
+        }
         Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone())),
         Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
         Expr::Object(properties) => evaluate_object(env, properties),
@@ -2409,7 +2422,20 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::SuperMethod(method, args) => evaluate_super_method(env, method, args),
         Expr::ArrayDestructuring(pattern) => evaluate_array_destructuring(env, pattern),
         Expr::ObjectDestructuring(pattern) => evaluate_object_destructuring(env, pattern),
-        Expr::AsyncFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone())),
+        Expr::AsyncFunction(name, params, body) => {
+            // Create a callable function object wrapper for async function expressions
+            let func_obj = new_js_object_data();
+            let prototype_obj = new_js_object_data();
+            let closure_val = Value::AsyncClosure(params.clone(), body.clone(), env.clone());
+            obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
+            // If this is a named async function expression, expose the `name` property
+            if let Some(n) = name.clone() {
+                obj_set_key_value(&func_obj, &"name".into(), Value::String(utf8_to_utf16(&n)))?;
+            }
+            obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+            obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+            Ok(Value::Object(func_obj))
+        }
         Expr::Await(expr) => evaluate_await_expression(env, expr),
         Expr::Yield(_expr) => {
             // Yield expressions are only valid in generator functions
@@ -2486,9 +2512,11 @@ fn evaluate_await_expression(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value
 
 fn evaluate_function_expression(
     env: &JSObjectDataPtr,
+    name: Option<String>,
     params: &[(String, Option<Box<Expr>>)],
     body: &[Statement],
 ) -> Result<Value, JSError> {
+    log::trace!("evaluate_function_expression: name={:?} params={:?}", name, params);
     // Create a callable function *object* that wraps the closure so
     // script-level assignments like `F.prototype = ...` work. Store
     // the executable closure under an internal `__closure__` key and
@@ -2501,6 +2529,11 @@ fn evaluate_function_expression(
     // Store the closure under an internal key
     let closure_val = Value::Closure(params.to_vec(), body.to_vec(), env.clone());
     obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
+
+    // If this is a named function expression, expose the `name` property
+    if let Some(n) = name {
+        obj_set_key_value(&func_obj, &"name".into(), Value::String(utf8_to_utf16(&n)))?;
+    }
 
     // Diagnostic: record the function object pointer so we can trace
     // whether the same function wrapper instance is used across bindings
@@ -3507,7 +3540,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             }
         }
         Value::Function(_) => "function",
-        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "function",
+        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(..) => "function",
         Value::ClassDefinition(_) => "function",
         Value::Getter(_, _) => "function",
         Value::Setter(_, _, _) => "function",
@@ -4523,6 +4556,14 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             Some(d) => Ok(Value::String(utf8_to_utf16(d))),
             None => Ok(Value::Undefined),
         },
+        Value::GeneratorFunction(name_opt, params, _body, _env) if prop == "name" => {
+            if let Some(n) = name_opt {
+                Ok(Value::String(utf8_to_utf16(&n)))
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        Value::GeneratorFunction(_name_opt, params, _body, _env) if prop == "length" => Ok(Value::Number(params.len() as f64)),
         Value::Function(func_name) => {
             // Special-case static properties on constructors like Symbol.iterator
             if func_name == "Symbol" {
@@ -5093,7 +5134,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 Ok(Value::Undefined)
             }
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-            Value::GeneratorFunction(params, body, captured_env) => {
+            Value::GeneratorFunction(_, params, body, captured_env) => {
                 // Generator function call - return a generator object
                 crate::js_generator::handle_generator_function_call(&params, &body, args, &captured_env)
             }
@@ -5139,7 +5180,46 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             // Execute function body
                             evaluate_statements(&func_env, body)
                         }
-                        Value::GeneratorFunction(params, body, captured_env) => {
+                        Value::AsyncClosure(params, body, captured_env) => {
+                            // Async method-style call: returns a Promise object
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            // Create a Promise object
+                            let promise = Rc::new(RefCell::new(JSPromise::default()));
+                            let promise_obj = Value::Object(new_js_object_data());
+                            if let Value::Object(obj) = &promise_obj {
+                                obj.borrow_mut()
+                                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                            }
+                            // Create new environment
+                            let func_env = new_js_object_data();
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            func_env.borrow_mut().is_function_scope = true;
+                            // Bind `this` to the receiver object
+                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                            // Bind parameters
+                            for (i, param) in params.iter().enumerate() {
+                                let (name, default_expr_opt) = param;
+                                let val = if i < evaluated_args.len() {
+                                    evaluated_args[i].clone()
+                                } else if let Some(expr) = default_expr_opt {
+                                    evaluate_expr(&func_env, expr)?
+                                } else {
+                                    Value::Undefined
+                                };
+                                env_set(&func_env, name.as_str(), val)?;
+                            }
+                            // Execute function body synchronously (for now)
+                            let result = evaluate_statements(&func_env, body);
+                            match result {
+                                Ok(val) => promise.borrow_mut().state = PromiseState::Fulfilled(val),
+                                Err(e) => {
+                                    promise.borrow_mut().state = PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))))
+                                }
+                            }
+                            Ok(promise_obj)
+                        }
+                        Value::GeneratorFunction(_, params, body, captured_env) => {
                             // Generator function call - return a generator object
                             crate::js_generator::handle_generator_function_call(params, body, args, captured_env)
                         }
@@ -5614,7 +5694,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
         } else {
             match value_expr {
                 Expr::Getter(func_expr) => {
-                    if let Expr::Function(_params, body) = func_expr.as_ref() {
+                    if let Expr::Function(_name, _params, body) = func_expr.as_ref() {
                         // Check if property already exists
                         let pk = key_to_property_key(key);
                         let existing_opt = get_own_property(&obj, &pk);
@@ -5652,7 +5732,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr)>) -> R
                     }
                 }
                 Expr::Setter(func_expr) => {
-                    if let Expr::Function(params, body) = func_expr.as_ref() {
+                    if let Expr::Function(_name, params, body) = func_expr.as_ref() {
                         // Check if property already exists
                         let pk = key_to_property_key(key);
                         let existing_opt = get_own_property(&obj, &pk);

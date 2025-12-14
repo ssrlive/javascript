@@ -589,14 +589,14 @@ pub enum Value {
     Boolean(bool),
     Undefined,
     Null,
-    Object(JSObjectDataPtr),                                                              // Object with properties
-    Function(String),                                                                     // Function name
-    Closure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),           // parameters, body, captured environment
-    AsyncClosure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
-    GeneratorFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
-    ClassDefinition(Rc<ClassDefinition>),                                                 // Class definition
-    Getter(Vec<Statement>, JSObjectDataPtr),                                              // getter body, captured environment
-    Setter(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),            // setter parameter, body, captured environment
+    Object(JSObjectDataPtr),                                                         // Object with properties
+    Function(String),                                                                // Function name
+    Closure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
+    AsyncClosure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
+    GeneratorFunction(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // optional name, parameters, body, captured environment
+    ClassDefinition(Rc<ClassDefinition>),                                                                 // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr), // getter body, captured environment
+    Setter(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // setter parameter, body, captured environment
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
@@ -635,7 +635,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Function(_) => true,
         Value::Closure(_, _, _) => true,
         Value::AsyncClosure(_, _, _) => true,
-        Value::GeneratorFunction(_, _, _) => true,
+        Value::GeneratorFunction(..) => true,
         Value::ClassDefinition(_) => true,
         Value::Getter(_, _) => true,
         Value::Setter(_, _, _) => true,
@@ -724,7 +724,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Function(name) => format!("function {}", name),
         Value::Closure(_, _, _) => "function".to_string(),
         Value::AsyncClosure(_, _, _) => "function".to_string(),
-        Value::GeneratorFunction(_, _, _) => "function".to_string(),
+        Value::GeneratorFunction(..) => "function".to_string(),
         Value::ClassDefinition(_) => "class".to_string(),
         Value::Getter(_, _) => "getter".to_string(),
         Value::Setter(_, _, _) => "setter".to_string(),
@@ -754,13 +754,13 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<(String, Option<Bo
     match val {
         Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
         Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-        Value::GeneratorFunction(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+        Value::GeneratorFunction(_, params, body, env) => Some((params.clone(), body.clone(), env.clone())),
         Value::Object(obj_map) => {
             if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
                     Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
                     Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-                    Value::GeneratorFunction(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::GeneratorFunction(_, params, body, env) => Some((params.clone(), body.clone(), env.clone())),
                     _ => None,
                 }
             } else {
@@ -857,7 +857,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
-        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) | Value::GeneratorFunction(_, _, _) => "[function]".to_string(),
+        Value::Closure(..) | Value::AsyncClosure(..) | Value::GeneratorFunction(..) => "[function]".to_string(),
         Value::ClassDefinition(_) => "[class]".to_string(),
         Value::Getter(_, _) => "[getter]".to_string(),
         Value::Setter(_, _, _) => "[setter]".to_string(),
@@ -956,7 +956,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
             Statement::Return(Some(Expr::Object(vec![(
                 "next".to_string(),
-                Expr::Function(Vec::new(), next_body),
+                Expr::Function(None, Vec::new(), next_body),
             )]))),
         ];
         Value::Closure(Vec::new(), iter_body, captured_env)
@@ -1284,7 +1284,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
                         Statement::Return(Some(Expr::Object(vec![(
                             "next".to_string(),
-                            Expr::Function(Vec::new(), next_body),
+                            Expr::Function(None, Vec::new(), next_body),
                         )]))),
                     ];
 
@@ -1348,7 +1348,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
                         Statement::Return(Some(Expr::Object(vec![(
                             "next".to_string(),
-                            Expr::Function(Vec::new(), next_body),
+                            Expr::Function(None, Vec::new(), next_body),
                         )]))),
                     ];
 

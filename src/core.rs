@@ -311,31 +311,31 @@ pub enum Expr {
     Index(Box<Expr>, Box<Expr>),
     Property(Box<Expr>, String),
     Call(Box<Expr>, Vec<Expr>),
-    Function(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body
-    AsyncFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body for async functions
-    GeneratorFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body for generator functions
-    ArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body
-    AsyncArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body for async arrow functions
-    Object(Vec<(String, Expr)>),                                // object literal: key-value pairs
-    Array(Vec<Expr>),                                           // array literal: [elem1, elem2, ...]
-    Getter(Box<Expr>),                                          // getter function
-    Setter(Box<Expr>),                                          // setter function
-    Spread(Box<Expr>),                                          // spread operator: ...expr
-    OptionalProperty(Box<Expr>, String),                        // optional property access: obj?.prop
-    OptionalCall(Box<Expr>, Vec<Expr>),                         // optional call: obj?.method(args)
-    OptionalIndex(Box<Expr>, Box<Expr>),                        // optional bracket access: obj?.[expr]
-    Await(Box<Expr>),                                           // await expression
-    Yield(Option<Box<Expr>>),                                   // yield expression (optional value)
-    YieldStar(Box<Expr>),                                       // yield* expression (delegation)
-    This,                                                       // this keyword
-    New(Box<Expr>, Vec<Expr>),                                  // new expression: new Constructor(args)
-    Super,                                                      // super keyword
-    SuperCall(Vec<Expr>),                                       // super() call in constructor
-    SuperProperty(String),                                      // super.property access
-    SuperMethod(String, Vec<Expr>),                             // super.method() call
-    ArrayDestructuring(Vec<DestructuringElement>),              // array destructuring: [a, b, ...rest]
-    ObjectDestructuring(Vec<ObjectDestructuringElement>),       // object destructuring: {a, b: c, ...rest}
-    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),               // conditional expression: condition ? trueExpr : falseExpr
+    Function(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // optional name, parameters, body
+    AsyncFunction(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // optional name, parameters, body for async functions
+    GeneratorFunction(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // optional name, parameters, body for generator functions
+    ArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                     // parameters, body
+    AsyncArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                // parameters, body for async arrow functions
+    Object(Vec<(String, Expr)>),                                                         // object literal: key-value pairs
+    Array(Vec<Expr>),                                                                    // array literal: [elem1, elem2, ...]
+    Getter(Box<Expr>),                                                                   // getter function
+    Setter(Box<Expr>),                                                                   // setter function
+    Spread(Box<Expr>),                                                                   // spread operator: ...expr
+    OptionalProperty(Box<Expr>, String),                                                 // optional property access: obj?.prop
+    OptionalCall(Box<Expr>, Vec<Expr>),                                                  // optional call: obj?.method(args)
+    OptionalIndex(Box<Expr>, Box<Expr>),                                                 // optional bracket access: obj?.[expr]
+    Await(Box<Expr>),                                                                    // await expression
+    Yield(Option<Box<Expr>>),                                                            // yield expression (optional value)
+    YieldStar(Box<Expr>),                                                                // yield* expression (delegation)
+    This,                                                                                // this keyword
+    New(Box<Expr>, Vec<Expr>),                                                           // new expression: new Constructor(args)
+    Super,                                                                               // super keyword
+    SuperCall(Vec<Expr>),                                                                // super() call in constructor
+    SuperProperty(String),                                                               // super.property access
+    SuperMethod(String, Vec<Expr>),                                                      // super.method() call
+    ArrayDestructuring(Vec<DestructuringElement>),                                       // array destructuring: [a, b, ...rest]
+    ObjectDestructuring(Vec<ObjectDestructuringElement>),                                // object destructuring: {a, b: c, ...rest}
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>), // conditional expression: condition ? trueExpr : falseExpr
     /// Regular expression literal: pattern, flags
     Regex(String, String),
     /// Logical operators with short-circuit semantics

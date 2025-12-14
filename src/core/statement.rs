@@ -328,9 +328,9 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 }
                 tokens.remove(0); // consume }
                 let func_expr = if is_generator {
-                    Expr::GeneratorFunction(params, body)
+                    Expr::GeneratorFunction(None, params, body)
                 } else {
-                    Expr::Function(params, body)
+                    Expr::Function(None, params, body)
                 };
                 specifiers.push(ExportSpecifier::Default(func_expr));
             } else {
@@ -673,7 +673,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         return Err(raise_parse_error!());
                     }
                     tokens.remove(0); // consume }
-                    return Ok(Statement::Let(name, Some(Expr::AsyncFunction(params, body))));
+                    return Ok(Statement::Let(name.clone(), Some(Expr::AsyncFunction(Some(name), params, body))));
                 }
             }
         }

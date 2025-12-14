@@ -56,7 +56,7 @@ pub(crate) fn string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
             Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
             Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
             Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
-            Value::GeneratorFunction(_, _, _) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
+            Value::GeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
             Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
             Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
             Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),

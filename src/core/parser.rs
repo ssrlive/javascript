@@ -27,6 +27,11 @@ pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<(String, Option<B
         loop {
             if let Some(Token::Identifier(param)) = tokens.first().cloned() {
                 tokens.remove(0);
+                log::trace!(
+                    "parse_parameters: consumed identifier '{}', remaining (first 8): {:?}",
+                    param,
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 let mut default_expr: Option<Box<Expr>> = None;
                 // Support default initializers: identifier '=' expression
                 if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
@@ -53,6 +58,10 @@ pub fn parse_parameters(tokens: &mut Vec<Token>) -> Result<Vec<(String, Option<B
                     )));
                 }
                 tokens.remove(0); // consume ,
+                log::trace!(
+                    "parse_parameters: consumed comma, remaining (first 8): {:?}",
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
             } else {
                 return Err(raise_parse_error!(format!(
                     "Expected identifier in parameter list; next tokens: {:?}",
@@ -538,7 +547,8 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     if tokens.is_empty() {
         return Err(raise_parse_error!());
     }
-    let mut expr = match tokens.remove(0) {
+    let current = tokens.remove(0);
+    let mut expr = match current {
         Token::Number(n) => Expr::Number(n),
         Token::BigInt(s) => Expr::BigInt(s.clone()),
         Token::StringLit(s) => Expr::StringLit(s),
@@ -956,7 +966,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                                     return Err(raise_parse_error!());
                                 }
                                 tokens.remove(0); // consume '}'
-                                properties.push((key_str, Expr::Function(params, body)));
+                                properties.push((key_str, Expr::Function(None, params, body)));
                                 // After adding method, skip any newline/semicolons and handle comma/end in outer loop
                                 while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
                                     tokens.remove(0);
@@ -995,7 +1005,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                                 return Err(raise_parse_error!());
                             }
                             tokens.remove(0); // consume '}'
-                            properties.push((name, Expr::Function(params, body)));
+                            properties.push((name, Expr::Function(None, params, body)));
                             while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator | Token::Semicolon) {
                                 tokens.remove(0);
                             }
@@ -1119,9 +1129,9 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         tokens.remove(0); // consume }
 
                         if is_getter {
-                            properties.push((key, Expr::Getter(Box::new(Expr::Function(params, body)))));
+                            properties.push((key, Expr::Getter(Box::new(Expr::Function(None, params, body)))));
                         } else {
-                            properties.push((key, Expr::Setter(Box::new(Expr::Function(params, body)))));
+                            properties.push((key, Expr::Setter(Box::new(Expr::Function(None, params, body)))));
                         }
                     } else {
                         // Regular property: support both key: value and shorthand `key` forms.
@@ -1236,10 +1246,49 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             Expr::Array(elements)
         }
         Token::Function | Token::FunctionStar => {
-            let is_generator = matches!(tokens[0], Token::FunctionStar);
-            // Parse function expression
-            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
-                tokens.remove(0); // consume "("
+            let is_generator = matches!(current, Token::FunctionStar);
+            log::trace!(
+                "parse_primary: function expression, next tokens (first 8): {:?}",
+                tokens.iter().take(8).collect::<Vec<_>>()
+            );
+
+            // Optional name for named function expression. Only treat a
+            // following identifier as the function's name if it is followed
+            // (possibly after line terminators) by a '('. This avoids
+            // misinterpreting the first parameter as a name in the forgiving
+            // case where the '(' may have been consumed earlier.
+            let name = if !tokens.is_empty() {
+                if let Token::Identifier(n) = &tokens[0] {
+                    // Look ahead for next non-LineTerminator token
+                    let mut idx = 1usize;
+                    while idx < tokens.len() && matches!(tokens[idx], Token::LineTerminator) {
+                        idx += 1;
+                    }
+                    if idx < tokens.len() && matches!(tokens[idx], Token::LParen) {
+                        let name = n.clone();
+                        log::trace!("parse_primary: treating '{}' as function name", name);
+                        tokens.remove(0);
+                        Some(name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            // Now expect parameter list. Be forgiving if the '(' was consumed
+            // earlier; accept either an explicit '(' or start directly at an
+            // identifier (first parameter) or an immediate ')' for empty params.
+            if !tokens.is_empty() && (matches!(tokens[0], Token::LParen) || matches!(tokens[0], Token::Identifier(_))) {
+                if matches!(tokens[0], Token::LParen) {
+                    tokens.remove(0); // consume "("
+                }
+                log::trace!(
+                    "parse_primary: about to call parse_parameters; tokens (first 8): {:?}",
+                    tokens.iter().take(8).collect::<Vec<_>>()
+                );
                 let params = parse_parameters(tokens)?;
                 if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
                     return Err(raise_parse_error!());
@@ -1251,9 +1300,30 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                 }
                 tokens.remove(0); // consume }
                 if is_generator {
-                    Expr::GeneratorFunction(params, body)
+                    log::trace!("parse_primary: constructed GeneratorFunction name={:?} params={:?}", name, params);
+                    Expr::GeneratorFunction(name, params, body)
                 } else {
-                    Expr::Function(params, body)
+                    log::trace!("parse_primary: constructed Function name={:?} params={:?}", name, params);
+                    Expr::Function(name, params, body)
+                }
+            } else if !tokens.is_empty() && matches!(tokens[0], Token::RParen) {
+                // Defensive case: treat `) {` as an empty parameter list
+                tokens.remove(0); // consume ')'
+                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
+                    return Err(raise_parse_error!());
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statements(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
+                    return Err(raise_parse_error!());
+                }
+                tokens.remove(0); // consume }
+                if is_generator {
+                    log::trace!("parse_primary: constructed GeneratorFunction name={:?} params=Vec::new()", name);
+                    Expr::GeneratorFunction(name, Vec::new(), body)
+                } else {
+                    log::trace!("parse_primary: constructed Function name={:?} params=Vec::new()", name);
+                    Expr::Function(name, Vec::new(), body)
                 }
             } else {
                 return Err(raise_parse_error!());
@@ -1263,6 +1333,29 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
             // Check if followed by function or arrow function parameters
             if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
                 tokens.remove(0); // consume function
+                // Optional name for async function expressions (same rules as normal functions)
+                let name = if !tokens.is_empty() {
+                    if let Token::Identifier(n) = &tokens[0] {
+                        // Look ahead for next non-LineTerminator token
+                        let mut idx = 1usize;
+                        while idx < tokens.len() && matches!(tokens[idx], Token::LineTerminator) {
+                            idx += 1;
+                        }
+                        if idx < tokens.len() && matches!(tokens[idx], Token::LParen) {
+                            let name = n.clone();
+                            log::trace!("parse_primary: treating '{}' as async function name", name);
+                            tokens.remove(0);
+                            Some(name)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
                     tokens.remove(0); // consume "("
                     let params = parse_parameters(tokens)?;
@@ -1275,7 +1368,7 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
                         return Err(raise_parse_error!());
                     }
                     tokens.remove(0); // consume }
-                    Expr::AsyncFunction(params, body)
+                    Expr::AsyncFunction(name, params, body)
                 } else {
                     return Err(raise_parse_error!());
                 }

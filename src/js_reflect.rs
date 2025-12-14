@@ -175,7 +175,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // script-defined function stored as an object.
                     if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
-                            Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => {
+                            Value::Closure(params, body, captured_env) => {
                                 // Evaluate argument expressions to Values
                                 let mut evaluated_args: Vec<Value> = Vec::new();
                                 for ae in &arg_exprs {
@@ -204,6 +204,53 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
                                 // Execute function body
                                 return crate::core::evaluate_statements(&func_env, body);
+                            }
+                            Value::AsyncClosure(params, body, captured_env) => {
+                                // Evaluate argument expressions to Values
+                                let mut evaluated_args: Vec<Value> = Vec::new();
+                                for ae in &arg_exprs {
+                                    evaluated_args.push(evaluate_expr(env, ae)?);
+                                }
+
+                                // Create promise and wrapper object
+                                let promise = Rc::new(RefCell::new(crate::js_promise::JSPromise::default()));
+                                let promise_obj = Value::Object(new_js_object_data());
+                                if let Value::Object(obj) = &promise_obj {
+                                    obj.borrow_mut()
+                                        .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                                }
+
+                                // Prepare function environment and bind `this`
+                                let func_env = new_js_object_data();
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                func_env.borrow_mut().is_function_scope = true;
+                                crate::core::env_set(&func_env, "this", this_arg)?;
+
+                                // Bind parameters
+                                for (i, param) in params.iter().enumerate() {
+                                    let (name, default_expr_opt) = param;
+                                    let val = if i < evaluated_args.len() {
+                                        evaluated_args[i].clone()
+                                    } else if let Some(expr) = default_expr_opt {
+                                        crate::core::evaluate_expr(&func_env, expr)?
+                                    } else {
+                                        Value::Undefined
+                                    };
+                                    crate::core::env_set(&func_env, name.as_str(), val)?;
+                                }
+
+                                // Execute function body and resolve/reject promise
+                                let result = crate::core::evaluate_statements(&func_env, body);
+                                match result {
+                                    Ok(val) => {
+                                        promise.borrow_mut().state = crate::js_promise::PromiseState::Fulfilled(val);
+                                    }
+                                    Err(e) => {
+                                        promise.borrow_mut().state =
+                                            crate::js_promise::PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
+                                    }
+                                }
+                                return Ok(promise_obj);
                             }
                             _ => {
                                 // Not callable - fall through to generic error below

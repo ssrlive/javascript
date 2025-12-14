@@ -783,7 +783,11 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                 }
             }
         } else {
-            result.push(chars[*start] as u16);
+            // Properly encode Unicode scalar values into UTF-16 code units
+            let ch = chars[*start];
+            for code_unit in ch.to_string().encode_utf16() {
+                result.push(code_unit);
+            }
         }
         *start += 1;
     }

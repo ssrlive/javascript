@@ -120,6 +120,47 @@ where
     Ok(v)
 }
 
+/// Read a script file from disk and decode it into a UTF-8 Rust `String`.
+/// Supports UTF-8 (with optional BOM) and UTF-16 (LE/BE) with BOM.
+pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JSError> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|e| raise_eval_error!(format!("Failed to read script file '{}': {e}", path.display())))?;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        let s = std::str::from_utf8(&bytes[3..]).map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))?;
+        return Ok(s.to_string());
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16LE
+        if (bytes.len() - 2) % 2 != 0 {
+            return Err(raise_eval_error!("Invalid UTF-16LE script file length"));
+        }
+        let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
+        for chunk in bytes[2..].chunks(2) {
+            let lo = chunk[0] as u16;
+            let hi = chunk[1] as u16;
+            u16s.push((hi << 8) | lo);
+        }
+        return String::from_utf16(&u16s).map_err(|e| raise_eval_error!(format!("Invalid UTF-16LE script file contents: {e}")));
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        // UTF-16BE
+        if (bytes.len() - 2) % 2 != 0 {
+            return Err(raise_eval_error!("Invalid UTF-16BE script file length"));
+        }
+        let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
+        for chunk in bytes[2..].chunks(2) {
+            let hi = chunk[0] as u16;
+            let lo = chunk[1] as u16;
+            u16s.push((hi << 8) | lo);
+        }
+        return String::from_utf16(&u16s).map_err(|e| raise_eval_error!(format!("Invalid UTF-16BE script file contents: {e}")));
+    }
+    // Otherwise assume UTF-8 without BOM
+    std::str::from_utf8(&bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))
+}
+
 // Helper to ensure a constructor-like object exists in the root env.
 // Creates an object, marks it with `marker_key` (e.g. "__is_string_constructor")
 // creates an empty `prototype` object whose internal prototype points to

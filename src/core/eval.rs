@@ -23,7 +23,7 @@ use crate::{
     obj_get_key_value, raise_eval_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
-    unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_to_utf8},
+    unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_slice, utf16_to_utf8},
 };
 use num_bigint::BigInt;
 use num_traits::ToPrimitive;
@@ -1925,9 +1925,63 @@ fn for_of_destructuring_array_iter(
                                         } else {
                                             return Err(raise_eval_error!("Iterator next() did not return an object"));
                                         }
-                                    } else if let Value::Function(_func_name) = &next_func {
-                                        // Built-in next handling not implemented
-                                        return Err(raise_eval_error!("Iterator next function not implemented"));
+                                    } else if let Value::Function(func_name) = &next_func {
+                                        // Built-in next handling: call the registered global function
+                                        // Bind `this` to the iterator object so native helper can access iterator state
+                                        let call_env = new_js_object_data();
+                                        call_env.borrow_mut().prototype = Some(env.clone());
+                                        obj_set_key_value(&call_env, &"this".into(), Value::Object(iterator_obj.clone()))?;
+                                        let next_result = crate::js_function::handle_global_function(func_name, &[], &call_env)?;
+                                        // next_result should be an object with { value, done }
+                                        if let Value::Object(result_obj) = next_result {
+                                            // Check if done
+                                            if let Some(done_val) = obj_get_key_value(&result_obj, &"done".into())?
+                                                && let Value::Boolean(true) = *done_val.borrow()
+                                            {
+                                                break; // Iteration complete
+                                            }
+
+                                            // Get value
+                                            if let Some(value_val) = obj_get_key_value(&result_obj, &"value".into())? {
+                                                let element = value_val.borrow().clone();
+                                                // perform array destructuring into env (var semantics)
+                                                perform_array_destructuring(env, pattern, &element, false)?;
+                                                let block_env = new_js_object_data();
+                                                block_env.borrow_mut().prototype = Some(env.clone());
+                                                block_env.borrow_mut().is_function_scope = false;
+                                                match evaluate_statements_with_context(&block_env, body)? {
+                                                    ControlFlow::Normal(val) => *last_value = val,
+                                                    ControlFlow::Break(None) => break,
+                                                    ControlFlow::Break(Some(lbl)) => {
+                                                        if let Some(ln) = label_name {
+                                                            if lbl == ln {
+                                                                break;
+                                                            } else {
+                                                                return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                            }
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
+                                                        }
+                                                    }
+                                                    ControlFlow::Continue(None) => {}
+                                                    ControlFlow::Continue(Some(lbl)) => {
+                                                        if let Some(ln) = label_name {
+                                                            if lbl == ln {
+                                                                continue;
+                                                            } else {
+                                                                return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                            }
+                                                        } else {
+                                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                                                        }
+                                                    }
+                                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                                }
+                                                continue;
+                                            }
+                                        } else {
+                                            return Err(raise_eval_error!("Iterator next() did not return an object"));
+                                        }
                                     } else {
                                         return Err(raise_eval_error!("Iterator next is not a function"));
                                     }
@@ -2015,8 +2069,11 @@ fn statement_for_of_var_iter(
                                 let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                 evaluate_statements(&func_env, &body)?
                             } else if let Value::Function(func_name) = method_val {
-                                // Call built-in function (no arguments)
-                                crate::js_function::handle_global_function(func_name, &[], env)?
+                                // Call built-in function (no arguments). Bind `this` to the receiver object.
+                                let call_env = new_js_object_data();
+                                call_env.borrow_mut().prototype = Some(env.clone());
+                                obj_set_key_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                                crate::js_function::handle_global_function(func_name, &[], &call_env)?
                             } else if let Value::Object(iter_obj) = method_val {
                                 Value::Object(iter_obj.clone())
                             } else {
@@ -2107,10 +2164,20 @@ fn statement_for_of_var_iter(
             }
         }
         Value::String(s) => {
-            // Iterate over UTF-16 units in the string
+            // Iterate over Unicode code points (surrogate-aware)
             let mut i = 0usize;
-            while let Some(ch) = utf16_char_at(&s, i) {
-                env_set_recursive(env, var, Value::String(vec![ch]))?;
+            while let Some(first) = utf16_char_at(&s, i) {
+                // Determine chunk: either a surrogate pair (2 code units) or single code unit
+                let chunk: Vec<u16> = if (0xD800..=0xDBFF).contains(&first)
+                    && let Some(second) = utf16_char_at(&s, i + 1)
+                    && (0xDC00..=0xDFFF).contains(&second)
+                {
+                    utf16_slice(&s, i, i + 2)
+                } else {
+                    vec![first]
+                };
+
+                env_set_recursive(env, var, Value::String(chunk.clone()))?;
                 let block_env = new_js_object_data();
                 block_env.borrow_mut().prototype = Some(env.clone());
                 block_env.borrow_mut().is_function_scope = false;
@@ -2122,7 +2189,7 @@ fn statement_for_of_var_iter(
                     ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
                     ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                 }
-                i += 1;
+                i += chunk.len();
             }
             Ok(None)
         }
@@ -4586,6 +4653,11 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
 
 fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
+    if let Expr::Property(_, method) = func_expr {
+        log::trace!("evaluate_call property method={}", method);
+    } else {
+        log::trace!("evaluate_call non-property call");
+    }
 
     // Special case for dynamic import: import("module")
     if let Expr::Var(func_name) = func_expr

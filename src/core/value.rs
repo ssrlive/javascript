@@ -948,6 +948,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
     // No own or inherited property found, fall back to special-case handling
     // (well-known symbol fallbacks, array/string iterator helpers, etc.).
 
+    // Helper: build an iterator closure given the `next` function body and a
+    // captured environment. This avoids duplicating the common pattern:
+    //   function() { let __i = 0; return { next: function() { ... } } }
+    fn make_iterator_closure(next_body: Vec<Statement>, captured_env: JSObjectDataPtr) -> Value {
+        let iter_body = vec![
+            Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
+            Statement::Return(Some(Expr::Object(vec![(
+                "next".to_string(),
+                Expr::Function(Vec::new(), next_body),
+            )]))),
+        ];
+        Value::Closure(Vec::new(), iter_body, captured_env)
+    }
+
     // Provide default well-known symbol fallbacks (non-own) for some built-ins.
     if let PropertyKey::Symbol(sym_rc) = key {
         // Support default Symbol.iterator for built-ins like Array and wrapped String objects.
@@ -994,20 +1008,12 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     ),
                 ];
 
-                let arr_iter_body = vec![
-                    Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                    Statement::Return(Some(Expr::Object(vec![(
-                        "next".to_string(),
-                        Expr::Function(Vec::new(), next_body),
-                    )]))),
-                ];
-
                 let captured_env = new_js_object_data();
                 captured_env.borrow_mut().insert(
                     PropertyKey::String("__array".to_string()),
                     Rc::new(RefCell::new(Value::Object(js_obj.clone()))),
                 );
-                let closure = Value::Closure(Vec::new(), arr_iter_body, captured_env.clone());
+                let closure = make_iterator_closure(next_body, captured_env.clone());
                 return Ok(Some(Rc::new(RefCell::new(closure))));
             }
 
@@ -1066,14 +1072,6 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         ),
                     ];
 
-                    let map_iter_body = vec![
-                        Statement::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0)))),
-                        Statement::Return(Some(Expr::Object(vec![(
-                            "next".to_string(),
-                            Expr::Function(Vec::new(), next_body),
-                        )]))),
-                    ];
-
                     let captured_env = new_js_object_data();
                     // Store map entries in the closure environment
                     let mut entries_obj = JSObjectData::new();
@@ -1091,7 +1089,151 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(entries_obj))))),
                     );
 
-                    let closure = Value::Closure(Vec::new(), map_iter_body, captured_env.clone());
+                    let closure = make_iterator_closure(next_body, captured_env.clone());
+                    return Ok(Some(Rc::new(RefCell::new(closure))));
+                }
+            }
+
+            // String default iterator
+            if let Some(val_rc) = get_own_property(js_obj, &"__value__".into()) {
+                if let Value::String(s) = &*val_rc.borrow() {
+                    // next function body for string iteration (returns whole Unicode characters)
+                    let next_body = vec![
+                        Statement::Let("idx".to_string(), Some(Expr::Var("__i".to_string()))),
+                        // if idx < __str.length then proceed
+                        Statement::If(
+                            Expr::Binary(
+                                Box::new(Expr::Var("idx".to_string())),
+                                BinaryOp::LessThan,
+                                Box::new(Expr::Property(Box::new(Expr::Var("__str".to_string())), "length".to_string())),
+                            ),
+                            vec![
+                                // first = __str.charCodeAt(idx)
+                                Statement::Let(
+                                    "first".to_string(),
+                                    Some(Expr::Call(
+                                        Box::new(Expr::Property(Box::new(Expr::Var("__str".to_string())), "charCodeAt".to_string())),
+                                        vec![Expr::Var("idx".to_string())],
+                                    )),
+                                ),
+                                // if first is high surrogate (>=0xD800 && <=0xDBFF)
+                                Statement::If(
+                                    Expr::LogicalAnd(
+                                        Box::new(Expr::Binary(
+                                            Box::new(Expr::Var("first".to_string())),
+                                            BinaryOp::GreaterEqual,
+                                            Box::new(Expr::Value(Value::Number(0xD800 as f64))),
+                                        )),
+                                        Box::new(Expr::Binary(
+                                            Box::new(Expr::Var("first".to_string())),
+                                            BinaryOp::LessEqual,
+                                            Box::new(Expr::Value(Value::Number(0xDBFF as f64))),
+                                        )),
+                                    ),
+                                    vec![
+                                        // second = __str.charCodeAt(idx + 1)
+                                        Statement::Let(
+                                            "second".to_string(),
+                                            Some(Expr::Call(
+                                                Box::new(Expr::Property(
+                                                    Box::new(Expr::Var("__str".to_string())),
+                                                    "charCodeAt".to_string(),
+                                                )),
+                                                vec![Expr::Binary(
+                                                    Box::new(Expr::Var("idx".to_string())),
+                                                    BinaryOp::Add,
+                                                    Box::new(Expr::Value(Value::Number(1.0))),
+                                                )],
+                                            )),
+                                        ),
+                                        // if second is low surrogate (>=0xDC00 && <=0xDFFF)
+                                        Statement::If(
+                                            Expr::LogicalAnd(
+                                                Box::new(Expr::Binary(
+                                                    Box::new(Expr::Var("second".to_string())),
+                                                    BinaryOp::GreaterEqual,
+                                                    Box::new(Expr::Value(Value::Number(0xDC00 as f64))),
+                                                )),
+                                                Box::new(Expr::Binary(
+                                                    Box::new(Expr::Var("second".to_string())),
+                                                    BinaryOp::LessEqual,
+                                                    Box::new(Expr::Value(Value::Number(0xDFFF as f64))),
+                                                )),
+                                            ),
+                                            vec![
+                                                // ch = __str.substring(idx, idx+2)
+                                                Statement::Let(
+                                                    "ch".to_string(),
+                                                    Some(Expr::Call(
+                                                        Box::new(Expr::Property(
+                                                            Box::new(Expr::Var("__str".to_string())),
+                                                            "substring".to_string(),
+                                                        )),
+                                                        vec![
+                                                            Expr::Var("idx".to_string()),
+                                                            Expr::Binary(
+                                                                Box::new(Expr::Var("idx".to_string())),
+                                                                BinaryOp::Add,
+                                                                Box::new(Expr::Value(Value::Number(2.0))),
+                                                            ),
+                                                        ],
+                                                    )),
+                                                ),
+                                                // __i = idx + 2
+                                                Statement::Expr(Expr::Assign(
+                                                    Box::new(Expr::Var("__i".to_string())),
+                                                    Box::new(Expr::Binary(
+                                                        Box::new(Expr::Var("idx".to_string())),
+                                                        BinaryOp::Add,
+                                                        Box::new(Expr::Value(Value::Number(2.0))),
+                                                    )),
+                                                )),
+                                                Statement::Return(Some(Expr::Object(vec![
+                                                    ("value".to_string(), Expr::Var("ch".to_string())),
+                                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                                ]))),
+                                            ],
+                                            // else: fallthrough to single-unit char
+                                            None,
+                                        ),
+                                    ],
+                                    // else: fallthrough to single-unit char
+                                    None,
+                                ),
+                                // Single-unit char fallback: ch = __str.charAt(idx)
+                                Statement::Let(
+                                    "ch".to_string(),
+                                    Some(Expr::Call(
+                                        Box::new(Expr::Property(Box::new(Expr::Var("__str".to_string())), "charAt".to_string())),
+                                        vec![Expr::Var("idx".to_string())],
+                                    )),
+                                ),
+                                Statement::Expr(Expr::Assign(
+                                    Box::new(Expr::Var("__i".to_string())),
+                                    Box::new(Expr::Binary(
+                                        Box::new(Expr::Var("idx".to_string())),
+                                        BinaryOp::Add,
+                                        Box::new(Expr::Value(Value::Number(1.0))),
+                                    )),
+                                )),
+                                Statement::Return(Some(Expr::Object(vec![
+                                    ("value".to_string(), Expr::Var("ch".to_string())),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ]))),
+                            ],
+                            Some(vec![Statement::Return(Some(Expr::Object(vec![(
+                                "done".to_string(),
+                                Expr::Value(Value::Boolean(true)),
+                            )])))]),
+                        ),
+                    ];
+
+                    let captured_env = new_js_object_data();
+                    captured_env.borrow_mut().insert(
+                        PropertyKey::String("__str".to_string()),
+                        Rc::new(RefCell::new(Value::String(s.clone()))),
+                    );
+                    let closure = make_iterator_closure(next_body, captured_env.clone());
                     return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
             }

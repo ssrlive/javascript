@@ -39,6 +39,6 @@ pub use core::{
     JSObjectData, Token, initialize_global_constructors, parse_expression, parse_object_destructuring_pattern, parse_statement,
     parse_statements,
 };
-pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, tokenize};
+pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, read_script_file, tokenize};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;

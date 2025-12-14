@@ -20,15 +20,13 @@ fn main() {
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
 
-    let script_content: Option<String>;
-
-    if let Some(script) = cli.eval {
-        script_content = Some(script);
+    let script_content = if let Some(script) = cli.eval {
+        script
     } else if let Some(ref file) = cli.file {
-        match std::fs::read_to_string(file) {
-            Ok(content) => script_content = Some(content),
+        match read_script_file(file) {
+            Ok(content) => content,
             Err(e) => {
-                eprintln!("Error reading file {}: {}", file.display(), e);
+                eprintln!("Error reading file {}: {}", file.display(), e.user_message());
                 process::exit(1);
             }
         }
@@ -36,19 +34,17 @@ fn main() {
         // No script argument -> start the interactive, persistent REPL
         run_persistent_repl();
         return;
-    }
+    };
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
-    if let Some(script) = script_content {
-        match evaluate_script(script, cli.file.as_ref()) {
-            Ok(result) => println!("{result}"),
-            Err(err) => {
-                eprintln!("{}", err.user_message());
-                if let Some(file_path) = cli.file.as_ref() {
-                    eprintln!("  in file: {}", file_path.display());
-                }
-                process::exit(1);
+    match evaluate_script(script_content, cli.file.as_ref()) {
+        Ok(result) => println!("{result}"),
+        Err(err) => {
+            eprintln!("{}", err.user_message());
+            if let Some(file_path) = cli.file.as_ref() {
+                eprintln!("  in file: {}", file_path.display());
             }
+            process::exit(1);
         }
     }
 }

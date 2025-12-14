@@ -50,8 +50,7 @@ fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<V
     let module_path = resolve_module_path(module_name, base_path)?;
 
     // Read the file
-    let content =
-        std::fs::read_to_string(&module_path).map_err(|e| raise_eval_error!(format!("Failed to read module file '{module_path}': {e}")))?;
+    let content = crate::core::read_script_file(&module_path)?;
 
     // Execute the module and get the final module value
     execute_module(&content, &module_path)

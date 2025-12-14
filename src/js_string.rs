@@ -17,33 +17,12 @@ use regex::Regex as StdRegex;
 
 pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
-        "toString" => {
-            if args.is_empty() {
-                Ok(Value::String(s.to_vec()))
-            } else {
-                let msg = format!("toString method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
+        "toString" => string_to_string_method(s, args, env),
         "substring" => string_substring_method(s, args, env),
         "substr" => string_substr_method(s, args, env),
         "slice" => string_slice_method(s, args, env),
-        "toUpperCase" => {
-            if args.is_empty() {
-                Ok(Value::String(utf16_to_uppercase(s)))
-            } else {
-                let msg = format!("toUpperCase method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
-        "toLowerCase" => {
-            if args.is_empty() {
-                Ok(Value::String(utf16_to_lowercase(s)))
-            } else {
-                let msg = format!("toLowerCase method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
+        "toUpperCase" => string_to_uppercase(s, args, env),
+        "toLowerCase" => string_to_lowercase(s, args, env),
         "indexOf" => string_indexof_method(s, args, env),
         "lastIndexOf" => string_lastindexof_method(s, args, env),
         "replace" => string_replace_method(s, args, env),
@@ -51,178 +30,26 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
         "match" => string_match_method(s, args, env),
         "charAt" => string_charat_method(s, args, env),
         "charCodeAt" => string_char_code_at_method(s, args, env),
-        "trim" => {
-            if args.is_empty() {
-                let str_val = String::from_utf16_lossy(s);
-                let trimmed = str_val.trim();
-                Ok(Value::String(utf8_to_utf16(trimmed)))
-            } else {
-                Err(raise_eval_error!(format!("trim method expects no arguments, got {}", args.len())))
-            }
-        }
-        "trimEnd" => {
-            if args.is_empty() {
-                let str_val = String::from_utf16_lossy(s);
-                let trimmed = str_val.trim_end();
-                Ok(Value::String(utf8_to_utf16(trimmed)))
-            } else {
-                let msg = format!("trimEnd method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
-        "trimStart" => {
-            if args.is_empty() {
-                let str_val = String::from_utf16_lossy(s);
-                let trimmed = str_val.trim_start();
-                Ok(Value::String(utf8_to_utf16(trimmed)))
-            } else {
-                let msg = format!("trimStart method expects no arguments, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
-        "startsWith" => {
-            if args.len() == 1 {
-                let search_val = evaluate_expr(env, &args[0])?;
-                if let Value::String(search) = search_val {
-                    let starts = s.len() >= search.len() && s[..search.len()] == search[..];
-                    Ok(Value::Boolean(starts))
-                } else {
-                    Err(raise_eval_error!("startsWith: argument must be a string"))
-                }
-            } else {
-                let msg = format!("startsWith method expects 1 argument, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
-        "endsWith" => {
-            if args.len() == 1 {
-                let search_val = evaluate_expr(env, &args[0])?;
-                if let Value::String(search) = search_val {
-                    let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
-                    Ok(Value::Boolean(ends))
-                } else {
-                    Err(raise_eval_error!("endsWith: argument must be a string"))
-                }
-            } else {
-                Err(raise_eval_error!(format!("endsWith method expects 1 argument, got {}", args.len())))
-            }
-        }
-        "includes" => {
-            if args.len() == 1 {
-                let search_val = evaluate_expr(env, &args[0])?;
-                if let Value::String(search) = search_val {
-                    let includes = utf16_find(s, &search).is_some();
-                    Ok(Value::Boolean(includes))
-                } else {
-                    Err(raise_eval_error!("includes: argument must be a string"))
-                }
-            } else {
-                Err(raise_eval_error!(format!("includes method expects 1 argument, got {}", args.len())))
-            }
-        }
-        "repeat" => {
-            if args.len() == 1 {
-                let count_val = evaluate_expr(env, &args[0])?;
-                if let Value::Number(n) = count_val {
-                    let count = n as usize;
-                    let mut repeated = Vec::new();
-                    for _ in 0..count {
-                        repeated.extend_from_slice(s);
-                    }
-                    Ok(Value::String(repeated))
-                } else {
-                    Err(raise_eval_error!("repeat: argument must be a number"))
-                }
-            } else {
-                Err(raise_eval_error!(format!("repeat method expects 1 argument, got {}", args.len())))
-            }
-        }
-        "concat" => {
-            let mut result = s.to_vec();
-            for arg in args {
-                let arg_val = evaluate_expr(env, arg)?;
-                if let Value::String(arg_str) = arg_val {
-                    result.extend(arg_str);
-                } else {
-                    // Convert to string
-                    let str_val = match arg_val {
-                        Value::Number(n) => utf8_to_utf16(&n.to_string()),
-                        Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
-                        Value::Undefined => utf8_to_utf16("undefined"),
-                        _ => utf8_to_utf16("[object Object]"),
-                    };
-                    result.extend(str_val);
-                }
-            }
-            Ok(Value::String(result))
-        }
-        "padStart" => {
-            if !args.is_empty() {
-                let target_len_val = evaluate_expr(env, &args[0])?;
-                if let Value::Number(target_len) = target_len_val {
-                    let target_len = target_len as usize;
-                    let current_len = utf16_len(s);
-                    if current_len >= target_len {
-                        Ok(Value::String(s.to_vec()))
-                    } else {
-                        let pad_char = if args.len() >= 2 {
-                            let pad_val = evaluate_expr(env, &args[1])?;
-                            if let Value::String(pad_str) = pad_val {
-                                if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
-                            } else {
-                                ' ' as u16
-                            }
-                        } else {
-                            ' ' as u16
-                        };
-                        let pad_count = target_len - current_len;
-                        let mut padded = vec![pad_char; pad_count];
-                        padded.extend_from_slice(s);
-                        Ok(Value::String(padded))
-                    }
-                } else {
-                    Err(raise_eval_error!("padStart: first argument must be a number"))
-                }
-            } else {
-                let msg = format!("padStart method expects at least 1 argument, got {}", args.len());
-                Err(raise_eval_error!(msg))
-            }
-        }
-        "padEnd" => {
-            if !args.is_empty() {
-                let target_len_val = evaluate_expr(env, &args[0])?;
-                if let Value::Number(target_len) = target_len_val {
-                    let target_len = target_len as usize;
-                    let current_len = utf16_len(s);
-                    if current_len >= target_len {
-                        Ok(Value::String(s.to_vec()))
-                    } else {
-                        let pad_char = if args.len() >= 2 {
-                            let pad_val = evaluate_expr(env, &args[1])?;
-                            if let Value::String(pad_str) = pad_val {
-                                if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
-                            } else {
-                                ' ' as u16
-                            }
-                        } else {
-                            ' ' as u16
-                        };
-                        let pad_count = target_len - current_len;
-                        let mut padded = s.to_vec();
-                        padded.extend(vec![pad_char; pad_count]);
-                        Ok(Value::String(padded))
-                    }
-                } else {
-                    Err(raise_eval_error!("padEnd: first argument must be a number"))
-                }
-            } else {
-                Err(raise_eval_error!(format!(
-                    "padEnd method expects at least 1 argument, got {}",
-                    args.len()
-                )))
-            }
-        }
+        "trim" => string_trim_method(s, args, env),
+        "trimEnd" => string_trim_end_method(s, args, env),
+        "trimStart" => string_trim_start_method(s, args, env),
+        "startsWith" => string_starts_with_method(s, args, env),
+        "endsWith" => string_ends_with_method(s, args, env),
+        "includes" => string_includes_method(s, args, env),
+        "repeat" => string_repeat_method(s, args, env),
+        "concat" => string_concat_method(s, args, env),
+        "padStart" => string_pad_start_method(s, args, env),
+        "padEnd" => string_pad_end_method(s, args, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}"))), // method not found
+    }
+}
+
+fn string_to_string_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        Ok(Value::String(s.to_vec()))
+    } else {
+        let msg = format!("toString method expects no arguments, got {}", args.len());
+        Err(raise_eval_error!(msg))
     }
 }
 
@@ -335,6 +162,24 @@ fn string_slice_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
         Ok(Value::String(utf16_slice(s, start, end)))
     } else {
         Ok(Value::String(Vec::new()))
+    }
+}
+
+fn string_to_uppercase(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        Ok(Value::String(utf16_to_uppercase(s)))
+    } else {
+        let msg = format!("toUpperCase method expects no arguments, got {}", args.len());
+        Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_to_lowercase(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        Ok(Value::String(utf16_to_lowercase(s)))
+    } else {
+        let msg = format!("toLowerCase method expects no arguments, got {}", args.len());
+        Err(raise_eval_error!(msg))
     }
 }
 
@@ -965,5 +810,186 @@ fn string_char_code_at_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -
     } else {
         let msg = format!("charCodeAt method expects 1 argument, got {}", args.len());
         Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_trim_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        let str_val = String::from_utf16_lossy(s);
+        let trimmed = str_val.trim();
+        Ok(Value::String(utf8_to_utf16(trimmed)))
+    } else {
+        Err(raise_eval_error!(format!("trim method expects no arguments, got {}", args.len())))
+    }
+}
+
+fn string_trim_end_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        let str_val = String::from_utf16_lossy(s);
+        let trimmed = str_val.trim_end();
+        Ok(Value::String(utf8_to_utf16(trimmed)))
+    } else {
+        let msg = format!("trimEnd method expects no arguments, got {}", args.len());
+        Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_trim_start_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        let str_val = String::from_utf16_lossy(s);
+        let trimmed = str_val.trim_start();
+        Ok(Value::String(utf8_to_utf16(trimmed)))
+    } else {
+        let msg = format!("trimStart method expects no arguments, got {}", args.len());
+        Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_starts_with_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.len() == 1 {
+        let search_val = evaluate_expr(env, &args[0])?;
+        if let Value::String(search) = search_val {
+            let starts = s.len() >= search.len() && s[..search.len()] == search[..];
+            Ok(Value::Boolean(starts))
+        } else {
+            Err(raise_eval_error!("startsWith: argument must be a string"))
+        }
+    } else {
+        let msg = format!("startsWith method expects 1 argument, got {}", args.len());
+        Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_ends_with_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.len() == 1 {
+        let search_val = evaluate_expr(env, &args[0])?;
+        if let Value::String(search) = search_val {
+            let ends = s.len() >= search.len() && s[s.len() - search.len()..] == search[..];
+            Ok(Value::Boolean(ends))
+        } else {
+            Err(raise_eval_error!("endsWith: argument must be a string"))
+        }
+    } else {
+        Err(raise_eval_error!(format!("endsWith method expects 1 argument, got {}", args.len())))
+    }
+}
+
+fn string_includes_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.len() == 1 {
+        let search_val = evaluate_expr(env, &args[0])?;
+        if let Value::String(search) = search_val {
+            let includes = utf16_find(s, &search).is_some();
+            Ok(Value::Boolean(includes))
+        } else {
+            Err(raise_eval_error!("includes: argument must be a string"))
+        }
+    } else {
+        Err(raise_eval_error!(format!("includes method expects 1 argument, got {}", args.len())))
+    }
+}
+
+fn string_repeat_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.len() == 1 {
+        let count_val = evaluate_expr(env, &args[0])?;
+        if let Value::Number(n) = count_val {
+            let count = n as usize;
+            let mut repeated = Vec::new();
+            for _ in 0..count {
+                repeated.extend_from_slice(s);
+            }
+            Ok(Value::String(repeated))
+        } else {
+            Err(raise_eval_error!("repeat: argument must be a number"))
+        }
+    } else {
+        Err(raise_eval_error!(format!("repeat method expects 1 argument, got {}", args.len())))
+    }
+}
+
+fn string_concat_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let mut result = s.to_vec();
+    for arg in args {
+        let arg_val = evaluate_expr(env, arg)?;
+        if let Value::String(arg_str) = arg_val {
+            result.extend(arg_str);
+        } else {
+            // Convert to string
+            let str_val = match arg_val {
+                Value::Number(n) => utf8_to_utf16(&n.to_string()),
+                Value::Boolean(b) => utf8_to_utf16(&b.to_string()),
+                Value::Undefined => utf8_to_utf16("undefined"),
+                _ => utf8_to_utf16("[object Object]"),
+            };
+            result.extend(str_val);
+        }
+    }
+    Ok(Value::String(result))
+}
+
+fn string_pad_start_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if !args.is_empty() {
+        let target_len_val = evaluate_expr(env, &args[0])?;
+        if let Value::Number(target_len) = target_len_val {
+            let target_len = target_len as usize;
+            let current_len = utf16_len(s);
+            if current_len >= target_len {
+                Ok(Value::String(s.to_vec()))
+            } else {
+                let pad_char = if args.len() >= 2 {
+                    let pad_val = evaluate_expr(env, &args[1])?;
+                    if let Value::String(pad_str) = pad_val {
+                        if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
+                    } else {
+                        ' ' as u16
+                    }
+                } else {
+                    ' ' as u16
+                };
+                let pad_count = target_len - current_len;
+                let mut padded = vec![pad_char; pad_count];
+                padded.extend_from_slice(s);
+                Ok(Value::String(padded))
+            }
+        } else {
+            Err(raise_eval_error!("padStart: first argument must be a number"))
+        }
+    } else {
+        let msg = format!("padStart method expects at least 1 argument, got {}", args.len());
+        Err(raise_eval_error!(msg))
+    }
+}
+
+fn string_pad_end_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if !args.is_empty() {
+        let target_len_val = evaluate_expr(env, &args[0])?;
+        if let Value::Number(target_len) = target_len_val {
+            let target_len = target_len as usize;
+            let current_len = utf16_len(s);
+            if current_len >= target_len {
+                Ok(Value::String(s.to_vec()))
+            } else {
+                let pad_char = if args.len() >= 2 {
+                    let pad_val = evaluate_expr(env, &args[1])?;
+                    if let Value::String(pad_str) = pad_val {
+                        if !pad_str.is_empty() { pad_str[0] } else { ' ' as u16 }
+                    } else {
+                        ' ' as u16
+                    }
+                } else {
+                    ' ' as u16
+                };
+                let pad_count = target_len - current_len;
+                let mut padded = s.to_vec();
+                padded.extend(vec![pad_char; pad_count]);
+                Ok(Value::String(padded))
+            }
+        } else {
+            Err(raise_eval_error!("padEnd: first argument must be a number"))
+        }
+    } else {
+        Err(raise_eval_error!(format!(
+            "padEnd method expects at least 1 argument, got {}",
+            args.len()
+        )))
     }
 }

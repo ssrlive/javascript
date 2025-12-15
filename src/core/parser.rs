@@ -4,6 +4,28 @@ use crate::{
     raise_parse_error,
 };
 
+// Helper: Generic binary operator parser for left-associative operators
+fn parse_binary_op<F, M>(tokens: &mut Vec<Token>, parse_next_level: F, op_mapper: M) -> Result<Expr, JSError>
+where
+    F: Fn(&mut Vec<Token>) -> Result<Expr, JSError>,
+    M: Fn(&Token) -> Option<BinaryOp>,
+{
+    let mut left = parse_next_level(tokens)?;
+    loop {
+        if tokens.is_empty() {
+            break;
+        }
+        if let Some(op) = op_mapper(&tokens[0]) {
+            tokens.remove(0);
+            let right = parse_next_level(tokens)?;
+            left = Expr::Binary(Box::new(left), op, Box::new(right));
+        } else {
+            break;
+        }
+    }
+    Ok(left)
+}
+
 // Helper: Flatten nested Comma expressions into a vector of expressions.
 fn flatten_commas(expr: Expr) -> Vec<Expr> {
     match expr {
@@ -139,131 +161,58 @@ pub fn parse_conditional(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     }
 }
 
+#[allow(clippy::type_complexity)]
+fn get_assignment_ctor(token: &Token) -> Option<fn(Box<Expr>, Box<Expr>) -> Expr> {
+    match token {
+        Token::Assign => Some(Expr::Assign),
+        Token::LogicalAndAssign => Some(Expr::LogicalAndAssign),
+        Token::LogicalOrAssign => Some(Expr::LogicalOrAssign),
+        Token::NullishAssign => Some(Expr::NullishAssign),
+        Token::AddAssign => Some(Expr::AddAssign),
+        Token::SubAssign => Some(Expr::SubAssign),
+        Token::PowAssign => Some(Expr::PowAssign),
+        Token::MulAssign => Some(Expr::MulAssign),
+        Token::DivAssign => Some(Expr::DivAssign),
+        Token::ModAssign => Some(Expr::ModAssign),
+        Token::BitXorAssign => Some(Expr::BitXorAssign),
+        Token::BitAndAssign => Some(Expr::BitAndAssign),
+        Token::BitOrAssign => Some(Expr::BitOrAssign),
+        Token::LeftShiftAssign => Some(Expr::LeftShiftAssign),
+        Token::RightShiftAssign => Some(Expr::RightShiftAssign),
+        Token::UnsignedRightShiftAssign => Some(Expr::UnsignedRightShiftAssign),
+        _ => None,
+    }
+}
+
+fn contains_optional_chain(e: &Expr) -> bool {
+    match e {
+        Expr::OptionalProperty(_, _) | Expr::OptionalIndex(_, _) | Expr::OptionalCall(_, _) => true,
+        Expr::Property(obj, _) => contains_optional_chain(obj.as_ref()),
+        Expr::Index(obj, idx) => contains_optional_chain(obj.as_ref()) || contains_optional_chain(idx.as_ref()),
+        Expr::Call(obj, _) => contains_optional_chain(obj.as_ref()),
+        _ => false,
+    }
+}
+
 pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
     let left = parse_conditional(tokens)?;
     if tokens.is_empty() {
         return Ok(left);
     }
-    // Helper: assignment targets must not contain optional-chaining (obj?.prop or obj?.[expr])
-    fn contains_optional_chain(e: &Expr) -> bool {
-        match e {
-            Expr::OptionalProperty(_, _) | Expr::OptionalIndex(_, _) | Expr::OptionalCall(_, _) => true,
-            Expr::Property(obj, _) => contains_optional_chain(obj.as_ref()),
-            Expr::Index(obj, idx) => contains_optional_chain(obj.as_ref()) || contains_optional_chain(idx.as_ref()),
-            Expr::Call(obj, _) => contains_optional_chain(obj.as_ref()),
-            // the optional forms are already handled above, so no-op here
-            _ => false,
+
+    if let Some(ctor) = get_assignment_ctor(&tokens[0]) {
+        if contains_optional_chain(&left) {
+            return Err(raise_parse_error!(format!(
+                "Invalid assignment target containing optional chaining; next tokens: {:?}",
+                tokens.iter().take(8).collect::<Vec<_>>()
+            )));
         }
+        tokens.remove(0);
+        let right = parse_assignment(tokens)?;
+        return Ok(ctor(Box::new(left), Box::new(right)));
     }
 
-    // Reject assignment forms where the left-hand side contains optional chaining
-    if !tokens.is_empty() {
-        match &tokens[0] {
-            Token::Assign
-            | Token::LogicalAndAssign
-            | Token::LogicalOrAssign
-            | Token::BitXorAssign
-            | Token::NullishAssign
-            | Token::AddAssign
-            | Token::SubAssign
-            | Token::PowAssign
-            | Token::MulAssign
-            | Token::DivAssign
-            | Token::ModAssign => {
-                if contains_optional_chain(&left) {
-                    return Err(raise_parse_error!(format!(
-                        "Invalid assignment target containing optional chaining; next tokens: {:?}",
-                        tokens.iter().take(8).collect::<Vec<_>>()
-                    )));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    match &tokens[0] {
-        Token::Assign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::Assign(Box::new(left), Box::new(right)))
-        }
-        Token::LogicalAndAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::LogicalAndAssign(Box::new(left), Box::new(right)))
-        }
-        Token::LogicalOrAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::LogicalOrAssign(Box::new(left), Box::new(right)))
-        }
-        Token::NullishAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::NullishAssign(Box::new(left), Box::new(right)))
-        }
-        Token::AddAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::AddAssign(Box::new(left), Box::new(right)))
-        }
-        Token::SubAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::SubAssign(Box::new(left), Box::new(right)))
-        }
-        Token::PowAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::PowAssign(Box::new(left), Box::new(right)))
-        }
-        Token::MulAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::MulAssign(Box::new(left), Box::new(right)))
-        }
-        Token::DivAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::DivAssign(Box::new(left), Box::new(right)))
-        }
-        Token::ModAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::ModAssign(Box::new(left), Box::new(right)))
-        }
-        Token::BitXorAssign => {
-            tokens.remove(0);
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::BitXorAssign(Box::new(left), Box::new(right)))
-        }
-        Token::BitAndAssign => {
-            tokens.remove(0); // consume '&='
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::BitAndAssign(Box::new(left), Box::new(right)))
-        }
-        Token::BitOrAssign => {
-            tokens.remove(0); // consume '|='
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::BitOrAssign(Box::new(left), Box::new(right)))
-        }
-        Token::LeftShiftAssign => {
-            tokens.remove(0); // consume '<<='
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::LeftShiftAssign(Box::new(left), Box::new(right)))
-        }
-        Token::RightShiftAssign => {
-            tokens.remove(0); // consume '>>='
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::RightShiftAssign(Box::new(left), Box::new(right)))
-        }
-        Token::UnsignedRightShiftAssign => {
-            tokens.remove(0); // consume '>>>='
-            let right = parse_conditional(tokens)?;
-            Ok(Expr::UnsignedRightShiftAssign(Box::new(left), Box::new(right)))
-        }
-        _ => Ok(left),
-    }
+    Ok(left)
 }
 
 // Operator precedence parsing chain (primary -> exponentiation -> multiplicative
@@ -271,169 +220,55 @@ pub fn parse_assignment(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 // -> logical-and -> logical-or -> nullish -> conditional -> assignment).
 
 fn parse_shift(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_additive(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        if matches!(tokens[0], Token::LeftShift) {
-            tokens.remove(0);
-            let right = parse_additive(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::LeftShift, Box::new(right));
-            continue;
-        }
-        if matches!(tokens[0], Token::RightShift) {
-            tokens.remove(0);
-            let right = parse_additive(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::RightShift, Box::new(right));
-            continue;
-        }
-        if matches!(tokens[0], Token::UnsignedRightShift) {
-            tokens.remove(0);
-            let right = parse_additive(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::UnsignedRightShift, Box::new(right));
-            continue;
-        }
-        break;
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_additive, |token| match token {
+        Token::LeftShift => Some(BinaryOp::LeftShift),
+        Token::RightShift => Some(BinaryOp::RightShift),
+        Token::UnsignedRightShift => Some(BinaryOp::UnsignedRightShift),
+        _ => None,
+    })
 }
 
 fn parse_relational(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_shift(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        match &tokens[0] {
-            Token::LessThan => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::LessThan, Box::new(right));
-                continue;
-            }
-            Token::GreaterThan => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::GreaterThan, Box::new(right));
-                continue;
-            }
-            Token::LessEqual => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::LessEqual, Box::new(right));
-                continue;
-            }
-            Token::GreaterEqual => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::GreaterEqual, Box::new(right));
-                continue;
-            }
-            Token::InstanceOf => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::InstanceOf, Box::new(right));
-                continue;
-            }
-            Token::In => {
-                tokens.remove(0);
-                let right = parse_shift(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::In, Box::new(right));
-                continue;
-            }
-            _ => break,
-        }
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_shift, |token| match token {
+        Token::LessThan => Some(BinaryOp::LessThan),
+        Token::GreaterThan => Some(BinaryOp::GreaterThan),
+        Token::LessEqual => Some(BinaryOp::LessEqual),
+        Token::GreaterEqual => Some(BinaryOp::GreaterEqual),
+        Token::InstanceOf => Some(BinaryOp::InstanceOf),
+        Token::In => Some(BinaryOp::In),
+        _ => None,
+    })
 }
 
 fn parse_equality(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_relational(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        match &tokens[0] {
-            Token::Equal => {
-                tokens.remove(0);
-                let right = parse_relational(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Equal, Box::new(right));
-                continue;
-            }
-            Token::StrictEqual => {
-                tokens.remove(0);
-                let right = parse_relational(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::StrictEqual, Box::new(right));
-                continue;
-            }
-            Token::NotEqual => {
-                tokens.remove(0);
-                let right = parse_relational(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::NotEqual, Box::new(right));
-                continue;
-            }
-            Token::StrictNotEqual => {
-                tokens.remove(0);
-                let right = parse_relational(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::StrictNotEqual, Box::new(right));
-                continue;
-            }
-            _ => break,
-        }
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_relational, |token| match token {
+        Token::Equal => Some(BinaryOp::Equal),
+        Token::StrictEqual => Some(BinaryOp::StrictEqual),
+        Token::NotEqual => Some(BinaryOp::NotEqual),
+        Token::StrictNotEqual => Some(BinaryOp::StrictNotEqual),
+        _ => None,
+    })
 }
 
 fn parse_bitwise_and(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_equality(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        if matches!(tokens[0], Token::BitAnd) {
-            tokens.remove(0);
-            let right = parse_equality(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::BitAnd, Box::new(right));
-            continue;
-        }
-        break;
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_equality, |token| match token {
+        Token::BitAnd => Some(BinaryOp::BitAnd),
+        _ => None,
+    })
 }
 
 fn parse_bitwise_xor_chain(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_bitwise_and(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        if matches!(tokens[0], Token::BitXor) {
-            tokens.remove(0);
-            let right = parse_bitwise_and(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::BitXor, Box::new(right));
-            continue;
-        }
-        break;
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_bitwise_and, |token| match token {
+        Token::BitXor => Some(BinaryOp::BitXor),
+        _ => None,
+    })
 }
 
 fn parse_bitwise_or(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_bitwise_xor_chain(tokens)?;
-    loop {
-        if tokens.is_empty() {
-            break;
-        }
-        if matches!(tokens[0], Token::BitOr) {
-            tokens.remove(0);
-            let right = parse_bitwise_xor_chain(tokens)?;
-            left = Expr::Binary(Box::new(left), BinaryOp::BitOr, Box::new(right));
-            continue;
-        }
-        break;
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_bitwise_xor_chain, |token| match token {
+        Token::BitOr => Some(BinaryOp::BitOr),
+        _ => None,
+    })
 }
 
 fn parse_logical_and(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
@@ -479,48 +314,20 @@ fn parse_nullish(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
 }
 
 fn parse_additive(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_multiplicative(tokens)?;
-    while !tokens.is_empty() {
-        match &tokens[0] {
-            Token::Plus => {
-                tokens.remove(0);
-                let right = parse_multiplicative(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Add, Box::new(right));
-            }
-            Token::Minus => {
-                tokens.remove(0);
-                let right = parse_multiplicative(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Sub, Box::new(right));
-            }
-            _ => break,
-        }
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_multiplicative, |token| match token {
+        Token::Plus => Some(BinaryOp::Add),
+        Token::Minus => Some(BinaryOp::Sub),
+        _ => None,
+    })
 }
 
 fn parse_multiplicative(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
-    let mut left = parse_exponentiation(tokens)?;
-    while !tokens.is_empty() {
-        match &tokens[0] {
-            Token::Multiply => {
-                tokens.remove(0);
-                let right = parse_exponentiation(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Mul, Box::new(right));
-            }
-            Token::Divide => {
-                tokens.remove(0);
-                let right = parse_exponentiation(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Div, Box::new(right));
-            }
-            Token::Mod => {
-                tokens.remove(0);
-                let right = parse_exponentiation(tokens)?;
-                left = Expr::Binary(Box::new(left), BinaryOp::Mod, Box::new(right));
-            }
-            _ => break,
-        }
-    }
-    Ok(left)
+    parse_binary_op(tokens, parse_exponentiation, |token| match token {
+        Token::Multiply => Some(BinaryOp::Mul),
+        Token::Divide => Some(BinaryOp::Div),
+        Token::Mod => Some(BinaryOp::Mod),
+        _ => None,
+    })
 }
 
 fn parse_exponentiation(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
@@ -651,6 +458,14 @@ fn parse_primary(tokens: &mut Vec<Token>) -> Result<Expr, JSError> {
         Token::Minus => {
             let inner = parse_primary(tokens)?;
             Expr::UnaryNeg(Box::new(inner))
+        }
+        Token::Plus => {
+            let inner = parse_primary(tokens)?;
+            Expr::UnaryPlus(Box::new(inner))
+        }
+        Token::BitNot => {
+            let inner = parse_primary(tokens)?;
+            Expr::BitNot(Box::new(inner))
         }
         Token::Increment => {
             let inner = parse_primary(tokens)?;

@@ -1993,6 +1993,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::PostIncrement(expr) => evaluate_post_increment(env, expr),
         Expr::PostDecrement(expr) => evaluate_post_decrement(env, expr),
         Expr::UnaryNeg(expr) => evaluate_unary_neg(env, expr),
+        Expr::UnaryPlus(expr) => evaluate_unary_plus(env, expr),
+        Expr::BitNot(expr) => evaluate_bit_not(env, expr),
         Expr::LogicalNot(expr) => {
             let v = evaluate_expr(env, expr)?;
             Ok(Value::Boolean(!is_truthy(&v)))
@@ -3130,6 +3132,55 @@ fn evaluate_unary_neg(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
         Value::Number(n) => Ok(Value::Number(-n)),
         Value::BigInt(s) => Ok(Value::BigInt(-s)),
         _ => Err(raise_eval_error!("error")),
+    }
+}
+
+fn evaluate_unary_plus(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    match val {
+        Value::Number(n) => Ok(Value::Number(n)),
+        Value::BigInt(_) => Err(raise_type_error!("Cannot convert a BigInt value to a number")),
+        _ => {
+            let num = match val {
+                Value::String(s) => utf16_to_utf8(&s).parse::<f64>().unwrap_or(f64::NAN),
+                Value::Boolean(b) => {
+                    if b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Value::Null => 0.0,
+                Value::Undefined => f64::NAN,
+                _ => f64::NAN,
+            };
+            Ok(Value::Number(num))
+        }
+    }
+}
+
+fn evaluate_bit_not(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    match val {
+        Value::BigInt(n) => Ok(Value::BigInt(!n)),
+        _ => {
+            let num = match val {
+                Value::Number(n) => n,
+                Value::String(s) => utf16_to_utf8(&s).parse::<f64>().unwrap_or(f64::NAN),
+                Value::Boolean(b) => {
+                    if b {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+                Value::Null => 0.0,
+                Value::Undefined => f64::NAN,
+                _ => f64::NAN,
+            };
+            let int_val = if num.is_nan() || num.is_infinite() { 0 } else { num as i32 };
+            Ok(Value::Number((!int_val) as f64))
+        }
     }
 }
 

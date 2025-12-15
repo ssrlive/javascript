@@ -408,6 +408,8 @@ pub enum Expr {
     Var(String),
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
+    UnaryPlus(Box<Expr>),
+    BitNot(Box<Expr>),
     LogicalNot(Box<Expr>),
     TypeOf(Box<Expr>),
     Delete(Box<Expr>),

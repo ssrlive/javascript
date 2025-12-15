@@ -98,6 +98,7 @@ pub enum Token {
     /// Exponentiation assignment (`**=`)
     PowAssign,
     BitAnd,
+    BitNot,
     BitAndAssign,
     BitOr,
     BitOrAssign,
@@ -500,6 +501,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     tokens.push(Token::BitXor);
                     i += 1;
                 }
+            }
+            '~' => {
+                tokens.push(Token::BitNot);
+                i += 1;
             }
             '0'..='9' => {
                 let start = i;

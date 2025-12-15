@@ -59,3 +59,26 @@ fn test_array_literal_mixed_types() {
         _ => panic!("Expected number 3.0, got {:?}", result),
     }
 }
+
+#[test]
+fn test_array_literal_nested() {
+    let script = r#"
+        console.log(~1);
+        console.log(+1);
+        console.log(+"123");
+
+        var a;
+        var b;
+        a = b = 1;
+        console.log(a);
+        console.log(b);
+
+        let arr = [ [1, 2], [3, 4] ];
+        arr[0][0] + arr[0][1] + arr[1][0] + arr[1][1]
+    "#;
+    let result = evaluate_script(script, None::<&std::path::Path>);
+    match result {
+        Ok(Value::Number(n)) => assert_eq!(n, 10.0),
+        _ => panic!("Expected number 10.0, got {:?}", result),
+    }
+}

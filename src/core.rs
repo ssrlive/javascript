@@ -33,6 +33,144 @@ thread_local! {
     static WELL_KNOWN_SYMBOLS: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
 
+fn inject_host_shims(env: &JSObjectDataPtr, script: &str) -> Result<(), JSError> {
+    // Inject simple host `std` / `os` shims when importing with the pattern:
+    //   import * as NAME from "std";
+    for line in script.lines() {
+        let l = line.trim();
+        if l.starts_with("import * as")
+            && l.contains("from")
+            && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
+        {
+            let name_part = &l[as_idx + 2..from_idx].trim();
+            let name = PropertyKey::String(name_part.trim().to_string());
+            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
+                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
+                let rest = &l[from_idx + start_quote + 1..];
+                if let Some(end_quote) = rest.find(quote_char) {
+                    let module = &rest[..end_quote];
+                    if module == "std" {
+                        obj_set_key_value(env, &name, Value::Object(crate::js_std::make_std_object()?))?;
+                    } else if module == "os" {
+                        obj_set_key_value(env, &name, Value::Object(crate::js_os::make_os_object()?))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise>>) -> Result<Value, JSError> {
+    // Run the event loop until the promise is resolved
+    loop {
+        run_event_loop()?;
+        let promise_borrow = promise.borrow();
+        match &promise_borrow.state {
+            PromiseState::Fulfilled(val) => return Ok(val.clone()),
+            PromiseState::Rejected(_reason) => {
+                log::trace!("evaluate_script: top-level promise is Rejected, running EXTRA_ITERATIONS");
+                // Give a few extra event-loop iterations a chance to run so any
+                // late-attached handlers (microtasks) can register and be
+                // scheduled. This reduces spurious uncaught rejections where
+                // a rejection is handled shortly after it occurs.
+                // Try up to a small number of extra iterations, breaking out
+                // early if handlers appear and get a chance to run.
+                const EXTRA_ITERATIONS: usize = 5;
+                for _ in 0..EXTRA_ITERATIONS {
+                    // If there are already attached handlers, run the loop once
+                    // to give them a chance to execute and settle the promise.
+                    run_event_loop()?;
+                    // If the promise is no longer rejected, we can continue
+                    if let PromiseState::Pending | PromiseState::Fulfilled(_) = &promise.borrow().state {
+                        break;
+                    }
+                    // If the promise has attached rejection handlers, run again
+                    // to let queued rejection tasks execute.
+                    if !promise.borrow().on_rejected.is_empty() {
+                        run_event_loop()?;
+                        break;
+                    }
+                }
+                // Re-check the promise state after a chance to run tasks
+                let promise_borrow = promise.borrow();
+                if let PromiseState::Rejected(_reason) = &promise_borrow.state {
+                    // Give some extra iterations to allow pending unhandled checks to settle
+                    // (same logic used for non-promise top-level scripts). This gives
+                    // late-attached handlers a chance to register before we surface
+                    // the top-level rejection.
+                    const EXTRA_UNHANDLED_ITER: usize = 5;
+                    for _ in 0..EXTRA_UNHANDLED_ITER {
+                        if crate::js_promise::pending_unhandled_count() == 0 {
+                            break;
+                        }
+                        run_event_loop()?;
+                    }
+                    // If a recorded unhandled rejection exists, run a small
+                    // deterministic final drain (multiple ticks) to let
+                    // harness/late handlers register before we attempt to
+                    // consume the recorded unhandled. Use `peek` so we do
+                    // not consume the recorded slot prematurely.
+                    const FINAL_DRAIN_ITER: usize = 5;
+                    if crate::js_promise::peek_unhandled_rejection().is_some() {
+                        log::trace!("evaluate_script: peek_unhandled_rejection -> Some; running final drain");
+                        for _ in 0..FINAL_DRAIN_ITER {
+                            run_event_loop()?;
+                            // Wait until there are no pending unhandled checks and
+                            // no queued tasks to give the harness a final chance
+                            // to register handlers and flush logs.
+                            if crate::js_promise::pending_unhandled_count() == 0 && crate::js_promise::task_queue_len() == 0 {
+                                break;
+                            }
+                        }
+                    } else {
+                        log::trace!("evaluate_script: peek_unhandled_rejection -> None");
+                    }
+                    // Run one extra event loop turn to advance the tick once more,
+                    // giving late handlers a final chance to attach before consuming.
+                    run_event_loop()?;
+                    // Only surface the top-level rejected promise as an error if the
+                    // promise machinery recorded it as an unhandled rejection. This
+                    // prevents prematurely converting a rejected Promise into a
+                    // thrown error when test harnesses attach late handlers.
+                    if let Some(unhandled_reason) = crate::js_promise::take_unhandled_rejection() {
+                        log::trace!("evaluate_script: consuming recorded unhandled rejection (deferring surfacing)");
+                        // Log helpful info about the value recorded as unhandled
+                        match &unhandled_reason {
+                            Value::Object(obj) => {
+                                if let Ok(Some(ctor_rc)) = obj_get_key_value(obj, &"constructor".into()) {
+                                    log::debug!("Top-level promise rejected with object whose constructor = {:?}", ctor_rc.borrow());
+                                } else {
+                                    log::debug!("Top-level promise rejected with object ptr={:p}", Rc::as_ptr(obj));
+                                }
+                                if let Ok(Some(stack_val)) = obj_get_key_value(obj, &"stack".into()) {
+                                    log::debug!("Top-level rejected object stack = {}", value_to_string(&stack_val.borrow()));
+                                }
+                            }
+                            _ => {
+                                log::debug!("Top-level promise rejected with value={}", value_to_string(&unhandled_reason));
+                            }
+                        }
+                        // Defer surfacing the unhandled rejection; return normally
+                        // so the script (and any final synchronous work) can complete
+                        // like Node does, allowing harnesses to print summaries.
+                        return Ok(Value::Undefined);
+                    }
+
+                    // No recorded unhandled rejection — assume the rejection was
+                    // handled (or will be) and finish the script without surfacing
+                    // a top-level thrown error.
+                    log::debug!("Not surfacing top-level rejection: no recorded unhandled rejection");
+                    return Ok(Value::Undefined);
+                }
+            }
+            PromiseState::Pending => {
+                // Continue running the event loop
+            }
+        }
+    }
+}
+
 pub fn evaluate_script<T, P>(script: T, script_path: Option<P>) -> Result<Value, JSError>
 where
     T: AsRef<str>,
@@ -67,30 +205,7 @@ where
     let path = script_path.map_or("<script>".to_string(), |p| p.as_ref().to_string_lossy().to_string());
     let _ = obj_set_key_value(&env, &"__script_name".into(), Value::String(utf8_to_utf16(&path)));
 
-    // Inject simple host `std` / `os` shims when importing with the pattern:
-    //   import * as NAME from "std";
-    for line in script.lines() {
-        let l = line.trim();
-        if l.starts_with("import * as")
-            && l.contains("from")
-            && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
-        {
-            let name_part = &l[as_idx + 2..from_idx].trim();
-            let name = PropertyKey::String(name_part.trim().to_string());
-            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                let rest = &l[from_idx + start_quote + 1..];
-                if let Some(end_quote) = rest.find(quote_char) {
-                    let module = &rest[..end_quote];
-                    if module == "std" {
-                        obj_set_key_value(&env, &name, Value::Object(crate::js_std::make_std_object()?))?;
-                    } else if module == "os" {
-                        obj_set_key_value(&env, &name, Value::Object(crate::js_os::make_os_object()?))?;
-                    }
-                }
-            }
-        }
-    }
+    inject_host_shims(&env, script)?;
 
     // Initialize global built-in constructors
     initialize_global_constructors(&env)?;
@@ -104,113 +219,7 @@ where
         && let Some(promise_val_rc) = obj_get_key_value(obj, &"__promise".into())?
         && let Value::Promise(promise) = &*promise_val_rc.borrow()
     {
-        // Run the event loop until the promise is resolved
-        loop {
-            run_event_loop()?;
-            let promise_borrow = promise.borrow();
-            match &promise_borrow.state {
-                PromiseState::Fulfilled(val) => return Ok(val.clone()),
-                PromiseState::Rejected(_reason) => {
-                    log::trace!("evaluate_script: top-level promise is Rejected, running EXTRA_ITERATIONS");
-                    // Give a few extra event-loop iterations a chance to run so any
-                    // late-attached handlers (microtasks) can register and be
-                    // scheduled. This reduces spurious uncaught rejections where
-                    // a rejection is handled shortly after it occurs.
-                    // Try up to a small number of extra iterations, breaking out
-                    // early if handlers appear and get a chance to run.
-                    const EXTRA_ITERATIONS: usize = 5;
-                    for _ in 0..EXTRA_ITERATIONS {
-                        // If there are already attached handlers, run the loop once
-                        // to give them a chance to execute and settle the promise.
-                        run_event_loop()?;
-                        // If the promise is no longer rejected, we can continue
-                        if let PromiseState::Pending | PromiseState::Fulfilled(_) = &promise.borrow().state {
-                            break;
-                        }
-                        // If the promise has attached rejection handlers, run again
-                        // to let queued rejection tasks execute.
-                        if !promise.borrow().on_rejected.is_empty() {
-                            run_event_loop()?;
-                            break;
-                        }
-                    }
-                    // Re-check the promise state after a chance to run tasks
-                    let promise_borrow = promise.borrow();
-                    if let PromiseState::Rejected(_reason) = &promise_borrow.state {
-                        // Give some extra iterations to allow pending unhandled checks to settle
-                        // (same logic used for non-promise top-level scripts). This gives
-                        // late-attached handlers a chance to register before we surface
-                        // the top-level rejection.
-                        const EXTRA_UNHANDLED_ITER: usize = 5;
-                        for _ in 0..EXTRA_UNHANDLED_ITER {
-                            if crate::js_promise::pending_unhandled_count() == 0 {
-                                break;
-                            }
-                            run_event_loop()?;
-                        }
-                        // If a recorded unhandled rejection exists, run a small
-                        // deterministic final drain (multiple ticks) to let
-                        // harness/late handlers register before we attempt to
-                        // consume the recorded unhandled. Use `peek` so we do
-                        // not consume the recorded slot prematurely.
-                        const FINAL_DRAIN_ITER: usize = 5;
-                        if crate::js_promise::peek_unhandled_rejection().is_some() {
-                            log::trace!("evaluate_script: peek_unhandled_rejection -> Some; running final drain");
-                            for _ in 0..FINAL_DRAIN_ITER {
-                                run_event_loop()?;
-                                // Wait until there are no pending unhandled checks and
-                                // no queued tasks to give the harness a final chance
-                                // to register handlers and flush logs.
-                                if crate::js_promise::pending_unhandled_count() == 0 && crate::js_promise::task_queue_len() == 0 {
-                                    break;
-                                }
-                            }
-                        } else {
-                            log::trace!("evaluate_script: peek_unhandled_rejection -> None");
-                        }
-                        // Run one extra event loop turn to advance the tick once more,
-                        // giving late handlers a final chance to attach before consuming.
-                        run_event_loop()?;
-                        // Only surface the top-level rejected promise as an error if the
-                        // promise machinery recorded it as an unhandled rejection. This
-                        // prevents prematurely converting a rejected Promise into a
-                        // thrown error when test harnesses attach late handlers.
-                        if let Some(unhandled_reason) = crate::js_promise::take_unhandled_rejection() {
-                            log::trace!("evaluate_script: consuming recorded unhandled rejection (deferring surfacing)");
-                            // Log helpful info about the value recorded as unhandled
-                            match &unhandled_reason {
-                                Value::Object(obj) => {
-                                    if let Ok(Some(ctor_rc)) = obj_get_key_value(obj, &"constructor".into()) {
-                                        log::debug!("Top-level promise rejected with object whose constructor = {:?}", ctor_rc.borrow());
-                                    } else {
-                                        log::debug!("Top-level promise rejected with object ptr={:p}", Rc::as_ptr(obj));
-                                    }
-                                    if let Ok(Some(stack_val)) = obj_get_key_value(obj, &"stack".into()) {
-                                        log::debug!("Top-level rejected object stack = {}", value_to_string(&stack_val.borrow()));
-                                    }
-                                }
-                                _ => {
-                                    log::debug!("Top-level promise rejected with value={}", value_to_string(&unhandled_reason));
-                                }
-                            }
-                            // Defer surfacing the unhandled rejection; return normally
-                            // so the script (and any final synchronous work) can complete
-                            // like Node does, allowing harnesses to print summaries.
-                            return Ok(Value::Undefined);
-                        }
-
-                        // No recorded unhandled rejection — assume the rejection was
-                        // handled (or will be) and finish the script without surfacing
-                        // a top-level thrown error.
-                        log::debug!("Not surfacing top-level rejection: no recorded unhandled rejection");
-                        return Ok(Value::Undefined);
-                    }
-                }
-                PromiseState::Pending => {
-                    // Continue running the event loop
-                }
-            }
-        }
+        return run_promise_resolution_loop(promise);
     }
     // Run the event loop to process any queued asynchronous tasks
     run_event_loop()?;
@@ -248,6 +257,7 @@ pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JS
     let path = path.as_ref();
     let bytes = std::fs::read(path).map_err(|e| raise_eval_error!(format!("Failed to read script file '{}': {e}", path.display())))?;
     if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        // UTF-8 with BOM
         let s = std::str::from_utf8(&bytes[3..]).map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))?;
         return Ok(s.to_string());
     }

@@ -65,6 +65,7 @@ fn test_array_literal_nested() {
     let script = r#"
         console.log(~1);
         console.log(+1);
+        console.log(-100);
         console.log(+"123");
 
         var a;

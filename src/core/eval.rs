@@ -330,6 +330,198 @@ fn evaluate_stmt_export(
     Ok(())
 }
 
+fn evaluate_stmt_expr(env: &JSObjectDataPtr, expr: &Expr, last_value: &mut Value) -> Result<Option<ControlFlow>, JSError> {
+    perform_statement_expression(env, expr, last_value)
+}
+
+fn evaluate_stmt_return(env: &JSObjectDataPtr, expr_opt: &Option<Expr>) -> Result<Option<ControlFlow>, JSError> {
+    let return_val = match expr_opt {
+        Some(expr) => evaluate_expr(env, expr)?,
+        None => Value::Undefined,
+    };
+    log::trace!("Statement::Return evaluated value = {:?}", return_val);
+    Ok(Some(ControlFlow::Return(return_val)))
+}
+
+fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<ControlFlow>, JSError> {
+    let throw_val = evaluate_expr(env, expr)?;
+    Err(raise_throw_error!(throw_val))
+}
+
+fn evaluate_stmt_if(
+    env: &JSObjectDataPtr,
+    condition: &Expr,
+    then_body: &[Statement],
+    else_body: &Option<Vec<Statement>>,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    perform_statement_if_then_else(env, condition, then_body, else_body, last_value)
+}
+
+fn evaluate_stmt_label(
+    env: &JSObjectDataPtr,
+    label_name: &str,
+    inner_stmt: &Statement,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    perform_statement_label(env, label_name, inner_stmt, last_value)
+}
+
+fn evaluate_stmt_try_catch(
+    env: &JSObjectDataPtr,
+    try_body: &[Statement],
+    catch_param: &str,
+    catch_body: &[Statement],
+    finally_body_opt: &Option<Vec<Statement>>,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, last_value)
+}
+
+fn evaluate_stmt_for(
+    env: &JSObjectDataPtr,
+    init: &Option<Box<Statement>>,
+    condition: &Option<Expr>,
+    increment: &Option<Box<Statement>>,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_for_init_condition_increment(env, init, condition, increment, body, last_value, None)
+}
+
+fn evaluate_stmt_for_of(
+    env: &JSObjectDataPtr,
+    var: &str,
+    iterable: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_for_of_var_iter(env, var, iterable, body, last_value)
+}
+
+fn evaluate_stmt_for_in(
+    env: &JSObjectDataPtr,
+    var: &str,
+    object: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_for_in_var_object(env, var, object, body, last_value)
+}
+
+fn evaluate_stmt_while(
+    env: &JSObjectDataPtr,
+    condition: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_while_condition_body(env, condition, body, last_value)
+}
+
+fn evaluate_stmt_do_while(
+    env: &JSObjectDataPtr,
+    body: &[Statement],
+    condition: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    statement_do_body_while_condition(env, body, condition, last_value)
+}
+
+fn evaluate_stmt_switch(
+    env: &JSObjectDataPtr,
+    expr: &Expr,
+    cases: &[crate::core::statement::SwitchCase],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    eval_switch_statement(env, expr, cases, last_value, None)
+}
+
+fn evaluate_stmt_break(opt: &Option<String>) -> Result<Option<ControlFlow>, JSError> {
+    Ok(Some(ControlFlow::Break(opt.clone())))
+}
+
+fn evaluate_stmt_continue(opt: &Option<String>) -> Result<Option<ControlFlow>, JSError> {
+    Ok(Some(ControlFlow::Continue(opt.clone())))
+}
+
+fn evaluate_stmt_let_destructuring_array(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::DestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    perform_array_destructuring(env, pattern, &val, false)?;
+    *last_value = val;
+    Ok(None)
+}
+
+fn evaluate_stmt_const_destructuring_array(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::DestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    perform_array_destructuring(env, pattern, &val, true)?;
+    *last_value = val;
+    Ok(None)
+}
+
+fn evaluate_stmt_let_destructuring_object(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::ObjectDestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    ensure_object_destructuring_target(&val, pattern, expr)?;
+    perform_object_destructuring(env, pattern, &val, false)?;
+    *last_value = val;
+    Ok(None)
+}
+
+fn evaluate_stmt_const_destructuring_object(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::ObjectDestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    ensure_object_destructuring_target(&val, pattern, expr)?;
+    perform_object_destructuring(env, pattern, &val, true)?;
+    *last_value = val;
+    Ok(None)
+}
+
+fn evaluate_stmt_for_of_destructuring_object(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::ObjectDestructuringElement],
+    iterable: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let iterable_val = evaluate_expr(env, iterable)?;
+    if let Some(cf) = for_of_destructuring_object_iter(env, pattern, &iterable_val, body, last_value, None)? {
+        return Ok(Some(cf));
+    }
+    Ok(None)
+}
+
+fn evaluate_stmt_for_of_destructuring_array(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::DestructuringElement],
+    iterable: &Expr,
+    body: &[Statement],
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let iterable_val = evaluate_expr(env, iterable)?;
+    if let Some(cf) = for_of_destructuring_array_iter(env, pattern, &iterable_val, body, last_value, None)? {
+        return Ok(Some(cf));
+    }
+    Ok(None)
+}
+
 fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
     hoist_declarations(env, statements)?;
 
@@ -377,76 +569,41 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     last_value = evaluate_stmt_assign(env, name, expr)?;
                     Ok(None)
                 }
-                Statement::Expr(expr) => perform_statement_expression(env, expr, &mut last_value),
-                Statement::Return(expr_opt) => {
-                    let return_val = match expr_opt {
-                        Some(expr) => evaluate_expr(env, expr)?,
-                        None => Value::Undefined,
-                    };
-                    log::trace!("Statement::Return evaluated value = {:?}", return_val);
-                    Ok(Some(ControlFlow::Return(return_val)))
-                }
-                Statement::Throw(expr) => {
-                    let throw_val = evaluate_expr(env, expr)?;
-                    Err(raise_throw_error!(throw_val))
-                }
-                Statement::If(condition, then_body, else_body) => {
-                    perform_statement_if_then_else(env, condition, then_body, else_body, &mut last_value)
-                }
+                Statement::Expr(expr) => evaluate_stmt_expr(env, expr, &mut last_value),
+                Statement::Return(expr_opt) => evaluate_stmt_return(env, expr_opt),
+                Statement::Throw(expr) => evaluate_stmt_throw(env, expr),
+                Statement::If(condition, then_body, else_body) => evaluate_stmt_if(env, condition, then_body, else_body, &mut last_value),
                 Statement::ForOfDestructuringObject(pattern, iterable, body) => {
-                    let iterable_val = evaluate_expr(env, iterable)?;
-                    if let Some(cf) = for_of_destructuring_object_iter(env, pattern, &iterable_val, body, &mut last_value, None)? {
-                        return Ok(Some(cf));
-                    }
-                    Ok(None)
+                    evaluate_stmt_for_of_destructuring_object(env, pattern, iterable, body, &mut last_value)
                 }
                 Statement::ForOfDestructuringArray(pattern, iterable, body) => {
-                    let iterable_val = evaluate_expr(env, iterable)?;
-                    if let Some(cf) = for_of_destructuring_array_iter(env, pattern, &iterable_val, body, &mut last_value, None)? {
-                        return Ok(Some(cf));
-                    }
-                    Ok(None)
+                    evaluate_stmt_for_of_destructuring_array(env, pattern, iterable, body, &mut last_value)
                 }
-
-                Statement::Label(label_name, inner_stmt) => perform_statement_label(env, label_name, inner_stmt, &mut last_value),
+                Statement::Label(label_name, inner_stmt) => evaluate_stmt_label(env, label_name, inner_stmt, &mut last_value),
                 Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
-                    statement_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, &mut last_value)
+                    evaluate_stmt_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, &mut last_value)
                 }
                 Statement::For(init, condition, increment, body) => {
-                    statement_for_init_condition_increment(env, init, condition, increment, body, &mut last_value, None)
+                    evaluate_stmt_for(env, init, condition, increment, body, &mut last_value)
                 }
-                Statement::ForOf(var, iterable, body) => statement_for_of_var_iter(env, var, iterable, body, &mut last_value),
-                Statement::ForIn(var, object, body) => statement_for_in_var_object(env, var, object, body, &mut last_value),
-                Statement::While(condition, body) => statement_while_condition_body(env, condition, body, &mut last_value),
-                Statement::DoWhile(body, condition) => statement_do_body_while_condition(env, body, condition, &mut last_value),
-                Statement::Switch(expr, cases) => eval_switch_statement(env, expr, cases, &mut last_value, None),
-                Statement::Break(opt) => Ok(Some(ControlFlow::Break(opt.clone()))),
-                Statement::Continue(opt) => Ok(Some(ControlFlow::Continue(opt.clone()))),
+                Statement::ForOf(var, iterable, body) => evaluate_stmt_for_of(env, var, iterable, body, &mut last_value),
+                Statement::ForIn(var, object, body) => evaluate_stmt_for_in(env, var, object, body, &mut last_value),
+                Statement::While(condition, body) => evaluate_stmt_while(env, condition, body, &mut last_value),
+                Statement::DoWhile(body, condition) => evaluate_stmt_do_while(env, body, condition, &mut last_value),
+                Statement::Switch(expr, cases) => evaluate_stmt_switch(env, expr, cases, &mut last_value),
+                Statement::Break(opt) => evaluate_stmt_break(opt),
+                Statement::Continue(opt) => evaluate_stmt_continue(opt),
                 Statement::LetDestructuringArray(pattern, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    perform_array_destructuring(env, pattern, &val, false)?;
-                    last_value = val;
-                    Ok(None)
+                    evaluate_stmt_let_destructuring_array(env, pattern, expr, &mut last_value)
                 }
                 Statement::ConstDestructuringArray(pattern, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    perform_array_destructuring(env, pattern, &val, true)?;
-                    last_value = val;
-                    Ok(None)
+                    evaluate_stmt_const_destructuring_array(env, pattern, expr, &mut last_value)
                 }
                 Statement::LetDestructuringObject(pattern, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    ensure_object_destructuring_target(&val, pattern, expr)?;
-                    perform_object_destructuring(env, pattern, &val, false)?;
-                    last_value = val;
-                    Ok(None)
+                    evaluate_stmt_let_destructuring_object(env, pattern, expr, &mut last_value)
                 }
                 Statement::ConstDestructuringObject(pattern, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    ensure_object_destructuring_target(&val, pattern, expr)?;
-                    perform_object_destructuring(env, pattern, &val, true)?;
-                    last_value = val;
-                    Ok(None)
+                    evaluate_stmt_const_destructuring_object(env, pattern, expr, &mut last_value)
                 }
                 Statement::Import(specifiers, module_name) => {
                     evaluate_stmt_import(env, specifiers, module_name)?;
@@ -1171,7 +1328,7 @@ fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: 
 
 fn perform_array_destructuring(
     env: &JSObjectDataPtr,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     value: &Value,
     is_const: bool,
 ) -> Result<(), JSError> {
@@ -1272,7 +1429,7 @@ fn perform_array_destructuring(
 
 fn perform_object_destructuring(
     env: &JSObjectDataPtr,
-    pattern: &Vec<ObjectDestructuringElement>,
+    pattern: &[ObjectDestructuringElement],
     value: &Value,
     is_const: bool,
 ) -> Result<(), JSError> {
@@ -1370,7 +1527,7 @@ fn perform_object_destructuring(
 /// unlabeled loops.
 fn for_of_destructuring_object_iter(
     env: &JSObjectDataPtr,
-    pattern: &Vec<ObjectDestructuringElement>,
+    pattern: &[ObjectDestructuringElement],
     iterable_val: &Value,
     body: &[Statement],
     last_value: &mut Value,
@@ -1433,7 +1590,7 @@ fn for_of_destructuring_object_iter(
 /// array-pattern destructuring per element, executing `body` each iteration.
 fn for_of_destructuring_array_iter(
     env: &JSObjectDataPtr,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     iterable_val: &Value,
     body: &[Statement],
     last_value: &mut Value,

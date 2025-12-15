@@ -134,27 +134,8 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                     // prevents prematurely converting a rejected Promise into a
                     // thrown error when test harnesses attach late handlers.
                     if let Some(unhandled_reason) = crate::js_promise::take_unhandled_rejection() {
-                        log::trace!("evaluate_script: consuming recorded unhandled rejection (deferring surfacing)");
-                        // Log helpful info about the value recorded as unhandled
-                        match &unhandled_reason {
-                            Value::Object(obj) => {
-                                if let Ok(Some(ctor_rc)) = obj_get_key_value(obj, &"constructor".into()) {
-                                    log::debug!("Top-level promise rejected with object whose constructor = {:?}", ctor_rc.borrow());
-                                } else {
-                                    log::debug!("Top-level promise rejected with object ptr={:p}", Rc::as_ptr(obj));
-                                }
-                                if let Ok(Some(stack_val)) = obj_get_key_value(obj, &"stack".into()) {
-                                    log::debug!("Top-level rejected object stack = {}", value_to_string(&stack_val.borrow()));
-                                }
-                            }
-                            _ => {
-                                log::debug!("Top-level promise rejected with value={}", value_to_string(&unhandled_reason));
-                            }
-                        }
-                        // Defer surfacing the unhandled rejection; return normally
-                        // so the script (and any final synchronous work) can complete
-                        // like Node does, allowing harnesses to print summaries.
-                        return Ok(Value::Undefined);
+                        log::trace!("evaluate_script: consuming recorded unhandled rejection (surfacing as error)");
+                        return Err(crate::raise_throw_error!(unhandled_reason));
                     }
 
                     // No recorded unhandled rejection — assume the rejection was

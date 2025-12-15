@@ -42,7 +42,11 @@ fn main() {
         Err(err) => {
             eprintln!("{}", err.user_message());
             if let Some(file_path) = cli.file.as_ref() {
-                eprintln!("  in file: {}", file_path.display());
+                if let (Some(line), Some(col)) = (err.js_line(), err.js_column()) {
+                    eprintln!("  in file: {}:{}:{}", file_path.display(), line, col);
+                } else {
+                    eprintln!("  in file: {}", file_path.display());
+                }
             }
             process::exit(1);
         }

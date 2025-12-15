@@ -22,7 +22,11 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(
             vec![("x".to_string(), None)],
-            vec![crate::core::Statement::Return(Some(crate::core::Expr::Var("x".to_string())))],
+            vec![crate::core::Statement {
+                kind: crate::core::StatementKind::Return(Some(crate::core::Expr::Var("x".to_string()))),
+                line: 0,
+                column: 0,
+            }],
             module_exports.clone(),
         );
         obj_set_key_value(&module_exports, &"identity".into(), identity_func)?;
@@ -31,6 +35,12 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
         obj_set_key_value(&module_exports, &"log".into(), log_func)?;
+    } else if module_name == "std" {
+        let std_obj = crate::js_std::make_std_object()?;
+        return Ok(Value::Object(std_obj));
+    } else if module_name == "os" {
+        let os_obj = crate::js_os::make_os_object()?;
+        return Ok(Value::Object(os_obj));
     } else {
         // Try to load as a file
         match load_module_from_file(module_name, base_path) {

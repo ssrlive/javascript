@@ -62,10 +62,10 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
     let revoke_proxy_ref = proxy.clone();
     let revoke_body = vec![
         // This is a special statement that will be handled in evaluate_call
-        crate::core::Statement::Expr(crate::core::Expr::Call(
+        crate::core::Statement::from(crate::core::StatementKind::Expr(crate::core::Expr::Call(
             Box::new(crate::core::Expr::Var("__revoke_proxy".to_string())),
             Vec::new(),
-        )),
+        ))),
     ];
 
     let revoke_env = new_js_object_data();

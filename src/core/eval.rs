@@ -1,10 +1,10 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, SwitchCase, SymbolData,
-        TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var, extract_closure_from_value,
-        get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string, to_primitive, value_to_string,
-        values_equal,
+        BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind, SwitchCase,
+        SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
+        extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
+        to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
     js_assert::make_assert_object,
@@ -47,6 +47,7 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
     // Attempt to find a script name by walking the env chain for `__script_name`
     let mut script_name = "<script>".to_string();
     let mut line: Option<usize> = None;
+    let mut column: Option<usize> = None;
     let mut env_opt = Some(caller_env.clone());
     while let Some(env_ptr) = env_opt {
         if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
@@ -55,10 +56,16 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
             }
         }
         if line.is_none() {
-            if let Ok(Some(idx_rc)) = obj_get_key_value(&env_ptr, &"__stmt_index".into()) {
-                if let Value::Number(n) = &*idx_rc.borrow() {
-                    // convert 0-based index to 1-based line-like number
-                    line = Some((*n as usize) + 1);
+            if let Ok(Some(line_rc)) = obj_get_key_value(&env_ptr, &"__line".into()) {
+                if let Value::Number(n) = &*line_rc.borrow() {
+                    line = Some(*n as usize);
+                }
+            }
+        }
+        if column.is_none() {
+            if let Ok(Some(col_rc)) = obj_get_key_value(&env_ptr, &"__column".into()) {
+                if let Value::Number(n) = &*col_rc.borrow() {
+                    column = Some(*n as usize);
                 }
             }
         }
@@ -66,7 +73,8 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
         env_opt = env_ptr.borrow().prototype.clone();
     }
     if let Some(ln) = line {
-        format!("{} ({}:{}:0)", base, script_name, ln)
+        let col = column.unwrap_or(0);
+        format!("{} ({}:{}:{})", base, script_name, ln, col)
     } else {
         format!("{} ({})", base, script_name)
     }
@@ -148,7 +156,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
 
     // Hoist function declarations
     for stmt in statements {
-        if let Statement::FunctionDeclaration(name, params, body, is_generator) = stmt {
+        if let StatementKind::FunctionDeclaration(name, params, body, is_generator) = &stmt.kind {
             let func_val = if *is_generator {
                 // For generator functions, create a function object wrapper
                 let func_obj = new_js_object_data();
@@ -266,18 +274,18 @@ fn evaluate_stmt_export(
     maybe_decl: &Option<Box<Statement>>,
 ) -> Result<(), JSError> {
     if let Some(decl_stmt) = maybe_decl {
-        match &**decl_stmt {
-            Statement::Const(name, expr) => {
+        match &decl_stmt.kind {
+            StatementKind::Const(name, expr) => {
                 evaluate_stmt_const(env, name, expr)?;
             }
-            Statement::Let(name, expr_opt) => {
+            StatementKind::Let(name, expr_opt) => {
                 evaluate_stmt_let(env, name, expr_opt)?;
             }
-            Statement::Var(name, expr_opt) => {
+            StatementKind::Var(name, expr_opt) => {
                 evaluate_stmt_var(env, name, expr_opt)?;
             }
-            Statement::Class(name, extends, members) => evaluate_stmt_class(env, name, extends, members)?,
-            Statement::FunctionDeclaration(name, params, body, is_generator) => {
+            StatementKind::Class(name, extends, members) => evaluate_stmt_class(env, name, extends, members)?,
+            StatementKind::FunctionDeclaration(name, params, body, is_generator) => {
                 let func_val = if *is_generator {
                     let func_obj = new_js_object_data();
                     let prototype_obj = new_js_object_data();
@@ -344,7 +352,7 @@ fn evaluate_stmt_return(env: &JSObjectDataPtr, expr_opt: &Option<Expr>) -> Resul
         Some(expr) => evaluate_expr(env, expr)?,
         None => Value::Undefined,
     };
-    log::trace!("Statement::Return evaluated value = {:?}", return_val);
+    log::trace!("StatementKind::Return evaluated value = {:?}", return_val);
     Ok(Some(ControlFlow::Return(return_val)))
 }
 
@@ -533,11 +541,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
         log::trace!("Evaluating statement {i}: {stmt:?}");
-        // Attach statement index to the current env so callsites can include
-        // an approximate source location in stack frames.
-        let _ = obj_set_key_value(env, &"__stmt_index".into(), Value::Number(i as f64));
+        // Attach statement location to the current env
+        let _ = obj_set_key_value(env, &"__line".into(), Value::Number(stmt.line as f64));
+        let _ = obj_set_key_value(env, &"__column".into(), Value::Number(stmt.column as f64));
+
         // Skip function declarations as they are already hoisted
-        if let Statement::FunctionDeclaration(..) = stmt {
+        if let StatementKind::FunctionDeclaration(..) = &stmt.kind {
             continue;
         }
         // Evaluate the statement inside a closure so we can log the
@@ -547,75 +556,77 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
         // continue, `Ok(Some(cf))` means propagate control flow, and
         // `Err(e)` means an error that we log and then return.
         let eval_res: Result<Option<ControlFlow>, JSError> = (|| -> Result<Option<ControlFlow>, JSError> {
-            match stmt {
-                Statement::Let(name, expr_opt) => {
+            match &stmt.kind {
+                StatementKind::Let(name, expr_opt) => {
                     last_value = evaluate_stmt_let(env, name, expr_opt)?;
                     Ok(None)
                 }
-                Statement::Var(name, expr_opt) => {
+                StatementKind::Var(name, expr_opt) => {
                     last_value = evaluate_stmt_var(env, name, expr_opt)?;
                     Ok(None)
                 }
-                Statement::Const(name, expr) => {
+                StatementKind::Const(name, expr) => {
                     last_value = evaluate_stmt_const(env, name, expr)?;
                     Ok(None)
                 }
-                Statement::FunctionDeclaration(..) => {
+                StatementKind::FunctionDeclaration(..) => {
                     // Skip function declarations as they are already hoisted
                     Ok(None)
                 }
-                Statement::Class(name, extends, members) => {
+                StatementKind::Class(name, extends, members) => {
                     evaluate_stmt_class(env, name, extends, members)?;
                     last_value = Value::Undefined;
                     Ok(None)
                 }
-                Statement::Block(stmts) => evaluate_stmt_block(env, stmts, &mut last_value),
-                Statement::Assign(name, expr) => {
+                StatementKind::Block(stmts) => evaluate_stmt_block(env, stmts, &mut last_value),
+                StatementKind::Assign(name, expr) => {
                     last_value = evaluate_stmt_assign(env, name, expr)?;
                     Ok(None)
                 }
-                Statement::Expr(expr) => evaluate_stmt_expr(env, expr, &mut last_value),
-                Statement::Return(expr_opt) => evaluate_stmt_return(env, expr_opt),
-                Statement::Throw(expr) => evaluate_stmt_throw(env, expr),
-                Statement::If(condition, then_body, else_body) => evaluate_stmt_if(env, condition, then_body, else_body, &mut last_value),
-                Statement::ForOfDestructuringObject(pattern, iterable, body) => {
+                StatementKind::Expr(expr) => evaluate_stmt_expr(env, expr, &mut last_value),
+                StatementKind::Return(expr_opt) => evaluate_stmt_return(env, expr_opt),
+                StatementKind::Throw(expr) => evaluate_stmt_throw(env, expr),
+                StatementKind::If(condition, then_body, else_body) => {
+                    evaluate_stmt_if(env, condition, then_body, else_body, &mut last_value)
+                }
+                StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
                     evaluate_stmt_for_of_destructuring_object(env, pattern, iterable, body, &mut last_value)
                 }
-                Statement::ForOfDestructuringArray(pattern, iterable, body) => {
+                StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
                     evaluate_stmt_for_of_destructuring_array(env, pattern, iterable, body, &mut last_value)
                 }
-                Statement::Label(label_name, inner_stmt) => evaluate_stmt_label(env, label_name, inner_stmt, &mut last_value),
-                Statement::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
+                StatementKind::Label(label_name, inner_stmt) => evaluate_stmt_label(env, label_name, inner_stmt, &mut last_value),
+                StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
                     evaluate_stmt_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, &mut last_value)
                 }
-                Statement::For(init, condition, increment, body) => {
+                StatementKind::For(init, condition, increment, body) => {
                     evaluate_stmt_for(env, init, condition, increment, body, &mut last_value)
                 }
-                Statement::ForOf(var, iterable, body) => evaluate_stmt_for_of(env, var, iterable, body, &mut last_value),
-                Statement::ForIn(var, object, body) => evaluate_stmt_for_in(env, var, object, body, &mut last_value),
-                Statement::While(condition, body) => evaluate_stmt_while(env, condition, body, &mut last_value),
-                Statement::DoWhile(body, condition) => evaluate_stmt_do_while(env, body, condition, &mut last_value),
-                Statement::Switch(expr, cases) => evaluate_stmt_switch(env, expr, cases, &mut last_value),
-                Statement::Break(opt) => evaluate_stmt_break(opt),
-                Statement::Continue(opt) => evaluate_stmt_continue(opt),
-                Statement::LetDestructuringArray(pattern, expr) => {
+                StatementKind::ForOf(var, iterable, body) => evaluate_stmt_for_of(env, var, iterable, body, &mut last_value),
+                StatementKind::ForIn(var, object, body) => evaluate_stmt_for_in(env, var, object, body, &mut last_value),
+                StatementKind::While(condition, body) => evaluate_stmt_while(env, condition, body, &mut last_value),
+                StatementKind::DoWhile(body, condition) => evaluate_stmt_do_while(env, body, condition, &mut last_value),
+                StatementKind::Switch(expr, cases) => evaluate_stmt_switch(env, expr, cases, &mut last_value),
+                StatementKind::Break(opt) => evaluate_stmt_break(opt),
+                StatementKind::Continue(opt) => evaluate_stmt_continue(opt),
+                StatementKind::LetDestructuringArray(pattern, expr) => {
                     evaluate_stmt_let_destructuring_array(env, pattern, expr, &mut last_value)
                 }
-                Statement::ConstDestructuringArray(pattern, expr) => {
+                StatementKind::ConstDestructuringArray(pattern, expr) => {
                     evaluate_stmt_const_destructuring_array(env, pattern, expr, &mut last_value)
                 }
-                Statement::LetDestructuringObject(pattern, expr) => {
+                StatementKind::LetDestructuringObject(pattern, expr) => {
                     evaluate_stmt_let_destructuring_object(env, pattern, expr, &mut last_value)
                 }
-                Statement::ConstDestructuringObject(pattern, expr) => {
+                StatementKind::ConstDestructuringObject(pattern, expr) => {
                     evaluate_stmt_const_destructuring_object(env, pattern, expr, &mut last_value)
                 }
-                Statement::Import(specifiers, module_name) => {
+                StatementKind::Import(specifiers, module_name) => {
                     evaluate_stmt_import(env, specifiers, module_name)?;
                     last_value = Value::Undefined;
                     Ok(None)
                 }
-                Statement::Export(specifiers, maybe_decl) => {
+                StatementKind::Export(specifiers, maybe_decl) => {
                     evaluate_stmt_export(env, specifiers, maybe_decl)?;
                     last_value = Value::Undefined;
                     Ok(None)
@@ -625,7 +636,10 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
         match eval_res {
             Ok(Some(cf)) => return Ok(cf),
             Ok(None) => {}
-            Err(e) => {
+            Err(mut e) => {
+                if e.inner.js_line.is_none() {
+                    e.set_js_location(stmt.line, stmt.column);
+                }
                 // Thrown values (user code `throw`) are expected control flow and
                 // we want to preserve the thrown JS `Value` contents for
                 // diagnostics rather than letting them be masked by generic
@@ -780,20 +794,20 @@ fn statement_for_init_condition_increment(
     for_env.borrow_mut().is_function_scope = false;
     // Execute initialization in for_env
     if let Some(init_stmt) = init {
-        match init_stmt.as_ref() {
-            Statement::Let(name, expr_opt) => {
+        match &init_stmt.kind {
+            StatementKind::Let(name, expr_opt) => {
                 let val = expr_opt
                     .clone()
                     .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
                 env_set(&for_env, name.as_str(), val)?;
             }
-            Statement::Var(name, expr_opt) => {
+            StatementKind::Var(name, expr_opt) => {
                 let val = expr_opt
                     .clone()
                     .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
                 env_set_var(&for_env, name.as_str(), val)?;
             }
-            Statement::Expr(expr) => {
+            StatementKind::Expr(expr) => {
                 evaluate_expr(&for_env, expr)?;
             }
             _ => {
@@ -847,8 +861,8 @@ fn statement_for_init_condition_increment(
 
         // Execute increment in for_env
         if let Some(incr_stmt) = increment {
-            match incr_stmt.as_ref() {
-                Statement::Expr(expr) => match expr {
+            match &incr_stmt.kind {
+                StatementKind::Expr(expr) => match expr {
                     Expr::Assign(target, value) => {
                         if let Expr::Var(name) = target.as_ref() {
                             let val = evaluate_expr(&for_env, value)?;
@@ -1083,11 +1097,11 @@ fn perform_statement_label(
     // Labels commonly attach to loops/switches. Re-implement
     // loop/switch evaluation here with awareness of the label so
     // labeled `break/continue` control flow can be handled.
-    match inner_stmt {
-        Statement::For(init, condition, increment, body) => {
+    match &inner_stmt.kind {
+        StatementKind::For(init, condition, increment, body) => {
             statement_for_init_condition_increment(env, init, condition, increment, body, last_value, Some(label_name))
         }
-        Statement::ForOf(var, iterable, body) => {
+        StatementKind::ForOf(var, iterable, body) => {
             let iterable_val = evaluate_expr(env, iterable)?;
             match iterable_val {
                 Value::Object(obj_map) => {
@@ -1138,7 +1152,7 @@ fn perform_statement_label(
                 _ => Err(raise_eval_error!("for-of loop requires an iterable")),
             }
         }
-        Statement::ForIn(var, object, body) => {
+        StatementKind::ForIn(var, object, body) => {
             let object_val = evaluate_expr(env, object)?;
             match object_val {
                 Value::Object(obj_map) => {
@@ -1177,35 +1191,38 @@ fn perform_statement_label(
                 _ => Err(raise_eval_error!("for-in loop requires an object")),
             }
         }
-        Statement::ForOfDestructuringObject(pattern, iterable, body) => {
+        StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
             let iterable_val = evaluate_expr(env, iterable)?;
             if let Some(cf) = for_of_destructuring_object_iter(env, pattern, &iterable_val, body, last_value, Some(label_name))? {
                 return Ok(Some(cf));
             }
             Ok(None)
         }
-        Statement::ForOfDestructuringArray(pattern, iterable, body) => {
+        StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
             let iterable_val = evaluate_expr(env, iterable)?;
             if let Some(cf) = for_of_destructuring_array_iter(env, pattern, &iterable_val, body, last_value, Some(label_name))? {
                 return Ok(Some(cf));
             }
             Ok(None)
         }
-        Statement::Switch(expr, cases) => eval_switch_statement(env, expr, cases, last_value, Some(label_name)),
+        StatementKind::Switch(expr, cases) => eval_switch_statement(env, expr, cases, last_value, Some(label_name)),
         // If it's some other statement type, just evaluate it here. Important: a
         // Normal control flow result from the inner statement should *not*
         // be propagated out of the label — labels only affect break/continue
         // that target the label itself. Propagate non-normal control-flow
         // (break/continue/return) as before, but swallow Normal so execution
         // continues.
-        other => match evaluate_statements_with_context(env, std::slice::from_ref(other))? {
-            ControlFlow::Break(Some(lbl)) if lbl == *label_name => Ok(None),
-            ControlFlow::Break(opt) => Ok(Some(ControlFlow::Break(opt))),
-            ControlFlow::Continue(Some(lbl)) if lbl == *label_name => Ok(Some(ControlFlow::Continue(None))),
-            ControlFlow::Continue(opt) => Ok(Some(ControlFlow::Continue(opt))),
-            ControlFlow::Normal(_) => Ok(None),
-            cf => Ok(Some(cf)),
-        },
+        other => {
+            let stmt = Statement::from(other.clone());
+            match evaluate_statements_with_context(env, std::slice::from_ref(&stmt))? {
+                ControlFlow::Break(Some(lbl)) if lbl == *label_name => Ok(None),
+                ControlFlow::Break(opt) => Ok(Some(ControlFlow::Break(opt))),
+                ControlFlow::Continue(Some(lbl)) if lbl == *label_name => Ok(Some(ControlFlow::Continue(None))),
+                ControlFlow::Continue(opt) => Ok(Some(ControlFlow::Continue(opt))),
+                ControlFlow::Normal(_) => Ok(None),
+                cf => Ok(Some(cf)),
+            }
+        }
     }
 }
 
@@ -5950,27 +5967,27 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
 
 fn collect_var_names(statements: &[Statement], names: &mut std::collections::HashSet<String>) {
     for stmt in statements {
-        match stmt {
-            Statement::Var(name, _) => {
+        match &stmt.kind {
+            StatementKind::Var(name, _) => {
                 names.insert(name.clone());
             }
-            Statement::If(_, then_body, else_body) => {
+            StatementKind::If(_, then_body, else_body) => {
                 collect_var_names(then_body, names);
                 if let Some(else_stmts) = else_body {
                     collect_var_names(else_stmts, names);
                 }
             }
-            Statement::For(_, _, _, body) => {
+            StatementKind::For(_, _, _, body) => {
                 collect_var_names(body, names);
             }
-            Statement::ForOf(_, _, body) => {
+            StatementKind::ForOf(_, _, body) => {
                 collect_var_names(body, names);
             }
-            Statement::ForIn(var, _, body) => {
+            StatementKind::ForIn(var, _, body) => {
                 names.insert(var.clone());
                 collect_var_names(body, names);
             }
-            Statement::ForOfDestructuringObject(pattern, _, body) => {
+            StatementKind::ForOfDestructuringObject(pattern, _, body) => {
                 // extract variable names from object destructuring pattern
                 for element in pattern {
                     match element {
@@ -5992,17 +6009,17 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
                 }
                 collect_var_names(body, names);
             }
-            Statement::ForOfDestructuringArray(pattern, _, body) => {
+            StatementKind::ForOfDestructuringArray(pattern, _, body) => {
                 collect_names_from_array_pattern(pattern, names);
                 collect_var_names(body, names);
             }
-            Statement::While(_, body) => {
+            StatementKind::While(_, body) => {
                 collect_var_names(body, names);
             }
-            Statement::DoWhile(body, _) => {
+            StatementKind::DoWhile(body, _) => {
                 collect_var_names(body, names);
             }
-            Statement::Switch(_, cases) => {
+            StatementKind::Switch(_, cases) => {
                 for case in cases {
                     match case {
                         SwitchCase::Case(_, stmts) => collect_var_names(stmts, names),
@@ -6010,7 +6027,7 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
                     }
                 }
             }
-            Statement::TryCatch(try_body, _, catch_body, finally_body) => {
+            StatementKind::TryCatch(try_body, _, catch_body, finally_body) => {
                 collect_var_names(try_body, names);
                 collect_var_names(catch_body, names);
                 if let Some(finally_stmts) = finally_body {

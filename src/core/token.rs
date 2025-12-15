@@ -164,86 +164,174 @@ impl Token {
 }
 
 #[derive(Debug, Clone)]
-pub enum TemplatePart {
-    String(Vec<u16>),
-    Expr(Vec<Token>),
+pub struct TokenData {
+    pub token: Token,
+    pub line: usize,
+    pub column: usize,
 }
 
-pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
+#[derive(Debug, Clone)]
+pub enum TemplatePart {
+    String(Vec<u16>),
+    Expr(Vec<TokenData>),
+}
+
+pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
+    let mut line = 1;
+    let mut column = 1;
+
     while i < chars.len() {
+        let start_col = column;
         match chars[i] {
-            ' ' | '\t' | '\r' => i += 1,
-            '\n' => {
-                tokens.push(Token::LineTerminator);
+            ' ' | '\t' | '\r' => {
                 i += 1;
+                column += 1;
+            }
+            '\n' => {
+                tokens.push(TokenData {
+                    token: Token::LineTerminator,
+                    line,
+                    column,
+                });
+                i += 1;
+                line += 1;
+                column = 1;
             }
             '+' => {
                 if i + 1 < chars.len() && chars[i + 1] == '+' {
-                    tokens.push(Token::Increment);
+                    tokens.push(TokenData {
+                        token: Token::Increment,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::AddAssign);
+                    tokens.push(TokenData {
+                        token: Token::AddAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::Plus);
+                    tokens.push(TokenData {
+                        token: Token::Plus,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '-' => {
                 if i + 1 < chars.len() && chars[i + 1] == '-' {
-                    tokens.push(Token::Decrement);
+                    tokens.push(TokenData {
+                        token: Token::Decrement,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::SubAssign);
+                    tokens.push(TokenData {
+                        token: Token::SubAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::Minus);
+                    tokens.push(TokenData {
+                        token: Token::Minus,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '*' => {
                 // Handle exponentiation '**' and '**=' first, then '*='
                 if i + 2 < chars.len() && chars[i + 1] == '*' && chars[i + 2] == '=' {
-                    tokens.push(Token::PowAssign);
+                    tokens.push(TokenData {
+                        token: Token::PowAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    tokens.push(Token::Exponent);
+                    tokens.push(TokenData {
+                        token: Token::Exponent,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::MulAssign);
+                    tokens.push(TokenData {
+                        token: Token::MulAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::Multiply);
+                    tokens.push(TokenData {
+                        token: Token::Multiply,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '/' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::DivAssign);
+                    tokens.push(TokenData {
+                        token: Token::DivAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '/' {
                     // Single-line comment: //
                     while i < chars.len() && chars[i] != '\n' {
                         i += 1;
+                        column += 1;
                     }
                     // Don't consume the newline, let the whitespace handler deal with it
                 } else if i + 1 < chars.len() && chars[i + 1] == '*' {
                     // Multi-line comment: /*
                     i += 2; // skip /*
+                    column += 2;
+                    let mut terminated = false;
                     while i + 1 < chars.len() {
                         if chars[i] == '*' && chars[i + 1] == '/' {
                             i += 2; // skip */
+                            column += 2;
+                            terminated = true;
                             break;
                         }
                         if chars[i] == '\n' {
-                            tokens.push(Token::LineTerminator);
+                            tokens.push(TokenData {
+                                token: Token::LineTerminator,
+                                line,
+                                column,
+                            });
+                            line += 1;
+                            column = 1;
+                        } else {
+                            column += 1;
                         }
                         i += 1;
                     }
-                    if i >= chars.len() {
+                    if !terminated {
                         return Err(raise_tokenize_error!()); // Unterminated comment
                     }
                 } else {
@@ -254,34 +342,46 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     // true/false, or a closing punctuation), treat this as a
                     // division operator instead.
                     let mut prev_end_expr = false;
-                    if let Some(
-                        Token::Number(_)
-                        | Token::BigInt(_)
-                        | Token::StringLit(_)
-                        | Token::Identifier(_)
-                        | Token::RBracket
-                        | Token::RParen
-                        | Token::RBrace
-                        | Token::True
-                        | Token::False
-                        | Token::Increment
-                        | Token::Decrement,
-                    ) = tokens.iter().rev().find(|t| !matches!(t, Token::LineTerminator))
-                    {
-                        prev_end_expr = true;
+                    // Iterate backwards skipping LineTerminators to find the last significant token
+                    let last_token = tokens.iter().rev().find(|t| !matches!(t.token, Token::LineTerminator));
+
+                    if let Some(token_data) = last_token {
+                        match token_data.token {
+                            Token::Number(_)
+                            | Token::BigInt(_)
+                            | Token::StringLit(_)
+                            | Token::Identifier(_)
+                            | Token::RBracket
+                            | Token::RParen
+                            | Token::RBrace
+                            | Token::True
+                            | Token::False
+                            | Token::Increment
+                            | Token::Decrement => {
+                                prev_end_expr = true;
+                            }
+                            _ => {}
+                        }
                     }
 
                     if prev_end_expr {
-                        tokens.push(Token::Divide);
+                        tokens.push(TokenData {
+                            token: Token::Divide,
+                            line,
+                            column: start_col,
+                        });
                         i += 1;
+                        column += 1;
                     } else {
                         // Parse regex literal: /.../flags
                         let mut j = i + 1;
+                        let mut col_j = column + 1;
                         let mut in_class = false;
                         while j < chars.len() {
                             if chars[j] == '\\' {
                                 // escape, skip next char
                                 j += 2;
+                                col_j += 2;
                                 continue;
                             }
                             if !in_class && chars[j] == '/' {
@@ -293,6 +393,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                                 in_class = false;
                             }
                             j += 1;
+                            col_j += 1;
                         }
                         if j >= chars.len() || chars[j] != '/' {
                             return Err(raise_tokenize_error!()); // unterminated regex
@@ -300,217 +401,465 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         // pattern is between i+1 and j-1
                         let pattern: String = chars[i + 1..j].iter().collect();
                         j += 1; // skip closing '/'
+                        col_j += 1;
 
                         // parse flags (letters only)
                         let mut flags = String::new();
                         while j < chars.len() && chars[j].is_alphabetic() {
                             flags.push(chars[j]);
                             j += 1;
+                            col_j += 1;
                         }
-                        tokens.push(Token::Regex(pattern, flags));
+                        tokens.push(TokenData {
+                            token: Token::Regex(pattern, flags),
+                            line,
+                            column: start_col,
+                        });
                         i = j;
+                        column = col_j;
                     }
                 }
             }
             '%' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::ModAssign);
+                    tokens.push(TokenData {
+                        token: Token::ModAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::Mod);
+                    tokens.push(TokenData {
+                        token: Token::Mod,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '(' => {
-                tokens.push(Token::LParen);
+                tokens.push(TokenData {
+                    token: Token::LParen,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             ')' => {
-                tokens.push(Token::RParen);
+                tokens.push(TokenData {
+                    token: Token::RParen,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             '[' => {
-                tokens.push(Token::LBracket);
+                tokens.push(TokenData {
+                    token: Token::LBracket,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             ']' => {
-                tokens.push(Token::RBracket);
+                tokens.push(TokenData {
+                    token: Token::RBracket,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             '{' => {
-                tokens.push(Token::LBrace);
+                tokens.push(TokenData {
+                    token: Token::LBrace,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             '}' => {
-                tokens.push(Token::RBrace);
+                tokens.push(TokenData {
+                    token: Token::RBrace,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             ':' => {
-                tokens.push(Token::Colon);
+                tokens.push(TokenData {
+                    token: Token::Colon,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             '.' => {
                 if i + 2 < chars.len() && chars[i + 1] == '.' && chars[i + 2] == '.' {
-                    tokens.push(Token::Spread);
+                    tokens.push(TokenData {
+                        token: Token::Spread,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else {
-                    tokens.push(Token::Dot);
+                    tokens.push(TokenData {
+                        token: Token::Dot,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '?' => {
                 // Recognize '??=' (nullish coalescing assignment), '??' (nullish coalescing), '?.' (optional chaining), and '?' (conditional)
                 if i + 2 < chars.len() && chars[i + 1] == '?' && chars[i + 2] == '=' {
-                    tokens.push(Token::NullishAssign);
+                    tokens.push(TokenData {
+                        token: Token::NullishAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '?' {
-                    tokens.push(Token::NullishCoalescing);
+                    tokens.push(TokenData {
+                        token: Token::NullishCoalescing,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '.' {
-                    tokens.push(Token::OptionalChain);
+                    tokens.push(TokenData {
+                        token: Token::OptionalChain,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::QuestionMark);
+                    tokens.push(TokenData {
+                        token: Token::QuestionMark,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '!' => {
                 if i + 2 < chars.len() && chars[i + 1] == '=' && chars[i + 2] == '=' {
-                    tokens.push(Token::StrictNotEqual);
+                    tokens.push(TokenData {
+                        token: Token::StrictNotEqual,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::NotEqual);
+                    tokens.push(TokenData {
+                        token: Token::NotEqual,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::LogicalNot);
+                    tokens.push(TokenData {
+                        token: Token::LogicalNot,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '=' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
                     if i + 2 < chars.len() && chars[i + 2] == '=' {
-                        tokens.push(Token::StrictEqual);
+                        tokens.push(TokenData {
+                            token: Token::StrictEqual,
+                            line,
+                            column: start_col,
+                        });
                         i += 3;
+                        column += 3;
                     } else {
-                        tokens.push(Token::Equal);
+                        tokens.push(TokenData {
+                            token: Token::Equal,
+                            line,
+                            column: start_col,
+                        });
                         i += 2;
+                        column += 2;
                     }
                 } else if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Token::Arrow);
+                    tokens.push(TokenData {
+                        token: Token::Arrow,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '+' {
-                    tokens.push(Token::AddAssign);
+                    tokens.push(TokenData {
+                        token: Token::AddAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '-' {
-                    tokens.push(Token::SubAssign);
+                    tokens.push(TokenData {
+                        token: Token::SubAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    tokens.push(Token::MulAssign);
+                    tokens.push(TokenData {
+                        token: Token::MulAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '/' {
-                    tokens.push(Token::DivAssign);
+                    tokens.push(TokenData {
+                        token: Token::DivAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '%' {
-                    tokens.push(Token::ModAssign);
+                    tokens.push(TokenData {
+                        token: Token::ModAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::Assign);
+                    tokens.push(TokenData {
+                        token: Token::Assign,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '<' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::LessEqual);
+                    tokens.push(TokenData {
+                        token: Token::LessEqual,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 2 < chars.len() && chars[i + 1] == '<' && chars[i + 2] == '=' {
                     // Recognize '<<=' (left shift assignment)
-                    tokens.push(Token::LeftShiftAssign);
+                    tokens.push(TokenData {
+                        token: Token::LeftShiftAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '<' {
-                    tokens.push(Token::LeftShift);
+                    tokens.push(TokenData {
+                        token: Token::LeftShift,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::LessThan);
+                    tokens.push(TokenData {
+                        token: Token::LessThan,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '>' => {
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::GreaterEqual);
+                    tokens.push(TokenData {
+                        token: Token::GreaterEqual,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 3 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '>' && chars[i + 3] == '=' {
                     // Recognize '>>>=' (unsigned right shift assignment)
-                    tokens.push(Token::UnsignedRightShiftAssign);
+                    tokens.push(TokenData {
+                        token: Token::UnsignedRightShiftAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 4;
+                    column += 4;
                 } else if i + 2 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '>' {
                     // Recognize '>>>' (unsigned right shift)
-                    tokens.push(Token::UnsignedRightShift);
+                    tokens.push(TokenData {
+                        token: Token::UnsignedRightShift,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 2 < chars.len() && chars[i + 1] == '>' && chars[i + 2] == '=' {
                     // Recognize '>>=' (right shift assignment)
-                    tokens.push(Token::RightShiftAssign);
+                    tokens.push(TokenData {
+                        token: Token::RightShiftAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '>' {
-                    tokens.push(Token::RightShift);
+                    tokens.push(TokenData {
+                        token: Token::RightShift,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::GreaterThan);
+                    tokens.push(TokenData {
+                        token: Token::GreaterThan,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '&' => {
                 // Recognize '&&=' (logical AND assignment) and '&&' (logical AND)
                 if i + 2 < chars.len() && chars[i + 1] == '&' && chars[i + 2] == '=' {
-                    tokens.push(Token::LogicalAndAssign);
+                    tokens.push(TokenData {
+                        token: Token::LogicalAndAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '&' {
-                    tokens.push(Token::LogicalAnd);
+                    tokens.push(TokenData {
+                        token: Token::LogicalAnd,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     // Bitwise AND assignment '&='
-                    tokens.push(Token::BitAndAssign);
+                    tokens.push(TokenData {
+                        token: Token::BitAndAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::BitAnd);
+                    tokens.push(TokenData {
+                        token: Token::BitAnd,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '|' => {
                 // Recognize '||=' (logical OR assignment) and '||' (logical OR)
                 if i + 2 < chars.len() && chars[i + 1] == '|' && chars[i + 2] == '=' {
-                    tokens.push(Token::LogicalOrAssign);
+                    tokens.push(TokenData {
+                        token: Token::LogicalOrAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 3;
+                    column += 3;
                 } else if i + 1 < chars.len() && chars[i + 1] == '|' {
-                    tokens.push(Token::LogicalOr);
+                    tokens.push(TokenData {
+                        token: Token::LogicalOr,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '=' {
                     // Bitwise OR assignment '|='
-                    tokens.push(Token::BitOrAssign);
+                    tokens.push(TokenData {
+                        token: Token::BitOrAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::BitOr);
+                    tokens.push(TokenData {
+                        token: Token::BitOr,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '^' => {
                 // Recognize '^=' (bitwise XOR assignment) and '^' (bitwise XOR)
                 if i + 1 < chars.len() && chars[i + 1] == '=' {
-                    tokens.push(Token::BitXorAssign);
+                    tokens.push(TokenData {
+                        token: Token::BitXorAssign,
+                        line,
+                        column: start_col,
+                    });
                     i += 2;
+                    column += 2;
                 } else {
-                    tokens.push(Token::BitXor);
+                    tokens.push(TokenData {
+                        token: Token::BitXor,
+                        line,
+                        column: start_col,
+                    });
                     i += 1;
+                    column += 1;
                 }
             }
             '~' => {
-                tokens.push(Token::BitNot);
+                tokens.push(TokenData {
+                    token: Token::BitNot,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             '0'..='9' => {
                 let start = i;
                 // integer part (allow underscores as numeric separators)
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                     i += 1;
+                    column += 1;
                 }
 
                 // BigInt literal: digits (possibly with underscores) followed by 'n' (no decimal/exponent allowed)
@@ -520,25 +869,34 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     if num_str.is_empty() || !num_str.chars().all(|c| c.is_ascii_digit()) {
                         return Err(raise_tokenize_error!());
                     }
-                    tokens.push(Token::BigInt(num_str));
+                    tokens.push(TokenData {
+                        token: Token::BigInt(num_str),
+                        line,
+                        column: start_col,
+                    });
                     i += 1; // consume trailing 'n'
+                    column += 1;
                     continue;
                 }
 
                 // fractional part
                 if i < chars.len() && chars[i] == '.' {
                     i += 1;
+                    column += 1;
                     while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                         i += 1;
+                        column += 1;
                     }
                 }
 
                 // optional exponent part
                 if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
                     let mut j = i + 1;
+                    let mut col_j = column + 1;
                     // optional sign after e/E
                     if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
                         j += 1;
+                        col_j += 1;
                     }
                     // require at least one digit in exponent (underscores allowed inside digits)
                     if j >= chars.len() || !(chars[j].is_ascii_digit()) {
@@ -546,8 +904,10 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     }
                     while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
                         j += 1;
+                        col_j += 1;
                     }
                     i = j;
+                    column = col_j;
                 }
 
                 // Build numeric string and remove numeric separators
@@ -555,26 +915,63 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                 num_str.retain(|c| c != '_');
                 // Convert to f64
                 match num_str.parse::<f64>() {
-                    Ok(n) => tokens.push(Token::Number(n)),
+                    Ok(n) => tokens.push(TokenData {
+                        token: Token::Number(n),
+                        line,
+                        column: start_col,
+                    }),
                     Err(_) => return Err(raise_tokenize_error!()),
                 }
             }
             '"' => {
                 i += 1; // skip opening quote
+                column += 1;
                 let mut start = i;
                 let str_lit = parse_string_literal(&chars, &mut start, '"')?;
-                tokens.push(Token::StringLit(str_lit));
+                tokens.push(TokenData {
+                    token: Token::StringLit(str_lit),
+                    line,
+                    column: start_col,
+                });
+
+                for &chars_k in chars[i..start].iter() {
+                    if chars_k == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
+
                 i = start + 1; // skip closing quote
+                column += 1;
             }
             '\'' => {
                 i += 1; // skip opening quote
+                column += 1;
                 let mut start = i;
                 let str_lit = parse_string_literal(&chars, &mut start, '\'')?;
-                tokens.push(Token::StringLit(str_lit));
+                tokens.push(TokenData {
+                    token: Token::StringLit(str_lit),
+                    line,
+                    column: start_col,
+                });
+
+                for &chars_k in chars[i..start].iter() {
+                    if chars_k == '\n' {
+                        line += 1;
+                        column = 1;
+                    } else {
+                        column += 1;
+                    }
+                }
+
                 i = start + 1; // skip closing quote
+                column += 1;
             }
             '`' => {
                 i += 1; // skip opening backtick
+                column += 1;
                 let mut parts = Vec::new();
                 let mut current_start = i;
                 while i < chars.len() && chars[i] != '`' {
@@ -584,9 +981,19 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                             let mut start_idx = current_start;
                             let str_part = parse_string_literal(&chars, &mut start_idx, '$')?;
                             parts.push(TemplatePart::String(str_part));
+
+                            for &chars_k in chars[current_start..start_idx].iter() {
+                                if chars_k == '\n' {
+                                    line += 1;
+                                    column = 1;
+                                } else {
+                                    column += 1;
+                                }
+                            }
                             i = start_idx; // Update i to after the parsed string
                         }
                         i += 2; // skip ${
+                        column += 2;
                         let expr_start = i;
                         let mut brace_count = 1;
                         while i < chars.len() && brace_count > 0 {
@@ -594,6 +1001,12 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                                 brace_count += 1;
                             } else if chars[i] == '}' {
                                 brace_count -= 1;
+                            }
+                            if chars[i] == '\n' {
+                                line += 1;
+                                column = 1;
+                            } else {
+                                column += 1;
                             }
                             i += 1;
                         }
@@ -606,7 +1019,33 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                         parts.push(TemplatePart::Expr(expr_tokens));
                         current_start = i;
                     } else {
-                        i += 1;
+                        // Handle escapes to avoid stopping at escaped backtick
+                        if chars[i] == '\\' {
+                            if chars[i] == '\n' {
+                                line += 1;
+                                column = 1;
+                            } else {
+                                column += 1;
+                            }
+                            i += 1;
+                            if i < chars.len() {
+                                if chars[i] == '\n' {
+                                    line += 1;
+                                    column = 1;
+                                } else {
+                                    column += 1;
+                                }
+                                i += 1;
+                            }
+                        } else {
+                            if chars[i] == '\n' {
+                                line += 1;
+                                column = 1;
+                            } else {
+                                column += 1;
+                            }
+                            i += 1;
+                        }
                     }
                 }
                 if i >= chars.len() {
@@ -617,82 +1056,113 @@ pub fn tokenize(expr: &str) -> Result<Vec<Token>, JSError> {
                     let mut start_idx = current_start;
                     let str_part = parse_string_literal(&chars, &mut start_idx, '`')?;
                     parts.push(TemplatePart::String(str_part));
+                    for &chars_k in chars[current_start..start_idx].iter() {
+                        if chars_k == '\n' {
+                            line += 1;
+                            column = 1;
+                        } else {
+                            column += 1;
+                        }
+                    }
                 }
-                tokens.push(Token::TemplateString(parts));
+                tokens.push(TokenData {
+                    token: Token::TemplateString(parts),
+                    line,
+                    column: start_col,
+                });
                 i += 1; // skip closing backtick
+                column += 1;
             }
             'a'..='z' | 'A'..='Z' | '_' | '$' => {
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                     i += 1;
+                    column += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                match ident.as_str() {
-                    "let" => tokens.push(Token::Let),
-                    "var" => tokens.push(Token::Var),
-                    "const" => tokens.push(Token::Const),
-                    "class" => tokens.push(Token::Class),
-                    "extends" => tokens.push(Token::Extends),
-                    "super" => tokens.push(Token::Super),
-                    "this" => tokens.push(Token::This),
-                    "static" => tokens.push(Token::Static),
-                    "new" => tokens.push(Token::New),
-                    "instanceof" => tokens.push(Token::InstanceOf),
-                    "typeof" => tokens.push(Token::TypeOf),
-                    "delete" => tokens.push(Token::Delete),
-                    "void" => tokens.push(Token::Void),
-                    "in" => tokens.push(Token::In),
-                    "as" => tokens.push(Token::As),
-                    "import" => tokens.push(Token::Import),
-                    "export" => tokens.push(Token::Export),
-                    "try" => tokens.push(Token::Try),
-                    "catch" => tokens.push(Token::Catch),
-                    "finally" => tokens.push(Token::Finally),
-                    "throw" => tokens.push(Token::Throw),
+                let token = match ident.as_str() {
+                    "let" => Token::Let,
+                    "var" => Token::Var,
+                    "const" => Token::Const,
+                    "class" => Token::Class,
+                    "extends" => Token::Extends,
+                    "super" => Token::Super,
+                    "this" => Token::This,
+                    "static" => Token::Static,
+                    "new" => Token::New,
+                    "instanceof" => Token::InstanceOf,
+                    "typeof" => Token::TypeOf,
+                    "delete" => Token::Delete,
+                    "void" => Token::Void,
+                    "in" => Token::In,
+                    "as" => Token::As,
+                    "import" => Token::Import,
+                    "export" => Token::Export,
+                    "try" => Token::Try,
+                    "catch" => Token::Catch,
+                    "finally" => Token::Finally,
+                    "throw" => Token::Throw,
                     "function" => {
                         // Check if followed by '*'
                         if i < chars.len() && chars[i] == '*' {
-                            tokens.push(Token::FunctionStar);
                             i += 1; // consume '*'
+                            column += 1;
+                            Token::FunctionStar
                         } else {
-                            tokens.push(Token::Function);
+                            Token::Function
                         }
                     }
-                    "return" => tokens.push(Token::Return),
-                    "if" => tokens.push(Token::If),
-                    "else" => tokens.push(Token::Else),
-                    "for" => tokens.push(Token::For),
-                    "while" => tokens.push(Token::While),
-                    "do" => tokens.push(Token::Do),
-                    "switch" => tokens.push(Token::Switch),
-                    "case" => tokens.push(Token::Case),
-                    "default" => tokens.push(Token::Default),
-                    "break" => tokens.push(Token::Break),
-                    "continue" => tokens.push(Token::Continue),
-                    "true" => tokens.push(Token::True),
-                    "false" => tokens.push(Token::False),
-                    "null" => tokens.push(Token::Null),
-                    "async" => tokens.push(Token::Async),
-                    "await" => tokens.push(Token::Await),
+                    "return" => Token::Return,
+                    "if" => Token::If,
+                    "else" => Token::Else,
+                    "for" => Token::For,
+                    "while" => Token::While,
+                    "do" => Token::Do,
+                    "switch" => Token::Switch,
+                    "case" => Token::Case,
+                    "default" => Token::Default,
+                    "break" => Token::Break,
+                    "continue" => Token::Continue,
+                    "true" => Token::True,
+                    "false" => Token::False,
+                    "null" => Token::Null,
+                    "async" => Token::Async,
+                    "await" => Token::Await,
                     "yield" => {
                         // Check if followed by '*'
                         if i < chars.len() && chars[i] == '*' {
-                            tokens.push(Token::YieldStar);
                             i += 1; // consume '*'
+                            column += 1;
+                            Token::YieldStar
                         } else {
-                            tokens.push(Token::Yield);
+                            Token::Yield
                         }
                     }
-                    _ => tokens.push(Token::Identifier(ident)),
-                }
+                    _ => Token::Identifier(ident),
+                };
+                tokens.push(TokenData {
+                    token,
+                    line,
+                    column: start_col,
+                });
             }
             ',' => {
-                tokens.push(Token::Comma);
+                tokens.push(TokenData {
+                    token: Token::Comma,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             ';' => {
-                tokens.push(Token::Semicolon);
+                tokens.push(TokenData {
+                    token: Token::Semicolon,
+                    line,
+                    column: start_col,
+                });
                 i += 1;
+                column += 1;
             }
             _ => return Err(raise_tokenize_error!()),
         }

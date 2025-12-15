@@ -1,12 +1,20 @@
 use crate::{
     JSError,
     core::{
-        DestructuringElement, Expr, ObjectDestructuringElement, Token, parse_array_destructuring_pattern, parse_expression,
+        DestructuringElement, Expr, ObjectDestructuringElement, Token, TokenData, parse_array_destructuring_pattern, parse_expression,
         parse_object_destructuring_pattern, parse_parameters, parse_statement_block,
     },
     js_class::ClassMember,
-    raise_parse_error,
+    raise_parse_error, raise_parse_error_with_token,
 };
+
+fn raise_parse_error_at(tokens: &[TokenData]) -> JSError {
+    if let Some(t) = tokens.first() {
+        raise_parse_error_with_token!(t)
+    } else {
+        raise_parse_error!()
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum SwitchCase {
@@ -27,8 +35,21 @@ pub enum ExportSpecifier {
     Default(Expr),                 // export default value
 }
 
+#[derive(Clone, Debug)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl From<StatementKind> for Statement {
+    fn from(kind: StatementKind) -> Self {
+        Statement { kind, line: 0, column: 0 }
+    }
+}
+
 #[derive(Clone)]
-pub enum Statement {
+pub enum StatementKind {
     Let(String, Option<Expr>),
     Var(String, Option<Expr>),
     Const(String, Expr),
@@ -60,67 +81,67 @@ pub enum Statement {
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>),                     // export specifiers, optional inner declaration
 }
 
-impl std::fmt::Debug for Statement {
+impl std::fmt::Debug for StatementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Statement::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
-            Statement::Var(var, expr) => write!(f, "Var({}, {:?})", var, expr),
-            Statement::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
-            Statement::FunctionDeclaration(name, params, body, is_gen) => {
+            StatementKind::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
+            StatementKind::Var(var, expr) => write!(f, "Var({}, {:?})", var, expr),
+            StatementKind::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
+            StatementKind::FunctionDeclaration(name, params, body, is_gen) => {
                 write!(f, "FunctionDeclaration({}, {:?}, {:?}, {})", name, params, body, is_gen)
             }
-            Statement::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
-            Statement::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),
-            Statement::LetDestructuringObject(pattern, expr) => write!(f, "LetDestructuringObject({:?}, {:?})", pattern, expr),
-            Statement::ConstDestructuringObject(pattern, expr) => write!(f, "ConstDestructuringObject({:?}, {:?})", pattern, expr),
-            Statement::Class(name, extends, members) => write!(f, "Class({name}, {extends:?}, {members:?})"),
-            Statement::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
-            Statement::Expr(expr) => write!(f, "Expr({:?})", expr),
-            Statement::Return(Some(expr)) => write!(f, "Return({:?})", expr),
-            Statement::Return(None) => write!(f, "Return(None)"),
-            Statement::If(cond, then_body, else_body) => {
+            StatementKind::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
+            StatementKind::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),
+            StatementKind::LetDestructuringObject(pattern, expr) => write!(f, "LetDestructuringObject({:?}, {:?})", pattern, expr),
+            StatementKind::ConstDestructuringObject(pattern, expr) => write!(f, "ConstDestructuringObject({:?}, {:?})", pattern, expr),
+            StatementKind::Class(name, extends, members) => write!(f, "Class({name}, {extends:?}, {members:?})"),
+            StatementKind::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
+            StatementKind::Expr(expr) => write!(f, "Expr({:?})", expr),
+            StatementKind::Return(Some(expr)) => write!(f, "Return({:?})", expr),
+            StatementKind::Return(None) => write!(f, "Return(None)"),
+            StatementKind::If(cond, then_body, else_body) => {
                 write!(f, "If({:?}, {:?}, {:?})", cond, then_body, else_body)
             }
-            Statement::For(init, cond, incr, body) => {
+            StatementKind::For(init, cond, incr, body) => {
                 write!(f, "For({:?}, {:?}, {:?}, {:?})", init, cond, incr, body)
             }
-            Statement::ForOf(var, iterable, body) => {
+            StatementKind::ForOf(var, iterable, body) => {
                 write!(f, "ForOf({}, {:?}, {:?})", var, iterable, body)
             }
-            Statement::ForIn(var, object, body) => {
+            StatementKind::ForIn(var, object, body) => {
                 write!(f, "ForIn({}, {:?}, {:?})", var, object, body)
             }
-            Statement::ForOfDestructuringObject(pat, iterable, body) => {
+            StatementKind::ForOfDestructuringObject(pat, iterable, body) => {
                 write!(f, "ForOfDestructuringObject({:?}, {:?}, {:?})", pat, iterable, body)
             }
-            Statement::ForOfDestructuringArray(pat, iterable, body) => {
+            StatementKind::ForOfDestructuringArray(pat, iterable, body) => {
                 write!(f, "ForOfDestructuringArray({:?}, {:?}, {:?})", pat, iterable, body)
             }
-            Statement::While(cond, body) => {
+            StatementKind::While(cond, body) => {
                 write!(f, "While({:?}, {:?})", cond, body)
             }
-            Statement::DoWhile(body, cond) => {
+            StatementKind::DoWhile(body, cond) => {
                 write!(f, "DoWhile({:?}, {:?})", body, cond)
             }
-            Statement::Switch(expr, cases) => {
+            StatementKind::Switch(expr, cases) => {
                 write!(f, "Switch({:?}, {:?})", expr, cases)
             }
-            Statement::Break(None) => write!(f, "Break"),
-            Statement::Break(Some(lbl)) => write!(f, "Break({})", lbl),
-            Statement::Continue(None) => write!(f, "Continue"),
-            Statement::Continue(Some(lbl)) => write!(f, "Continue({})", lbl),
-            Statement::Label(name, stmt) => write!(f, "Label({}, {:?})", name, stmt),
-            Statement::Block(stmts) => write!(f, "Block({:?})", stmts),
-            Statement::TryCatch(try_body, catch_param, catch_body, finally_body) => {
+            StatementKind::Break(None) => write!(f, "Break"),
+            StatementKind::Break(Some(lbl)) => write!(f, "Break({})", lbl),
+            StatementKind::Continue(None) => write!(f, "Continue"),
+            StatementKind::Continue(Some(lbl)) => write!(f, "Continue({})", lbl),
+            StatementKind::Label(name, stmt) => write!(f, "Label({}, {:?})", name, stmt),
+            StatementKind::Block(stmts) => write!(f, "Block({:?})", stmts),
+            StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body) => {
                 write!(f, "TryCatch({:?}, {}, {:?}, {:?})", try_body, catch_param, catch_body, finally_body)
             }
-            Statement::Throw(expr) => {
+            StatementKind::Throw(expr) => {
                 write!(f, "Throw({:?})", expr)
             }
-            Statement::Import(specifiers, module) => {
+            StatementKind::Import(specifiers, module) => {
                 write!(f, "Import({:?}, {})", specifiers, module)
             }
-            Statement::Export(specifiers, maybe_decl) => {
+            StatementKind::Export(specifiers, maybe_decl) => {
                 if let Some(decl) = maybe_decl {
                     write!(f, "Export({:?}, {:?})", specifiers, decl)
                 } else {
@@ -131,11 +152,11 @@ impl std::fmt::Debug for Statement {
     }
 }
 
-pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSError> {
+pub fn parse_statements(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
-    while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+    while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
         // Skip empty statement semicolons that may appear (e.g. from inserted tokens)
-        if matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+        if matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0);
             continue;
         }
@@ -157,174 +178,191 @@ pub fn parse_statements(tokens: &mut Vec<Token>) -> Result<Vec<Statement>, JSErr
             }
         };
         statements.push(stmt);
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0);
         }
     }
     Ok(statements)
 }
 
-pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
+pub fn parse_statement(tokens: &mut Vec<TokenData>) -> Result<Statement, JSError> {
     // Skip any leading line terminators so statements inside blocks (e.g., cases)
     // can contain blank lines or comments that emitted line terminators.
-    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
+        tokens.remove(0);
+    }
+
+    let (line, column) = if let Some(t) = tokens.first() { (t.line, t.column) } else { (0, 0) };
+
+    let kind = parse_statement_kind(tokens)?;
+    Ok(Statement { kind, line, column })
+}
+
+pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind, JSError> {
+    // Skip any leading line terminators so statements inside blocks (e.g., cases)
+    // can contain blank lines or comments that emitted line terminators.
+    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
         tokens.remove(0);
     }
     // This function parses a single statement from the token stream.
     // It handles various types of statements including break, continue, and return.
 
     // Import statement (static imports only)
-    if !tokens.is_empty() && matches!(tokens[0], Token::Import) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Import) {
         // Check if this is a dynamic import (import followed by parenthesis)
         // If so, it's an expression, not a statement - fall through to expression parsing
-        if tokens.len() > 1 && matches!(tokens[1], Token::LParen) {
+        if tokens.len() > 1 && matches!(tokens[1].token, Token::LParen) {
             // This is a dynamic import expression, not a statement
         } else {
             tokens.remove(0); // consume import
             let mut specifiers = Vec::new();
 
             // Parse import specifiers
-            if !tokens.is_empty() && matches!(tokens[0], Token::Multiply) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::Multiply) {
                 // import * as name
                 tokens.remove(0); // consume *
-                if tokens.is_empty() || !matches!(tokens[0], Token::As) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::As) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume as
-                if let Some(Token::Identifier(name)) = tokens.first().cloned() {
-                    tokens.remove(0);
+                if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                    if let Token::Identifier(_) = tokens[0].token {
+                        tokens.remove(0);
+                    }
                     specifiers.push(ImportSpecifier::Namespace(name));
                 } else {
-                    return Err(raise_parse_error!());
+                    return Err(raise_parse_error_at(tokens));
                 }
-            } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                 // import { ... }
                 tokens.remove(0); // consume {
-                while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
-                    if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
+                    if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                         tokens.remove(0);
-                        let alias = if !tokens.is_empty() && matches!(tokens[0], Token::As) {
+                        let alias = if !tokens.is_empty() && matches!(tokens[0].token, Token::As) {
                             tokens.remove(0); // consume as
-                            if let Some(Token::Identifier(alias_name)) = tokens.first().cloned() {
+                            if let Some(Token::Identifier(alias_name)) = tokens.first().map(|t| t.token.clone()) {
                                 tokens.remove(0);
                                 Some(alias_name)
                             } else {
-                                return Err(raise_parse_error!());
+                                return Err(raise_parse_error_at(tokens));
                             }
                         } else {
                             None
                         };
                         specifiers.push(ImportSpecifier::Named(name, alias));
 
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                             tokens.remove(0); // consume ,
-                        } else if !matches!(tokens[0], Token::RBrace) {
-                            return Err(raise_parse_error!());
+                        } else if !matches!(tokens[0].token, Token::RBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                     } else {
-                        return Err(raise_parse_error!());
+                        return Err(raise_parse_error_at(tokens));
                     }
                 }
-                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume }
-            } else if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            } else if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                 // import name
-                tokens.remove(0);
+                if let Token::Identifier(_) = tokens[0].token {
+                    tokens.remove(0);
+                }
                 specifiers.push(ImportSpecifier::Default(name));
 
                 // Check for comma followed by named imports
-                if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                     tokens.remove(0); // consume ,
-                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume {
-                    while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
-                        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                    while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
+                        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                             tokens.remove(0);
-                            let alias = if !tokens.is_empty() && matches!(tokens[0], Token::As) {
+                            let alias = if !tokens.is_empty() && matches!(tokens[0].token, Token::As) {
                                 tokens.remove(0); // consume as
-                                if let Some(Token::Identifier(alias_name)) = tokens.first().cloned() {
+                                if let Some(Token::Identifier(alias_name)) = tokens.first().map(|t| t.token.clone()) {
                                     tokens.remove(0);
                                     Some(alias_name)
                                 } else {
-                                    return Err(raise_parse_error!());
+                                    return Err(raise_parse_error_at(tokens));
                                 }
                             } else {
                                 None
                             };
                             specifiers.push(ImportSpecifier::Named(name, alias));
 
-                            if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                            if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                                 tokens.remove(0); // consume ,
-                            } else if !matches!(tokens[0], Token::RBrace) {
-                                return Err(raise_parse_error!());
+                            } else if !matches!(tokens[0].token, Token::RBrace) {
+                                return Err(raise_parse_error_at(tokens));
                             }
                         } else {
-                            return Err(raise_parse_error!());
+                            return Err(raise_parse_error_at(tokens));
                         }
                     }
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume }
                 }
             }
 
             // Expect "from"
-            if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                return Err(raise_parse_error_at(tokens));
             }
-            if let Token::Identifier(from_keyword) = tokens.remove(0) {
+            if let Token::Identifier(from_keyword) = tokens.remove(0).token {
                 if from_keyword != "from" {
-                    return Err(raise_parse_error!());
+                    return Err(raise_parse_error_at(tokens));
                 }
             } else {
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             }
 
             // Parse module name
-            let module_name = if let Some(Token::StringLit(utf16_chars)) = tokens.first().cloned() {
+            let module_name = if let Some(Token::StringLit(utf16_chars)) = tokens.first().map(|t| t.token.clone()) {
                 tokens.remove(0);
-                String::from_utf16(&utf16_chars).map_err(|_| raise_parse_error!())?
+                String::from_utf16(&utf16_chars).map_err(|_| raise_parse_error_at(tokens))?
             } else {
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             };
 
-            return Ok(Statement::Import(specifiers, module_name));
+            return Ok(StatementKind::Import(specifiers, module_name));
         }
     } // Export statement
-    if !tokens.is_empty() && matches!(tokens[0], Token::Export) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Export) {
         tokens.remove(0); // consume export
         let mut specifiers = Vec::new();
 
-        if !tokens.is_empty() && matches!(tokens[0], Token::Default) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Default) {
             // export default <expr> or export default function ...
             tokens.remove(0); // consume default
-            if !tokens.is_empty() && (matches!(tokens[0], Token::Function) || matches!(tokens[0], Token::FunctionStar)) {
+            if !tokens.is_empty() && (matches!(tokens[0].token, Token::Function) || matches!(tokens[0].token, Token::FunctionStar)) {
                 // export default function [name]?(...) { ... }
-                let is_generator = matches!(tokens[0], Token::FunctionStar);
+                let is_generator = matches!(tokens[0].token, Token::FunctionStar);
                 tokens.remove(0); // consume function or function*
-                let _name = if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+                let _name = if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                     tokens.remove(0);
                     Some(name)
                 } else {
                     None
                 };
-                if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume "("
                 let params = crate::core::parser::parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume }
                 let func_expr = if is_generator {
@@ -338,97 +376,98 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                 let expr = parse_expression(tokens)?;
                 specifiers.push(ExportSpecifier::Default(expr));
             }
-        } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             // export { ... }
             tokens.remove(0); // consume {
-            while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
-                if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
+                if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                     tokens.remove(0);
-                    let alias = if !tokens.is_empty() && matches!(tokens[0], Token::As) {
+                    let alias = if !tokens.is_empty() && matches!(tokens[0].token, Token::As) {
                         tokens.remove(0); // consume as
-                        if let Some(Token::Identifier(alias_name)) = tokens.first().cloned() {
+                        if let Some(Token::Identifier(alias_name)) = tokens.first().map(|t| t.token.clone()) {
                             tokens.remove(0);
                             Some(alias_name)
                         } else {
-                            return Err(raise_parse_error!());
+                            return Err(raise_parse_error_at(tokens));
                         }
                     } else {
                         None
                     };
                     specifiers.push(ExportSpecifier::Named(name, alias));
 
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                         tokens.remove(0); // consume ,
-                    } else if !matches!(tokens[0], Token::RBrace) {
-                        return Err(raise_parse_error!());
+                    } else if !matches!(tokens[0].token, Token::RBrace) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                 } else {
-                    return Err(raise_parse_error!());
+                    return Err(raise_parse_error_at(tokens));
                 }
             }
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
         } else {
             // export <declaration> (const, let, var, function, class)
             let stmt = parse_statement(tokens)?;
-            match stmt.clone() {
-                Statement::Const(name, _expr) => {
+            match stmt.clone().kind {
+                StatementKind::Const(name, _expr) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                    return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                Statement::Let(name, Some(_expr)) => {
+                StatementKind::Let(name, Some(_expr)) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                    return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                Statement::Var(name, Some(_expr)) => {
+                StatementKind::Var(name, Some(_expr)) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                    return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                Statement::Class(name, _, _) => {
+                StatementKind::Class(name, _, _) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                    return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                Statement::FunctionDeclaration(name, _, _, _) => {
+                StatementKind::FunctionDeclaration(name, _, _, _) => {
                     specifiers.push(ExportSpecifier::Named(name, None));
-                    return Ok(Statement::Export(specifiers, Some(Box::new(stmt))));
+                    return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                _ => return Err(raise_parse_error!()),
+                _ => return Err(raise_parse_error_at(tokens)),
             }
         }
 
-        return Ok(Statement::Export(specifiers, None));
+        return Ok(StatementKind::Export(specifiers, None));
     }
 
     // Labelled statement: `label: <statement>`
-    if tokens.len() > 1
-        && let Token::Identifier(name) = tokens[0].clone()
-        && matches!(tokens[1], Token::Colon)
-    {
-        // consume identifier and colon
-        tokens.remove(0);
-        tokens.remove(0);
-        let stmt = parse_statement(tokens)?;
-        return Ok(Statement::Label(name, Box::new(stmt)));
+    if tokens.len() > 1 {
+        if let Token::Identifier(name) = tokens[0].token.clone() {
+            if matches!(tokens[1].token, Token::Colon) {
+                // consume identifier and colon
+                tokens.remove(0);
+                tokens.remove(0);
+                let stmt = parse_statement(tokens)?;
+                return Ok(StatementKind::Label(name, Box::new(stmt)));
+            }
+        }
     }
 
     // Block statement as a standalone statement
-    if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
         tokens.remove(0); // consume {
         let body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume }
-        return Ok(Statement::Block(body));
+        return Ok(StatementKind::Block(body));
     }
 
-    if !tokens.is_empty() && matches!(tokens[0], Token::Break) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Break) {
         tokens.remove(0); // consume break
         // optional label identifier
         let label = if !tokens.is_empty() {
-            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                 tokens.remove(0);
                 Some(name)
             } else {
@@ -441,22 +480,24 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         // insertion when the next token is a block terminator (e.g. `}`), or
         // part of a try/catch/finally sequence. This keeps `throw <expr>` and
         // `throw <expr>;` equivalent inside blocks.
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0); // consume ;
         } else if !tokens.is_empty()
-            && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
+            && (matches!(tokens[0].token, Token::RBrace)
+                || matches!(tokens[0].token, Token::Catch)
+                || matches!(tokens[0].token, Token::Finally))
         {
             // semicolon omitted but next token terminates the statement; accept
         } else {
-            return Err(raise_parse_error!());
+            return Err(raise_parse_error_at(tokens));
         }
-        return Ok(Statement::Break(label));
+        return Ok(StatementKind::Break(label));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Continue) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Continue) {
         tokens.remove(0); // consume continue
         // optional label identifier
         let label = if !tokens.is_empty() {
-            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                 tokens.remove(0);
                 Some(name)
             } else {
@@ -465,239 +506,244 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         } else {
             None
         };
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume ;
-        return Ok(Statement::Continue(label));
+        return Ok(StatementKind::Continue(label));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::While) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::While) {
         tokens.remove(0); // consume while
-        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume )
         // Body may be a block (`{ ... }`) or a single statement (e.g. `while (...) stmt;`)
-        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
             b
         } else {
             // Single-statement body: parse one statement and remove a trailing semicolon if present.
             let s = parse_statement(tokens)?;
-            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                 tokens.remove(0);
             }
             vec![s]
         };
-        return Ok(Statement::While(condition, body));
+        return Ok(StatementKind::While(condition, body));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Do) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Do) {
         tokens.remove(0); // consume do
         // Do body may be a block or a single statement
-        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
             b
         } else {
             // Single-statement body: parse one statement and remove trailing semicolon if present
             let s = parse_statement(tokens)?;
-            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                 tokens.remove(0);
             }
             vec![s]
         };
         // Allow intervening line terminators between the do-body and the `while`
         // keyword, e.g. `do\nwhile (...)`.
-        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
             tokens.remove(0);
         }
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::While) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::While) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume while
-        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume )
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume ;
-        return Ok(Statement::DoWhile(body, condition));
+        return Ok(StatementKind::DoWhile(body, condition));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Switch) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Switch) {
         tokens.remove(0); // consume switch
-        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume (
         let expr = parse_expression(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume )
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume {
         let mut cases = Vec::new();
-        while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+        while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
             // Skip any blank lines inside switch body (LineTerminators coming from tokenizer)
-            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                 tokens.remove(0);
             }
-            if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+            if tokens.is_empty() || matches!(tokens[0].token, Token::RBrace) {
                 break;
             }
-            if matches!(tokens[0], Token::Case) {
+            if matches!(tokens[0].token, Token::Case) {
                 tokens.remove(0); // consume case
                 let case_value = parse_expression(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::Colon) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume :
                 let mut case_stmts = Vec::new();
                 while !tokens.is_empty()
-                    && !matches!(tokens[0], Token::Case)
-                    && !matches!(tokens[0], Token::Default)
-                    && !matches!(tokens[0], Token::RBrace)
+                    && !matches!(tokens[0].token, Token::Case)
+                    && !matches!(tokens[0].token, Token::Default)
+                    && !matches!(tokens[0].token, Token::RBrace)
                 {
                     // Skip blank lines inside a case body before parsing the next
                     // statement so cases like `case X: \n` fall through properly
                     // rather than trying to parse `}` as a statement.
-                    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                         tokens.remove(0);
                     }
                     // If skipping blank lines lands us at a case/default/rbrace
                     // there's no statement to parse — break out of the case loop.
                     if tokens.is_empty()
-                        || matches!(tokens[0], Token::Case)
-                        || matches!(tokens[0], Token::Default)
-                        || matches!(tokens[0], Token::RBrace)
+                        || matches!(tokens[0].token, Token::Case)
+                        || matches!(tokens[0].token, Token::Default)
+                        || matches!(tokens[0].token, Token::RBrace)
                     {
                         break;
                     }
                     log::trace!("switch case parsing stmt, next token = {:?}", tokens.first());
                     let stmt = parse_statement(tokens)?;
                     case_stmts.push(stmt);
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                         tokens.remove(0);
                     }
                 }
                 cases.push(SwitchCase::Case(case_value, case_stmts));
-            } else if matches!(tokens[0], Token::Default) {
+            } else if matches!(tokens[0].token, Token::Default) {
                 tokens.remove(0); // consume default
-                if tokens.is_empty() || !matches!(tokens[0], Token::Colon) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::Colon) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume :
                 let mut default_stmts = Vec::new();
-                while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+                while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
                     // Skip leading blank lines inside default branch to avoid
                     // attempting to parse a closing brace as a statement.
-                    while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                         tokens.remove(0);
                     }
-                    if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+                    if tokens.is_empty() || matches!(tokens[0].token, Token::RBrace) {
                         break;
                     }
                     log::trace!("switch default parsing stmt, next token = {:?}", tokens.first());
                     let stmt = parse_statement(tokens)?;
                     default_stmts.push(stmt);
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                         tokens.remove(0);
                     }
                 }
                 cases.push(SwitchCase::Default(default_stmts));
             } else {
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             }
         }
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume }
-        return Ok(Statement::Switch(expr, cases));
+        return Ok(StatementKind::Switch(expr, cases));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Throw) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Throw) {
         tokens.remove(0); // consume throw
         let expr = parse_expression(tokens)?;
         // Accept an explicit semicolon, or allow ASI-ish omission when next token
         // ends the block or begins a catch/finally block.
-        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
             tokens.remove(0); // consume ;
         } else if !tokens.is_empty()
-            && (matches!(tokens[0], Token::RBrace) || matches!(tokens[0], Token::Catch) || matches!(tokens[0], Token::Finally))
+            && (matches!(tokens[0].token, Token::RBrace)
+                || matches!(tokens[0].token, Token::Catch)
+                || matches!(tokens[0].token, Token::Finally))
         {
             // semicolon omitted but next token terminates the statement; accept
         } else {
-            return Err(raise_parse_error!());
+            return Err(raise_parse_error_at(tokens));
         }
-        return Ok(Statement::Throw(expr));
+        return Ok(StatementKind::Throw(expr));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Async) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Async) {
         tokens.remove(0); // consume async
-        if !tokens.is_empty() && matches!(tokens[0], Token::Function) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Function) {
             tokens.remove(0); // consume function
-            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                 tokens.remove(0);
-                if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
                     tokens.remove(0); // consume "("
                     let params = crate::core::parser::parse_parameters(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume {
                     let body = parse_statements(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume }
-                    return Ok(Statement::Let(name.clone(), Some(Expr::AsyncFunction(Some(name), params, body))));
+                    return Ok(StatementKind::Let(
+                        name.clone(),
+                        Some(Expr::AsyncFunction(Some(name), params, body)),
+                    ));
                 }
             }
         }
-        return Err(raise_parse_error!());
+        return Err(raise_parse_error_at(tokens));
     }
-    if !tokens.is_empty() && (matches!(tokens[0], Token::Function) || matches!(tokens[0], Token::FunctionStar)) {
-        let is_generator = matches!(tokens[0], Token::FunctionStar);
+    if !tokens.is_empty() && (matches!(tokens[0].token, Token::Function) || matches!(tokens[0].token, Token::FunctionStar)) {
+        let is_generator = matches!(tokens[0].token, Token::FunctionStar);
         tokens.remove(0); // consume function or function*
         log::trace!(
             "parse_statement: entered Function branch; next tokens: {:?}",
             tokens.iter().take(12).collect::<Vec<_>>()
         );
-        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
             tokens.remove(0);
             log::trace!(
                 "parse_statement: function name parsed: {} ; remaining: {:?}",
                 name,
                 tokens.iter().take(12).collect::<Vec<_>>()
             );
-            if !tokens.is_empty() && matches!(tokens[0], Token::LParen) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
                 tokens.remove(0); // consume "("
                 let params = crate::core::parser::parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 log::trace!(
                     "parse_statement: function params parsed; entering body parse; remaining tokens: {:?}",
@@ -710,32 +756,32 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     body.len(),
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
-                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume }
-                return Ok(Statement::FunctionDeclaration(name, params, body, is_generator));
+                return Ok(StatementKind::FunctionDeclaration(name, params, body, is_generator));
             }
         }
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::If) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::If) {
         tokens.remove(0); // consume if
-        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume (
         let condition = parse_expression(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume )
         // Allow either a block (`{ ... }`) or a single statement as the
         // then-body of an `if` (e.g. `if (cond) stmt;`), matching JavaScript.
-        let then_body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        let then_body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             tokens.remove(0); // consume {
             let body = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
             body
@@ -744,7 +790,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             let stmt = parse_statement(tokens)?;
             // Consume trailing semicolon after the inner statement if present so
             // `if (cond) stmt; else ...` is handled correctly.
-            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                 tokens.remove(0);
             }
             vec![stmt]
@@ -752,31 +798,31 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         // Allow newline(s) between then-body and `else` so `else` can be on the
         // following line (real-world JS commonly formats code like this).
-        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
             tokens.remove(0);
         }
 
-        let else_body = if !tokens.is_empty() && matches!(tokens[0], Token::Else) {
+        let else_body = if !tokens.is_empty() && matches!(tokens[0].token, Token::Else) {
             tokens.remove(0); // consume else
             // Support both `else { ... }` and `else if (...) { ... }` forms.
-            if !tokens.is_empty() && matches!(tokens[0], Token::If) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::If) {
                 // `else if` form — parse the nested if statement and wrap it
                 // as a single-item body.
                 let nested_if = parse_statement(tokens)?;
                 Some(vec![nested_if])
-            } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                 // Block body for else
                 tokens.remove(0); // consume {
                 let body = parse_statements(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                    return Err(raise_parse_error!());
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                    return Err(raise_parse_error_at(tokens));
                 }
                 tokens.remove(0); // consume }
                 Some(body)
             } else {
                 // Single-statement else body (e.g. `else stmt;`)
                 let stmt = parse_statement(tokens)?;
-                if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                     tokens.remove(0);
                 }
                 Some(vec![stmt])
@@ -785,17 +831,17 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             None
         };
 
-        return Ok(Statement::If(condition, then_body, else_body));
+        return Ok(StatementKind::If(condition, then_body, else_body));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Try) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Try) {
         tokens.remove(0); // consume try
-        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume {
         let try_body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume }
 
@@ -806,196 +852,198 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
         // Skip any intervening line terminators before checking for `catch`
         // so patterns like `}\ncatch (e) { ... }` are accepted.
-        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
             tokens.remove(0);
         }
 
-        if !tokens.is_empty() && matches!(tokens[0], Token::Catch) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Catch) {
             tokens.remove(0); // consume catch
-            if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume (
             if tokens.is_empty() {
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             }
-            if let Token::Identifier(name) = tokens.remove(0) {
+            if let Token::Identifier(name) = tokens.remove(0).token {
                 catch_param = name;
             } else {
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             }
-            if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume )
-            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume {
             catch_body = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
         }
 
         // Optional finally — allow line terminators between catch and finally
-        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
             tokens.remove(0);
         }
 
         // Optional finally
-        if !tokens.is_empty() && matches!(tokens[0], Token::Finally) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::Finally) {
             tokens.remove(0); // consume finally
-            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume {
             let fb = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
             finally_body = Some(fb);
         }
 
-        return Ok(Statement::TryCatch(try_body, catch_param, catch_body, finally_body));
+        return Ok(StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::For) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::For) {
         tokens.remove(0); // consume for
-        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume (
 
         // Check if this is a for-of loop
-        if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
+        if !tokens.is_empty()
+            && (matches!(tokens[0].token, Token::Let) || matches!(tokens[0].token, Token::Var) || matches!(tokens[0].token, Token::Const))
+        {
             let saved_declaration_token = tokens[0].clone();
             tokens.remove(0); // consume let/var/const
-            if let Some(Token::Identifier(var_name)) = tokens.first().cloned() {
+            if let Some(Token::Identifier(var_name)) = tokens.first().map(|t| t.token.clone()) {
                 let saved_identifier_token = tokens[0].clone();
                 tokens.remove(0);
-                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Identifier(ref s) if s == "of") {
                     // This is a for-of loop
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume )
                     // For-of body may be a block or a single statement
-                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                    let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume }
                         b
                     } else {
                         let s = parse_statement(tokens)?;
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                             tokens.remove(0);
                         }
                         vec![s]
                     };
-                    return Ok(Statement::ForOf(var_name, iterable, body));
-                } else if !tokens.is_empty() && matches!(tokens[0], Token::In) {
+                    return Ok(StatementKind::ForOf(var_name, iterable, body));
+                } else if !tokens.is_empty() && matches!(tokens[0].token, Token::In) {
                     // This is a for-in loop
                     tokens.remove(0); // consume in
                     let object = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume )
                     // For-in body may be a block or a single statement
-                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                    let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume }
                         b
                     } else {
                         let s = parse_statement(tokens)?;
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                             tokens.remove(0);
                         }
                         vec![s]
                     };
-                    return Ok(Statement::ForIn(var_name, object, body));
+                    return Ok(StatementKind::ForIn(var_name, object, body));
                 } else {
                     // This is a regular for loop with variable declaration, put tokens back
                     tokens.insert(0, saved_identifier_token);
                     tokens.insert(0, saved_declaration_token);
                 }
-            } else if let Some(Token::LBrace) = tokens.first().cloned()
-                && (matches!(saved_declaration_token, Token::Var)
-                    || matches!(saved_declaration_token, Token::Let)
-                    || matches!(saved_declaration_token, Token::Const))
+            } else if matches!(tokens.first().map(|t| &t.token), Some(Token::LBrace))
+                && (matches!(saved_declaration_token.token, Token::Var)
+                    || matches!(saved_declaration_token.token, Token::Let)
+                    || matches!(saved_declaration_token.token, Token::Const))
             {
                 // var { ... } of iterable
                 let pattern = parse_object_destructuring_pattern(tokens)?;
-                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Identifier(ref s) if s == "of") {
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume )
                     // parse body
-                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                    let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume }
                         b
                     } else {
                         let s = parse_statement(tokens)?;
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                             tokens.remove(0);
                         }
                         vec![s]
                     };
-                    return Ok(Statement::ForOfDestructuringObject(pattern, iterable, body));
+                    return Ok(StatementKind::ForOfDestructuringObject(pattern, iterable, body));
                 } else {
                     // Not a for-of; restore declaration token
                     tokens.insert(0, saved_declaration_token);
                 }
-            } else if let Some(Token::LBracket) = tokens.first().cloned()
-                && (matches!(saved_declaration_token, Token::Var)
-                    || matches!(saved_declaration_token, Token::Let)
-                    || matches!(saved_declaration_token, Token::Const))
+            } else if matches!(tokens.first().map(|t| &t.token), Some(Token::LBracket))
+                && (matches!(saved_declaration_token.token, Token::Var)
+                    || matches!(saved_declaration_token.token, Token::Let)
+                    || matches!(saved_declaration_token.token, Token::Const))
             {
                 // var [ ... ] of iterable
                 let pattern = parse_array_destructuring_pattern(tokens)?;
-                if !tokens.is_empty() && matches!(tokens[0], Token::Identifier(ref s) if s == "of") {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Identifier(ref s) if s == "of") {
                     tokens.remove(0); // consume of
                     let iterable = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-                        return Err(raise_parse_error!());
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume )
                     // parse body
-                    let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+                    let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
                         tokens.remove(0); // consume {
                         let b = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume }
                         b
                     } else {
                         let s = parse_statement(tokens)?;
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                             tokens.remove(0);
                         }
                         vec![s]
                     };
-                    return Ok(Statement::ForOfDestructuringArray(pattern, iterable, body));
+                    return Ok(StatementKind::ForOfDestructuringArray(pattern, iterable, body));
                 } else {
                     // Not a for-of; restore declaration token
                     tokens.insert(0, saved_declaration_token);
@@ -1007,73 +1055,76 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         }
 
         // Parse initialization (regular for loop)
-        let init = if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var)) {
+        let init = if !tokens.is_empty() && (matches!(tokens[0].token, Token::Let) || matches!(tokens[0].token, Token::Var)) {
             Some(Box::new(parse_statement(tokens)?))
-        } else if !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
+        } else if !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            Some(Box::new(Statement::from(StatementKind::Expr(parse_expression(tokens)?))))
         } else {
             None
         };
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume first ;
 
         // Parse condition
-        let condition = if !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+        let condition = if !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
             Some(parse_expression(tokens)?)
         } else {
             None
         };
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume second ;
 
         // Parse increment
-        let increment = if !matches!(tokens[0], Token::RParen) {
-            Some(Box::new(Statement::Expr(parse_expression(tokens)?)))
+        let increment = if !matches!(tokens[0].token, Token::RParen) {
+            Some(Box::new(Statement::from(StatementKind::Expr(parse_expression(tokens)?))))
         } else {
             None
         };
 
-        if tokens.is_empty() || !matches!(tokens[0], Token::RParen) {
-            return Err(raise_parse_error!());
+        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume )
 
         // For-loop body may be a block or a single statement
-        let body = if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        let body = if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             tokens.remove(0); // consume {
             let b = parse_statements(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
             b
         } else {
             let s = parse_statement(tokens)?;
-            if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+            if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                 tokens.remove(0);
             }
             vec![s]
         };
 
-        return Ok(Statement::For(init, condition, increment, body));
+        return Ok(StatementKind::For(init, condition, increment, body));
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Return) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Return) {
         tokens.remove(0); // consume return
-        if tokens.is_empty() || matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-            return Ok(Statement::Return(None));
+        if tokens.is_empty() || matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            return Ok(StatementKind::Return(None));
         }
         let expr = parse_expression(tokens)?;
-        return Ok(Statement::Return(Some(expr)));
+        return Ok(StatementKind::Return(Some(expr)));
     }
-    if !tokens.is_empty() && (matches!(tokens[0], Token::Let) || matches!(tokens[0], Token::Var) || matches!(tokens[0], Token::Const)) {
-        let is_const = matches!(tokens[0], Token::Const);
-        let is_var = matches!(tokens[0], Token::Var);
+    if !tokens.is_empty()
+        && (matches!(tokens[0].token, Token::Let) || matches!(tokens[0].token, Token::Var) || matches!(tokens[0].token, Token::Const))
+    {
+        let is_const = matches!(tokens[0].token, Token::Const);
+        let is_var = matches!(tokens[0].token, Token::Var);
+        let decl_keyword_token = tokens[0].clone();
         tokens.remove(0); // consume let/var/const
         log::trace!(
             "parse_statement: after consuming declaration keyword; next tokens (first 8): {:?}",
@@ -1081,43 +1132,43 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
         );
 
         // Check for destructuring
-        if !tokens.is_empty() && matches!(tokens[0], Token::LBracket) {
+        if !tokens.is_empty() && matches!(tokens[0].token, Token::LBracket) {
             // Array destructuring
             let pattern = parse_array_destructuring_pattern(tokens)?;
-            if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::Assign) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume =
             let expr = parse_expression(tokens)?;
             if is_const {
-                return Ok(Statement::ConstDestructuringArray(pattern, expr));
+                return Ok(StatementKind::ConstDestructuringArray(pattern, expr));
             } else {
-                return Ok(Statement::LetDestructuringArray(pattern, expr));
+                return Ok(StatementKind::LetDestructuringArray(pattern, expr));
             }
-        } else if !tokens.is_empty() && matches!(tokens[0], Token::LBrace) {
+        } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
             // Object destructuring
             let pattern = parse_object_destructuring_pattern(tokens)?;
             log::trace!(
                 "parse_statement: after object pattern parse; next tokens (first 8): {:?}",
                 tokens.iter().take(8).collect::<Vec<_>>()
             );
-            if tokens.is_empty() || !matches!(tokens[0], Token::Assign) {
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::Assign) {
                 log::error!(
                     "parse_statement: expected '=' after object pattern but found (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
-                return Err(raise_parse_error!());
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume =
             let expr = parse_expression(tokens)?;
             if is_const {
-                return Ok(Statement::ConstDestructuringObject(pattern, expr));
+                return Ok(StatementKind::ConstDestructuringObject(pattern, expr));
             } else {
-                return Ok(Statement::LetDestructuringObject(pattern, expr));
+                return Ok(StatementKind::LetDestructuringObject(pattern, expr));
             }
         } else {
             // Regular variable declaration
-            if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+            if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                 tokens.remove(0);
                 log::trace!(
                     "parse_statement: consumed identifier {}; next tokens (first 8): {:?}",
@@ -1125,7 +1176,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
                 // Handle optional initializer (e.g., var x = 1)
-                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
                     tokens.remove(0);
                     log::trace!(
                         "parse_statement: consumed '='; next tokens (first 8): {:?}",
@@ -1166,49 +1217,54 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     // If there's a comma after this initialized declarator, we
                     // need to handle the rest of the comma-separated list. The
                     // parser represents single-declarator statements as
-                    // `Statement::Var/Let/Const`, so we convert each following
+                    // `StatementKind::Var/Let/Const`, so we convert each following
                     // declarator into its own standalone declaration token
                     // sequence and insert them at the front of the token
                     // stream (reverse insertion to preserve order) so they
                     // get parsed on subsequent iterations.
-                    let mut follow_decls: Vec<Vec<Token>> = Vec::new();
+                    let mut follow_decls: Vec<Vec<TokenData>> = Vec::new();
                     loop {
                         // Skip any blank lines between the comma and next ident
-                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                             tokens.remove(0);
                         }
 
-                        if tokens.is_empty() || !matches!(tokens[0], Token::Comma) {
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::Comma) {
                             break;
                         }
 
                         tokens.remove(0); // consume comma
 
                         // Skip blank lines after comma
-                        while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                             tokens.remove(0);
                         }
 
                         // Next must be an identifier
-                        let next_name = if let Some(Token::Identifier(n)) = tokens.first().cloned() {
-                            tokens.remove(0);
-                            n
+                        let next_name_token = if let Some(Token::Identifier(_)) = tokens.first().map(|t| &t.token) {
+                            tokens.remove(0)
                         } else {
-                            return Err(raise_parse_error!());
+                            return Err(raise_parse_error_at(tokens));
+                        };
+                        let next_name = if let Token::Identifier(n) = &next_name_token.token {
+                            n.clone()
+                        } else {
+                            unreachable!()
                         };
 
                         // Capture initializer tokens if present (we'll build a
                         // separate statement for this declarator later).
-                        let mut init_tokens: Vec<Token> = Vec::new();
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
-                            tokens.remove(0); // consume '='
+                        let mut init_tokens: Vec<TokenData> = Vec::new();
+                        let mut assign_token: Option<TokenData> = None;
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
+                            assign_token = Some(tokens.remove(0)); // consume '='
                             // Grab tokens into init_tokens until top-level comma/semicolon
                             let mut depth: i32 = 0;
                             while !tokens.is_empty() {
-                                if depth == 0 && (matches!(tokens[0], Token::Comma) || matches!(tokens[0], Token::Semicolon)) {
+                                if depth == 0 && (matches!(tokens[0].token, Token::Comma) || matches!(tokens[0].token, Token::Semicolon)) {
                                     break;
                                 }
-                                match tokens[0] {
+                                match tokens[0].token {
                                     Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
                                     Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
                                     _ => {}
@@ -1219,22 +1275,22 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
 
                         // Build a token sequence for the standalone declaration
                         // in left-to-right order: <var/let/const> <ident> [= <init>];
-                        let mut decl_tokens: Vec<Token> = Vec::new();
-                        if is_var {
-                            decl_tokens.push(Token::Var);
-                        } else if is_const {
-                            decl_tokens.push(Token::Const);
-                        } else {
-                            decl_tokens.push(Token::Let);
-                        }
+                        let mut decl_tokens: Vec<TokenData> = Vec::new();
+                        decl_tokens.push(decl_keyword_token.clone());
                         // keep a copy for debug logging (we'll move the original into the token list)
                         let next_name_for_log = next_name.clone();
-                        decl_tokens.push(Token::Identifier(next_name));
+                        decl_tokens.push(next_name_token);
                         if !init_tokens.is_empty() {
-                            decl_tokens.push(Token::Assign);
+                            if let Some(at) = assign_token {
+                                decl_tokens.push(at);
+                            }
                             decl_tokens.extend(init_tokens);
                         }
-                        decl_tokens.push(Token::Semicolon);
+                        decl_tokens.push(TokenData {
+                            token: Token::Semicolon,
+                            line: 0,
+                            column: 0,
+                        });
 
                         log::trace!(
                             "parse_statement: collected follow-declarator '{}' ({} tokens)",
@@ -1246,7 +1302,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         // If the next token is a semicolon that terminates the
                         // whole declaration, consume it and stop extracting more
                         // declarators.
-                        if !tokens.is_empty() && matches!(tokens[0], Token::Semicolon) {
+                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon) {
                             tokens.remove(0);
                             break;
                         }
@@ -1264,35 +1320,35 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     }
 
                     if is_const {
-                        return Ok(Statement::Const(name, expr));
+                        return Ok(StatementKind::Const(name, expr));
                     } else if is_var {
-                        return Ok(Statement::Var(name, Some(expr)));
+                        return Ok(StatementKind::Var(name, Some(expr)));
                     } else {
-                        return Ok(Statement::Let(name, Some(expr)));
+                        return Ok(StatementKind::Let(name, Some(expr)));
                     }
                 } else if !is_const {
                     // Support comma-separated declarations like `var a, b, c;` by
                     // inserting subsequent simple declarators back into the token
                     // stream as separate var/let statements. For now we only support
                     // subsequent declarators without initializers (e.g., `, b, c`).
-                    if !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                         let mut extra_names: Vec<String> = Vec::new();
                         // Collect following identifiers separated by commas
-                        while !tokens.is_empty() && matches!(tokens[0], Token::Comma) {
+                        while !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                             tokens.remove(0); // consume comma
                             // Skip blank lines between comma and identifier
-                            while !tokens.is_empty() && matches!(tokens[0], Token::LineTerminator) {
+                            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
                                 tokens.remove(0);
                             }
-                            if let Some(Token::Identifier(n)) = tokens.first().cloned() {
+                            if let Some(Token::Identifier(n)) = tokens.first().map(|t| t.token.clone()) {
                                 tokens.remove(0);
                                 // If there is an initializer on the later decl, bail out (not supported here)
-                                if !tokens.is_empty() && matches!(tokens[0], Token::Assign) {
-                                    return Err(raise_parse_error!());
+                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
+                                    return Err(raise_parse_error_at(tokens));
                                 }
                                 extra_names.push(n);
                             } else {
-                                return Err(raise_parse_error!());
+                                return Err(raise_parse_error_at(tokens));
                             }
                         }
 
@@ -1302,38 +1358,48 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                         // original left-to-right order.
                         for n in extra_names.into_iter().rev() {
                             // Add a semicolon terminator for each inserted declaration
-                            tokens.insert(0, Token::Semicolon);
+                            tokens.insert(
+                                0,
+                                TokenData {
+                                    token: Token::Semicolon,
+                                    line: 0,
+                                    column: 0,
+                                },
+                            );
                             // Identifier
-                            tokens.insert(0, Token::Identifier(n));
+                            tokens.insert(
+                                0,
+                                TokenData {
+                                    token: Token::Identifier(n),
+                                    line: 0,
+                                    column: 0,
+                                },
+                            );
                             // var/let token
-                            if is_var {
-                                tokens.insert(0, Token::Var);
-                            } else {
-                                tokens.insert(0, Token::Let);
-                            }
+                            tokens.insert(0, decl_keyword_token.clone());
                         }
 
                         // Return the first declaration
                         if is_var {
-                            return Ok(Statement::Var(name, None));
+                            return Ok(StatementKind::Var(name, None));
                         } else {
-                            return Ok(Statement::Let(name, None));
+                            return Ok(StatementKind::Let(name, None));
                         }
                     }
                     if is_var {
-                        return Ok(Statement::Var(name, None));
+                        return Ok(StatementKind::Var(name, None));
                     } else {
-                        return Ok(Statement::Let(name, None));
+                        return Ok(StatementKind::Let(name, None));
                     }
                 }
             }
         }
     }
-    if !tokens.is_empty() && matches!(tokens[0], Token::Class) {
+    if !tokens.is_empty() && matches!(tokens[0].token, Token::Class) {
         tokens.remove(0); // consume class
-        if let Some(Token::Identifier(name)) = tokens.first().cloned() {
+        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
             tokens.remove(0);
-            let extends = if !tokens.is_empty() && matches!(tokens[0], Token::Extends) {
+            let extends = if !tokens.is_empty() && matches!(tokens[0].token, Token::Extends) {
                 tokens.remove(0); // consume extends
                 // Parse an arbitrary expression for the superclass (e.g. Intl.PluralRules)
                 let super_expr = parse_expression(tokens)?;
@@ -1343,42 +1409,42 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
             };
 
             // Parse class body
-            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume {
 
             let mut members = Vec::new();
-            while !tokens.is_empty() && !matches!(tokens[0], Token::RBrace) {
+            while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
                 // Skip blank lines or stray semicolons in class body (tokenizer
                 // emits LineTerminator tokens). This allows class members to be
                 // separated by newlines or semicolons without confusing the
                 // parser which expects identifiers/static/get/set/paren next.
-                while !tokens.is_empty() && matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
+                while !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
                     tokens.remove(0);
                 }
-                if tokens.is_empty() || matches!(tokens[0], Token::RBrace) {
+                if tokens.is_empty() || matches!(tokens[0].token, Token::RBrace) {
                     break;
                 }
-                let is_static = if !tokens.is_empty() && matches!(tokens[0], Token::Static) {
+                let is_static = if !tokens.is_empty() && matches!(tokens[0].token, Token::Static) {
                     tokens.remove(0);
                     true
                 } else {
                     false
                 };
 
-                if let Some(Token::Identifier(method_name)) = tokens.first() {
+                if let Some(Token::Identifier(method_name)) = tokens.first().map(|t| &t.token) {
                     let method_name = method_name.clone();
                     if method_name == "constructor" {
                         tokens.remove(0);
                         // Parse constructor
-                        if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume (
                         let params = parse_parameters(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                            return Err(raise_parse_error!());
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                            return Err(raise_parse_error_at(tokens));
                         }
                         tokens.remove(0); // consume {
                         let body = parse_statement_block(tokens)?;
@@ -1386,34 +1452,34 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                     } else {
                         tokens.remove(0);
                         if tokens.is_empty() {
-                            return Err(raise_parse_error!());
+                            return Err(raise_parse_error_at(tokens));
                         }
                         // Check for getter/setter
-                        let is_getter = matches!(tokens[0], Token::Identifier(ref id) if id == "get");
-                        let is_setter = matches!(tokens[0], Token::Identifier(ref id) if id == "set");
+                        let is_getter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "get");
+                        let is_setter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "set");
                         if is_getter || is_setter {
                             tokens.remove(0); // consume get/set
-                            if tokens.is_empty() || !matches!(tokens[0], Token::Identifier(_)) {
-                                return Err(raise_parse_error!());
+                            if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                                return Err(raise_parse_error_at(tokens));
                             }
-                            let prop_name = if let Token::Identifier(name) = tokens.remove(0) {
-                                name
+                            let prop_name = if let Token::Identifier(name) = &tokens.remove(0).token {
+                                name.clone()
                             } else {
-                                return Err(raise_parse_error!());
+                                return Err(raise_parse_error_at(tokens));
                             };
-                            if tokens.is_empty() || !matches!(tokens[0], Token::LParen) {
-                                return Err(raise_parse_error!());
+                            if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                                return Err(raise_parse_error_at(tokens));
                             }
                             tokens.remove(0); // consume (
                             let params = parse_parameters(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                                return Err(raise_parse_error!());
+                            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                                return Err(raise_parse_error_at(tokens));
                             }
                             tokens.remove(0); // consume {
                             let body = parse_statement_block(tokens)?;
                             if is_getter {
                                 if !params.is_empty() {
-                                    return Err(raise_parse_error!()); // getters should have no parameters
+                                    return Err(raise_parse_error_at(tokens)); // getters should have no parameters
                                 }
                                 if is_static {
                                     members.push(ClassMember::StaticGetter(prop_name, body));
@@ -1423,7 +1489,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             } else {
                                 // setter
                                 if params.len() != 1 {
-                                    return Err(raise_parse_error!()); // setters should have exactly one parameter
+                                    return Err(raise_parse_error_at(tokens)); // setters should have exactly one parameter
                                 }
                                 if is_static {
                                     members.push(ClassMember::StaticSetter(prop_name, params, body));
@@ -1431,12 +1497,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                                     members.push(ClassMember::Setter(prop_name, params, body));
                                 }
                             }
-                        } else if matches!(tokens[0], Token::LParen) {
+                        } else if matches!(tokens[0].token, Token::LParen) {
                             // This is a method
                             tokens.remove(0); // consume (
                             let params = parse_parameters(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0], Token::LBrace) {
-                                return Err(raise_parse_error!());
+                            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                                return Err(raise_parse_error_at(tokens));
                             }
                             tokens.remove(0); // consume {
                             let body = parse_statement_block(tokens)?;
@@ -1445,12 +1511,12 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                             } else {
                                 members.push(ClassMember::Method(method_name, params, body));
                             }
-                        } else if matches!(tokens[0], Token::Assign) {
+                        } else if matches!(tokens[0].token, Token::Assign) {
                             // This is a property
                             tokens.remove(0); // consume =
                             let value = parse_expression(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0], Token::Semicolon | Token::LineTerminator) {
-                                return Err(raise_parse_error!());
+                            if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                                return Err(raise_parse_error_at(tokens));
                             }
                             tokens.remove(0); // consume ;
                             if is_static {
@@ -1459,20 +1525,20 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
                                 members.push(ClassMember::Property(method_name, value));
                             }
                         } else {
-                            return Err(raise_parse_error!());
+                            return Err(raise_parse_error_at(tokens));
                         }
                     }
                 } else {
-                    return Err(raise_parse_error!());
+                    return Err(raise_parse_error_at(tokens));
                 }
             }
 
-            if tokens.is_empty() || !matches!(tokens[0], Token::RBrace) {
-                return Err(raise_parse_error!());
+            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                return Err(raise_parse_error_at(tokens));
             }
             tokens.remove(0); // consume }
 
-            return Ok(Statement::Class(name, extends, members));
+            return Ok(StatementKind::Class(name, extends, members));
         }
     }
     let expr = parse_expression(tokens)?;
@@ -1480,7 +1546,7 @@ pub fn parse_statement(tokens: &mut Vec<Token>) -> Result<Statement, JSError> {
     if let Expr::Assign(target, value) = &expr
         && let Expr::Var(name) = target.as_ref()
     {
-        return Ok(Statement::Assign(name.clone(), *value.clone()));
+        return Ok(StatementKind::Assign(name.clone(), *value.clone()));
     }
-    Ok(Statement::Expr(expr))
+    Ok(StatementKind::Expr(expr))
 }

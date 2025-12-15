@@ -44,7 +44,7 @@ fn parse_is_canonicalized_tag() {
     let tokens = tokenize(src).expect("tokenize should succeed");
     // Ensure tokenizer finds the function token
     assert!(
-        tokens.iter().any(|t| matches!(t, Token::Function)),
+        tokens.iter().any(|t| matches!(t.token, Token::Function)),
         "should include a Function token"
     );
 

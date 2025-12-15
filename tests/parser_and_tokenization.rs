@@ -38,7 +38,7 @@ fn single_line_and_block_comments_ignored() {
 #[test]
 fn trailing_comma_and_newline_before_rbrace_is_allowed() {
     // tokens for: { \n seconds = 0, \n }
-    let mut tokens = vec![
+    let raw_tokens = vec![
         Token::LBrace,
         Token::LineTerminator,
         Token::Identifier("seconds".to_string()),
@@ -48,6 +48,14 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
         Token::LineTerminator,
         Token::RBrace,
     ];
+    let mut tokens: Vec<javascript::TokenData> = raw_tokens
+        .into_iter()
+        .map(|t| javascript::TokenData {
+            token: t,
+            line: 0,
+            column: 0,
+        })
+        .collect();
 
     let pattern = parse_object_destructuring_pattern(&mut tokens).expect("should parse pattern");
     // pattern should contain one property

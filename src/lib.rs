@@ -36,7 +36,7 @@ pub(crate) mod unicode;
 
 pub use core::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 pub use core::{
-    JSObjectData, Token, initialize_global_constructors, parse_expression, parse_object_destructuring_pattern, parse_statement,
+    JSObjectData, Token, TokenData, initialize_global_constructors, parse_expression, parse_object_destructuring_pattern, parse_statement,
     parse_statements,
 };
 pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, read_script_file, tokenize};

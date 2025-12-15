@@ -33,34 +33,6 @@ thread_local! {
     static WELL_KNOWN_SYMBOLS: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
 
-fn inject_host_shims(env: &JSObjectDataPtr, script: &str) -> Result<(), JSError> {
-    // Inject simple host `std` / `os` shims when importing with the pattern:
-    //   import * as NAME from "std";
-    for line in script.lines() {
-        let l = line.trim();
-        if l.starts_with("import * as")
-            && l.contains("from")
-            && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
-        {
-            let name_part = &l[as_idx + 2..from_idx].trim();
-            let name = PropertyKey::String(name_part.trim().to_string());
-            if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                let rest = &l[from_idx + start_quote + 1..];
-                if let Some(end_quote) = rest.find(quote_char) {
-                    let module = &rest[..end_quote];
-                    if module == "std" {
-                        obj_set_key_value(env, &name, Value::Object(crate::js_std::make_std_object()?))?;
-                    } else if module == "os" {
-                        obj_set_key_value(env, &name, Value::Object(crate::js_os::make_os_object()?))?;
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise>>) -> Result<Value, JSError> {
     // Run the event loop until the promise is resolved
     loop {
@@ -160,9 +132,7 @@ where
     let script = script.as_ref();
     log::debug!("evaluate_script async called with script len {}", script.len());
     log::trace!("evaluate_script: entry");
-    let filtered = filter_input_script(script);
-    log::trace!("filtered script:\n{}", filtered);
-    let mut tokens = match tokenize(&filtered) {
+    let mut tokens = match tokenize(script) {
         Ok(t) => t,
         Err(e) => {
             log::debug!("tokenize error: {e:?}");
@@ -185,8 +155,6 @@ where
     // Record a script name on the root environment so stack frames can include it.
     let path = script_path.map_or("<script>".to_string(), |p| p.as_ref().to_string_lossy().to_string());
     let _ = obj_set_key_value(&env, &"__script_name".into(), Value::String(utf8_to_utf16(&path)));
-
-    inject_host_shims(&env, script)?;
 
     // Initialize global built-in constructors
     initialize_global_constructors(&env)?;
@@ -502,163 +470,6 @@ pub enum DestructuringElement {
 pub enum ObjectDestructuringElement {
     Property { key: String, value: DestructuringElement }, // a: b or a
     Rest(String),                                          // ...rest
-}
-
-pub(crate) fn filter_input_script(script: &str) -> String {
-    // Remove comments and simple import lines that we've already handled via shim injection
-    let mut filtered = String::new();
-    let chars: Vec<char> = script.trim().chars().collect();
-    let mut i = 0;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut escape = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // Handle escape sequences
-        if escape {
-            filtered.push(ch);
-            escape = false;
-            i += 1;
-            continue;
-        }
-        if ch == '\\' {
-            escape = true;
-            filtered.push(ch);
-            i += 1;
-            continue;
-        }
-
-        // Handle quote states
-        match ch {
-            '\'' if !in_double && !in_backtick => {
-                in_single = !in_single;
-                filtered.push(ch);
-                i += 1;
-                continue;
-            }
-            '"' if !in_single && !in_backtick => {
-                in_double = !in_double;
-                filtered.push(ch);
-                i += 1;
-                continue;
-            }
-            '`' if !in_single && !in_double => {
-                in_backtick = !in_backtick;
-                filtered.push(ch);
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        // Only process comments when not inside quotes
-        if !in_single && !in_double && !in_backtick {
-            // Handle single-line comments: //
-            if i + 1 < chars.len() && ch == '/' && chars[i + 1] == '/' {
-                // Skip to end of line
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-                // Don't add the newline yet, continue to next iteration
-                continue;
-            }
-
-            // Handle multi-line comments: /* */
-            if i + 1 < chars.len() && ch == '/' && chars[i + 1] == '*' {
-                i += 2; // Skip /*
-                while i + 1 < chars.len() {
-                    if chars[i] == '*' && chars[i + 1] == '/' {
-                        i += 2; // Skip */
-                        break;
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-        }
-
-        // Handle regular characters and newlines
-        filtered.push(ch);
-        i += 1;
-    }
-
-    // Now process the filtered script line by line for import statements
-    let mut final_filtered = String::new();
-    for (i, line) in filtered.lines().enumerate() {
-        // Split line on semicolons only when not inside quotes/backticks
-        let mut current = String::new();
-        let mut in_single = false;
-        let mut in_double = false;
-        let mut in_backtick = false;
-        let mut escape = false;
-        // track parts along with whether they were followed by a semicolon
-        let mut parts: Vec<(String, bool)> = Vec::new();
-        for ch in line.chars() {
-            if escape {
-                current.push(ch);
-                escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                escape = true;
-                current.push(ch);
-                continue;
-            }
-            match ch {
-                '\'' if !in_double && !in_backtick => {
-                    in_single = !in_single;
-                    current.push(ch);
-                    continue;
-                }
-                '"' if !in_single && !in_backtick => {
-                    in_double = !in_double;
-                    current.push(ch);
-                    continue;
-                }
-                '`' if !in_single && !in_double => {
-                    in_backtick = !in_backtick;
-                    current.push(ch);
-                    continue;
-                }
-                _ => {}
-            }
-            if ch == ';' && !in_single && !in_double && !in_backtick {
-                parts.push((current.clone(), true));
-                current.clear();
-                continue;
-            }
-            current.push(ch);
-        }
-        // If there is a trailing part (possibly no trailing semicolon), add it
-        if !current.is_empty() {
-            parts.push((current, false));
-        }
-
-        for (part, had_semicolon) in parts.iter() {
-            let p = part.trim();
-            if p.is_empty() {
-                continue;
-            }
-            log::trace!("script part[{i}]='{p}'");
-            if p.starts_with("import * as") && p.contains("from") {
-                log::debug!("skipping import part[{i}]: \"{p}\"");
-                continue;
-            }
-            final_filtered.push_str(p);
-            // Re-add semicolon if the original part was followed by a semicolon
-            if *had_semicolon {
-                final_filtered.push(';');
-            }
-        }
-        final_filtered.push('\n');
-    }
-
-    // Remove any trailing newline(s) added during filtering to avoid an extra
-    // empty statement at the end when tokenizing/parsing.
-    final_filtered.trim().to_string()
 }
 
 /// Initialize global built-in constructors in the environment

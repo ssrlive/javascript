@@ -37,6 +37,8 @@ pub struct JSErrorData {
     pub file: String,
     pub line: usize,
     pub method: String,
+    pub js_line: Option<usize>,
+    pub js_column: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -48,8 +50,28 @@ impl JSError {
     // Provide a constructor for use by macros
     pub fn new(kind: JSErrorKind, file: String, line: usize, method: String) -> Self {
         Self {
-            inner: Box::new(JSErrorData { kind, file, line, method }),
+            inner: Box::new(JSErrorData {
+                kind,
+                file,
+                line,
+                method,
+                js_line: None,
+                js_column: None,
+            }),
         }
+    }
+
+    pub fn set_js_location(&mut self, line: usize, column: usize) {
+        self.inner.js_line = Some(line);
+        self.inner.js_column = Some(column);
+    }
+
+    pub fn js_line(&self) -> Option<usize> {
+        self.inner.js_line
+    }
+
+    pub fn js_column(&self) -> Option<usize> {
+        self.inner.js_column
     }
 
     // convenience method to access the kind
@@ -59,7 +81,7 @@ impl JSError {
 
     /// Get a user-friendly error message without internal Rust debugging details
     pub fn user_message(&self) -> String {
-        match &self.inner.kind {
+        let msg = match &self.inner.kind {
             JSErrorKind::TokenizationError => "SyntaxError: Failed to parse input".to_string(),
             JSErrorKind::ParseError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::EvaluationError { message } => {
@@ -82,6 +104,7 @@ impl JSError {
                 // If the thrown value is an object, prefer a human-friendly
                 // message that includes the constructor name and/or message
                 // property instead of the generic [object Object] string.
+                let mut result = None;
                 if let crate::core::Value::Object(obj) = value {
                     // Try constructor.name
                     if let Ok(Some(ctor_val_rc)) = crate::core::obj_get_key_value(obj, &"constructor".into())
@@ -95,21 +118,33 @@ impl JSError {
                             && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
                         {
                             let msg = crate::unicode::utf16_to_utf8(msg_utf16);
-                            return format!("Uncaught {}: {}", ctor_name, msg);
+                            result = Some(format!("Uncaught {}: {}", ctor_name, msg));
+                        } else {
+                            result = Some(format!("Uncaught {}", ctor_name));
                         }
-                        return format!("Uncaught {}", ctor_name);
                     }
                     // Fallback: if object has a message property, use it
-                    if let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
+                    if result.is_none()
+                        && let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
                         && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
                     {
                         let msg = crate::unicode::utf16_to_utf8(msg_utf16);
-                        return format!("Uncaught {}", msg);
+                        result = Some(format!("Uncaught {}", msg));
                     }
                 }
-                format!("Uncaught {}", crate::core::value_to_string(value))
+                result.unwrap_or_else(|| format!("Uncaught {}", crate::core::value_to_string(value)))
             }
             JSErrorKind::IoError(e) => format!("IOError: {}", e),
+        };
+
+        if let Some(line) = self.inner.js_line {
+            if let Some(col) = self.inner.js_column {
+                format!("{} at line {}:{}", msg, line, col)
+            } else {
+                format!("{} at line {}", msg, line)
+            }
+        } else {
+            msg
         }
     }
 }
@@ -181,6 +216,21 @@ macro_rules! raise_parse_error {
     };
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_parse_error_with_token {
+    ($token:expr, $msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::ParseError {
+            message: format!("{} ({}:{}:0)", $msg, $token.line, $token.column)
+        })
+    };
+    ($token:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::ParseError {
+            message: format!("parse error ({}:{}:0)", $token.line, $token.column)
+        })
     };
 }
 

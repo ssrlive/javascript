@@ -1,8 +1,8 @@
 use crate::{
     JSError,
     core::{
-        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors, new_js_object_data,
-        obj_get_key_value, obj_set_key_value, parse_statements, tokenize,
+        JSObjectDataPtr, Value, evaluate_statements, initialize_global_constructors, new_js_object_data, obj_get_key_value,
+        parse_statements, tokenize,
     },
     js_promise::{PromiseState, run_event_loop},
 };
@@ -37,36 +37,10 @@ impl Repl {
     /// Returns the evaluation result or an error.
     pub fn eval<T: AsRef<str>>(&self, script: T) -> Result<Value, JSError> {
         let script = script.as_ref();
-        let filtered = filter_input_script(script);
 
         // Parse tokens and statements
-        let mut tokens = tokenize(&filtered)?;
+        let mut tokens = tokenize(script)?;
         let statements = parse_statements(&mut tokens)?;
-
-        // Inject simple host `std` / `os` shims when importing with the pattern:
-        //   import * as NAME from "std";
-        for line in script.lines() {
-            let l = line.trim();
-            if l.starts_with("import * as")
-                && l.contains("from")
-                && let (Some(as_idx), Some(from_idx)) = (l.find("as"), l.find("from"))
-            {
-                let name_part = &l[as_idx + 2..from_idx].trim();
-                let name = PropertyKey::String(name_part.trim().to_string());
-                if let Some(start_quote) = l[from_idx..].find(|c: char| ['"', '\''].contains(&c)) {
-                    let quote_char = l[from_idx + start_quote..].chars().next().unwrap();
-                    let rest = &l[from_idx + start_quote + 1..];
-                    if let Some(end_quote) = rest.find(quote_char) {
-                        let module = &rest[..end_quote];
-                        if module == "std" {
-                            obj_set_key_value(&self.env, &name, Value::Object(crate::js_std::make_std_object()?))?;
-                        } else if module == "os" {
-                            obj_set_key_value(&self.env, &name, Value::Object(crate::js_os::make_os_object()?))?;
-                        }
-                    }
-                }
-            }
-        }
 
         match evaluate_statements(&self.env, &statements) {
             Ok(v) => {

@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr},
+    core::{Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr},
     error::JSError,
 };
 
@@ -174,21 +174,20 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
 }
 
 fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, replaced: &mut bool) {
-    use crate::core::Statement;
-    match stmt {
-        Statement::Expr(e) => {
+    match &mut stmt.kind {
+        StatementKind::Expr(e) => {
             *e = replace_first_yield_in_expr(e, send_value, replaced);
         }
-        Statement::Let(_, Some(expr)) | Statement::Var(_, Some(expr)) => {
+        StatementKind::Let(_, Some(expr)) | StatementKind::Var(_, Some(expr)) => {
             *expr = replace_first_yield_in_expr(expr, send_value, replaced);
         }
-        Statement::Const(_, expr) => {
+        StatementKind::Const(_, expr) => {
             *expr = replace_first_yield_in_expr(expr, send_value, replaced);
         }
-        Statement::Return(Some(expr)) => {
+        StatementKind::Return(Some(expr)) => {
             *expr = replace_first_yield_in_expr(expr, send_value, replaced);
         }
-        Statement::If(cond, then_body, else_body_opt) => {
+        StatementKind::If(cond, then_body, else_body_opt) => {
             *cond = replace_first_yield_in_expr(cond, send_value, replaced);
             for s in then_body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
@@ -205,7 +204,7 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
-        Statement::For(_, cond_opt, _, body) => {
+        StatementKind::For(_, cond_opt, _, body) => {
             if let Some(cond) = cond_opt {
                 *cond = replace_first_yield_in_expr(cond, send_value, replaced);
             }
@@ -216,7 +215,7 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
-        Statement::While(cond, body) => {
+        StatementKind::While(cond, body) => {
             *cond = replace_first_yield_in_expr(cond, send_value, replaced);
             for s in body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
@@ -225,7 +224,7 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
-        Statement::DoWhile(body, cond) => {
+        StatementKind::DoWhile(body, cond) => {
             for s in body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
                 if *replaced {
@@ -234,10 +233,10 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
             }
             *cond = replace_first_yield_in_expr(cond, send_value, replaced);
         }
-        Statement::ForOf(_, _, body)
-        | Statement::ForIn(_, _, body)
-        | Statement::ForOfDestructuringObject(_, _, body)
-        | Statement::ForOfDestructuringArray(_, _, body) => {
+        StatementKind::ForOf(_, _, body)
+        | StatementKind::ForIn(_, _, body)
+        | StatementKind::ForOfDestructuringObject(_, _, body)
+        | StatementKind::ForOfDestructuringArray(_, _, body) => {
             for s in body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
                 if *replaced {
@@ -245,7 +244,7 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
-        Statement::Block(stmts) => {
+        StatementKind::Block(stmts) => {
             for s in stmts.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
                 if *replaced {
@@ -288,22 +287,22 @@ fn expr_contains_yield(e: &Expr) -> bool {
 // Replace the first nested statement containing a yield with a Throw statement
 // holding `throw_value`. Returns true if a replacement was performed.
 fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &Value) -> bool {
-    match stmt {
-        Statement::Expr(e) => {
+    match &mut stmt.kind {
+        StatementKind::Expr(e) => {
             if expr_contains_yield(e) {
-                *stmt = Statement::Throw(Expr::Value(throw_value.clone()));
+                stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
                 return true;
             }
             false
         }
-        Statement::Let(_, Some(expr)) | Statement::Var(_, Some(expr)) | Statement::Const(_, expr) => {
+        StatementKind::Let(_, Some(expr)) | StatementKind::Var(_, Some(expr)) | StatementKind::Const(_, expr) => {
             if expr_contains_yield(expr) {
-                *stmt = Statement::Throw(Expr::Value(throw_value.clone()));
+                stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
                 return true;
             }
             false
         }
-        Statement::If(_, then_body, else_body_opt) => {
+        StatementKind::If(_, then_body, else_body_opt) => {
             for s in then_body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
@@ -318,7 +317,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        Statement::Block(stmts) => {
+        StatementKind::Block(stmts) => {
             for s in stmts.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
@@ -326,12 +325,12 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        Statement::For(_, _, _, body)
-        | Statement::ForOf(_, _, body)
-        | Statement::ForIn(_, _, body)
-        | Statement::ForOfDestructuringObject(_, _, body)
-        | Statement::ForOfDestructuringArray(_, _, body)
-        | Statement::While(_, body) => {
+        StatementKind::For(_, _, _, body)
+        | StatementKind::ForOf(_, _, body)
+        | StatementKind::ForIn(_, _, body)
+        | StatementKind::ForOfDestructuringObject(_, _, body)
+        | StatementKind::ForOfDestructuringArray(_, _, body)
+        | StatementKind::While(_, body) => {
             for s in body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
@@ -339,7 +338,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        Statement::DoWhile(body, _) => {
+        StatementKind::DoWhile(body, _) => {
             for s in body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
@@ -347,7 +346,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        Statement::TryCatch(try_body, _, catch_body, finally_body_opt) => {
+        StatementKind::TryCatch(try_body, _, catch_body, finally_body_opt) => {
             for s in try_body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
@@ -375,20 +374,19 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
 // index of the containing top-level statement and the inner yield
 // expression if found.
 fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<Box<Expr>>)> {
-    use crate::core::Statement;
     for (i, s) in stmts.iter().enumerate() {
-        match s {
-            Statement::Expr(e) => match e {
+        match &s.kind {
+            StatementKind::Expr(e) => match e {
                 Expr::Yield(inner) => return Some((i, inner.clone())),
                 Expr::YieldStar(inner) => return Some((i, Some(inner.clone()))),
                 _ => {}
             },
-            Statement::Block(inner_stmts) => {
+            StatementKind::Block(inner_stmts) => {
                 if let Some((_inner_idx, found)) = find_first_yield_in_statements(inner_stmts) {
                     return Some((i, found));
                 }
             }
-            Statement::If(_, then_body, else_body_opt) => {
+            StatementKind::If(_, then_body, else_body_opt) => {
                 if let Some((_inner_idx, found)) = find_first_yield_in_statements(then_body) {
                     return Some((i, found));
                 }
@@ -398,20 +396,20 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
                     return Some((i, found));
                 }
             }
-            Statement::For(_, _, _, body) | Statement::While(_, body) | Statement::DoWhile(body, _) => {
+            StatementKind::For(_, _, _, body) | StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
                 if let Some((_inner_idx, found)) = find_first_yield_in_statements(body) {
                     return Some((i, found));
                 }
             }
-            Statement::ForOf(_, _, body)
-            | Statement::ForIn(_, _, body)
-            | Statement::ForOfDestructuringObject(_, _, body)
-            | Statement::ForOfDestructuringArray(_, _, body) => {
+            StatementKind::ForOf(_, _, body)
+            | StatementKind::ForIn(_, _, body)
+            | StatementKind::ForOfDestructuringObject(_, _, body)
+            | StatementKind::ForOfDestructuringArray(_, _, body) => {
                 if let Some((_inner_idx, found)) = find_first_yield_in_statements(body) {
                     return Some((i, found));
                 }
             }
-            Statement::FunctionDeclaration(_, _, _, _) => {
+            StatementKind::FunctionDeclaration(_, _, _, _) => {
                 // don't search nested function declarations
             }
             _ => {}
@@ -522,7 +520,7 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
             }
             if !replaced {
                 // fallback: replace the top-level statement
-                tail[0] = Statement::Throw(Expr::Value(throw_value.clone()));
+                tail[0] = StatementKind::Throw(Expr::Value(throw_value.clone())).into();
             }
 
             let func_env = crate::core::new_js_object_data();

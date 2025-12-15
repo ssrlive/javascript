@@ -3502,6 +3502,30 @@ fn to_num(v: &Value) -> Result<f64, JSError> {
     }
 }
 
+fn to_number_f64(val: &Value) -> f64 {
+    match val {
+        Value::Number(n) => *n,
+        Value::Boolean(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        Value::String(s) => {
+            let s_utf8 = utf16_to_utf8(s);
+            if s_utf8.trim().is_empty() {
+                0.0
+            } else {
+                s_utf8.trim().parse::<f64>().unwrap_or(f64::NAN)
+            }
+        }
+        Value::Null => 0.0,
+        Value::Undefined => f64::NAN,
+        _ => f64::NAN,
+    }
+}
+
 fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Expr) -> Result<Value, JSError> {
     let l = evaluate_expr(env, left)?;
     let r = evaluate_expr(env, right)?;
@@ -3580,57 +3604,69 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Err(raise_eval_error!("error")),
             }
         }
-        BinaryOp::Sub => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln - rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la - rb)),
-            // Mixing BigInt and Number is not allowed for arithmetic
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("error")),
-        },
-        BinaryOp::Mul => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln * rn)),
-            (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la * rb)),
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("error")),
-        },
-        BinaryOp::Pow => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln.powf(rn))),
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                // exponent must be non-negative and fit into u32 for pow
-                if rb < BigInt::from(0) {
-                    return Err(raise_eval_error!("negative exponent for bigint"));
+        BinaryOp::Sub => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la - rb)),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    Ok(Value::Number(ln - rn))
                 }
-                let exp = rb.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
-                let res = la.pow(exp);
-                Ok(Value::BigInt(res))
             }
-            // Mixing BigInt and Number is disallowed for exponentiation
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("error")),
-        },
-        BinaryOp::Div => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                // JavaScript behavior: division by zero returns Infinity or -Infinity
-                Ok(Value::Number(ln / rn))
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                if rb == BigInt::from(0) {
-                    return Err(raise_eval_error!("Division by zero"));
+        }
+        BinaryOp::Mul => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => Ok(Value::BigInt(la * rb)),
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    Ok(Value::Number(ln * rn))
                 }
-                Ok(Value::BigInt(la / rb))
             }
-            // Mixing BigInt and Number is not allowed
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
+        }
+        BinaryOp::Pow => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    if rb < BigInt::from(0) {
+                        return Err(raise_eval_error!("negative exponent for bigint"));
+                    }
+                    let exp = rb.to_u32().ok_or(raise_eval_error!("exponent too large"))?;
+                    Ok(Value::BigInt(la.pow(exp)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    Ok(Value::Number(ln.powf(rn)))
+                }
             }
-            _ => Err(raise_eval_error!("error")),
-        },
+        }
+        BinaryOp::Div => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    if rb == BigInt::from(0) {
+                        return Err(raise_eval_error!("Division by zero"));
+                    }
+                    Ok(Value::BigInt(la / rb))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    Ok(Value::Number(ln / rn))
+                }
+            }
+        }
         BinaryOp::Equal => {
             // Abstract equality comparison with type coercion
             abstract_equality(&l, &r, env)
@@ -3929,27 +3965,28 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 Ok(Value::Boolean(ln >= rn))
             }
         }
-        BinaryOp::Mod => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                if rn == 0.0 {
-                    Err(raise_eval_error!("Division by zero"))
-                } else {
-                    Ok(Value::Number(ln % rn))
-                }
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                if rb == BigInt::from(0) {
-                    Err(raise_eval_error!("Division by zero"))
-                } else {
+        BinaryOp::Mod => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    if rb == BigInt::from(0) {
+                        return Err(raise_eval_error!("Division by zero"));
+                    }
                     Ok(Value::BigInt(la % rb))
                 }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    if rn == 0.0 {
+                        Ok(Value::Number(f64::NAN))
+                    } else {
+                        Ok(Value::Number(ln % rn))
+                    }
+                }
             }
-            // Mixing BigInt and Number is not allowed
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("Modulo operation only supported for numbers")),
-        },
+        }
         BinaryOp::InstanceOf => {
             // Check if left is an instance of right (constructor)
             log::trace!("Evaluating instanceof with left={:?}, right={:?}", l, r);
@@ -3965,22 +4002,24 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(Value::Boolean(false)),
             }
         }
-        BinaryOp::BitXor => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_int32(ln);
-                let b = crate::core::number::to_int32(rn);
-                Ok(Value::Number((a ^ b) as f64))
+        BinaryOp::BitXor => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    use std::ops::BitXor;
+                    Ok(Value::BigInt(la.bitxor(&rb)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_int32(ln);
+                    let b = crate::core::number::to_int32(rn);
+                    Ok(Value::Number((a ^ b) as f64))
+                }
             }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                use std::ops::BitXor;
-                let res = la.bitxor(&rb);
-                Ok(Value::BigInt(res))
-            }
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("Bitwise XOR only supported for numbers or BigInt")),
-        },
+        }
         BinaryOp::In => {
             // Check if property exists in object
             match (l, r) {
@@ -3991,93 +4030,105 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 _ => Ok(Value::Boolean(false)),
             }
         }
-        BinaryOp::BitAnd => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_int32(ln);
-                let b = crate::core::number::to_int32(rn);
-                Ok(Value::Number((a & b) as f64))
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                use std::ops::BitAnd;
-                let res = la.bitand(&rb);
-                Ok(Value::BigInt(res))
-            }
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("Bitwise AND only supported for numbers or BigInt")),
-        },
-        BinaryOp::BitOr => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_int32(ln);
-                let b = crate::core::number::to_int32(rn);
-                Ok(Value::Number((a | b) as f64))
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                use std::ops::BitOr;
-                let res = la.bitor(&rb);
-                Ok(Value::BigInt(res))
-            }
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("Bitwise OR only supported for numbers or BigInt")),
-        },
-        BinaryOp::LeftShift => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_int32(ln);
-                let shift = crate::core::number::to_uint32(rn) & 0x1f;
-                let res = a.wrapping_shl(shift);
-                Ok(Value::Number(res as f64))
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                if rb < BigInt::from(0) {
-                    return Err(raise_eval_error!("negative shift count"));
+        BinaryOp::BitAnd => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    use std::ops::BitAnd;
+                    Ok(Value::BigInt(la.bitand(&rb)))
                 }
-                let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
-                use std::ops::Shl;
-                let res = la.shl(shift);
-                Ok(Value::BigInt(res))
-            }
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
-            }
-            _ => Err(raise_eval_error!("Left shift only supported for numbers or BigInt")),
-        },
-        BinaryOp::RightShift => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_int32(ln);
-                let shift = crate::core::number::to_uint32(rn) & 0x1f;
-                let res = a >> shift;
-                Ok(Value::Number(res as f64))
-            }
-            (Value::BigInt(la), Value::BigInt(rb)) => {
-                if rb < BigInt::from(0) {
-                    return Err(raise_eval_error!("negative shift count"));
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_int32(ln);
+                    let b = crate::core::number::to_int32(rn);
+                    Ok(Value::Number((a & b) as f64))
                 }
-                let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
-                use std::ops::Shr;
-                let res = la.shr(shift);
-                Ok(Value::BigInt(res))
             }
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
+        }
+        BinaryOp::BitOr => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    use std::ops::BitOr;
+                    Ok(Value::BigInt(la.bitor(&rb)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_int32(ln);
+                    let b = crate::core::number::to_int32(rn);
+                    Ok(Value::Number((a | b) as f64))
+                }
             }
-            _ => Err(raise_eval_error!("Right shift only supported for numbers or BigInt")),
-        },
-        BinaryOp::UnsignedRightShift => match (l, r) {
-            (Value::Number(ln), Value::Number(rn)) => {
-                let a = crate::core::number::to_uint32(ln);
-                let shift = crate::core::number::to_uint32(rn) & 0x1f;
-                let res = a >> shift;
-                Ok(Value::Number(res as f64))
+        }
+        BinaryOp::LeftShift => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    if rb < BigInt::from(0) {
+                        return Err(raise_eval_error!("negative shift count"));
+                    }
+                    let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                    use std::ops::Shl;
+                    Ok(Value::BigInt(la.shl(shift)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_int32(ln);
+                    let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                    let res = a.wrapping_shl(shift);
+                    Ok(Value::Number(res as f64))
+                }
             }
-            (Value::BigInt(_), Value::BigInt(_)) => Err(raise_type_error!("Unsigned right shift is not supported for BigInt")),
-            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                Err(raise_type_error!("Cannot mix BigInt and other types"))
+        }
+        BinaryOp::RightShift => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(la), Value::BigInt(rb)) => {
+                    if rb < BigInt::from(0) {
+                        return Err(raise_eval_error!("negative shift count"));
+                    }
+                    let shift = rb.to_u32().ok_or(raise_eval_error!("shift count too large"))?;
+                    use std::ops::Shr;
+                    Ok(Value::BigInt(la.shr(shift)))
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_int32(ln);
+                    let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                    let res = a >> shift;
+                    Ok(Value::Number(res as f64))
+                }
             }
-            _ => Err(raise_eval_error!("Unsigned right shift only supported for numbers")),
-        },
+        }
+        BinaryOp::UnsignedRightShift => {
+            let l_prim = to_primitive(&l, "number", env)?;
+            let r_prim = to_primitive(&r, "number", env)?;
+            match (l_prim, r_prim) {
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(raise_type_error!("BigInts have no unsigned right shift, use >> instead"))
+                }
+                (lp, rp) => {
+                    let ln = to_number_f64(&lp);
+                    let rn = to_number_f64(&rp);
+                    let a = crate::core::number::to_uint32(ln);
+                    let shift = crate::core::number::to_uint32(rn) & 0x1f;
+                    let res = a >> shift;
+                    Ok(Value::Number(res as f64))
+                }
+            }
+        }
         BinaryOp::NullishCoalescing => {
             // Nullish coalescing: return right if left is null or undefined, otherwise left
             match l {

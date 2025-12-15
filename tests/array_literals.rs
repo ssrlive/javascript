@@ -63,10 +63,28 @@ fn test_array_literal_mixed_types() {
 #[test]
 fn test_array_literal_nested() {
     let script = r#"
-        console.log(~1);
-        console.log(+1);
-        console.log(-100);
-        console.log(+"123");
+        console.log((6 ^ 3) ^ 3 === 6);  // 5
+        console.log(((6 ^ 3) ^ 3) === 6); // true
+        console.log(9 + "20"); // 920
+        console.log(9 - "20"); // -11
+        console.log(9 * "20"); // 180
+        console.log(9 / "3"); // 3
+        console.log(9 % "4"); // 1
+        console.log(2 ** 3); // 8
+        console.log(2 ** "4"); // 16
+        console.log(5 & 3); // 1
+        console.log(5 | 2); // 7
+        console.log(5 ^ 2); // 7
+        console.log(5 << 1); // 10
+        console.log(20 >> 2); // 5
+        console.log(20 >>> 2); // 5
+        console.log(5 & "3"); // 1
+        console.log(5 | "2"); // 7
+        console.log(!!""); // false
+        console.log(~1); // -2
+        console.log(+1); // 1
+        console.log(-100); // -100
+        console.log(+"123"); // 123
 
         var a;
         var b;

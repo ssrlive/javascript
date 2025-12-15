@@ -136,7 +136,7 @@ fn ensure_object_destructuring_target(val: &Value, pattern: &[ObjectDestructurin
     Ok(())
 }
 
-fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
+fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<(), JSError> {
     // Hoist var declarations if this is a function scope
     if env.borrow().is_function_scope {
         let mut var_names = std::collections::HashSet::new();
@@ -171,6 +171,167 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
             env_set(env, name, func_val)?;
         }
     }
+    Ok(())
+}
+
+fn evaluate_stmt_let(env: &JSObjectDataPtr, name: &str, expr_opt: &Option<Expr>) -> Result<Value, JSError> {
+    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+    set_function_name_if_needed(&val, name)?;
+    if let Value::Object(obj_map) = &val {
+        log::debug!("DBG Let - binding '{name}' into env -> func_obj ptr={:p}", Rc::as_ptr(obj_map));
+    } else {
+        log::debug!("DBG Let - binding '{name}' into env -> value={val:?}");
+    }
+    env_set(env, name, val.clone())?;
+    Ok(val)
+}
+
+fn evaluate_stmt_var(env: &JSObjectDataPtr, name: &str, expr_opt: &Option<Expr>) -> Result<Value, JSError> {
+    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
+    set_function_name_if_needed(&val, name)?;
+    env_set_var(env, name, val.clone())?;
+    Ok(val)
+}
+
+fn evaluate_stmt_const(env: &JSObjectDataPtr, name: &str, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    set_function_name_if_needed(&val, name)?;
+    env_set_const(env, name, val.clone());
+    Ok(val)
+}
+
+fn evaluate_stmt_class(
+    env: &JSObjectDataPtr,
+    name: &str,
+    extends: &Option<Expr>,
+    members: &[crate::js_class::ClassMember],
+) -> Result<(), JSError> {
+    let class_obj = create_class_object(name, extends, members, env)?;
+    env_set(env, name, class_obj)?;
+    Ok(())
+}
+
+fn evaluate_stmt_block(env: &JSObjectDataPtr, stmts: &[Statement], last_value: &mut Value) -> Result<Option<ControlFlow>, JSError> {
+    let block_env = new_js_object_data();
+    block_env.borrow_mut().prototype = Some(env.clone());
+    block_env.borrow_mut().is_function_scope = false;
+    match evaluate_statements_with_context(&block_env, stmts)? {
+        ControlFlow::Normal(val) => *last_value = val,
+        cf => return Ok(Some(cf)),
+    }
+    Ok(None)
+}
+
+fn evaluate_stmt_assign(env: &JSObjectDataPtr, name: &str, expr: &Expr) -> Result<Value, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    env_set_recursive(env, name, val.clone())?;
+    Ok(val)
+}
+
+fn evaluate_stmt_import(
+    env: &JSObjectDataPtr,
+    specifiers: &[crate::core::statement::ImportSpecifier],
+    module_name: &str,
+) -> Result<(), JSError> {
+    let module_value = crate::js_module::load_module(module_name, None)?;
+    for specifier in specifiers {
+        match specifier {
+            crate::core::statement::ImportSpecifier::Default(name) => {
+                match crate::js_module::import_from_module(&module_value, "default") {
+                    Ok(default_value) => env_set(env, name, default_value)?,
+                    Err(_) => env_set(env, name, module_value.clone())?,
+                }
+            }
+            crate::core::statement::ImportSpecifier::Named(name, alias) => {
+                let imported_value = crate::js_module::import_from_module(&module_value, name)?;
+                let import_name = alias.as_ref().unwrap_or(name);
+                env_set(env, import_name, imported_value)?;
+            }
+            crate::core::statement::ImportSpecifier::Namespace(name) => {
+                env_set(env, name, module_value.clone())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_stmt_export(
+    env: &JSObjectDataPtr,
+    specifiers: &[crate::core::statement::ExportSpecifier],
+    maybe_decl: &Option<Box<Statement>>,
+) -> Result<(), JSError> {
+    if let Some(decl_stmt) = maybe_decl {
+        match &**decl_stmt {
+            Statement::Const(name, expr) => {
+                evaluate_stmt_const(env, name, expr)?;
+            }
+            Statement::Let(name, expr_opt) => {
+                evaluate_stmt_let(env, name, expr_opt)?;
+            }
+            Statement::Var(name, expr_opt) => {
+                evaluate_stmt_var(env, name, expr_opt)?;
+            }
+            Statement::Class(name, extends, members) => evaluate_stmt_class(env, name, extends, members)?,
+            Statement::FunctionDeclaration(name, params, body, is_generator) => {
+                let func_val = if *is_generator {
+                    let func_obj = new_js_object_data();
+                    let prototype_obj = new_js_object_data();
+                    let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone());
+                    obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
+                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                    Value::Object(func_obj)
+                } else {
+                    let func_obj = new_js_object_data();
+                    let prototype_obj = new_js_object_data();
+                    let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
+                    obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
+                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                    Value::Object(func_obj)
+                };
+                env_set(env, name, func_val)?;
+            }
+            _ => {
+                return Err(raise_eval_error!("Invalid export declaration"));
+            }
+        }
+    }
+
+    // Handle exports in module context
+    let exports_opt = get_own_property(env, &crate::core::PropertyKey::String("exports".to_string()));
+    if let Some(exports_val) = exports_opt {
+        if let Value::Object(exports_obj) = &*exports_val.borrow() {
+            for specifier in specifiers {
+                match specifier {
+                    crate::core::statement::ExportSpecifier::Named(name, alias) => {
+                        let var_opt = get_own_property(env, &crate::core::PropertyKey::String(name.clone()));
+                        if let Some(var_val) = var_opt {
+                            let export_name = alias.as_ref().unwrap_or(name).clone();
+                            exports_obj.borrow_mut().insert(
+                                crate::core::PropertyKey::String(export_name),
+                                Rc::new(RefCell::new(var_val.borrow().clone())),
+                            );
+                        } else {
+                            return Err(raise_eval_error!(format!("Export '{}' not found in scope", name)));
+                        }
+                    }
+                    crate::core::statement::ExportSpecifier::Default(expr) => {
+                        let val = evaluate_expr(env, expr)?;
+                        exports_obj
+                            .borrow_mut()
+                            .insert(crate::core::PropertyKey::String("default".to_string()), Rc::new(RefCell::new(val)));
+                    }
+                }
+            }
+        }
+    }
+    log::debug!("Export statement: specifiers={:?}", specifiers);
+    Ok(())
+}
+
+fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
+    hoist_declarations(env, statements)?;
 
     let mut last_value = Value::Number(0.0);
     for (i, stmt) in statements.iter().enumerate() {
@@ -191,65 +352,29 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
         let eval_res: Result<Option<ControlFlow>, JSError> = (|| -> Result<Option<ControlFlow>, JSError> {
             match stmt {
                 Statement::Let(name, expr_opt) => {
-                    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                    // If the initialized value is a function-object wrapping a closure,
-                    // set its `name` property to the declared identifier to match
-                    // typical JS engines (e.g. Node.js) which expose `Function.name`.
-                    set_function_name_if_needed(&val, name.as_str())?;
-                    // Log the pointer about to be bound into the environment for visibility.
-                    if let Value::Object(obj_map) = &val {
-                        log::debug!("DBG Let - binding '{name}' into env -> func_obj ptr={:p}", Rc::as_ptr(obj_map));
-                    } else {
-                        log::debug!("DBG Let - binding '{name}' into env -> value={val:?}");
-                    }
-                    env_set(env, name.as_str(), val.clone())?;
-                    last_value = val;
+                    last_value = evaluate_stmt_let(env, name, expr_opt)?;
                     Ok(None)
                 }
                 Statement::Var(name, expr_opt) => {
-                    let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                    set_function_name_if_needed(&val, name.as_str())?;
-                    env_set_var(env, name.as_str(), val.clone())?;
-                    last_value = val;
+                    last_value = evaluate_stmt_var(env, name, expr_opt)?;
                     Ok(None)
                 }
                 Statement::Const(name, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    set_function_name_if_needed(&val, name.as_str())?;
-                    env_set_const(env, name.as_str(), val.clone());
-                    last_value = val;
+                    last_value = evaluate_stmt_const(env, name, expr)?;
                     Ok(None)
                 }
-                Statement::FunctionDeclaration(name, params, body, is_generator) => {
-                    let closure = if *is_generator {
-                        Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone())
-                    } else {
-                        Value::Closure(params.clone(), body.clone(), env.clone())
-                    };
-                    env_set(env, name, closure)?;
-                    last_value = Value::Undefined;
+                Statement::FunctionDeclaration(..) => {
+                    // Skip function declarations as they are already hoisted
                     Ok(None)
                 }
                 Statement::Class(name, extends, members) => {
-                    let class_obj = create_class_object(name, extends, members, env)?;
-                    env_set(env, name.as_str(), class_obj)?;
+                    evaluate_stmt_class(env, name, extends, members)?;
                     last_value = Value::Undefined;
                     Ok(None)
                 }
-                Statement::Block(stmts) => {
-                    let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
-                    block_env.borrow_mut().is_function_scope = false;
-                    match evaluate_statements_with_context(&block_env, stmts)? {
-                        ControlFlow::Normal(val) => last_value = val,
-                        cf => return Ok(Some(cf)),
-                    }
-                    Ok(None)
-                }
+                Statement::Block(stmts) => evaluate_stmt_block(env, stmts, &mut last_value),
                 Statement::Assign(name, expr) => {
-                    let val = evaluate_expr(env, expr)?;
-                    env_set_recursive(env, name.as_str(), val.clone())?;
-                    last_value = val;
+                    last_value = evaluate_stmt_assign(env, name, expr)?;
                     Ok(None)
                 }
                 Statement::Expr(expr) => perform_statement_expression(env, expr, &mut last_value),
@@ -311,12 +436,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::LetDestructuringObject(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
-                    // Provide a clearer error message when the RHS evaluates to
-                    // `undefined` or `null` and destructuring is attempted — this
-                    // mirrors node's behaviour where the specific property name
-                    // and variable are included in the error when possible.
                     ensure_object_destructuring_target(&val, pattern, expr)?;
-
                     perform_object_destructuring(env, pattern, &val, false)?;
                     last_value = val;
                     Ok(None)
@@ -324,127 +444,17 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 Statement::ConstDestructuringObject(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
                     ensure_object_destructuring_target(&val, pattern, expr)?;
-
                     perform_object_destructuring(env, pattern, &val, true)?;
                     last_value = val;
                     Ok(None)
                 }
                 Statement::Import(specifiers, module_name) => {
-                    // Load the module
-                    let module_value = crate::js_module::load_module(module_name, None)?;
-
-                    // Import the specifiers into the current environment
-                    for specifier in specifiers {
-                        match specifier {
-                            crate::core::statement::ImportSpecifier::Default(name) => {
-                                // For default import, check if the module has a default export (file modules)
-                                // or import the entire module (built-in modules)
-                                match crate::js_module::import_from_module(&module_value, "default") {
-                                    Ok(default_value) => {
-                                        // Module has a default export (file module)
-                                        env_set(env, name, default_value)?;
-                                    }
-                                    Err(_) => {
-                                        // Module doesn't have a default export (built-in module)
-                                        env_set(env, name, module_value.clone())?;
-                                    }
-                                }
-                            }
-                            crate::core::statement::ImportSpecifier::Named(name, alias) => {
-                                // Import specific named export
-                                let imported_value = crate::js_module::import_from_module(&module_value, name)?;
-                                let import_name = alias.as_ref().unwrap_or(name);
-                                env_set(env, import_name, imported_value)?;
-                            }
-                            crate::core::statement::ImportSpecifier::Namespace(name) => {
-                                // Import entire module as namespace
-                                env_set(env, name, module_value.clone())?;
-                            }
-                        }
-                    }
-
+                    evaluate_stmt_import(env, specifiers, module_name)?;
                     last_value = Value::Undefined;
                     Ok(None)
                 }
                 Statement::Export(specifiers, maybe_decl) => {
-                    // If this export included an inner declaration (e.g. `export const x = 1`),
-                    // evaluate that declaration now so the exported name exists in the environment.
-                    if let Some(decl_stmt) = maybe_decl {
-                        match &**decl_stmt {
-                            Statement::Const(name, expr) => {
-                                let val = evaluate_expr(env, expr)?;
-                                env_set_const(env, name.as_str(), val);
-                            }
-                            Statement::Let(name, Some(expr)) => {
-                                let val = evaluate_expr(env, expr)?;
-                                env_set(env, name, val)?;
-                            }
-                            Statement::Var(name, Some(expr)) => {
-                                let val = evaluate_expr(env, expr)?;
-                                env_set_var(env, name, val)?;
-                            }
-                            Statement::Class(name, extends, members) => {
-                                let class_obj = create_class_object(name.as_str(), extends, members.as_slice(), env)?;
-                                env_set(env, name.as_str(), class_obj)?;
-                            }
-                            Statement::FunctionDeclaration(name, params, body, is_generator) => {
-                                let func_val = if *is_generator {
-                                    let func_obj = new_js_object_data();
-                                    let prototype_obj = new_js_object_data();
-                                    let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone());
-                                    obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
-                                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
-                                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
-                                    Value::Object(func_obj)
-                                } else {
-                                    let func_obj = new_js_object_data();
-                                    let prototype_obj = new_js_object_data();
-                                    let closure_val = Value::Closure(params.clone(), body.clone(), env.clone());
-                                    obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
-                                    obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
-                                    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
-                                    Value::Object(func_obj)
-                                };
-                                env_set(env, name.as_str(), func_val)?;
-                            }
-                            _ => {
-                                return Err(raise_eval_error!("Invalid export declaration"));
-                            }
-                        }
-                    }
-
-                    // Handle exports in module context
-                    let exports_opt = get_own_property(env, &crate::core::PropertyKey::String("exports".to_string()));
-                    if let Some(exports_val) = exports_opt {
-                        if let Value::Object(exports_obj) = &*exports_val.borrow() {
-                            for specifier in specifiers {
-                                match specifier {
-                                    crate::core::statement::ExportSpecifier::Named(name, alias) => {
-                                        // For named exports, we need to find the value in current scope
-                                        // For now, assume it's a variable in the environment
-                                        let var_opt = get_own_property(env, &crate::core::PropertyKey::String(name.clone()));
-                                        if let Some(var_val) = var_opt {
-                                            let export_name = alias.as_ref().unwrap_or(name).clone();
-                                            exports_obj.borrow_mut().insert(
-                                                crate::core::PropertyKey::String(export_name),
-                                                Rc::new(RefCell::new(var_val.borrow().clone())),
-                                            );
-                                        } else {
-                                            return Err(crate::raise_eval_error!(format!("Export '{}' not found in scope", name)));
-                                        }
-                                    }
-                                    crate::core::statement::ExportSpecifier::Default(expr) => {
-                                        // Evaluate the default export expression
-                                        let val = evaluate_expr(env, expr)?;
-                                        exports_obj
-                                            .borrow_mut()
-                                            .insert(crate::core::PropertyKey::String("default".to_string()), Rc::new(RefCell::new(val)));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    log::debug!("Export statement: specifiers={:?}", specifiers);
+                    evaluate_stmt_export(env, specifiers, maybe_decl)?;
                     last_value = Value::Undefined;
                     Ok(None)
                 }

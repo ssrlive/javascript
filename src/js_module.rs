@@ -131,6 +131,9 @@ fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
     // Initialize global constructors
     crate::core::initialize_global_constructors(&env)?;
 
+    // Expose `globalThis` binding in module environment as well
+    crate::core::obj_set_key_value(&env, &"globalThis".into(), crate::core::Value::Object(env.clone()))?;
+
     // Parse and execute the module content
     let mut tokens = crate::core::tokenize(content)?;
     let statements = crate::core::parse_statements(&mut tokens)?;

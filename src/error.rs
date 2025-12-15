@@ -24,7 +24,7 @@ pub enum JSErrorKind {
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
 
-    #[error("Thrown value: {value:?}")]
+    #[error("Thrown value")]
     Throw { value: crate::core::Value },
 
     #[error("std::io error: {0}")]
@@ -79,6 +79,34 @@ impl JSError {
             JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
             JSErrorKind::Throw { value } => {
+                // If the thrown value is an object, prefer a human-friendly
+                // message that includes the constructor name and/or message
+                // property instead of the generic [object Object] string.
+                if let crate::core::Value::Object(obj) = value {
+                    // Try constructor.name
+                    if let Ok(Some(ctor_val_rc)) = crate::core::obj_get_key_value(obj, &"constructor".into())
+                        && let crate::core::Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
+                        && let Ok(Some(name_val_rc)) = crate::core::obj_get_key_value(ctor_obj, &"name".into())
+                        && let crate::core::Value::String(name_utf16) = &*name_val_rc.borrow()
+                    {
+                        let ctor_name = crate::unicode::utf16_to_utf8(name_utf16);
+                        // prefer a message property if present
+                        if let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
+                            && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
+                        {
+                            let msg = crate::unicode::utf16_to_utf8(msg_utf16);
+                            return format!("Uncaught {}: {}", ctor_name, msg);
+                        }
+                        return format!("Uncaught {}", ctor_name);
+                    }
+                    // Fallback: if object has a message property, use it
+                    if let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
+                        && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
+                    {
+                        let msg = crate::unicode::utf16_to_utf8(msg_utf16);
+                        return format!("Uncaught {}", msg);
+                    }
+                }
                 format!("Uncaught {}", crate::core::value_to_string(value))
             }
             JSErrorKind::IoError(e) => format!("IOError: {}", e),

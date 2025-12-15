@@ -75,9 +75,126 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "__internal_promise_race_resolve" => internal_promise_race_resolve(args, env),
         "__internal_promise_all_resolve" => internal_promise_all_resolve(args, env),
         "__internal_promise_all_reject" => internal_promise_all_reject(args, env),
+        "Promise.prototype.then" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_promise::handle_promise_then(&obj, args, env);
+                }
+            }
+            Err(raise_eval_error!("Promise.prototype.then called without a promise receiver"))
+        }
+        "Promise.prototype.catch" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_promise::handle_promise_catch(&obj, args, env);
+                }
+            }
+            Err(raise_eval_error!("Promise.prototype.catch called without a promise receiver"))
+        }
+        "Promise.prototype.finally" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_promise::handle_promise_finally(&obj, args, env);
+                }
+            }
+            Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver"))
+        }
         "testWithIntlConstructors" => test_with_intl_constructors(args, env),
         "setTimeout" => crate::js_promise::handle_set_timeout(args, env),
         "clearTimeout" => crate::js_promise::handle_clear_timeout(args, env),
+
+        // Basic Function.prototype.call support so builtin methods can be invoked
+        // via `.call` (e.g., Object.prototype.hasOwnProperty.call(obj, 'key'))
+        "Function.prototype.call" => {
+            // The function to be invoked is bound as the `this` value on env
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                match this_val {
+                    Value::Function(func_name) => {
+                        // Only implement forwarding for Object.prototype.* builtins here
+                        if func_name.starts_with("Object.prototype.") {
+                            // Need at least receiver arg
+                            if args.is_empty() {
+                                return Err(raise_eval_error!("call requires a receiver"));
+                            }
+                            // Build a property call expression: receiver.METHOD(...rest)
+                            let method = func_name.trim_start_matches("Object.prototype.").to_string();
+                            // First arg is receiver expression
+                            let receiver_expr = &args[0];
+                            // Remaining args are forwarded to the method
+                            let forwarded = &args[1..];
+                            let prop_expr = Expr::Property(Box::new(receiver_expr.clone()), method);
+                            let call_expr = Expr::Call(Box::new(prop_expr), forwarded.to_vec());
+                            return evaluate_expr(env, &call_expr);
+                        }
+                        Err(raise_eval_error!(format!(
+                            "Function.prototype.call target not supported: {}",
+                            func_name
+                        )))
+                    }
+                    _ => Err(raise_eval_error!("Function.prototype.call called on non-callable")),
+                }
+            } else {
+                Err(raise_eval_error!("Function.prototype.call called without this"))
+            }
+        }
+
+        "Function.prototype.apply" => {
+            // Minimal apply implementation for Object.prototype.* builtins
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                match this_val {
+                    Value::Function(func_name) => {
+                        if func_name.starts_with("Object.prototype.") {
+                            if args.is_empty() {
+                                return Err(raise_eval_error!("apply requires a receiver"));
+                            }
+                            // Evaluate receiver
+                            let receiver_val = evaluate_expr(env, &args[0])?;
+                            // Evaluate arg array (if provided)
+                            let mut forwarded_exprs: Vec<Expr> = Vec::new();
+                            if args.len() >= 2 {
+                                match evaluate_expr(env, &args[1])? {
+                                    Value::Object(arr_obj) if crate::js_array::is_array(&arr_obj) => {
+                                        // Collect numeric indices 0..n
+                                        let mut i = 0usize;
+                                        loop {
+                                            let key = i.to_string();
+                                            if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                                forwarded_exprs.push(Expr::Value(val_rc.borrow().clone()));
+                                            } else {
+                                                break;
+                                            }
+                                            i += 1;
+                                        }
+                                    }
+                                    _ => {
+                                        // Non-array apply - ignore for now
+                                    }
+                                }
+                            }
+                            // Build a property call expression using the receiver expression we just evaluated
+                            let method = func_name.trim_start_matches("Object.prototype.").to_string();
+                            // We need an Expr for receiver - wrap the evaluated receiver value as Expr::Value
+                            let receiver_expr = Expr::Value(receiver_val);
+                            let prop_expr = Expr::Property(Box::new(receiver_expr), method);
+                            let call_expr = Expr::Call(Box::new(prop_expr), forwarded_exprs);
+                            return evaluate_expr(env, &call_expr);
+                        }
+                        Err(raise_eval_error!(format!(
+                            "Function.prototype.apply target not supported: {}",
+                            func_name
+                        )))
+                    }
+                    _ => Err(raise_eval_error!("Function.prototype.apply called on non-callable")),
+                }
+            } else {
+                Err(raise_eval_error!("Function.prototype.apply called without this"))
+            }
+        }
 
         _ => Err(raise_eval_error!(format!("Global function {func_name} is not implemented"))),
     }

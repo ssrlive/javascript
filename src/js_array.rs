@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::{
-    Expr, Value, env_get, env_set, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,
+    Expr, Value, env_set, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,
     value_to_sort_string, values_equal,
 };
 
@@ -158,7 +158,6 @@ pub(crate) fn handle_array_instance_method(
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr,
-    obj_expr: &Expr,
 ) -> Result<Value, JSError> {
     match method {
         "push" => {
@@ -174,24 +173,6 @@ pub(crate) fn handle_array_instance_method(
                     obj_set_key_value(map, &current_len.to_string().into(), val)?;
                     *current_len += 1;
                     Ok(())
-                }
-
-                // If obj_expr is a variable referring to an object stored in env,
-                // mutate that stored object directly so changes persist.
-                if let Expr::Var(varname) = obj_expr
-                    && let Some(rc_val) = env_get(env, varname)
-                {
-                    let mut borrowed = rc_val.borrow_mut();
-                    if let Value::Object(ref mut map) = *borrowed {
-                        for arg in args {
-                            let val = evaluate_expr(env, arg)?;
-                            push_into_map(map, val, &mut current_len)?;
-                        }
-                        set_array_length(map, current_len)?;
-
-                        // Return the original object
-                        return Ok(Value::Object(map.clone()));
-                    }
                 }
 
                 // Fallback: mutate the local obj_map copy
@@ -970,28 +951,6 @@ pub(crate) fn handle_array_instance_method(
 
             if current_len > 0 {
                 // Get the first element
-                // Try to mutate the env-stored object when possible (chainable behavior)
-                if let Expr::Var(varname) = obj_expr
-                    && let Some(rc_val) = env_get(env, varname)
-                {
-                    let mut borrowed = rc_val.borrow_mut();
-                    if let Value::Object(ref mut map) = *borrowed {
-                        let first_element = obj_get_key_value(map, &"0".into())?.map(|v| v.borrow().clone());
-                        // Shift left
-                        for i in 1..current_len {
-                            let val_rc_opt = obj_get_key_value(map, &i.to_string().into())?;
-                            if let Some(val_rc) = val_rc_opt {
-                                obj_set_rc(map, &(i - 1).to_string().into(), val_rc);
-                            } else {
-                                map.borrow_mut().remove(&(i - 1).to_string().into());
-                            }
-                        }
-                        map.borrow_mut().remove(&(current_len - 1).to_string().into());
-                        set_array_length(map, current_len - 1)?;
-                        return Ok(first_element.unwrap_or(Value::Undefined));
-                    }
-                }
-
                 // Fallback: mutate the local obj_map copy
                 let first_element = obj_get_key_value(obj_map, &"0".into())?.map(|v| v.borrow().clone());
                 for i in 1..current_len {
@@ -1013,33 +972,6 @@ pub(crate) fn handle_array_instance_method(
             let current_len = get_array_length(obj_map).unwrap_or(0);
             if args.is_empty() {
                 return Ok(Value::Number(current_len as f64));
-            }
-
-            // Try to mutate env-stored object when possible
-            if let Expr::Var(varname) = obj_expr
-                && let Some(rc_val) = env_get(env, varname)
-            {
-                let mut borrowed = rc_val.borrow_mut();
-                if let Value::Object(ref mut map) = *borrowed {
-                    // Shift right by number of new elements
-                    for i in (0..current_len).rev() {
-                        let dest = (i + args.len()).to_string();
-                        let val_rc_opt = obj_get_key_value(map, &i.to_string().into())?;
-                        if let Some(val_rc) = val_rc_opt {
-                            obj_set_rc(map, &dest.into(), val_rc);
-                        } else {
-                            map.borrow_mut().remove(&dest.into());
-                        }
-                    }
-                    // Insert new elements
-                    for (i, arg) in args.iter().enumerate() {
-                        let val = evaluate_expr(env, arg)?;
-                        obj_set_key_value(map, &i.to_string().into(), val)?;
-                    }
-                    let new_len = current_len + args.len();
-                    set_array_length(map, new_len)?;
-                    return Ok(Value::Number(new_len as f64));
-                }
             }
 
             // Fallback: mutate local copy (shift right by number of new elements)

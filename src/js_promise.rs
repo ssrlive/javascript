@@ -23,12 +23,15 @@
 //!
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
-use crate::core::{Expr, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value};
+use crate::core::{
+    Expr, JSObjectDataPtr, Statement, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, value_to_string,
+};
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Asynchronous task types for the promise event loop.
 ///
@@ -49,8 +52,42 @@ enum Task {
     },
     /// Task to execute a setTimeout callback
     Timeout { id: usize, callback: Value, args: Vec<Value> },
+    /// Task to check for unhandled rejection after potential handler attachment
+    UnhandledCheck { promise: Rc<RefCell<JSPromise>>, reason: Value },
+    // Previously this variant represented a queued unhandled-check task.
+    // Unhandled checks are now tracked separately in `PENDING_UNHANDLED_CHECKS`.
+    // NOTE: Unhandled checks are now tracked in `PENDING_UNHANDLED_CHECKS`
+    // rather than as queued tasks. Keeping the task enum slimmer avoids
+    // accidental re-processing within the same run. The pending list is
+    // processed once when the outermost `run_event_loop` finishes.
 }
 
+/// Take any recorded unhandled rejection, consuming it from the thread-local
+/// storage. Returns `Some(Value)` if an unhandled rejection was recorded.
+pub fn take_unhandled_rejection() -> Option<Value> {
+    UNHANDLED_REJECTION.with(|slot| slot.borrow_mut().take())
+}
+
+/// Peek at any recorded unhandled rejection without consuming it.
+pub fn peek_unhandled_rejection() -> Option<Value> {
+    UNHANDLED_REJECTION.with(|slot| slot.borrow().clone())
+}
+
+/// Return the number of pending unhandled checks awaiting processing.
+pub fn pending_unhandled_count() -> usize {
+    // Count entries in the pending-unhandled list
+    PENDING_UNHANDLED_CHECKS.with(|q| q.borrow().len())
+}
+
+/// Return the current number of queued tasks in the global task queue.
+pub fn task_queue_len() -> usize {
+    GLOBAL_TASK_QUEUE.with(|q| q.borrow().len())
+}
+
+/// Return the current monotonic tick value (for debugging/inspection)
+pub fn current_tick() -> usize {
+    CURRENT_TICK.load(Ordering::SeqCst)
+}
 thread_local! {
     /// Global task queue for asynchronous promise operations.
     /// Uses thread-local storage to maintain separate queues per thread.
@@ -62,7 +99,34 @@ thread_local! {
 
     /// Counter for generating unique timeout IDs
     static NEXT_TIMEOUT_ID: RefCell<usize> = const { RefCell::new(1) };
+    /// Storage for an unhandled rejection detected by the UnhandledCheck task
+    static UNHANDLED_REJECTION: RefCell<Option<Value>> = const { RefCell::new(None) };
+    /// Pending unhandled checks queued by `reject_promise` when there are no
+    /// attached rejection handlers at the time of rejection. Each entry
+    /// stores the tuple `(promise, reason, insertion_tick)` where
+    /// `insertion_tick` is the value of `CURRENT_TICK` when the rejection
+    /// was recorded. The pending list is processed only once per outermost
+    /// idle tick; an entry is treated as unhandled when
+    /// `CURRENT_TICK >= insertion_tick + UNHANDLED_GRACE`.
+    #[allow(clippy::type_complexity)]
+    static PENDING_UNHANDLED_CHECKS: RefCell<Vec<(Rc<RefCell<JSPromise>>, Value, usize)>> = const { RefCell::new(Vec::new()) };
 }
+
+/// Tracks how many nested invocations of the promise event loop are active.
+/// When >1 we are in a nested/inline run and should defer UnhandledCheck
+/// processing to the outermost loop to avoid premature unhandled reports.
+static RUN_LOOP_NESTING: AtomicUsize = AtomicUsize::new(0);
+
+/// Monotonic tick counter advanced once per outermost idle event-loop tick.
+/// Pending unhandled checks record the insertion tick and are considered
+/// unhandled only when `CURRENT_TICK >= insertion_tick + UNHANDLED_GRACE`.
+static CURRENT_TICK: AtomicUsize = AtomicUsize::new(0);
+
+/// Number of outermost idle ticks to wait before treating a rejection as
+/// unhandled. This provides a small grace window for handlers to attach.
+/// Increased to give harnesses additional time to attach handlers in
+/// high-latency or deeply-nested synchronous scenarios.
+const UNHANDLED_GRACE: usize = 6;
 
 /// Add a task to the global task queue for later execution.
 ///
@@ -70,6 +134,11 @@ thread_local! {
 /// * `task` - The task to queue (Resolution or Rejection)
 fn queue_task(task: Task) {
     log::debug!("queue_task called with {:?}", task);
+    // Also log current run-loop nesting for correlation
+    let nesting = RUN_LOOP_NESTING.load(Ordering::SeqCst);
+    log::trace!("queue_task: current RUN_LOOP_NESTING={}", nesting);
+    // Log tick and current queue length to help debug ordering with console.log
+    log::debug!("queue_task: CURRENT_TICK={} task_queue_len={}", current_tick(), task_queue_len());
     GLOBAL_TASK_QUEUE.with(|queue| {
         queue.borrow_mut().push(task);
     });
@@ -84,6 +153,14 @@ fn queue_task(task: Task) {
 /// * `Result<(), JSError>` - Success or evaluation error during callback execution
 pub fn run_event_loop() -> Result<(), JSError> {
     log::trace!("run_event_loop called");
+    // Mark that we're entering an event-loop run (may be nested).
+    let nesting_before = RUN_LOOP_NESTING.fetch_add(1, Ordering::SeqCst);
+    log::debug!(
+        "run_event_loop: incremented RUN_LOOP_NESTING from {} to {}",
+        nesting_before,
+        nesting_before + 1
+    );
+    let mut processed_any = false;
     loop {
         let task = GLOBAL_TASK_QUEUE.with(|queue| {
             let mut queue_borrow = queue.borrow_mut();
@@ -95,7 +172,10 @@ pub fn run_event_loop() -> Result<(), JSError> {
             }
         });
         match task {
+            // `UnhandledCheck` tasks removed: pending unhandled checks are
+            // processed once when leaving the outermost `run_event_loop`.
             Some(Task::Resolution { promise, callbacks }) => {
+                processed_any = true;
                 log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
                 for (callback, new_promise) in callbacks {
                     // Call the callback and resolve the new promise with the result
@@ -113,7 +193,14 @@ pub fn run_event_loop() -> Result<(), JSError> {
                             }
                             Err(e) => {
                                 log::trace!("Callback execution failed: {:?}", e);
-                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                                // If the callback threw a JS value, propagate that value
+                                // as the rejection reason. Otherwise fall back to stringifying
+                                // the error for the rejection reason.
+                                if let crate::error::JSErrorKind::Throw { value } = e.kind() {
+                                    reject_promise(&new_promise, value.clone());
+                                } else {
+                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                                }
                             }
                         }
                     } else {
@@ -139,7 +226,11 @@ pub fn run_event_loop() -> Result<(), JSError> {
                                 resolve_promise(&new_promise, result);
                             }
                             Err(e) => {
-                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                                if let crate::error::JSErrorKind::Throw { value } = e.kind() {
+                                    reject_promise(&new_promise, value.clone());
+                                } else {
+                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                                }
                             }
                         }
                     } else {
@@ -149,6 +240,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
                 }
             }
             Some(Task::Timeout { id: _, callback, args }) => {
+                processed_any = true;
                 log::trace!("Processing Timeout task");
                 // Call the callback with the provided args
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
@@ -163,12 +255,100 @@ pub fn run_event_loop() -> Result<(), JSError> {
                     let _ = evaluate_statements(&func_env, &body)?;
                 }
             }
+            Some(Task::UnhandledCheck { promise, reason }) => {
+                processed_any = true;
+                log::trace!("Processing UnhandledCheck task for promise ptr={:p}", Rc::as_ptr(&promise));
+                // Check if the promise still has no rejection handlers
+                let promise_borrow = promise.borrow();
+                if promise_borrow.on_rejected.is_empty() {
+                    // Still no handlers: record insertion tick for later processing
+                    let insertion_tick = CURRENT_TICK.load(Ordering::SeqCst);
+                    log::trace!(
+                        "UnhandledCheck: adding to PENDING_UNHANDLED_CHECKS for promise ptr={:p} insertion_tick={}",
+                        Rc::as_ptr(&promise),
+                        insertion_tick
+                    );
+                    PENDING_UNHANDLED_CHECKS.with(|pending| {
+                        pending.borrow_mut().push((promise.clone(), reason, insertion_tick));
+                    });
+                } else {
+                    log::trace!("UnhandledCheck: handlers attached, skipping unhandled recording");
+                }
+            }
+
             None => {
                 log::trace!("No more tasks, exiting event loop");
                 break;
             }
         }
     }
+    // If this was the outermost run and we didn't process any tasks, process
+    // any pending unhandled checks. Only counting down on idle outermost
+    // ticks prevents consuming the grace window while work is actively
+    // being performed (which may attach handlers).
+    if nesting_before == 0 && !processed_any {
+        // We are leaving the outermost run and the loop was idle.
+        // Advance the monotonic tick and process pending entries which
+        // were recorded earlier with an insertion tick. Treat an entry
+        // as unhandled only when the current tick has advanced by
+        // `UNHANDLED_GRACE` since insertion.
+        let prev_tick = CURRENT_TICK.load(Ordering::SeqCst);
+        let current = CURRENT_TICK.fetch_add(1, Ordering::SeqCst) + 1;
+        log::debug!("CURRENT_TICK advanced from {} to {}", prev_tick, current);
+        PENDING_UNHANDLED_CHECKS.with(|pending| {
+            let mut pending_borrow = pending.borrow_mut();
+            if !pending_borrow.is_empty() {
+                log::trace!(
+                    "Processing PENDING_UNHANDLED_CHECKS: len={} current={}",
+                    pending_borrow.len(),
+                    current
+                );
+                let mut new_pending: Vec<(Rc<RefCell<JSPromise>>, Value, usize)> = Vec::new();
+                // Drain current list and decide whether to record or re-queue
+                for (promise, reason, insertion_tick) in pending_borrow.drain(..) {
+                    let promise_ptr = Rc::as_ptr(&promise);
+                    log::trace!(
+                        "pending entry: promise ptr={:p} insertion_tick={} expires_at={}",
+                        promise_ptr,
+                        insertion_tick,
+                        insertion_tick + UNHANDLED_GRACE
+                    );
+                    let promise_b = promise.borrow();
+                    match &promise_b.state {
+                        PromiseState::Rejected(_val) => {
+                            if !promise_b.on_rejected.is_empty() {
+                                // Handler attached; do not record or re-queue
+                                log::trace!("handler attached for promise ptr={:p}, ignoring", promise_ptr);
+                                continue;
+                            }
+                            if current >= insertion_tick + UNHANDLED_GRACE {
+                                log::debug!("pending expired -> recording unhandled for promise ptr={:p}", promise_ptr);
+                                // Record the unhandled rejection if slot empty
+                                UNHANDLED_REJECTION.with(|slot| {
+                                    let mut s = slot.borrow_mut();
+                                    if s.is_none() {
+                                        *s = Some(reason.clone());
+                                    }
+                                });
+                            } else {
+                                // Not yet timed out; keep for later
+                                log::trace!("pending not yet expired -> requeue promise ptr={:p}", promise_ptr);
+                                new_pending.push((promise.clone(), reason.clone(), insertion_tick));
+                            }
+                        }
+                        _ => {
+                            // Not rejected anymore; ignore
+                            log::trace!("promise ptr={:p} no longer rejected, ignoring", promise_ptr);
+                        }
+                    }
+                }
+                *pending_borrow = new_pending;
+            }
+        });
+    }
+
+    // Leaving this run: decrement nesting
+    RUN_LOOP_NESTING.fetch_sub(1, Ordering::SeqCst);
     Ok(())
 }
 
@@ -424,7 +604,19 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
         Box::new(Expr::Value(executor)),
         vec![Expr::Value(resolve_func), Expr::Value(reject_func)],
     );
-    evaluate_expr(&executor_env, &call_expr)?;
+    match evaluate_expr(&executor_env, &call_expr) {
+        Ok(_) => {}
+        Err(e) => {
+            // If the executor threw a JS value, the Promise constructor must
+            // reject the newly created promise with that value instead of
+            // re-throwing to the host.
+            if let crate::error::JSErrorKind::Throw { value } = e.kind() {
+                crate::js_promise::reject_promise(&promise, value.clone());
+            } else {
+                return Err(e);
+            }
+        }
+    }
     log::trace!("Executor function called");
 
     Ok(Value::Object(promise_obj))
@@ -965,9 +1157,21 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
 /// - Clears the callback list after queuing
 pub fn reject_promise(promise: &Rc<RefCell<JSPromise>>, reason: Value) {
     let mut promise_borrow = promise.borrow_mut();
+    // Helpful debug logging for rejected promises (especially when rejecting
+    // with JS Error-like objects) to help track unhandled rejections.
+    if let Value::Object(obj) = &reason {
+        if let Ok(Some(ctor_rc)) = obj_get_key_value(obj, &"constructor".into()) {
+            log::debug!("reject_promise: rejecting with object whose constructor = {:?}", ctor_rc.borrow());
+        } else {
+            log::debug!("reject_promise: rejecting with object ptr={:p}", Rc::as_ptr(obj));
+        }
+    } else {
+        log::debug!("reject_promise: rejecting with value={}", value_to_string(&reason));
+    }
+    log::trace!("reject_promise callbacks count = {}", promise_borrow.on_rejected.len());
     if let PromiseState::Pending = promise_borrow.state {
         promise_borrow.state = PromiseState::Rejected(reason.clone());
-        promise_borrow.value = Some(reason);
+        promise_borrow.value = Some(reason.clone());
 
         // Queue task to execute rejected callbacks asynchronously
         let callbacks = promise_borrow.on_rejected.clone();
@@ -976,6 +1180,17 @@ pub fn reject_promise(promise: &Rc<RefCell<JSPromise>>, reason: Value) {
             queue_task(Task::Rejection {
                 promise: promise.clone(),
                 callbacks,
+            });
+        } else {
+            // No callbacks now: queue a task to check for unhandled rejection
+            // after potential handler attachment (avoids race with synchronous .then/.catch)
+            log::trace!(
+                "reject_promise: queuing UnhandledCheck task for promise ptr={:p}",
+                Rc::as_ptr(promise)
+            );
+            queue_task(Task::UnhandledCheck {
+                promise: promise.clone(),
+                reason: reason.clone(),
             });
         }
     }

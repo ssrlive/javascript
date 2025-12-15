@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
+use crate::js_promise;
 
 /// Create the console object with logging functions
 pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
@@ -12,6 +13,12 @@ pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
 pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "log" => {
+            // Instrument: record current tick and task-queue length when console.log is invoked
+            log::debug!(
+                "console.log called; CURRENT_TICK={} task_queue_len={}",
+                js_promise::current_tick(),
+                js_promise::task_queue_len()
+            );
             // console.log call
             let count = args.len();
             for (i, arg) in args.iter().enumerate() {

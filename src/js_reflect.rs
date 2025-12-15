@@ -155,9 +155,14 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Ok(val) => {
                             crate::js_promise::resolve_promise(&promise, val);
                         }
-                        Err(e) => {
-                            crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
-                        }
+                        Err(e) => match e.kind() {
+                            crate::JSErrorKind::Throw { value } => {
+                                crate::js_promise::reject_promise(&promise, value.clone());
+                            }
+                            _ => {
+                                crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
+                            }
+                        },
                     }
                     Ok(promise_obj)
                 }
@@ -244,10 +249,15 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                     Ok(val) => {
                                         promise.borrow_mut().state = crate::js_promise::PromiseState::Fulfilled(val);
                                     }
-                                    Err(e) => {
-                                        promise.borrow_mut().state =
-                                            crate::js_promise::PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
-                                    }
+                                    Err(e) => match e.kind() {
+                                        crate::JSErrorKind::Throw { value } => {
+                                            promise.borrow_mut().state = crate::js_promise::PromiseState::Rejected(value.clone());
+                                        }
+                                        _ => {
+                                            promise.borrow_mut().state =
+                                                crate::js_promise::PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{}", e))));
+                                        }
+                                    },
                                 }
                                 return Ok(promise_obj);
                             }

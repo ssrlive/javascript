@@ -41,6 +41,7 @@ jobs:
     - name: run js scripts tests
       if: ${{ !cancelled() }}
       run: |
+        cargo run --example js -- js-scripts/async_n_throw_async_tests.js
         cargo run --example js -- js-scripts/atomics_test.js
         cargo run --example js -- js-scripts/atomics_wait_notify_test.js
         cargo run --example js -- js-scripts/check_dataview_global.js
@@ -59,6 +60,7 @@ jobs:
         cargo run --example js -- js-scripts/test_array_join_split.js
         cargo run --example js -- js-scripts/test_dataview_js.js
         cargo run --example js -- js-scripts/test_typedarray_constructors.js
+        cargo run --example js -- js-scripts/typeof_n_callable.js
 
     - name: Abort on error
       if: ${{ failure() }}

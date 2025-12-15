@@ -93,6 +93,49 @@ pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> R
     }
 }
 
+fn set_function_name_if_needed(val: &Value, name: &str) -> Result<(), JSError> {
+    if let Value::Object(obj_map) = val {
+        if let Some(_cl) = obj_get_key_value(obj_map, &"__closure__".into())? {
+            let existing = obj_get_key_value(obj_map, &"name".into())?;
+            if existing.is_none() {
+                let name_val = Value::String(utf8_to_utf16(name));
+                obj_set_key_value(obj_map, &"name".into(), name_val)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_object_destructuring_target(val: &Value, pattern: &[ObjectDestructuringElement], expr: &Expr) -> Result<(), JSError> {
+    if !matches!(val, Value::Object(_)) {
+        let first_key = pattern.iter().find_map(|el| {
+            if let ObjectDestructuringElement::Property { key, .. } = el {
+                Some(key.clone())
+            } else {
+                None
+            }
+        });
+
+        let message = if let Some(first) = first_key {
+            if let Expr::Var(name) = expr {
+                let value_desc = match val {
+                    Value::Undefined => "undefined",
+                    Value::Object(_) => "object",
+                    _ => "non-object value",
+                };
+                format!("Cannot destructure property '{first}' of '{name}' as it is {value_desc}")
+            } else {
+                format!("Cannot destructure property '{first}' from non-object value")
+            }
+        } else {
+            "Cannot destructure non-object value".to_string()
+        };
+
+        return Err(raise_eval_error!(message));
+    }
+    Ok(())
+}
+
 fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
     // Hoist var declarations if this is a function scope
     if env.borrow().is_function_scope {
@@ -152,16 +195,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     // If the initialized value is a function-object wrapping a closure,
                     // set its `name` property to the declared identifier to match
                     // typical JS engines (e.g. Node.js) which expose `Function.name`.
-                    if let Value::Object(obj_map) = &val {
-                        if let Some(_cl) = obj_get_key_value(obj_map, &"__closure__".into())? {
-                            // set name property if not present
-                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
-                            let existing = obj_get_key_value(obj_map, &"name".into())?;
-                            if existing.is_none() {
-                                obj_set_key_value(obj_map, &"name".into(), name_val)?;
-                            }
-                        }
-                    }
+                    set_function_name_if_needed(&val, name.as_str())?;
                     // Log the pointer about to be bound into the environment for visibility.
                     if let Value::Object(obj_map) = &val {
                         log::debug!("DBG Let - binding '{name}' into env -> func_obj ptr={:p}", Rc::as_ptr(obj_map));
@@ -174,30 +208,14 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::Var(name, expr_opt) => {
                     let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
-                    if let Value::Object(obj_map) = &val {
-                        if let Some(_cl) = obj_get_key_value(obj_map, &"__closure__".into())? {
-                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
-                            let existing = obj_get_key_value(obj_map, &"name".into())?;
-                            if existing.is_none() {
-                                obj_set_key_value(obj_map, &"name".into(), name_val)?;
-                            }
-                        }
-                    }
+                    set_function_name_if_needed(&val, name.as_str())?;
                     env_set_var(env, name.as_str(), val.clone())?;
                     last_value = val;
                     Ok(None)
                 }
                 Statement::Const(name, expr) => {
                     let val = evaluate_expr(env, expr)?;
-                    if let Value::Object(obj_map) = &val {
-                        if let Some(_cl) = obj_get_key_value(obj_map, &"__closure__".into())? {
-                            let name_val = Value::String(utf8_to_utf16(name.as_str()));
-                            let existing = obj_get_key_value(obj_map, &"name".into())?;
-                            if existing.is_none() {
-                                obj_set_key_value(obj_map, &"name".into(), name_val)?;
-                            }
-                        }
-                    }
+                    set_function_name_if_needed(&val, name.as_str())?;
                     env_set_const(env, name.as_str(), val.clone());
                     last_value = val;
                     Ok(None)
@@ -270,7 +288,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     statement_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, &mut last_value)
                 }
                 Statement::For(init, condition, increment, body) => {
-                    statement_for_init_condition_increment(env, init, condition, increment, body, &mut last_value)
+                    statement_for_init_condition_increment(env, init, condition, increment, body, &mut last_value, None)
                 }
                 Statement::ForOf(var, iterable, body) => statement_for_of_var_iter(env, var, iterable, body, &mut last_value),
                 Statement::ForIn(var, object, body) => statement_for_in_var_object(env, var, object, body, &mut last_value),
@@ -297,36 +315,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                     // `undefined` or `null` and destructuring is attempted — this
                     // mirrors node's behaviour where the specific property name
                     // and variable are included in the error when possible.
-                    if !matches!(val, Value::Object(_)) {
-                        // Try to extract a helpful identifier and a property
-                        // name to match typical node error messages. We use the
-                        // first property key listed in the pattern, if any.
-                        let first_key = pattern.iter().find_map(|el| {
-                            if let ObjectDestructuringElement::Property { key, .. } = el {
-                                Some(key.clone())
-                            } else {
-                                None
-                            }
-                        });
-
-                        let message = if let Some(first) = first_key {
-                            if let Expr::Var(name) = expr {
-                                // e.g. `Cannot destructure property 'seconds' of 'duration' as it is undefined.`
-                                let value_desc = match val {
-                                    Value::Undefined => "undefined",
-                                    Value::Object(_) => "object",
-                                    _ => "non-object value",
-                                };
-                                format!("Cannot destructure property '{first}' of '{name}' as it is {value_desc}")
-                            } else {
-                                format!("Cannot destructure property '{first}' from non-object value")
-                            }
-                        } else {
-                            "Cannot destructure non-object value".to_string()
-                        };
-
-                        return Err(raise_eval_error!(message));
-                    }
+                    ensure_object_destructuring_target(&val, pattern, expr)?;
 
                     perform_object_destructuring(env, pattern, &val, false)?;
                     last_value = val;
@@ -334,32 +323,7 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
                 Statement::ConstDestructuringObject(pattern, expr) => {
                     let val = evaluate_expr(env, expr)?;
-                    if !matches!(val, Value::Object(_)) {
-                        let first_key = pattern.iter().find_map(|el| {
-                            if let ObjectDestructuringElement::Property { key, .. } = el {
-                                Some(key.clone())
-                            } else {
-                                None
-                            }
-                        });
-
-                        let message = if let Some(first) = first_key {
-                            if let Expr::Var(name) = expr {
-                                let value_desc = match val {
-                                    Value::Undefined => "undefined",
-                                    Value::Object(_) => "object",
-                                    _ => "non-object value",
-                                };
-                                format!("Cannot destructure property '{first}' of '{name}' as it is {value_desc}")
-                            } else {
-                                format!("Cannot destructure property '{first}' from non-object value")
-                            }
-                        } else {
-                            "Cannot destructure non-object value".to_string()
-                        };
-
-                        return Err(raise_eval_error!(message));
-                    }
+                    ensure_object_destructuring_target(&val, pattern, expr)?;
 
                     perform_object_destructuring(env, pattern, &val, true)?;
                     last_value = val;
@@ -637,6 +601,7 @@ fn statement_for_init_condition_increment(
     increment: &Option<Box<Statement>>,
     body: &[Statement],
     last_value: &mut Value,
+    label_name: Option<&str>,
 ) -> Result<Option<ControlFlow>, JSError> {
     let for_env = new_js_object_data();
     for_env.borrow_mut().prototype = Some(env.clone());
@@ -685,9 +650,26 @@ fn statement_for_init_condition_increment(
         match evaluate_statements_with_context(&block_env, body)? {
             ControlFlow::Normal(val) => *last_value = val,
             ControlFlow::Break(None) => break,
-            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
+            ControlFlow::Break(Some(lbl)) => {
+                if let Some(name) = label_name {
+                    if lbl == name {
+                        break;
+                    }
+                }
+                return Ok(Some(ControlFlow::Break(Some(lbl))));
+            }
             ControlFlow::Continue(None) => {}
-            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
+            ControlFlow::Continue(Some(lbl)) => {
+                if let Some(name) = label_name {
+                    if lbl == name {
+                        // continue loop
+                    } else {
+                        return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                    }
+                } else {
+                    return Ok(Some(ControlFlow::Continue(Some(lbl))));
+                }
+            }
             ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
         }
 
@@ -743,6 +725,115 @@ fn perform_statement_if_then_else(
     Ok(None)
 }
 
+// Helper: construct a JS Error instance from a constructor name and the original JSError
+fn create_js_error_instance(env: &JSObjectDataPtr, ctor_name: &str, err: &JSError) -> Result<Value, JSError> {
+    // Try to find the constructor in the environment
+    if let Ok(Some(ctor_rc)) = obj_get_key_value(env, &ctor_name.into()) {
+        if let Value::Object(ctor_obj) = &*ctor_rc.borrow() {
+            let instance = new_js_object_data();
+            // Link prototype
+            if let Ok(Some(proto_val)) = obj_get_key_value(ctor_obj, &"prototype".into()) {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    instance.borrow_mut().prototype = Some(proto_obj.clone());
+                    let _ = obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()));
+                }
+            }
+            // name/message
+            let _ = obj_set_key_value(&instance, &"name".into(), Value::String(utf8_to_utf16(ctor_name)));
+            let _ = obj_set_key_value(&instance, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())));
+            // Build stack string from last captured frames plus error string
+            let mut stack_lines = Vec::new();
+            // first line: ErrorName: message
+            stack_lines.push(format!("{}: {}", ctor_name, err));
+            let frames = take_last_stack();
+            for f in frames.iter() {
+                stack_lines.push(format!("    at {}", f));
+            }
+            let stack_combined = stack_lines.join("\n");
+            let _ = obj_set_key_value(&instance, &"stack".into(), Value::String(utf8_to_utf16(&stack_combined)));
+            let _ = obj_set_key_value(&instance, &"constructor".into(), Value::Object(ctor_obj.clone()));
+            // Mark these properties non-enumerable, non-writable, and non-configurable per ECMAScript semantics
+            let name_key = PropertyKey::String("name".to_string());
+            let msg_key = PropertyKey::String("message".to_string());
+            let stack_key = PropertyKey::String("stack".to_string());
+            instance.borrow_mut().set_non_enumerable(name_key.clone());
+            instance.borrow_mut().set_non_enumerable(msg_key.clone());
+            instance.borrow_mut().set_non_enumerable(stack_key.clone());
+            instance.borrow_mut().set_non_writable(name_key.clone());
+            instance.borrow_mut().set_non_writable(msg_key.clone());
+            instance.borrow_mut().set_non_writable(stack_key.clone());
+            instance.borrow_mut().set_non_configurable(name_key.clone());
+            instance.borrow_mut().set_non_configurable(msg_key.clone());
+            instance.borrow_mut().set_non_configurable(stack_key.clone());
+            return Ok(Value::Object(instance));
+        }
+    }
+    // Fallback: plain Error-like object
+    let error_obj = new_js_object_data();
+    obj_set_key_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
+    obj_set_key_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
+    obj_set_key_value(&error_obj, &"stack".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
+    let name_key = PropertyKey::String("name".to_string());
+    let msg_key = PropertyKey::String("message".to_string());
+    let stack_key = PropertyKey::String("stack".to_string());
+    error_obj.borrow_mut().set_non_enumerable(name_key.clone());
+    error_obj.borrow_mut().set_non_enumerable(msg_key.clone());
+    error_obj.borrow_mut().set_non_enumerable(stack_key.clone());
+    error_obj.borrow_mut().set_non_writable(name_key.clone());
+    error_obj.borrow_mut().set_non_writable(msg_key.clone());
+    error_obj.borrow_mut().set_non_writable(stack_key.clone());
+    error_obj.borrow_mut().set_non_configurable(name_key.clone());
+    error_obj.borrow_mut().set_non_configurable(msg_key.clone());
+    error_obj.borrow_mut().set_non_configurable(stack_key.clone());
+    Ok(Value::Object(error_obj))
+}
+
+fn execute_finally(
+    env: &JSObjectDataPtr,
+    finally_body: &[Statement],
+    previous_cf: Option<ControlFlow>,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let block_env = new_js_object_data();
+    block_env.borrow_mut().prototype = Some(env.clone());
+    block_env.borrow_mut().is_function_scope = false;
+    match evaluate_statements_with_context(&block_env, finally_body)? {
+        ControlFlow::Normal(val) => {
+            if let Some(cf) = previous_cf {
+                Ok(Some(cf))
+            } else {
+                *last_value = val;
+                Ok(None)
+            }
+        }
+        other => Ok(Some(other)),
+    }
+}
+
+fn create_catch_value(env: &JSObjectDataPtr, err: &JSError) -> Result<Value, JSError> {
+    match &err.kind() {
+        JSErrorKind::Throw { value } => {
+            let cloned = value.clone();
+            if let Value::Object(obj_ptr) = &cloned {
+                let has_ctor = get_own_property(obj_ptr, &"constructor".into()).is_some();
+                if !has_ctor {
+                    if let Some(proto_ptr) = &obj_ptr.borrow().prototype {
+                        if let Some(proto_ctor_rc) = get_own_property(proto_ptr, &"constructor".into()) {
+                            let ctor_val = proto_ctor_rc.borrow().clone();
+                            let _ = obj_set_key_value(obj_ptr, &"constructor".into(), ctor_val);
+                        }
+                    }
+                }
+            }
+            Ok(cloned)
+        }
+        JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", err),
+        JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", err),
+        JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", err),
+        _ => create_js_error_instance(env, "Error", err),
+    }
+}
+
 fn statement_try_catch(
     env: &JSObjectDataPtr,
     try_body: &[Statement],
@@ -753,168 +844,62 @@ fn statement_try_catch(
 ) -> Result<Option<ControlFlow>, JSError> {
     // Execute try block and handle catch/finally semantics
     match evaluate_statements_with_context(env, try_body) {
-        Ok(ControlFlow::Normal(v)) => *last_value = v,
+        Ok(ControlFlow::Normal(v)) => {
+            *last_value = v;
+            if let Some(finally_body) = finally_body_opt {
+                execute_finally(env, finally_body, None, last_value)
+            } else {
+                Ok(None)
+            }
+        }
         Ok(cf) => {
             // For any non-normal control flow, execute finally (if present)
             // then propagate the eventual control flow (finally can override).
             if let Some(finally_body) = finally_body_opt {
-                let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(env.clone());
-                block_env.borrow_mut().is_function_scope = false;
-                match evaluate_statements_with_context(&block_env, finally_body)? {
-                    ControlFlow::Normal(_) => return Ok(Some(cf)),
-                    other => return Ok(Some(other)),
-                }
+                execute_finally(env, finally_body, Some(cf), last_value)
             } else {
-                return Ok(Some(cf));
+                Ok(Some(cf))
             }
         }
         Err(err) => {
             if catch_param.is_empty() {
                 if let Some(finally_body) = finally_body_opt {
-                    evaluate_statements_with_context(env, finally_body)?;
+                    let block_env = new_js_object_data();
+                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().is_function_scope = false;
+                    match evaluate_statements_with_context(&block_env, finally_body)? {
+                        ControlFlow::Normal(_) => return Err(err),
+                        other => return Ok(Some(other)),
+                    }
                 }
-                return Err(err);
+                Err(err)
             } else {
                 let catch_env = new_js_object_data();
                 catch_env.borrow_mut().prototype = Some(env.clone());
                 catch_env.borrow_mut().is_function_scope = false;
-                // Helper: construct a JS Error instance from a constructor name and the original JSError
-                fn create_js_error_instance(env: &JSObjectDataPtr, ctor_name: &str, err: &JSError) -> Result<Value, JSError> {
-                    // Try to find the constructor in the environment
-                    if let Ok(Some(ctor_rc)) = obj_get_key_value(env, &ctor_name.into()) {
-                        if let Value::Object(ctor_obj) = &*ctor_rc.borrow() {
-                            let instance = new_js_object_data();
-                            // Link prototype
-                            if let Ok(Some(proto_val)) = obj_get_key_value(ctor_obj, &"prototype".into()) {
-                                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                                    instance.borrow_mut().prototype = Some(proto_obj.clone());
-                                    let _ = obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()));
-                                }
-                            }
-                            // name/message
-                            let _ = obj_set_key_value(&instance, &"name".into(), Value::String(utf8_to_utf16(ctor_name)));
-                            let _ = obj_set_key_value(&instance, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())));
-                            // Build stack string from last captured frames plus error string
-                            let mut stack_lines = Vec::new();
-                            // first line: ErrorName: message
-                            stack_lines.push(format!("{}: {}", ctor_name, err));
-                            let frames = take_last_stack();
-                            for f in frames.iter() {
-                                stack_lines.push(format!("    at {}", f));
-                            }
-                            let stack_combined = stack_lines.join("\n");
-                            let _ = obj_set_key_value(&instance, &"stack".into(), Value::String(utf8_to_utf16(&stack_combined)));
-                            let _ = obj_set_key_value(&instance, &"constructor".into(), Value::Object(ctor_obj.clone()));
-                            // Mark these properties non-enumerable, non-writable, and non-configurable per ECMAScript semantics
-                            let name_key = PropertyKey::String("name".to_string());
-                            let msg_key = PropertyKey::String("message".to_string());
-                            let stack_key = PropertyKey::String("stack".to_string());
-                            instance.borrow_mut().set_non_enumerable(name_key.clone());
-                            instance.borrow_mut().set_non_enumerable(msg_key.clone());
-                            instance.borrow_mut().set_non_enumerable(stack_key.clone());
-                            instance.borrow_mut().set_non_writable(name_key.clone());
-                            instance.borrow_mut().set_non_writable(msg_key.clone());
-                            instance.borrow_mut().set_non_writable(stack_key.clone());
-                            instance.borrow_mut().set_non_configurable(name_key.clone());
-                            instance.borrow_mut().set_non_configurable(msg_key.clone());
-                            instance.borrow_mut().set_non_configurable(stack_key.clone());
-                            return Ok(Value::Object(instance));
-                        }
-                    }
-                    // Fallback: plain Error-like object
-                    let error_obj = new_js_object_data();
-                    obj_set_key_value(&error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
-                    obj_set_key_value(&error_obj, &"message".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
-                    obj_set_key_value(&error_obj, &"stack".into(), Value::String(utf8_to_utf16(&err.to_string())))?;
-                    let name_key = PropertyKey::String("name".to_string());
-                    let msg_key = PropertyKey::String("message".to_string());
-                    let stack_key = PropertyKey::String("stack".to_string());
-                    error_obj.borrow_mut().set_non_enumerable(name_key.clone());
-                    error_obj.borrow_mut().set_non_enumerable(msg_key.clone());
-                    error_obj.borrow_mut().set_non_enumerable(stack_key.clone());
-                    error_obj.borrow_mut().set_non_writable(name_key.clone());
-                    error_obj.borrow_mut().set_non_writable(msg_key.clone());
-                    error_obj.borrow_mut().set_non_writable(stack_key.clone());
-                    error_obj.borrow_mut().set_non_configurable(name_key.clone());
-                    error_obj.borrow_mut().set_non_configurable(msg_key.clone());
-                    error_obj.borrow_mut().set_non_configurable(stack_key.clone());
-                    Ok(Value::Object(error_obj))
-                }
 
-                let catch_value = match &err.kind() {
-                    // Thrown values created by `throw <expr>` should be delivered
-                    // to the catch clause unmodified (as in ECMA-262).
-                    // Only JS engine error variants (TypeError, SyntaxError,
-                    // RuntimeError, EvaluationError) are converted into
-                    // Error-like objects for the catch. Preserve the
-                    // original thrown value here.
-                    JSErrorKind::Throw { value } => {
-                        // Preserve thrown JS object identity but ensure that
-                        // if the object lacks an own `constructor` property
-                        // we expose the prototype's constructor as an own
-                        // property so script code that checks
-                        // `err.constructor === SomeCtor` observes the
-                        // canonical constructor object. This avoids any
-                        // hard-coded Test262Error names in Rust.
-                        let cloned = value.clone();
-                        if let Value::Object(obj_ptr) = &cloned {
-                            // If there is no own `constructor` property,
-                            // try to read it from the object's prototype
-                            // and, if present, copy it as an own property.
-                            let has_ctor = get_own_property(obj_ptr, &"constructor".into()).is_some();
-                            if !has_ctor {
-                                // Look up internal prototype pointer
-                                if let Some(proto_ptr) = &obj_ptr.borrow().prototype {
-                                    if let Some(proto_ctor_rc) = get_own_property(proto_ptr, &"constructor".into()) {
-                                        // Copy the constructor value (usually an object)
-                                        let ctor_val = proto_ctor_rc.borrow().clone();
-                                        // Ignore errors setting the property; best-effort
-                                        let _ = obj_set_key_value(obj_ptr, &"constructor".into(), ctor_val);
-                                    }
-                                }
-                            }
-                        }
-                        cloned
-                    }
-                    JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", &err)?,
-                    JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", &err)?,
-                    JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", &err)?,
-                    _ => {
-                        // For other errors, create a generic Error object
-                        create_js_error_instance(env, "Error", &err)?
-                    }
-                };
+                let catch_value = create_catch_value(env, &err)?;
                 env_set(&catch_env, catch_param, catch_value)?;
                 match evaluate_statements_with_context(&catch_env, catch_body)? {
-                    ControlFlow::Normal(val) => *last_value = val,
+                    ControlFlow::Normal(val) => {
+                        *last_value = val;
+                        if let Some(finally_body) = finally_body_opt {
+                            execute_finally(env, finally_body, None, last_value)
+                        } else {
+                            Ok(None)
+                        }
+                    }
                     cf => {
                         if let Some(finally_body) = finally_body_opt {
-                            let block_env = new_js_object_data();
-                            block_env.borrow_mut().prototype = Some(env.clone());
-                            block_env.borrow_mut().is_function_scope = false;
-                            match evaluate_statements_with_context(&block_env, finally_body)? {
-                                ControlFlow::Normal(_) => return Ok(Some(cf)),
-                                other => return Ok(Some(other)),
-                            }
+                            execute_finally(env, finally_body, Some(cf), last_value)
+                        } else {
+                            Ok(Some(cf))
                         }
-                        return Ok(Some(cf));
                     }
                 }
             }
         }
     }
-    // Finally block executes after try/catch
-    if let Some(finally_body) = finally_body_opt {
-        let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(env.clone());
-        block_env.borrow_mut().is_function_scope = false;
-        match evaluate_statements_with_context(&block_env, finally_body)? {
-            ControlFlow::Normal(val) => *last_value = val,
-            cf => return Ok(Some(cf)),
-        }
-    }
-    Ok(None)
 }
 
 fn perform_statement_label(
@@ -928,87 +913,7 @@ fn perform_statement_label(
     // labeled `break/continue` control flow can be handled.
     match inner_stmt {
         Statement::For(init, condition, increment, body) => {
-            let for_env = new_js_object_data();
-            for_env.borrow_mut().prototype = Some(env.clone());
-            for_env.borrow_mut().is_function_scope = false;
-            // Execute initialization
-            if let Some(init_stmt) = init {
-                match init_stmt.as_ref() {
-                    Statement::Let(name, expr_opt) => {
-                        let val = expr_opt
-                            .clone()
-                            .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
-                        env_set(&for_env, name.as_str(), val)?;
-                    }
-                    Statement::Var(name, expr_opt) => {
-                        let val = expr_opt
-                            .clone()
-                            .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
-                        env_set_var(&for_env, name.as_str(), val)?;
-                    }
-                    Statement::Expr(expr) => {
-                        evaluate_expr(&for_env, expr)?;
-                    }
-                    _ => {
-                        return Err(raise_eval_error!("error"));
-                    }
-                }
-            }
-
-            loop {
-                let should_continue = if let Some(cond_expr) = condition {
-                    let cond_val = evaluate_expr(&for_env, cond_expr)?;
-                    is_truthy(&cond_val)
-                } else {
-                    true
-                };
-                if !should_continue {
-                    break;
-                }
-
-                let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(for_env.clone());
-                block_env.borrow_mut().is_function_scope = false;
-                match evaluate_statements_with_context(&block_env, body)? {
-                    ControlFlow::Normal(val) => *last_value = val,
-                    ControlFlow::Break(None) => break,
-                    ControlFlow::Break(Some(lbl)) => {
-                        if lbl == *label_name {
-                            break;
-                        } else {
-                            return Ok(Some(ControlFlow::Break(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Continue(None) => {}
-                    ControlFlow::Continue(Some(lbl)) => {
-                        if lbl == *label_name { /* continue loop */
-                        } else {
-                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
-                        }
-                    }
-                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
-                }
-
-                if let Some(incr_stmt) = increment {
-                    match incr_stmt.as_ref() {
-                        Statement::Expr(expr) => match expr {
-                            Expr::Assign(target, value) => {
-                                if let Expr::Var(name) = target.as_ref() {
-                                    let val = evaluate_expr(&for_env, value)?;
-                                    env_set_recursive(&for_env, name.as_str(), val)?;
-                                }
-                            }
-                            _ => {
-                                evaluate_expr(&for_env, expr)?;
-                            }
-                        },
-                        _ => {
-                            return Err(raise_eval_error!("error"));
-                        }
-                    }
-                }
-            }
-            Ok(None)
+            statement_for_init_condition_increment(env, init, condition, increment, body, last_value, Some(label_name))
         }
         Statement::ForOf(var, iterable, body) => {
             let iterable_val = evaluate_expr(env, iterable)?;
@@ -1132,331 +1037,124 @@ fn perform_statement_label(
     }
 }
 
-fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: &mut Value) -> Result<Option<ControlFlow>, JSError> {
-    // Special-case assignment expressions so we can mutate `env` or
-    // object properties. `parse_statement` only turns simple
-    // variable assignments into `Statement::Assign`, so here we
-    // handle expression-level assignments such as `obj.prop = val`
-    // and `arr[0] = val`.
-    if let Expr::Assign(target, value_expr) = expr {
-        match target.as_ref() {
-            Expr::Var(name) => {
-                let v = evaluate_expr(env, value_expr)?;
-                env_set_recursive(env, name.as_str(), v.clone())?;
-                *last_value = v;
+fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Result<Value, JSError> {
+    match target {
+        Expr::Var(name) => {
+            env_set_recursive(env, name.as_str(), value.clone())?;
+            Ok(value)
+        }
+        Expr::Property(obj_expr, prop_name) => {
+            set_prop_env(env, obj_expr, prop_name.as_str(), value.clone())?;
+            Ok(value)
+        }
+        Expr::Index(obj_expr, idx_expr) => {
+            let obj_val = evaluate_expr(env, obj_expr)?;
+            let idx_val = evaluate_expr(env, idx_expr)?;
+
+            if let (Value::Object(obj_map), Value::Number(n)) = (&obj_val, &idx_val)
+                && let Some(ta_val) = obj_get_key_value(obj_map, &"__typedarray".into())?
+                && let Value::TypedArray(ta) = &*ta_val.borrow()
+            {
+                let val_num = match &value {
+                    Value::Number(num) => *num as i64,
+                    Value::BigInt(h) => h
+                        .to_i64()
+                        .ok_or(raise_eval_error!("TypedArray assignment value must be a number"))?,
+                    _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
+                };
+                ta.borrow_mut()
+                    .set(*n as usize, val_num)
+                    .map_err(|_| raise_eval_error!("TypedArray index out of bounds"))?;
+                return Ok(value);
             }
-            Expr::Property(obj_expr, prop_name) => {
-                let v = evaluate_expr(env, value_expr)?;
-                // set_prop_env will attempt to mutate the env-held
-                // object when possible, otherwise it will update
-                // the evaluated object and return it.
-                match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                    Some(updated_obj) => *last_value = updated_obj,
-                    None => *last_value = v,
-                }
-            }
-            Expr::Index(obj_expr, idx_expr) => {
-                // Check if this is a TypedArray assignment first
-                let obj_val = evaluate_expr(env, obj_expr)?;
-                let idx_val = evaluate_expr(env, idx_expr)?;
-                if let (Value::Object(obj_map), Value::Number(n)) = (&obj_val, &idx_val)
-                    && let Some(ta_val) = obj_get_key_value(obj_map, &"__typedarray".into())?
-                    && let Value::TypedArray(ta) = &*ta_val.borrow()
-                {
-                    // This is a TypedArray, use our set method
-                    let mut v = evaluate_expr(env, value_expr)?;
-                    let val_num = match &mut v {
-                        Value::Number(num) => *num as i64,
-                        Value::BigInt(h) => h
-                            .to_i64()
-                            .ok_or(raise_eval_error!("TypedArray assignment value must be a number"))?,
-                        _ => return Err(raise_eval_error!("TypedArray assignment value must be a number")),
-                    };
-                    ta.borrow_mut()
-                        .set(*n as usize, val_num)
-                        .map_err(|_| raise_eval_error!("TypedArray index out of bounds"))?;
-                    *last_value = v;
-                    return Ok(None);
-                }
-                // Evaluate index — support number, string and symbol keys
-                let v = evaluate_expr(env, value_expr)?;
-                match idx_val {
-                    Value::Number(n) => {
-                        let key = n.to_string();
-                        match set_prop_env(env, obj_expr, &key, v.clone())? {
-                            Some(updated_obj) => *last_value = updated_obj,
-                            None => *last_value = v,
-                        }
-                    }
-                    Value::String(s) => {
-                        let key = String::from_utf16_lossy(&s);
-                        match set_prop_env(env, obj_expr, &key, v.clone())? {
-                            Some(updated_obj) => *last_value = updated_obj,
-                            None => *last_value = v,
-                        }
-                    }
-                    Value::Symbol(sym) => {
-                        // For symbols we must set the property with a Symbol key.
-                        // Try fast path (obj_expr is a var that points to an object in env)
-                        if let Expr::Var(varname) = obj_expr.as_ref()
-                            && let Some(rc_val) = env_get(env, varname)
-                        {
-                            let mut borrowed = rc_val.borrow_mut();
-                            if let Value::Object(ref mut map) = *borrowed {
-                                let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                obj_set_key_value(map, &key, v.clone())?;
-                                *last_value = v;
+
+            match idx_val {
+                Value::Number(n) => {
+                    let key = n.to_string();
+                    if let Value::Object(obj) = obj_val {
+                        if key == "__proto__" {
+                            if let Value::Object(proto_map) = &value {
+                                obj.borrow_mut().prototype = Some(proto_map.clone());
                             } else {
-                                return Err(raise_eval_error!("Cannot assign to property of non-object"));
+                                obj.borrow_mut().prototype = None;
                             }
                         } else {
-                            // Fall back: evaluate object expression and set symbol key
-                            let obj_val = evaluate_expr(env, obj_expr)?;
-                            match obj_val {
-                                Value::Object(obj_map) => {
-                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                    obj_set_key_value(&obj_map, &key, v.clone())?;
-                                    *last_value = v;
-                                }
-                                _ => {
-                                    return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                }
-                            }
+                            obj_set_key_value(&obj, &key.into(), value.clone())?;
                         }
-                    }
-                    _ => {
-                        return Err(raise_eval_error!("Invalid index type"));
+                        Ok(value)
+                    } else {
+                        Err(raise_eval_error!("Cannot assign to property of non-object"))
                     }
                 }
-            }
-            _ => {
-                // Fallback: evaluate the expression normally
-                *last_value = evaluate_expr(env, expr)?;
+                Value::String(s) => {
+                    let key = String::from_utf16_lossy(&s);
+                    if let Value::Object(obj) = obj_val {
+                        if key == "__proto__" {
+                            if let Value::Object(proto_map) = &value {
+                                obj.borrow_mut().prototype = Some(proto_map.clone());
+                            } else {
+                                obj.borrow_mut().prototype = None;
+                            }
+                        } else {
+                            obj_set_key_value(&obj, &key.into(), value.clone())?;
+                        }
+                        Ok(value)
+                    } else {
+                        Err(raise_eval_error!("Cannot assign to property of non-object"))
+                    }
+                }
+                Value::Symbol(sym) => {
+                    if let Value::Object(obj) = obj_val {
+                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
+                        obj_set_key_value(&obj, &key, value.clone())?;
+                        Ok(value)
+                    } else {
+                        Err(raise_eval_error!("Cannot assign to property of non-object"))
+                    }
+                }
+                _ => Err(raise_eval_error!("Invalid index type")),
             }
         }
-    } else if let Expr::LogicalAndAssign(target, value_expr) = expr {
-        // Handle logical AND assignment: a &&= b
-        let left_val = evaluate_expr(env, target)?;
-        if is_truthy(&left_val) {
-            match target.as_ref() {
-                Expr::Var(name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    env_set_recursive(env, name.as_str(), v.clone())?;
-                    *last_value = v;
-                }
-                Expr::Property(obj_expr, prop_name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                        Some(updated_obj) => *last_value = updated_obj,
-                        None => *last_value = v,
-                    }
-                }
-                Expr::Index(obj_expr, idx_expr) => {
-                    let idx_val = evaluate_expr(env, idx_expr)?;
-                    let v = evaluate_expr(env, value_expr)?;
-                    match idx_val {
-                        Value::Number(n) => {
-                            let key = n.to_string();
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::String(s) => {
-                            let key = String::from_utf16_lossy(&s);
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::Symbol(sym) => {
-                            // symbol index — set symbol-keyed property
-                            if let Expr::Var(varname) = obj_expr.as_ref()
-                                && let Some(rc_val) = env_get(env, varname)
-                            {
-                                let mut borrowed = rc_val.borrow_mut();
-                                if let Value::Object(ref mut map) = *borrowed {
-                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                    obj_set_key_value(map, &key, v.clone())?;
-                                    *last_value = v;
-                                } else {
-                                    return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                }
-                            } else {
-                                let obj_val = evaluate_expr(env, obj_expr)?;
-                                match obj_val {
-                                    Value::Object(obj_map) => {
-                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                        obj_set_key_value(&obj_map, &key, v.clone())?;
-                                        *last_value = v;
-                                    }
-                                    _ => {
-                                        return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(raise_eval_error!("Invalid index type"));
-                        }
-                    }
-                }
-                _ => {
-                    *last_value = evaluate_expr(env, expr)?;
-                }
-            }
-        } else {
-            *last_value = left_val;
+        _ => Err(raise_eval_error!("Invalid assignment target")),
+    }
+}
+
+fn perform_statement_expression(env: &JSObjectDataPtr, expr: &Expr, last_value: &mut Value) -> Result<Option<ControlFlow>, JSError> {
+    match expr {
+        Expr::Assign(target, value_expr) => {
+            let val = evaluate_expr(env, value_expr)?;
+            *last_value = assign_to_target(env, target, val)?;
         }
-    } else if let Expr::LogicalOrAssign(target, value_expr) = expr {
-        // Handle logical OR assignment: a ||= b
-        let left_val = evaluate_expr(env, target)?;
-        if !is_truthy(&left_val) {
-            match target.as_ref() {
-                Expr::Var(name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    env_set_recursive(env, name.as_str(), v.clone())?;
-                    *last_value = v;
-                }
-                Expr::Property(obj_expr, prop_name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                        Some(updated_obj) => *last_value = updated_obj,
-                        None => *last_value = v,
-                    }
-                }
-                Expr::Index(obj_expr, idx_expr) => {
-                    let idx_val = evaluate_expr(env, idx_expr)?;
-                    let v = evaluate_expr(env, value_expr)?;
-                    match idx_val {
-                        Value::Number(n) => {
-                            let key = n.to_string();
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::String(s) => {
-                            let key = String::from_utf16_lossy(&s);
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::Symbol(sym) => {
-                            if let Expr::Var(varname) = obj_expr.as_ref()
-                                && let Some(rc_val) = env_get(env, varname)
-                            {
-                                let mut borrowed = rc_val.borrow_mut();
-                                if let Value::Object(ref mut map) = *borrowed {
-                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                    obj_set_key_value(map, &key, v.clone())?;
-                                    *last_value = v;
-                                } else {
-                                    return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                }
-                            } else {
-                                let obj_val = evaluate_expr(env, obj_expr)?;
-                                match obj_val {
-                                    Value::Object(obj_map) => {
-                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                        obj_set_key_value(&obj_map, &key, v.clone())?;
-                                        *last_value = v;
-                                    }
-                                    _ => {
-                                        return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(raise_eval_error!("Invalid index type"));
-                        }
-                    }
-                }
-                _ => {
-                    *last_value = evaluate_expr(env, expr)?;
-                }
-            }
-        } else {
-            *last_value = left_val;
-        }
-    } else if let Expr::NullishAssign(target, value_expr) = expr {
-        // Handle nullish coalescing assignment: a ??= b
-        let left_val = evaluate_expr(env, target)?;
-        match left_val {
-            Value::Undefined => match target.as_ref() {
-                Expr::Var(name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    env_set_recursive(env, name.as_str(), v.clone())?;
-                    *last_value = v;
-                }
-                Expr::Property(obj_expr, prop_name) => {
-                    let v = evaluate_expr(env, value_expr)?;
-                    match set_prop_env(env, obj_expr, prop_name.as_str(), v.clone())? {
-                        Some(updated_obj) => *last_value = updated_obj,
-                        None => *last_value = v,
-                    }
-                }
-                Expr::Index(obj_expr, idx_expr) => {
-                    let idx_val = evaluate_expr(env, idx_expr)?;
-                    let v = evaluate_expr(env, value_expr)?;
-                    match idx_val {
-                        Value::Number(n) => {
-                            let key = n.to_string();
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::String(s) => {
-                            let key = String::from_utf16_lossy(&s);
-                            match set_prop_env(env, obj_expr, &key, v.clone())? {
-                                Some(updated_obj) => *last_value = updated_obj,
-                                None => *last_value = v,
-                            }
-                        }
-                        Value::Symbol(sym) => {
-                            if let Expr::Var(varname) = obj_expr.as_ref()
-                                && let Some(rc_val) = env_get(env, varname)
-                            {
-                                let mut borrowed = rc_val.borrow_mut();
-                                if let Value::Object(ref mut map) = *borrowed {
-                                    let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                    obj_set_key_value(map, &key, v.clone())?;
-                                    *last_value = v;
-                                } else {
-                                    return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                }
-                            } else {
-                                let obj_val = evaluate_expr(env, obj_expr)?;
-                                match obj_val {
-                                    Value::Object(obj_map) => {
-                                        let key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sym))));
-                                        obj_set_key_value(&obj_map, &key, v.clone())?;
-                                        *last_value = v;
-                                    }
-                                    _ => {
-                                        return Err(raise_eval_error!("Cannot assign to property of non-object"));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(raise_eval_error!("Invalid index type"));
-                        }
-                    }
-                }
-                _ => {
-                    *last_value = evaluate_expr(env, expr)?;
-                }
-            },
-            _ => {
+        Expr::LogicalAndAssign(target, value_expr) => {
+            let left_val = evaluate_expr(env, target)?;
+            if is_truthy(&left_val) {
+                let val = evaluate_expr(env, value_expr)?;
+                *last_value = assign_to_target(env, target, val)?;
+            } else {
                 *last_value = left_val;
             }
         }
-    } else {
-        *last_value = evaluate_expr(env, expr)?;
+        Expr::LogicalOrAssign(target, value_expr) => {
+            let left_val = evaluate_expr(env, target)?;
+            if !is_truthy(&left_val) {
+                let val = evaluate_expr(env, value_expr)?;
+                *last_value = assign_to_target(env, target, val)?;
+            } else {
+                *last_value = left_val;
+            }
+        }
+        Expr::NullishAssign(target, value_expr) => {
+            let left_val = evaluate_expr(env, target)?;
+            if matches!(left_val, Value::Undefined | Value::Null) {
+                let val = evaluate_expr(env, value_expr)?;
+                *last_value = assign_to_target(env, target, val)?;
+            } else {
+                *last_value = left_val;
+            }
+        }
+        _ => {
+            *last_value = evaluate_expr(env, expr)?;
+        }
     }
     Ok(None)
 }
@@ -2416,7 +2114,7 @@ fn evaluate_await_expression(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value
                 match &promise_borrow.state {
                     PromiseState::Fulfilled(val) => return Ok(val.clone()),
                     PromiseState::Rejected(reason) => {
-                        return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
+                        return Err(raise_throw_error!(reason.clone()));
                     }
                     PromiseState::Pending => {
                         // Continue running the event loop
@@ -2436,7 +2134,7 @@ fn evaluate_await_expression(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value
                     match &promise_borrow.state {
                         PromiseState::Fulfilled(val) => return Ok(val.clone()),
                         PromiseState::Rejected(reason) => {
-                            return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
+                            return Err(raise_throw_error!(reason.clone()));
                         }
                         PromiseState::Pending => {
                             // Continue running the event loop
@@ -2506,7 +2204,7 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
 fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
     // First, attempt to resolve the name in the current scope chain.
     // This ensures script-defined bindings shadow engine-provided helpers
-    // such as `assert` or `Test262Error`.
+    // such as `assert`.
     let mut current_opt = Some(env.clone());
     while let Some(current_env) = current_opt {
         if let Some(val_rc) = obj_get_key_value(&current_env, &name.into())? {
@@ -3470,10 +3168,13 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::Number(_) => "number",
         Value::String(_) => "string",
         Value::BigInt(_) => "bigint",
-        Value::Object(_obj_map) => {
+        Value::Object(obj_map) => {
             // If this object wraps a closure under the internal `__closure__` key,
             // report `function` for `typeof` so function-objects behave like functions.
+            #[allow(clippy::if_same_then_else)]
             if extract_closure_from_value(&val).is_some() {
+                "function"
+            } else if obj_get_key_value(obj_map, &"__is_constructor".into()).ok().flatten().is_some() {
                 "function"
             } else {
                 "object"
@@ -4523,6 +4224,14 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 return Ok(Value::Function("Proxy.revocable".to_string()));
             }
 
+            // Expose Function.prototype.call and apply as properties on function values
+            if prop == "call" {
+                return Ok(Value::Function("Function.prototype.call".to_string()));
+            }
+            if prop == "apply" {
+                return Ok(Value::Function("Function.prototype.apply".to_string()));
+            }
+
             Err(raise_eval_error!(format!("Property not found for prop={prop}")))
         }
         // For boolean and other primitive types, property access should usually
@@ -4716,6 +4425,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     Err(raise_eval_error!("Invalid Map object"))
                 }
             }
+
             (Value::Object(obj_map), method) if get_own_property(&obj_map, &"__set__".into()).is_some() => {
                 if let Some(set_val) = get_own_property(&obj_map, &"__set__".into()) {
                     if let Value::Set(set) = &*set_val.borrow() {
@@ -4820,7 +4530,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_regexp::handle_regexp_method(&obj_map, method, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
-                    crate::js_array::handle_array_instance_method(&obj_map, method, args, env, obj_expr)
+                    crate::js_array::handle_array_instance_method(&obj_map, method, args, env)
                 } else if get_own_property(&obj_map, &"__promise".into()).is_some() {
                     // Promise instance methods
                     handle_promise_method(&obj_map, method, args, env)
@@ -5064,10 +4774,21 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             match result {
                                                 Ok(val) => crate::js_promise::resolve_promise(&promise, val),
                                                 Err(e) => {
-                                                    crate::js_promise::reject_promise(
-                                                        &promise,
-                                                        Value::String(utf8_to_utf16(&format!("{}", e))),
-                                                    );
+                                                    // If the error represents a thrown JS value,
+                                                    // reject the promise with that original JS
+                                                    // value so script-level handlers see the
+                                                    // same object/type as intended.
+                                                    match e.kind() {
+                                                        crate::JSErrorKind::Throw { value } => {
+                                                            crate::js_promise::reject_promise(&promise, value.clone());
+                                                        }
+                                                        _ => {
+                                                            crate::js_promise::reject_promise(
+                                                                &promise,
+                                                                Value::String(utf8_to_utf16(&format!("{}", e))),
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                             }
                                             Ok(promise_obj)
@@ -5084,6 +4805,81 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                         Err(raise_eval_error!(format!("Method {method} not found on object")))
                     }
                 }
+            }
+            // Allow function values to support `.call` and `.apply` forwarding
+            (Value::Function(func_name), "call") => {
+                // Forward Object.prototype.* builtins when called via .call
+                if func_name.starts_with("Object.prototype.") {
+                    if args.len() < 2 {
+                        return Err(raise_eval_error!("call requires a receiver and at least one arg"));
+                    }
+                    let method = func_name.trim_start_matches("Object.prototype.").to_string();
+                    // Special-case hasOwnProperty: call should invoke the builtin
+                    // implementation using the provided receiver (args[0]) and
+                    // property argument (args[1]) without requiring the receiver
+                    // to have the method as an own property.
+                    if method == "hasOwnProperty" {
+                        // receiver
+                        let receiver_val = evaluate_expr(env, &args[0])?;
+                        // property name arg
+                        let key_val = evaluate_expr(env, &args[1])?;
+                        let exists = match receiver_val {
+                            Value::Object(obj_map) => match key_val {
+                                Value::String(s) => get_own_property(&obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
+                                Value::Number(n) => get_own_property(&obj_map, &n.to_string().into()).is_some(),
+                                Value::Boolean(b) => get_own_property(&obj_map, &b.to_string().into()).is_some(),
+                                Value::Undefined => get_own_property(&obj_map, &"undefined".into()).is_some(),
+                                Value::Symbol(sd) => {
+                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                                    get_own_property(&obj_map, &sym_key).is_some()
+                                }
+                                other => get_own_property(&obj_map, &value_to_string(&other).into()).is_some(),
+                            },
+                            _ => false,
+                        };
+                        return Ok(Value::Boolean(exists));
+                    }
+                    let receiver_expr = args[0].clone();
+                    let forwarded = &args[1..];
+                    let prop_expr = Expr::Property(Box::new(receiver_expr), method);
+                    let call_expr = Expr::Call(Box::new(prop_expr), forwarded.to_vec());
+                    return evaluate_expr(env, &call_expr);
+                }
+                Err(raise_eval_error!(format!("{} has no static method 'call'", func_name)))
+            }
+            (Value::Function(func_name), "apply") => {
+                if func_name.starts_with("Object.prototype.") {
+                    if args.is_empty() {
+                        return Err(raise_eval_error!("apply requires a receiver"));
+                    }
+                    // receiver
+                    let receiver_val = evaluate_expr(env, &args[0])?;
+                    // array arg
+                    let mut forwarded_exprs: Vec<Expr> = Vec::new();
+                    if args.len() >= 2 {
+                        match evaluate_expr(env, &args[1])? {
+                            Value::Object(arr_obj) if crate::js_array::is_array(&arr_obj) => {
+                                let mut i = 0usize;
+                                loop {
+                                    let key = i.to_string();
+                                    if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                        forwarded_exprs.push(Expr::Value(val_rc.borrow().clone()));
+                                    } else {
+                                        break;
+                                    }
+                                    i += 1;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let method = func_name.trim_start_matches("Object.prototype.").to_string();
+                    let receiver_expr = Expr::Value(receiver_val);
+                    let prop_expr = Expr::Property(Box::new(receiver_expr), method);
+                    let call_expr = Expr::Call(Box::new(prop_expr), forwarded_exprs);
+                    return evaluate_expr(env, &call_expr);
+                }
+                Err(raise_eval_error!(format!("{} has no static method 'apply'", func_name)))
             }
             (Value::Function(func_name), method) => {
                 // Handle constructor static methods
@@ -5106,7 +4902,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
         let obj_val = evaluate_expr(env, obj_expr)?;
         match obj_val {
             Value::Undefined | Value::Null => Ok(Value::Undefined),
-            Value::Object(obj_map) => handle_optional_method_call(&obj_map, method_name, args, env, obj_expr),
+            Value::Object(obj_map) => handle_optional_method_call(&obj_map, method_name, args, env),
             Value::Function(func_name) => {
                 // Handle constructor static methods
                 match func_name.as_str() {
@@ -5172,9 +4968,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let result = evaluate_statements(&func_env, body);
                             match result {
                                 Ok(val) => crate::js_promise::resolve_promise(&promise, val),
-                                Err(e) => {
-                                    crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
-                                }
+                                Err(e) => match e.kind() {
+                                    crate::JSErrorKind::Throw { value } => {
+                                        crate::js_promise::reject_promise(&promise, value.clone());
+                                    }
+                                    _ => {
+                                        crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
+                                    }
+                                },
                             }
                             Ok(promise_obj)
                         }
@@ -5226,6 +5027,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else {
                     Err(raise_eval_error!("Object is not callable"))
                 }
+            }
+            Value::Object(obj_map)
+                if obj_get_key_value(&obj_map, &"__is_error_constructor".into())
+                    .ok()
+                    .flatten()
+                    .is_some() =>
+            {
+                crate::js_class::evaluate_new(env, func_expr, args)
             }
             Value::Closure(params, body, captured_env) => {
                 // Function call
@@ -5299,9 +5108,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     Ok(val) => {
                         crate::js_promise::resolve_promise(&promise, val);
                     }
-                    Err(e) => {
-                        crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
-                    }
+                    Err(e) => match e.kind() {
+                        crate::JSErrorKind::Throw { value } => {
+                            crate::js_promise::reject_promise(&promise, value.clone());
+                        }
+                        _ => {
+                            crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
+                        }
+                    },
                 }
                 Ok(promise_obj)
             }
@@ -5585,7 +5399,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                     crate::js_regexp::handle_regexp_method(&obj_map, method_name, args, env)
                 } else if is_array(&obj_map) {
                     // Array instance methods
-                    crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env, obj_expr)
+                    crate::js_array::handle_array_instance_method(&obj_map, method_name, args, env)
                 } else if get_own_property(&obj_map, &"__promise".into()).is_some() {
                     // Promise instance methods
                     handle_promise_method(&obj_map, method_name, args, env)
@@ -5972,13 +5786,7 @@ fn collect_names_from_object_pattern(pattern: &Vec<ObjectDestructuringElement>, 
 }
 
 /// Handle optional method call on an object, Similar logic to regular method call but for optional
-fn handle_optional_method_call(
-    obj_map: &JSObjectDataPtr,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-    obj_expr: &Expr,
-) -> Result<Value, JSError> {
+fn handle_optional_method_call(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "log" if get_own_property(obj_map, &"log".into()).is_some() => handle_console_method(method, args, env),
         "toString" => crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env),
@@ -6021,7 +5829,7 @@ fn handle_optional_method_call(
                 crate::js_regexp::handle_regexp_method(obj_map, method, args, env)
             } else if is_array(obj_map) {
                 // Array instance methods
-                crate::js_array::handle_array_instance_method(obj_map, method, args, env, obj_expr)
+                crate::js_array::handle_array_instance_method(obj_map, method, args, env)
             } else if get_own_property(obj_map, &"__class_def__".into()).is_some() {
                 // Class static methods
                 call_static_method(obj_map, method, args, env)

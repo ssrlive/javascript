@@ -2,7 +2,7 @@ use crate::{
     JSError,
     core::{
         JSObjectDataPtr, PropertyKey, Value, evaluate_statements, filter_input_script, initialize_global_constructors, new_js_object_data,
-        obj_get_key_value, obj_set_key_value, parse_statements, tokenize, value_to_string,
+        obj_get_key_value, obj_set_key_value, parse_statements, tokenize,
     },
     js_promise::{PromiseState, run_event_loop},
 };
@@ -82,7 +82,10 @@ impl Repl {
                         match &promise_borrow.state {
                             PromiseState::Fulfilled(val) => return Ok(val.clone()),
                             PromiseState::Rejected(reason) => {
-                                return Err(raise_eval_error!(format!("Promise rejected: {}", value_to_string(reason))));
+                                // Preserve the original rejected JS value instead of
+                                // converting it to a string so callers can inspect
+                                // the rejection reason (e.g., error objects).
+                                return Err(raise_throw_error!(reason.clone()));
                             }
                             PromiseState::Pending => {
                                 // Continue running the event loop

@@ -47,6 +47,7 @@ jobs:
         cargo run --example js -- js-scripts/comprehensive_dataview_test.js
         cargo run --example js -- js-scripts/dataview_properties_test.js
         cargo run --example js -- js-scripts/date_tests.js
+        cargo run --example js -- js-scripts/date_utc_n_get_time_zone_offset.js
         cargo run --example js -- js-scripts/function_object.js
         cargo run --example js -- js-scripts/globel_assert.js
         cargo run --example js -- js-scripts/proper_dataview_test.js

@@ -318,6 +318,24 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
                 Ok(Value::Number(f64::NAN))
             }
         }
+        "getTimezoneOffset" => {
+            if !args.is_empty() {
+                return Err(raise_type_error!("Date.getTimezoneOffset() takes no arguments"));
+            }
+            let timestamp = get_time_stamp_value(obj)?;
+            if let Some(dt) = Utc.timestamp_millis_opt(timestamp as i64).single() {
+                // Convert UTC instant to local datetime
+                let local_dt = Local.from_utc_datetime(&dt.naive_utc());
+                // Compute offset in seconds (local - utc)
+                // local_dt.offset().local_minus_utc() returns seconds difference
+                let offset_seconds = local_dt.offset().local_minus_utc();
+                // JS getTimezoneOffset returns minutes between UTC and local time (UTC - local)
+                let minutes = -((offset_seconds as f64) / 60.0);
+                Ok(Value::Number(minutes))
+            } else {
+                Ok(Value::Number(f64::NAN))
+            }
+        }
         "getDay" => {
             if !args.is_empty() {
                 return Err(raise_type_error!("Date.getDay() takes no arguments"));
@@ -548,6 +566,69 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
             } else {
                 Ok(Value::Number(f64::NAN))
             }
+        }
+        "UTC" => {
+            // Date.UTC(year, month[, day[, hour[, minute[, second[, millisecond]]]]])
+            if args.len() < 2 {
+                return Err(raise_type_error!("Date.UTC() requires at least year and month"));
+            }
+            // Evaluate and coerce args to numbers
+            let eval_num = |i: usize, default: f64| -> Result<f64, JSError> {
+                if i < args.len() {
+                    match evaluate_expr(_env, &args[i])? {
+                        Value::Number(n) => Ok(n),
+                        _ => Ok(f64::NAN),
+                    }
+                } else {
+                    Ok(default)
+                }
+            };
+
+            let year_n = eval_num(0, 0.0)?;
+            let month_n = eval_num(1, 0.0)?;
+            let day_n = eval_num(2, 1.0)?;
+            let hour_n = eval_num(3, 0.0)?;
+            let minute_n = eval_num(4, 0.0)?;
+            let second_n = eval_num(5, 0.0)?;
+            let ms_n = eval_num(6, 0.0)?;
+
+            if year_n.is_nan()
+                || month_n.is_nan()
+                || day_n.is_nan()
+                || hour_n.is_nan()
+                || minute_n.is_nan()
+                || second_n.is_nan()
+                || ms_n.is_nan()
+            {
+                return Ok(Value::Number(f64::NAN));
+            }
+
+            // ToInteger semantics
+            let mut year = year_n as i32;
+            if (0..=99).contains(&year) {
+                year += 1900;
+            }
+            // month is 0-based in JS
+            let month = month_n as i64;
+            let day = day_n as i64;
+            let hour = hour_n as i64;
+            let minute = minute_n as i64;
+            let second = second_n as i64;
+            let millisecond = ms_n as i64;
+
+            // Normalize months (allow overflow/underflow)
+            let total_months = year as i64 * 12 + month;
+            let norm_year = (total_months.div_euclid(12)) as i32;
+            let norm_month = (total_months.rem_euclid(12) + 1) as u32; // chrono months 1-12
+
+            // Build NaiveDate and NaiveTime, allowing chrono to reject invalid dates
+            if let Some(naive_date) = chrono::NaiveDate::from_ymd_opt(norm_year, norm_month, day as u32)
+                && let Some(naive_dt) = naive_date.and_hms_milli_opt(hour as u32, minute as u32, second as u32, millisecond as u32)
+            {
+                let dt = chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
+                return Ok(Value::Number(dt.timestamp_millis() as f64));
+            }
+            Ok(Value::Number(f64::NAN))
         }
         _ => Err(raise_eval_error!(format!("Date has no static method '{method}'"))),
     }

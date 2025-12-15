@@ -168,7 +168,12 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
                 Value::Object(func_obj)
             };
-            env_set(env, name, func_val)?;
+            env_set(env, name, func_val.clone())?;
+            // In non-strict mode (assumed), function declarations in blocks are hoisted
+            // to the nearest function/global scope (Annex B.3.3).
+            if !env.borrow().is_function_scope {
+                env_set_var(env, name, func_val)?;
+            }
         }
     }
     Ok(())

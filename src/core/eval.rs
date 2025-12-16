@@ -20,7 +20,7 @@ use crate::{
     js_reflect::make_reflect_object,
     js_regexp::is_regex_object,
     js_testintl::make_testintl_object,
-    obj_get_key_value, raise_eval_error, raise_throw_error, raise_type_error,
+    obj_get_key_value, raise_eval_error, raise_syntax_error, raise_throw_error, raise_type_error,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
     unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_slice, utf16_to_utf8},
@@ -90,6 +90,211 @@ pub enum ControlFlow {
     Break(Option<String>),
     Continue(Option<String>),
     Return(Value),
+}
+
+fn validate_declarations(statements: &[Statement]) -> Result<(), JSError> {
+    let mut lexical_names = std::collections::HashSet::new();
+
+    for stmt in statements {
+        match &stmt.kind {
+            StatementKind::Let(name, _) | StatementKind::Const(name, _) | StatementKind::Class(name, _, _) => {
+                if lexical_names.contains(name) {
+                    let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
+                    err.set_js_location(stmt.line, stmt.column);
+                    return Err(err);
+                }
+                lexical_names.insert(name.clone());
+            }
+            StatementKind::FunctionDeclaration(name, _, _, _) => {
+                if lexical_names.contains(name) {
+                    let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
+                    err.set_js_location(stmt.line, stmt.column);
+                    return Err(err);
+                }
+                lexical_names.insert(name.clone());
+            }
+            StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
+                collect_lexical_names_from_array(pattern, &mut lexical_names, stmt.line, stmt.column)?;
+            }
+            StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
+                collect_lexical_names_from_object(pattern, &mut lexical_names, stmt.line, stmt.column)?;
+            }
+            _ => {}
+        }
+    }
+
+    let mut var_names = std::collections::HashSet::new();
+    collect_var_names(statements, &mut var_names);
+
+    for name in lexical_names {
+        if var_names.contains(&name) {
+            // We don't have exact location for the var declaration here easily without re-scanning,
+            // but we can at least report the error.
+            // Ideally we should find the conflicting var statement to report its location,
+            // or report the location of the let/const that conflicts.
+            // For now, let's try to find the statement that declared this lexical name to report its location.
+            if let Some(stmt) = statements.iter().find(|s| declares_lexical_name(s, &name)) {
+                let mut err = raise_syntax_error!(format!("Identifier '{}' has already been declared", name));
+                err.set_js_location(stmt.line, stmt.column);
+                return Err(err);
+            }
+            return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
+        }
+    }
+    Ok(())
+}
+
+fn declares_lexical_name(stmt: &Statement, name: &str) -> bool {
+    match &stmt.kind {
+        StatementKind::Let(n, _) | StatementKind::Const(n, _) | StatementKind::Class(n, _, _) => n == name,
+        StatementKind::FunctionDeclaration(n, _, _, _) => n == name,
+        StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
+            pattern_contains_name(pattern, name)
+        }
+        StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
+            object_pattern_contains_name(pattern, name)
+        }
+        _ => false,
+    }
+}
+
+fn pattern_contains_name(pattern: &[DestructuringElement], name: &str) -> bool {
+    for element in pattern {
+        match element {
+            DestructuringElement::Variable(var, _) => {
+                if var == name {
+                    return true;
+                }
+            }
+            DestructuringElement::NestedArray(nested) => {
+                if pattern_contains_name(nested, name) {
+                    return true;
+                }
+            }
+            DestructuringElement::NestedObject(nested) => {
+                if object_pattern_contains_name(nested, name) {
+                    return true;
+                }
+            }
+            DestructuringElement::Rest(var) => {
+                if var == name {
+                    return true;
+                }
+            }
+            DestructuringElement::Empty => {}
+        }
+    }
+    false
+}
+
+fn object_pattern_contains_name(pattern: &[ObjectDestructuringElement], name: &str) -> bool {
+    for element in pattern {
+        match element {
+            ObjectDestructuringElement::Property { value, .. } => match value {
+                DestructuringElement::Variable(var, _) => {
+                    if var == name {
+                        return true;
+                    }
+                }
+                DestructuringElement::NestedArray(nested) => {
+                    if pattern_contains_name(nested, name) {
+                        return true;
+                    }
+                }
+                DestructuringElement::NestedObject(nested) => {
+                    if object_pattern_contains_name(nested, name) {
+                        return true;
+                    }
+                }
+                DestructuringElement::Rest(var) => {
+                    if var == name {
+                        return true;
+                    }
+                }
+                DestructuringElement::Empty => {}
+            },
+            ObjectDestructuringElement::Rest(var) => {
+                if var == name {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn collect_lexical_names_from_array(
+    pattern: &[DestructuringElement],
+    names: &mut std::collections::HashSet<String>,
+    line: usize,
+    column: usize,
+) -> Result<(), JSError> {
+    for element in pattern {
+        match element {
+            DestructuringElement::Variable(var, _) => {
+                if names.contains(var) {
+                    let mut err = raise_syntax_error!(format!("Identifier '{var}' has already been declared"));
+                    err.set_js_location(line, column);
+                    return Err(err);
+                }
+                names.insert(var.clone());
+            }
+            DestructuringElement::NestedArray(nested) => collect_lexical_names_from_array(nested, names, line, column)?,
+            DestructuringElement::NestedObject(nested) => collect_lexical_names_from_object(nested, names, line, column)?,
+            DestructuringElement::Rest(var) => {
+                if names.contains(var) {
+                    let mut err = raise_syntax_error!(format!("Identifier '{var}' has already been declared"));
+                    err.set_js_location(line, column);
+                    return Err(err);
+                }
+                names.insert(var.clone());
+            }
+            DestructuringElement::Empty => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_lexical_names_from_object(
+    pattern: &[ObjectDestructuringElement],
+    names: &mut std::collections::HashSet<String>,
+    line: usize,
+    column: usize,
+) -> Result<(), JSError> {
+    for element in pattern {
+        match element {
+            ObjectDestructuringElement::Property { value, .. } => match value {
+                DestructuringElement::Variable(var, _) => {
+                    if names.contains(var) {
+                        let mut err = raise_syntax_error!(format!("Identifier '{var}' has already been declared"));
+                        err.set_js_location(line, column);
+                        return Err(err);
+                    }
+                    names.insert(var.clone());
+                }
+                DestructuringElement::NestedArray(nested) => collect_lexical_names_from_array(nested, names, line, column)?,
+                DestructuringElement::NestedObject(nested) => collect_lexical_names_from_object(nested, names, line, column)?,
+                DestructuringElement::Rest(var) => {
+                    if names.contains(var) {
+                        let mut err = raise_syntax_error!(format!("Identifier '{var}' has already been declared"));
+                        err.set_js_location(line, column);
+                        return Err(err);
+                    }
+                    names.insert(var.clone());
+                }
+                DestructuringElement::Empty => {}
+            },
+            ObjectDestructuringElement::Rest(var) => {
+                if names.contains(var) {
+                    let mut err = raise_syntax_error!(format!("Identifier '{var}' has already been declared"));
+                    err.set_js_location(line, column);
+                    return Err(err);
+                }
+                names.insert(var.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn evaluate_statements(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<Value, JSError> {
@@ -536,6 +741,7 @@ fn evaluate_stmt_for_of_destructuring_array(
 }
 
 fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
+    validate_declarations(statements)?;
     hoist_declarations(env, statements)?;
 
     let mut last_value = Value::Number(0.0);
@@ -6033,6 +6239,12 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
                 if let Some(finally_stmts) = finally_body {
                     collect_var_names(finally_stmts, names);
                 }
+            }
+            StatementKind::Block(stmts) => {
+                collect_var_names(stmts, names);
+            }
+            StatementKind::Label(_, stmt) => {
+                collect_var_names(std::slice::from_ref(stmt), names);
             }
             _ => {}
         }

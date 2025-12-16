@@ -1,7 +1,4 @@
-#![allow(clippy::println_empty_string)]
-
 use javascript::*;
-use std::process;
 
 #[derive(clap::Parser)]
 #[command(name = "js", version, about = "JavaScript Rust Interpreter")]
@@ -14,7 +11,7 @@ struct Cli {
     file: Option<std::path::PathBuf>,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let cli = <Cli as clap::Parser>::parse();
 
     // Initialize logger (controlled by RUST_LOG)
@@ -27,13 +24,13 @@ fn main() {
             Ok(content) => content,
             Err(e) => {
                 eprintln!("Error reading file {}: {}", file.display(), e.user_message());
-                process::exit(1);
+                std::process::exit(1);
             }
         }
     } else {
         // No script argument -> start the interactive, persistent REPL
-        run_persistent_repl();
-        return;
+        run_persistent_repl()?;
+        return Ok(());
     };
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
@@ -48,13 +45,15 @@ fn main() {
                     eprintln!("  in file: {}", file_path.display());
                 }
             }
-            process::exit(1);
+            std::process::exit(1);
         }
     }
+    Ok(())
 }
 
 // Persistent rustyline-powered REPL loop extracted into a helper to keep `main()` small.
-fn run_persistent_repl() {
+#[allow(clippy::println_empty_string)]
+fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     use rustyline::Editor;
     use rustyline::error::ReadlineError;
     use std::path::PathBuf;
@@ -65,15 +64,15 @@ fn run_persistent_repl() {
     let mut rl = match Editor::<(), rustyline::history::FileHistory>::new() {
         Ok(e) => e,
         Err(err) => {
-            eprintln!("Failed to initialize line editor: {}", err);
-            process::exit(1);
+            eprintln!("Failed to initialize line editor: {err}");
+            std::process::exit(1);
         }
     };
 
     // Simple history file in the user's home directory
     let history_path: Option<PathBuf> = std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".js_repl_history"));
     if let Some(ref p) = history_path {
-        let _ = rl.load_history(p);
+        rl.load_history(p)?;
     }
 
     let repl = Repl::new();
@@ -110,7 +109,7 @@ fn run_persistent_repl() {
                     continue;
                 }
 
-                let _ = rl.add_history_entry(buffer.clone());
+                rl.add_history_entry(buffer.clone())?;
 
                 match repl.eval(&buffer) {
                     Ok(val) => println!("{val}"),
@@ -122,7 +121,7 @@ fn run_persistent_repl() {
                         } else {
                             eprintln!("  in:");
                             for line in buffer.lines() {
-                                eprintln!("    {}", line);
+                                eprintln!("    {line}");
                             }
                         }
                     }
@@ -140,13 +139,14 @@ fn run_persistent_repl() {
                 break;
             }
             Err(err) => {
-                eprintln!("Readline error: {}", err);
+                eprintln!("Readline error: {err}");
                 break;
             }
         }
     }
 
     if let Some(ref p) = history_path {
-        let _ = rl.save_history(p);
+        rl.save_history(p)?;
     }
+    Ok(())
 }

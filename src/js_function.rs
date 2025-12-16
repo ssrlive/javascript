@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, value_to_string};
+use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr};
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
@@ -243,103 +243,237 @@ fn object_prototype_value_of(args: &[Expr], env: &JSObjectDataPtr) -> Result<Val
 }
 
 fn parse_int_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if args.is_empty() {
-        return Err(raise_type_error!("parseInt requires at least one argument"));
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
-    let arg_val = evaluate_expr(env, &args[0])?;
-    match arg_val {
-        Value::String(s) => {
-            let str_val = String::from_utf16_lossy(&s);
-            // Parse integer from the beginning of the string
-            let trimmed = str_val.trim();
-            if trimmed.is_empty() {
-                return Ok(Value::Number(f64::NAN));
-            }
-            let mut end_pos = 0;
-            let mut chars = trimmed.chars();
-            if let Some(first_char) = chars.next()
-                && (first_char == '-' || first_char == '+' || first_char.is_ascii_digit())
-            {
-                end_pos = 1;
-                for ch in chars {
-                    if ch.is_ascii_digit() {
-                        end_pos += 1;
-                    } else {
-                        break;
-                    }
+
+    if evaluated_args.is_empty() {
+        return Ok(Value::Number(f64::NAN));
+    }
+
+    let input_val = &evaluated_args[0];
+    let input_str = match input_val {
+        Value::String(s) => crate::unicode::utf16_to_utf8(s),
+        _ => crate::core::value_to_string(input_val),
+    };
+
+    // 1. Trim leading whitespace
+    let trimmed = input_str.trim_start();
+
+    // 2. Handle sign
+    let mut sign = 1.0;
+    let mut current_str = trimmed;
+
+    if let Some(stripped) = trimmed.strip_prefix('-') {
+        sign = -1.0;
+        current_str = stripped;
+    } else if let Some(stripped) = trimmed.strip_prefix('+') {
+        current_str = stripped;
+    }
+
+    // 3. Determine radix
+    let mut radix = 10;
+    let mut strip_prefix = true;
+
+    if evaluated_args.len() > 1 {
+        let radix_val = &evaluated_args[1];
+        let r_num = match radix_val {
+            Value::Number(n) => *n,
+            Value::Boolean(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
                 }
             }
-            if end_pos == 0 {
+            Value::String(s) => {
+                let s_utf8 = crate::unicode::utf16_to_utf8(s);
+                if s_utf8.trim().is_empty() {
+                    0.0
+                } else {
+                    s_utf8.trim().parse::<f64>().unwrap_or(f64::NAN)
+                }
+            }
+            Value::Undefined => f64::NAN,
+            Value::Null => 0.0,
+            _ => f64::NAN,
+        };
+
+        // ToInt32 logic inline
+        let r_int = if !r_num.is_finite() || r_num == 0.0 {
+            0
+        } else {
+            let int = r_num.trunc();
+            let two_32 = 4294967296.0;
+            let int32bit = ((int % two_32) + two_32) % two_32;
+            if int32bit >= two_32 / 2.0 {
+                (int32bit - two_32) as i32
+            } else {
+                int32bit as i32
+            }
+        };
+
+        if r_int != 0 {
+            if !(2..=36).contains(&r_int) {
                 return Ok(Value::Number(f64::NAN));
             }
-            let num_str = &trimmed[0..end_pos];
-            match num_str.parse::<i32>() {
-                Ok(n) => Ok(Value::Number(n as f64)),
-                Err(_) => Ok(Value::Number(f64::NAN)), // This shouldn't happen with our validation
-            }
-        }
-        Value::Number(n) => Ok(Value::Number(n.trunc())),
-        Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
-        Value::Undefined => Ok(Value::Number(f64::NAN)),
-        _ => {
-            // Convert to string first, then parse
-            let str_val = match arg_val {
-                Value::Object(_) => "[object Object]".to_string(),
-                Value::Function(name) => format!("[Function: {}]", name),
-                Value::Closure(_, _, _) => "[Function]".to_string(),
-                Value::AsyncClosure(_, _, _) => "[Function]".to_string(),
-                _ => unreachable!(), // All cases covered above
-            };
-            match str_val.parse::<i32>() {
-                Ok(n) => Ok(Value::Number(n as f64)),
-                Err(_) => Ok(Value::Number(f64::NAN)),
+            radix = r_int;
+            if radix != 16 {
+                strip_prefix = false;
             }
         }
     }
+
+    if strip_prefix && current_str.starts_with("0x") || current_str.starts_with("0X") {
+        radix = 16;
+        current_str = &current_str[2..];
+    }
+
+    // 4. Parse digits
+    let mut end_index = 0;
+    for (i, ch) in current_str.char_indices() {
+        if ch.is_digit(radix as u32) {
+            end_index = i + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    if end_index == 0 {
+        return Ok(Value::Number(f64::NAN));
+    }
+
+    let num_part = &current_str[..end_index];
+
+    let mut result: f64 = 0.0;
+    let radix_f64 = radix as f64;
+
+    for ch in num_part.chars() {
+        let digit = ch.to_digit(radix as u32).unwrap() as f64;
+        result = result * radix_f64 + digit;
+    }
+
+    Ok(Value::Number(sign * result))
 }
 
 fn parse_float_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if args.is_empty() {
-        return Err(raise_type_error!("parseFloat requires at least one argument"));
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
-    let arg_val = evaluate_expr(env, &args[0])?;
-    match arg_val {
-        Value::String(s) => {
-            let str_val = String::from_utf16_lossy(&s);
-            let trimmed = str_val.trim();
-            if trimmed.is_empty() {
-                return Ok(Value::Number(f64::NAN));
+
+    if evaluated_args.is_empty() {
+        return Ok(Value::Number(f64::NAN));
+    }
+
+    let arg_val = &evaluated_args[0];
+    let str_val = match arg_val {
+        Value::String(s) => crate::unicode::utf16_to_utf8(s),
+        _ => crate::core::value_to_string(arg_val),
+    };
+
+    let trimmed = str_val.trim_start();
+    if trimmed.is_empty() {
+        return Ok(Value::Number(f64::NAN));
+    }
+
+    // Find the longest prefix that is a valid float number
+    // This is a simplified implementation. A full implementation would need a proper lexer.
+    // We can try to parse substrings of increasing length, or better, find the end of the number.
+    // Valid characters: 0-9, +, -, ., e, E
+
+    // Simple heuristic: scan for valid float characters.
+    // Note: This is not perfect (e.g. "1.2.3" -> "1.2", "1-2" -> "1")
+
+    let mut end_index = 0;
+    let mut seen_dot = false;
+    let mut seen_e = false;
+    let mut seen_sign_after_e = false;
+
+    let chars: Vec<char> = trimmed.chars().collect();
+
+    for (i, &ch) in chars.iter().enumerate() {
+        if ch.is_ascii_digit() {
+            end_index = i + 1;
+        } else if ch == '.' {
+            if seen_dot || seen_e {
+                break;
             }
-            match trimmed.parse::<f64>() {
-                Ok(n) => Ok(Value::Number(n)),
-                Err(_) => Ok(Value::Number(f64::NAN)),
+            seen_dot = true;
+            end_index = i + 1; // . can be part of number if followed by digits or if it is "1."
+        } else if ch == 'e' || ch == 'E' {
+            if seen_e {
+                break;
             }
-        }
-        Value::Number(n) => Ok(Value::Number(n)),
-        Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
-        Value::Undefined => Ok(Value::Number(f64::NAN)),
-        _ => {
-            // Convert to string first, then parse
-            let str_val = match arg_val {
-                Value::Object(_) => "[object Object]".to_string(),
-                Value::Function(name) => format!("[Function: {}]", name),
-                Value::Closure(_, _, _) => "[Function]".to_string(),
-                Value::AsyncClosure(_, _, _) => "[Function]".to_string(),
-                _ => unreachable!(), // All cases covered above
-            };
-            match str_val.parse::<f64>() {
-                Ok(n) => Ok(Value::Number(n)),
-                Err(_) => Ok(Value::Number(f64::NAN)),
+            seen_e = true;
+            seen_dot = true; // cannot have dot after e
+            end_index = i + 1; // e can be part if followed by digits/sign
+        } else if ch == '+' || ch == '-' {
+            if i == 0 {
+                end_index = i + 1;
+            } else if seen_e && !seen_sign_after_e && (chars[i - 1] == 'e' || chars[i - 1] == 'E') {
+                seen_sign_after_e = true;
+                end_index = i + 1;
+            } else {
+                break;
             }
+        } else {
+            break;
         }
     }
+
+    // Refine end_index: "1." is valid (1), "1e" is invalid (NaN? No, 1), "1e+" is invalid (1)
+    // We need to backtrack if parsing fails.
+
+    // Collect char indices to safely slice
+    let indices: Vec<usize> = trimmed.char_indices().map(|(i, _)| i).collect();
+    let len = trimmed.len();
+
+    // We try candidates from longest to shortest
+    // end_index is the count of characters
+    let mut current_char_count = end_index;
+
+    while current_char_count > 0 {
+        let byte_len = if current_char_count >= indices.len() {
+            len
+        } else {
+            indices[current_char_count]
+        };
+
+        let slice = &trimmed[..byte_len];
+        if let Ok(n) = slice.parse::<f64>() {
+            return Ok(Value::Number(n));
+        }
+        current_char_count -= 1;
+    }
+
+    // If we fall through, maybe it's "Infinity"?
+    if trimmed.starts_with("Infinity") || trimmed.starts_with("+Infinity") {
+        return Ok(Value::Number(f64::INFINITY));
+    }
+    if trimmed.starts_with("-Infinity") {
+        return Ok(Value::Number(f64::NEG_INFINITY));
+    }
+
+    Ok(Value::Number(f64::NAN))
 }
 
 fn is_nan_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if args.is_empty() {
-        return Err(raise_type_error!("isNaN requires at least one argument"));
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
-    let arg_val = evaluate_expr(env, &args[0])?;
+
+    let arg_val = if evaluated_args.is_empty() {
+        Value::Undefined
+    } else {
+        evaluated_args[0].clone()
+    };
+
     match arg_val {
         Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
         Value::String(s) => {
@@ -351,15 +485,23 @@ fn is_nan_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSErro
         }
         Value::Boolean(_) => Ok(Value::Boolean(false)), // Booleans are never NaN
         Value::Undefined => Ok(Value::Boolean(true)),   // undefined is NaN
-        _ => Ok(Value::Boolean(false)),                 // Objects, functions, etc. are not NaN
+        _ => Ok(Value::Boolean(true)),                  // Objects are usually NaN (simplified)
     }
 }
 
 fn is_finite_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if args.is_empty() {
-        return Err(raise_type_error!("isFinite requires at least one argument"));
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
-    let arg_val = evaluate_expr(env, &args[0])?;
+
+    let arg_val = if evaluated_args.is_empty() {
+        Value::Undefined
+    } else {
+        evaluated_args[0].clone()
+    };
+
     match arg_val {
         Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
         Value::String(s) => {
@@ -376,102 +518,109 @@ fn is_finite_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSE
 }
 
 fn encode_uri_component(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if !args.is_empty() {
-        let arg_val = evaluate_expr(env, &args[0])?;
-        match arg_val {
-            Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
-                // Simple URI encoding - replace spaces with %20 and some special chars
-                let encoded = str_val
-                    .replace("%", "%25")
-                    .replace(" ", "%20")
-                    .replace("\"", "%22")
-                    .replace("'", "%27")
-                    .replace("<", "%3C")
-                    .replace(">", "%3E")
-                    .replace("&", "%26");
-                Ok(Value::String(utf8_to_utf16(&encoded)))
-            }
-            _ => {
-                // For non-string values, convert to string first
-                let str_val = match arg_val {
-                    Value::Number(n) => n.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => "[object Object]".to_string(),
-                };
-                Ok(Value::String(utf8_to_utf16(&str_val)))
-            }
-        }
-    } else {
-        Ok(Value::String(Vec::new()))
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
+
+    let arg_val = if evaluated_args.is_empty() {
+        Value::Undefined
+    } else {
+        evaluated_args[0].clone()
+    };
+
+    let str_val = match arg_val {
+        Value::String(s) => String::from_utf16_lossy(&s),
+        _ => crate::core::value_to_string(&arg_val),
+    };
+
+    // Simple URI encoding - replace spaces with %20 and some special chars
+    let encoded = str_val
+        .replace("%", "%25")
+        .replace(" ", "%20")
+        .replace("\"", "%22")
+        .replace("'", "%27")
+        .replace("<", "%3C")
+        .replace(">", "%3E")
+        .replace("&", "%26");
+    Ok(Value::String(utf8_to_utf16(&encoded)))
 }
 
 fn decode_uri_component(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if !args.is_empty() {
-        let arg_val = evaluate_expr(env, &args[0])?;
-        match arg_val {
-            Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
-                // Simple URI decoding - replace %20 with spaces and some special chars
-                let decoded = str_val
-                    .replace("%20", " ")
-                    .replace("%22", "\"")
-                    .replace("%27", "'")
-                    .replace("%3C", "<")
-                    .replace("%3E", ">")
-                    .replace("%26", "&")
-                    .replace("%25", "%");
-                Ok(Value::String(utf8_to_utf16(&decoded)))
-            }
-            _ => {
-                // For non-string values, convert to string first
-                let str_val = match arg_val {
-                    Value::Number(n) => n.to_string(),
-                    Value::Boolean(b) => b.to_string(),
-                    _ => "[object Object]".to_string(),
-                };
-                Ok(Value::String(utf8_to_utf16(&str_val)))
-            }
-        }
-    } else {
-        Ok(Value::String(Vec::new()))
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
+
+    let arg_val = if evaluated_args.is_empty() {
+        Value::Undefined
+    } else {
+        evaluated_args[0].clone()
+    };
+
+    let str_val = match arg_val {
+        Value::String(s) => String::from_utf16_lossy(&s),
+        _ => crate::core::value_to_string(&arg_val),
+    };
+
+    // Simple URI decoding - replace %20 with spaces and some special chars
+    let decoded = str_val
+        .replace("%20", " ")
+        .replace("%22", "\"")
+        .replace("%27", "'")
+        .replace("%3C", "<")
+        .replace("%3E", ">")
+        .replace("%26", "&")
+        .replace("%25", "%");
+    Ok(Value::String(utf8_to_utf16(&decoded)))
 }
 
 fn boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    // Boolean constructor
-    if args.len() == 1 {
-        let arg_val = evaluate_expr(env, &args[0])?;
-        let bool_val = match arg_val {
-            Value::Boolean(b) => b,
-            Value::Number(n) => n != 0.0 && !n.is_nan(),
-            Value::String(s) => !s.is_empty(),
-            Value::Object(_) => true,
-            Value::Undefined => false,
-            _ => false,
-        };
-        Ok(Value::Boolean(bool_val))
-    } else {
-        Ok(Value::Boolean(false)) // Boolean() with no args returns false
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
+
+    if evaluated_args.is_empty() {
+        return Ok(Value::Boolean(false));
+    }
+
+    let arg_val = &evaluated_args[0];
+    let bool_val = match arg_val {
+        Value::Boolean(b) => *b,
+        Value::Number(n) => *n != 0.0 && !n.is_nan(),
+        Value::String(s) => !s.is_empty(),
+        Value::Object(_) => true,
+        Value::Undefined => false,
+        Value::Null => false,
+        _ => false,
+    };
+    Ok(Value::Boolean(bool_val))
 }
 
 fn symbol_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    // Symbol constructor - creates a unique symbol
-    if args.len() == 1 {
-        let arg_val = evaluate_expr(env, &args[0])?;
-        let description = match arg_val {
-            Value::String(s) => Some(String::from_utf16_lossy(&s)),
-            Value::Undefined => None,
-            _ => Some(value_to_string(&arg_val)),
-        };
-        let symbol_data = Rc::new(crate::core::SymbolData { description });
-        Ok(Value::Symbol(symbol_data))
-    } else {
-        let symbol_data = Rc::new(crate::core::SymbolData { description: None });
-        Ok(Value::Symbol(symbol_data)) // Symbol() with no args creates symbol with no description
+    // Evaluate all arguments for side effects
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
     }
+
+    let description = if evaluated_args.is_empty() {
+        None
+    } else {
+        let arg_val = &evaluated_args[0];
+        match arg_val {
+            Value::String(s) => Some(String::from_utf16_lossy(s)),
+            Value::Undefined => None,
+            _ => Some(crate::core::value_to_string(arg_val)),
+        }
+    };
+
+    let symbol_data = Rc::new(crate::core::SymbolData { description });
+    Ok(Value::Symbol(symbol_data))
 }
 
 fn evaluate_new_expression(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

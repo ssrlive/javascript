@@ -6,15 +6,11 @@ use crate::core::{
 };
 use crate::error::JSError;
 use crate::js_array::set_array_length;
-use crate::js_regexp::{
-    RegexKind, get_regex_pattern, handle_regexp_constructor, handle_regexp_method, is_regex_object, sanitize_js_pattern,
-};
+use crate::js_regexp::{handle_regexp_constructor, handle_regexp_method, is_regex_object};
 use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
     utf16_to_utf8,
 };
-use fancy_regex::Regex as FancyRegex;
-use regex::Regex as StdRegex;
 
 pub(crate) fn string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // String() constructor
@@ -327,43 +323,26 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                 };
                 let global = flags.contains('g');
 
-                // Extract pattern to build effective pattern
-                let pattern = get_regex_pattern(&obj_map)?;
+                // Extract pattern
+                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
 
-                // build regex_kind
-                let mut inline = String::new();
-                if flags.contains('i') {
-                    inline.push('i');
-                }
-                if flags.contains('m') {
-                    inline.push('m');
-                }
-                if flags.contains('s') {
-                    inline.push('s');
-                }
-                let eff_pat = if inline.is_empty() {
-                    pattern.clone()
-                } else {
-                    format!("(?{}){}", inline, pattern)
-                };
-                let eff_pat = sanitize_js_pattern(&eff_pat);
-                let regex_kind = match FancyRegex::new(&eff_pat) {
-                    Ok(r) => RegexKind::Fancy(r),
-                    Err(_) => {
-                        let sr = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
-                        RegexKind::Std(sr)
-                    }
-                };
+                let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
+                    .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
 
                 // replacement string must be string (function replacement not supported yet)
                 if let Value::String(repl_u16) = replace_val {
                     let repl = utf16_to_utf8(&repl_u16);
-                    let input_utf8 = String::from_utf16_lossy(s);
-                    let mut out = String::new();
+                    let mut out: Vec<u16> = Vec::new();
                     let mut last_pos = 0usize;
 
                     // helper to expand replacement tokens ($&, $1, $2, $`, $', $$)
-                    fn expand_replacement(repl: &str, matched: &str, captures: &[Option<String>], before: &str, after: &str) -> String {
+                    fn expand_replacement(
+                        repl: &str,
+                        matched: &[u16],
+                        captures: &[Option<Vec<u16>>],
+                        before: &[u16],
+                        after: &[u16],
+                    ) -> Vec<u16> {
                         let mut out = String::new();
                         let mut chars = repl.chars().peekable();
                         while let Some(ch) = chars.next() {
@@ -372,15 +351,15 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                                     match next {
                                         '&' => {
                                             chars.next();
-                                            out.push_str(matched);
+                                            out.push_str(&utf16_to_utf8(matched));
                                         }
                                         '`' => {
                                             chars.next();
-                                            out.push_str(before);
+                                            out.push_str(&utf16_to_utf8(before));
                                         }
                                         '\'' => {
                                             chars.next();
-                                            out.push_str(after);
+                                            out.push_str(&utf16_to_utf8(after));
                                         }
                                         '$' => {
                                             chars.next();
@@ -396,10 +375,17 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                                                 chars.next();
                                             }
                                             if let Ok(n) = num_str.parse::<usize>() {
-                                                if n > 0 && n < captures.len() {
-                                                    if let Some(ref cap) = captures[n] {
-                                                        out.push_str(cap);
+                                                if n > 0 && n <= captures.len() {
+                                                    if let Some(ref cap) = captures[n - 1] {
+                                                        out.push_str(&utf16_to_utf8(cap));
                                                     }
+                                                } else {
+                                                    // If n is out of bounds, treat as literal?
+                                                    // JS spec says: if $n is not a capture, it's literal $n.
+                                                    // But here we parsed it.
+                                                    // For simplicity, just ignore or push literal.
+                                                    out.push('$');
+                                                    out.push_str(&num_str);
                                                 }
                                             }
                                         }
@@ -414,60 +400,63 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                                 out.push(ch);
                             }
                         }
-                        out
+                        utf8_to_utf16(&out)
                     }
 
-                    // depending on regex_kind, find matches with captures
-                    match regex_kind {
-                        RegexKind::Fancy(r) => {
-                            let mut offset = 0usize;
-                            while let Ok(Some(caps)) = r.captures(&input_utf8[offset..]) {
-                                if let Some(mat) = caps.get(0) {
-                                    let start = offset + mat.start();
-                                    let end = offset + mat.end();
-                                    let before = &input_utf8[..start];
-                                    let after = &input_utf8[end..];
-                                    let matched = &input_utf8[start..end];
-                                    let capture_groups: Vec<Option<String>> =
-                                        (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str().to_string())).collect();
-                                    out.push_str(&input_utf8[last_pos..start]);
-                                    out.push_str(&expand_replacement(&repl, matched, &capture_groups, before, after));
-                                    last_pos = end;
-                                    if !global {
-                                        break;
-                                    }
-                                    offset = end;
-                                } else {
-                                    break;
-                                }
+                    let mut offset = 0usize;
+                    // regress doesn't have an iterator for matches that handles overlap/global automatically in a simple way?
+                    // It has `find_iter` but that might not handle `lastIndex` updates if we were doing that.
+                    // But here we just want all matches.
+                    // `re.find_iter` returns an iterator.
+
+                    // Wait, `find_iter` is for `&str`. `find_iter_utf16`?
+                    // regress 0.4.1 has `find_iter`. Does it support `&[u16]`?
+                    // `Regex::find_iter` takes `text`.
+                    // Let's check if `regress` has `find_iter` for utf16.
+                    // The README says `*_utf16` family.
+                    // I'll assume `find_iter_utf16` exists or I loop manually.
+                    // Manual loop is safer.
+
+                    while let Some(m) = re.find_from_utf16(s, offset).next() {
+                        let start = m.range.start;
+                        let end = m.range.end;
+
+                        // If global and zero-length match, we must advance by 1 to avoid infinite loop
+                        // But we must also include the zero-length match in replacement.
+
+                        let before = &s[..start];
+                        let after = &s[end..];
+                        let matched = &s[start..end];
+
+                        let mut captures = Vec::new();
+                        for cap in m.captures.iter() {
+                            if let Some(range) = cap {
+                                captures.push(Some(s[range.start..range.end].to_vec()));
+                            } else {
+                                captures.push(None);
                             }
                         }
-                        RegexKind::Std(r) => {
-                            let mut offset = 0usize;
-                            while let Some(caps) = r.captures(&input_utf8[offset..]) {
-                                if let Some(mat) = caps.get(0) {
-                                    let start = offset + mat.start();
-                                    let end = offset + mat.end();
-                                    let before = &input_utf8[..start];
-                                    let after = &input_utf8[end..];
-                                    let matched = &input_utf8[start..end];
-                                    let capture_groups: Vec<Option<String>> =
-                                        (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str().to_string())).collect();
-                                    out.push_str(&input_utf8[last_pos..start]);
-                                    out.push_str(&expand_replacement(&repl, matched, &capture_groups, before, after));
-                                    last_pos = end;
-                                    if !global {
-                                        break;
-                                    }
-                                    offset = end;
-                                } else {
-                                    break;
-                                }
-                            }
+
+                        out.extend_from_slice(&s[last_pos..start]);
+                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, before, after));
+                        last_pos = end;
+
+                        if !global {
+                            break;
+                        }
+
+                        if start == end {
+                            offset = end + 1;
+                        } else {
+                            offset = end;
+                        }
+                        if offset > s.len() {
+                            break;
                         }
                     }
-                    out.push_str(&input_utf8[last_pos..]);
-                    Ok(Value::String(utf8_to_utf16(&out)))
+
+                    out.extend_from_slice(&s[last_pos..]);
+                    Ok(Value::String(out))
                 } else {
                     Err(raise_eval_error!(
                         "replace only supports string as replacement argument for RegExp search"
@@ -573,7 +562,7 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
             Ok(Value::Object(arr))
         } else if let Value::Object(obj_map) = sep_val {
             // Separator is a RegExp-like object
-            let pattern = get_regex_pattern(&obj_map)?;
+            let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
 
             let flags_opt = get_own_property(&obj_map, &"__flags".into());
             let flags = match flags_opt {
@@ -584,95 +573,76 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                 None => String::new(),
             };
 
-            // Build fancy-regex with inline flags
-            let mut inline = String::new();
-            if flags.contains('i') {
-                inline.push('i');
-            }
-            if flags.contains('m') {
-                inline.push('m');
-            }
-            if flags.contains('s') {
-                inline.push('s');
-            }
-            let eff_pat = if inline.is_empty() {
-                pattern
-            } else {
-                format!("(?{}){}", inline, pattern)
-            };
+            let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
+                .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
 
-            // Try fancy_regex first, then fall back to StdRegex
-            let eff_pat = sanitize_js_pattern(&eff_pat);
-            let regex_kind_fancy = FancyRegex::new(&eff_pat);
-            let input_utf8 = String::from_utf16_lossy(s);
+            let mut parts: Vec<Vec<u16>> = Vec::new();
+            let mut start = 0usize;
+            let mut offset = 0usize;
 
-            match regex_kind_fancy {
-                Ok(ref fancy) => {
-                    let mut parts_utf8: Vec<String> = Vec::new();
-                    let mut start_byte = 0usize;
-                    while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
-                        match fancy.find(&input_utf8[start_byte..]) {
-                            Ok(Some(mat)) => {
-                                let match_start = start_byte + mat.start();
-                                parts_utf8.push(input_utf8[start_byte..match_start].to_string());
-                                start_byte += mat.end();
-                                if start_byte > input_utf8.len() {
-                                    break;
-                                }
-                            }
-                            Ok(None) => {
-                                parts_utf8.push(input_utf8[start_byte..].to_string());
-                                break;
-                            }
-                            Err(e) => {
-                                return Err(raise_syntax_error!(format!("Invalid RegExp: {e}")));
-                            }
-                        }
-                    }
-
-                    // continue with parts_utf8
-                    let parts_iter = parts_utf8.into_iter();
-                    let arr = new_js_object_data();
-                    let mut idx = 0usize;
-                    for part in parts_iter {
-                        obj_set_key_value(&arr, &idx.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
-                        idx += 1;
-                    }
-                    obj_set_key_value(&arr, &"length".into(), Value::Number(idx as f64))?;
-                    Ok(Value::Object(arr))
+            loop {
+                if parts.len() >= limit {
+                    break;
                 }
-                Err(_) => {
-                    let stdregex = StdRegex::new(&eff_pat).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
-                    let mut parts_utf8: Vec<String> = Vec::new();
-                    let mut start_byte = 0usize;
-                    while start_byte <= input_utf8.len() && parts_utf8.len() < limit {
-                        match stdregex.find(&input_utf8[start_byte..]) {
-                            Some(mat) => {
-                                let match_start = start_byte + mat.start();
-                                parts_utf8.push(input_utf8[start_byte..match_start].to_string());
-                                start_byte += mat.end();
-                                if start_byte > input_utf8.len() {
-                                    break;
-                                }
-                            }
-                            None => {
-                                parts_utf8.push(input_utf8[start_byte..].to_string());
+
+                match re.find_from_utf16(s, offset).next() {
+                    Some(m) => {
+                        let match_start = m.range.start;
+                        let match_end = m.range.end;
+
+                        // If match is empty and at the same position as start, we need to advance
+                        if match_start == match_end && match_start == start {
+                            if offset < s.len() {
+                                offset += 1;
+                                continue;
+                            } else {
+                                // End of string matched as empty?
+                                // If we are at end, and match is empty, we might have one last part?
+                                // JS split behavior is complex.
+                                // If we match empty at end, we split?
+                                // "ab".split(/$/) -> ["ab", ""]
+                                // "ab".split(/./) -> ["", "", ""]
+
+                                // If we match at end (empty), we push s[start..match_start] (which is empty if start==match_start)
+                                // and then update start.
+
+                                // But here `match_start == start`. So we push empty string.
+                                parts.push(Vec::new());
                                 break;
                             }
                         }
-                    }
 
-                    let parts_iter = parts_utf8.into_iter();
-                    let arr = new_js_object_data();
-                    let mut idx = 0usize;
-                    for part in parts_iter {
-                        obj_set_key_value(&arr, &idx.to_string().into(), Value::String(utf8_to_utf16(&part)))?;
-                        idx += 1;
+                        parts.push(s[start..match_start].to_vec());
+                        start = match_end;
+                        offset = match_end;
+
+                        if offset > s.len() {
+                            break;
+                        }
                     }
-                    obj_set_key_value(&arr, &"length".into(), Value::Number(idx as f64))?;
-                    Ok(Value::Object(arr))
+                    None => {
+                        parts.push(s[start..].to_vec());
+                        break;
+                    }
                 }
             }
+
+            let arr = new_js_object_data();
+            if let Some(array_val) = env_get(env, "Array") {
+                if let Value::Object(array_obj) = &*array_val.borrow() {
+                    if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
+                        if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                            arr.borrow_mut().prototype = Some(proto_obj.clone());
+                        }
+                    }
+                }
+            }
+            for (i, part) in parts.into_iter().enumerate() {
+                obj_set_key_value(&arr, &i.to_string().into(), Value::String(part))?;
+            }
+            let len = arr.borrow().properties.len();
+            set_array_length(&arr, len)?;
+            Ok(Value::Object(arr))
             // All paths above return a constructed array result.
             // This code path should be unreachable because both branches returned.
         } else {

@@ -174,29 +174,6 @@ mod regexp_tests {
     }
 
     #[test]
-    fn test_regexp_swap_greed_behavior() {
-        // 'U' flag should swap default greediness (greedy -> lazy), so first match is minimal
-        let script = r#"
-        (function(){
-            var s = 'a111b222b';
-            var r = new RegExp('a.*b','gU');
-            var m = r.exec(s);
-            return m ? m[0] : 'nomatch';
-        })()
-        "#;
-
-        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let val = String::from_utf16_lossy(&s);
-                // With swap_greed, '.*' should match lazily -> 'a111b'
-                assert_eq!(val, "a111b");
-            }
-            _ => panic!("Expected string result for swap_greed match"),
-        }
-    }
-
-    #[test]
     fn test_regexp_crlf_normalization() {
         // 'R' flag should allow patterns expecting '\n' to match CRLF sequences in the original string
         let script = r#"
@@ -296,13 +273,12 @@ mod regexp_tests {
     }
 
     #[test]
-    fn test_regexp_swap_greed_complex_patterns() {
-        // Test nested quantifiers and brace ranges that could be tricky for swapping greediness
+    fn test_regexp_lazy_quantifier() {
+        // Standard non-greedy matching using '?'
         let script = r#"
         (function(){
-            var s = 'abcccxbcc';
-            // complex nested pattern: 'a(bc+)+x' - greedy normally grabs as much as possible
-            var r = new RegExp('a(bc+)+x','U');
+            var s = 'a111b222b';
+            var r = /a.*?b/;
             var m = r.exec(s);
             return m ? m[0] : 'nomatch';
         })()
@@ -312,10 +288,33 @@ mod regexp_tests {
         match result {
             Value::String(s) => {
                 let val = String::from_utf16_lossy(&s);
-                // With U flag (swap greed), the match should be minimal and stop at the first bc sequence -> 'abcccx'
+                // Lazy match should stop at the first 'b'
+                assert_eq!(val, "a111b");
+            }
+            _ => panic!("Expected string result for lazy match"),
+        }
+    }
+
+    #[test]
+    fn test_regexp_lazy_complex() {
+        // Complex nested pattern with lazy quantifier
+        let script = r#"
+        (function(){
+            var s = 'abcccxbcc';
+            // 'a' followed by one or more 'bc+' groups, lazily, then 'x'
+            var r = /a(bc+)+?x/;
+            var m = r.exec(s);
+            return m ? m[0] : 'nomatch';
+        })()
+        "#;
+
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        match result {
+            Value::String(s) => {
+                let val = String::from_utf16_lossy(&s);
                 assert_eq!(val, "abcccx");
             }
-            _ => panic!("Expected string result for complex swap_greed test"),
+            _ => panic!("Expected string result for complex lazy test"),
         }
     }
 }

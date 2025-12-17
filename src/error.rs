@@ -222,16 +222,18 @@ macro_rules! raise_parse_error {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! raise_parse_error_with_token {
-    ($token:expr, $msg:expr) => {
-        $crate::make_js_error!($crate::JSErrorKind::ParseError {
-            message: format!("{} ({}:{}:0)", $msg, $token.line, $token.column)
-        })
-    };
-    ($token:expr) => {
-        $crate::make_js_error!($crate::JSErrorKind::ParseError {
-            message: format!("parse error ({}:{}:0)", $token.line, $token.column)
-        })
-    };
+    ($token:expr, $msg:expr) => {{
+        let mut err = $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() });
+        err.set_js_location($token.line, $token.column);
+        err
+    }};
+    ($token:expr) => {{
+        let mut err = $crate::make_js_error!($crate::JSErrorKind::ParseError {
+            message: "Unexpected token".to_string()
+        });
+        err.set_js_location($token.line, $token.column);
+        err
+    }};
 }
 
 #[macro_export]

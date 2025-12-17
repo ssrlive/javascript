@@ -1245,7 +1245,7 @@ pub(crate) fn handle_array_instance_method(
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
                 match callback {
-                    Value::Closure(params, body, captured_env) => {
+                    Value::Closure(params, body, captured_env, _) => {
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         // Search from the end
@@ -1297,7 +1297,7 @@ pub(crate) fn handle_array_instance_method(
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
                 match callback {
-                    Value::Closure(params, body, captured_env) => {
+                    Value::Closure(params, body, captured_env, _) => {
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         // Search from the end

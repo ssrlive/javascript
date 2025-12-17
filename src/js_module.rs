@@ -28,6 +28,7 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
                 column: 0,
             }],
             module_exports.clone(),
+            None,
         );
         obj_set_key_value(&module_exports, &"identity".into(), identity_func)?;
     } else if module_name == "console" {

@@ -589,20 +589,46 @@ pub enum Value {
     Boolean(bool),
     Undefined,
     Null,
-    Object(JSObjectDataPtr),                                                         // Object with properties
-    Function(String),                                                                // Function name
-    Closure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr),      // parameters, body, captured environment
-    AsyncClosure(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // parameters, body, captured environment
-    GeneratorFunction(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // optional name, parameters, body, captured environment
-    ClassDefinition(Rc<ClassDefinition>),                                                                 // Class definition
-    Getter(Vec<Statement>, JSObjectDataPtr), // getter body, captured environment
-    Setter(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr), // setter parameter, body, captured environment
+    Object(JSObjectDataPtr), // Object with properties
+    Function(String),        // Function name
+    Closure(
+        Vec<(String, Option<Box<Expr>>)>,
+        Vec<Statement>,
+        JSObjectDataPtr,
+        Option<JSObjectDataPtr>,
+    ), // parameters, body, captured environment, home object
+    AsyncClosure(
+        Vec<(String, Option<Box<Expr>>)>,
+        Vec<Statement>,
+        JSObjectDataPtr,
+        Option<JSObjectDataPtr>,
+    ), // parameters, body, captured environment, home object
+    GeneratorFunction(
+        Option<String>,
+        Vec<(String, Option<Box<Expr>>)>,
+        Vec<Statement>,
+        JSObjectDataPtr,
+        Option<JSObjectDataPtr>,
+    ), // optional name, parameters, body, captured environment, home object
+    ClassDefinition(Rc<ClassDefinition>), // Class definition
+    Getter(Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // getter body, captured environment, home object
+    Setter(
+        Vec<(String, Option<Box<Expr>>)>,
+        Vec<Statement>,
+        JSObjectDataPtr,
+        Option<JSObjectDataPtr>,
+    ), // setter parameter, body, captured environment, home object
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
-        getter: Option<(Vec<Statement>, JSObjectDataPtr)>,
+        getter: Option<(Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)>,
         #[allow(clippy::type_complexity)]
-        setter: Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)>,
+        setter: Option<(
+            Vec<(String, Option<Box<Expr>>)>,
+            Vec<Statement>,
+            JSObjectDataPtr,
+            Option<JSObjectDataPtr>,
+        )>,
     },
     Promise(Rc<RefCell<JSPromise>>),         // Promise object
     Symbol(Rc<SymbolData>),                  // Symbol primitive with description
@@ -633,12 +659,12 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Null => false,
         Value::Object(_) => true,
         Value::Function(_) => true,
-        Value::Closure(_, _, _) => true,
-        Value::AsyncClosure(_, _, _) => true,
+        Value::Closure(..) => true,
+        Value::AsyncClosure(..) => true,
         Value::GeneratorFunction(..) => true,
         Value::ClassDefinition(_) => true,
-        Value::Getter(_, _) => true,
-        Value::Setter(_, _, _) => true,
+        Value::Getter(..) => true,
+        Value::Setter(..) => true,
         Value::Property { .. } => true,
         Value::Promise(_) => true,
         Value::Symbol(_) => true,
@@ -722,12 +748,12 @@ pub fn value_to_string(val: &Value) -> String {
             }
         }
         Value::Function(name) => format!("function {}", name),
-        Value::Closure(_, _, _) => "function".to_string(),
-        Value::AsyncClosure(_, _, _) => "function".to_string(),
+        Value::Closure(..) => "function".to_string(),
+        Value::AsyncClosure(..) => "function".to_string(),
         Value::GeneratorFunction(..) => "function".to_string(),
         Value::ClassDefinition(_) => "class".to_string(),
-        Value::Getter(_, _) => "getter".to_string(),
-        Value::Setter(_, _, _) => "setter".to_string(),
+        Value::Getter(..) => "getter".to_string(),
+        Value::Setter(..) => "setter".to_string(),
         Value::Property { .. } => "[property]".to_string(),
         Value::Promise(_) => "[object Promise]".to_string(),
         Value::Symbol(desc) => match desc.description.as_ref() {
@@ -752,15 +778,15 @@ pub fn value_to_string(val: &Value) -> String {
 #[allow(clippy::type_complexity)]
 pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)> {
     match val {
-        Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-        Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-        Value::GeneratorFunction(_, params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+        Value::Closure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+        Value::AsyncClosure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+        Value::GeneratorFunction(_, params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
         Value::Object(obj_map) => {
             if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
-                    Value::Closure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-                    Value::AsyncClosure(params, body, env) => Some((params.clone(), body.clone(), env.clone())),
-                    Value::GeneratorFunction(_, params, body, env) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::Closure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::AsyncClosure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::GeneratorFunction(_, params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
                     _ => None,
                 }
             } else {
@@ -859,8 +885,8 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Function(name) => format!("[function {}]", name),
         Value::Closure(..) | Value::AsyncClosure(..) | Value::GeneratorFunction(..) => "[function]".to_string(),
         Value::ClassDefinition(_) => "[class]".to_string(),
-        Value::Getter(_, _) => "[getter]".to_string(),
-        Value::Setter(_, _, _) => "[setter]".to_string(),
+        Value::Getter(..) => "[getter]".to_string(),
+        Value::Setter(..) => "[setter]".to_string(),
         Value::Property { .. } => "[property]".to_string(),
         Value::Promise(_) => "[object Promise]".to_string(),
         Value::Symbol(_) => "[object Symbol]".to_string(),
@@ -899,7 +925,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             match val_clone {
                 Value::Property { value, getter, .. } => {
                     log::trace!("obj_get_key_value - property descriptor found for key {}", key);
-                    if let Some((body, env)) = getter {
+                    if let Some((body, env, _)) = getter {
                         // Create a new environment with this bound to the original object
                         let getter_env = new_js_object_data();
                         getter_env.borrow_mut().prototype = Some(env);
@@ -920,7 +946,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
                     }
                 }
-                Value::Getter(body, env) => {
+                Value::Getter(body, env, _) => {
                     log::trace!("obj_get_key_value - getter found for key {}", key);
                     let getter_env = new_js_object_data();
                     getter_env.borrow_mut().prototype = Some(env);
@@ -957,9 +983,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                 "next".to_string(),
                 Expr::Function(None, Vec::new(), next_body),
+                false,
             )])))),
         ];
-        Value::Closure(Vec::new(), iter_body, captured_env)
+        Value::Closure(Vec::new(), iter_body, captured_env, None)
     }
 
     // Provide default well-known symbol fallbacks (non-own) for some built-ins.
@@ -1003,13 +1030,14 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 )),
                             ))),
                             Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                ("value".to_string(), Expr::Var("v".to_string(), None, None)),
-                                ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                ("value".to_string(), Expr::Var("v".to_string(), None, None), false),
+                                ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                             ])))),
                         ],
                         Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                             "done".to_string(),
                             Expr::Value(Value::Boolean(true)),
+                            false,
                         )]))))]),
                     )),
                 ];
@@ -1070,13 +1098,14 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("entry".to_string(), None, None)),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                    ("value".to_string(), Expr::Var("entry".to_string(), None, None), false),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                                 "done".to_string(),
                                 Expr::Value(Value::Boolean(true)),
+                                false,
                             )]))))]),
                         )),
                     ];
@@ -1207,8 +1236,8 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                                     )),
                                                 ))),
                                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None)),
-                                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None), false),
+                                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                                                 ])))),
                                             ],
                                             // else: fallthrough to single-unit char
@@ -1238,13 +1267,14 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None)),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None), false),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                                 "done".to_string(),
                                 Expr::Value(Value::Boolean(true)),
+                                false,
                             )]))))]),
                         )),
                     ];
@@ -1293,13 +1323,14 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("value".to_string(), None, None)),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                    ("value".to_string(), Expr::Var("value".to_string(), None, None), false),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                                 "done".to_string(),
                                 Expr::Value(Value::Boolean(true)),
+                                false,
                             )]))))]),
                         )),
                     ];
@@ -1309,6 +1340,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                             "next".to_string(),
                             Expr::Function(None, Vec::new(), next_body),
+                            false,
                         )])))),
                     ];
 
@@ -1323,7 +1355,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(values_obj))))),
                     );
 
-                    let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone());
+                    let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone(), None);
                     return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
             }
@@ -1363,13 +1395,14 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("v".to_string(), None, None)),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false))),
+                                    ("value".to_string(), Expr::Var("v".to_string(), None, None), false),
+                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                                 "done".to_string(),
                                 Expr::Value(Value::Boolean(true)),
+                                false,
                             )]))))]),
                         )),
                     ];
@@ -1379,6 +1412,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                             "next".to_string(),
                             Expr::Function(None, Vec::new(), next_body),
+                            false,
                         )])))),
                     ];
 
@@ -1387,7 +1421,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         PropertyKey::String("__s".to_string()),
                         Rc::new(RefCell::new(wrapped.borrow().clone())),
                     );
-                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone());
+                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone(), None);
                     return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
             }
@@ -1440,7 +1474,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
 
         match existing.borrow().clone() {
             Value::Property { value: _, getter, setter } => {
-                if let Some((param, body, env)) = setter {
+                if let Some((param, body, env, _)) = setter {
                     // Create a new environment with this bound to the object and the parameter
                     let setter_env = new_js_object_data();
                     setter_env.borrow_mut().prototype = Some(env);
@@ -1479,7 +1513,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                 }
                 return Ok(());
             }
-            Value::Setter(param, body, env) => {
+            Value::Setter(param, body, env, _) => {
                 // Create a new environment with this bound to the object and the parameter
                 let setter_env = new_js_object_data();
                 setter_env.borrow_mut().prototype = Some(env);

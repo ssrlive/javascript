@@ -871,7 +871,7 @@ fn test_with_intl_constructors(args: &[Expr], env: &JSObjectDataPtr) -> Result<V
     }
     let callback = evaluate_expr(env, &args[0])?;
     let callback_func = match callback {
-        Value::Closure(params, body, captured_env) | Value::AsyncClosure(params, body, captured_env) => (params, body, captured_env),
+        Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => (params, body, captured_env),
         _ => {
             return Err(raise_type_error!("testWithIntlConstructors requires a function as argument"));
         }

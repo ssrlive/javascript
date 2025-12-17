@@ -208,16 +208,20 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                                     obj_set_key_value(&desc_obj, &"writable".into(), Value::Boolean(true))?;
                                 }
                                 // Accessor
-                                if let Some((gbody, genv)) = getter {
+                                if let Some((gbody, genv, _)) = getter {
                                     // expose getter as function (Closure) on descriptor
-                                    obj_set_key_value(&desc_obj, &"get".into(), Value::Closure(Vec::new(), gbody.clone(), genv.clone()))?;
+                                    obj_set_key_value(
+                                        &desc_obj,
+                                        &"get".into(),
+                                        Value::Closure(Vec::new(), gbody.clone(), genv.clone(), None),
+                                    )?;
                                 }
-                                if let Some((sparams, sbody, senv)) = setter {
+                                if let Some((sparams, sbody, senv, _)) = setter {
                                     // expose setter as function (Closure) on descriptor
                                     obj_set_key_value(
                                         &desc_obj,
                                         &"set".into(),
-                                        Value::Closure(sparams.clone(), sbody.clone(), senv.clone()),
+                                        Value::Closure(sparams.clone(), sbody.clone(), senv.clone(), None),
                                     )?;
                                 }
                                 // flags: enumerable depends on object's non-enumerable set
@@ -390,7 +394,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     // Determine whether existing property is a data property or accessor
                     let existing_is_accessor = match &*existing_rc.borrow() {
                         Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
-                        Value::Getter(_, _) | Value::Setter(_, _, _) => true,
+                        Value::Getter(..) | Value::Setter(..) => true,
                         _ => false,
                     };
 
@@ -442,28 +446,33 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 }
             }
 
-            let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr)> = None;
+            let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
             if let Some(get_rc) = obj_get_key_value(&desc_obj, &"get".into())? {
                 match &*get_rc.borrow() {
-                    Value::Closure(_params, body, genv) => {
-                        getter_opt = Some((body.clone(), genv.clone()));
+                    Value::Closure(_params, body, genv, _) => {
+                        getter_opt = Some((body.clone(), genv.clone(), None));
                     }
-                    Value::Getter(body, genv) => {
-                        getter_opt = Some((body.clone(), genv.clone()));
+                    Value::Getter(body, genv, _) => {
+                        getter_opt = Some((body.clone(), genv.clone(), None));
                     }
                     _ => {}
                 }
             }
 
             #[allow(clippy::type_complexity)]
-            let mut setter_opt: Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)> = None;
+            let mut setter_opt: Option<(
+                Vec<(String, Option<Box<Expr>>)>,
+                Vec<Statement>,
+                JSObjectDataPtr,
+                Option<JSObjectDataPtr>,
+            )> = None;
             if let Some(set_rc) = obj_get_key_value(&desc_obj, &"set".into())? {
                 match &*set_rc.borrow() {
-                    Value::Closure(params, body, senv) => {
-                        setter_opt = Some((params.clone(), body.clone(), senv.clone()));
+                    Value::Closure(params, body, senv, _) => {
+                        setter_opt = Some((params.clone(), body.clone(), senv.clone(), None));
                     }
-                    Value::Setter(params, body, senv) => {
-                        setter_opt = Some((params.clone(), body.clone(), senv.clone()));
+                    Value::Setter(params, body, senv, _) => {
+                        setter_opt = Some((params.clone(), body.clone(), senv.clone(), None));
                     }
                     _ => {}
                 }
@@ -495,12 +504,12 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
                 Value::Boolean(_) => "Boolean",
                 Value::Object(_) => "Object",
                 Value::Function(_) => "Function",
-                Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
+                Value::Closure(..) | Value::AsyncClosure(..) => "Function",
                 Value::Undefined => "undefined",
                 Value::Null => "null",
                 Value::ClassDefinition(_) => "Class",
-                Value::Getter(_, _) => "Getter",
-                Value::Setter(_, _, _) => "Setter",
+                Value::Getter(..) => "Getter",
+                Value::Setter(..) => "Setter",
                 Value::Property { .. } => "Property",
                 Value::Promise(_) => "Promise",
                 Value::Symbol(_) => "Symbol",
@@ -577,10 +586,10 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
             Ok(Value::String(utf8_to_utf16("[object Object]")))
         }
         Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {}]", name)))),
-        Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+        Value::Closure(..) | Value::AsyncClosure(..) => Ok(Value::String(utf8_to_utf16("[Function]"))),
         Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
-        Value::Getter(_, _) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
-        Value::Setter(_, _, _) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
+        Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
+        Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
         Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[Property]"))),
         Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
         Value::Symbol(symbol_data) => {
@@ -649,12 +658,12 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                 Value::Boolean(_) => "Boolean",
                 Value::Object(_) => "Object",
                 Value::Function(_) => "Function",
-                Value::Closure(_, _, _) | Value::AsyncClosure(_, _, _) => "Function",
+                Value::Closure(..) | Value::AsyncClosure(..) => "Function",
                 Value::Undefined => "undefined",
                 Value::Null => "null",
                 Value::ClassDefinition(_) => "Class",
-                &Value::Getter(_, _) => "Getter",
-                &Value::Setter(_, _, _) => "Setter",
+                &Value::Getter(..) => "Getter",
+                &Value::Setter(..) => "Setter",
                 &Value::Property { .. } => "Property",
                 &Value::Promise(_) => "Promise",
                 Value::BigInt(_) => "BigInt",
@@ -690,7 +699,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
             if let Some(method_rc) = obj_get_key_value(obj_map, &"valueOf".into())? {
                 let method_val = method_rc.borrow().clone();
                 match method_val {
-                    Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                    Value::Closure(_params, body, captured_env, _) | Value::AsyncClosure(_params, body, captured_env, _) => {
                         let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         func_env.borrow_mut().is_function_scope = true;
@@ -733,7 +742,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                 if let Value::Object(func_obj_map) = &*method_rc.borrow() {
                     if let Some(cl_rc) = obj_get_key_value(func_obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
-                            Value::Closure(_params, body, captured_env) | Value::AsyncClosure(_params, body, captured_env) => {
+                            Value::Closure(_params, body, captured_env, _) | Value::AsyncClosure(_params, body, captured_env, _) => {
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 func_env.borrow_mut().is_function_scope = true;
@@ -759,12 +768,12 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
             Ok(Value::Object(obj_map.clone()))
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
-        Value::Closure(params, body, env) | Value::AsyncClosure(params, body, env) => {
-            Ok(Value::Closure(params.clone(), body.clone(), env.clone()))
+        Value::Closure(params, body, env, _) | Value::AsyncClosure(params, body, env, _) => {
+            Ok(Value::Closure(params.clone(), body.clone(), env.clone(), None))
         }
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
-        Value::Getter(body, env) => Ok(Value::Getter(body.clone(), env.clone())),
-        Value::Setter(param, body, env) => Ok(Value::Setter(param.clone(), body.clone(), env.clone())),
+        Value::Getter(body, env, _) => Ok(Value::Getter(body.clone(), env.clone(), None)),
+        Value::Setter(param, body, env, _) => Ok(Value::Setter(param.clone(), body.clone(), env.clone(), None)),
         Value::Property { value, getter, setter } => Ok(Value::Property {
             value: value.clone(),
             getter: getter.clone(),
@@ -776,7 +785,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
         Value::Set(set) => Ok(Value::Set(set.clone())),
         Value::WeakMap(weakmap) => Ok(Value::WeakMap(weakmap.clone())),
         Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
-        Value::GeneratorFunction(_, params, body, env) => Ok(Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone())),
+        Value::GeneratorFunction(_, params, body, env, _) => {
+            Ok(Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone(), None))
+        }
         Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
         Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),
         Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(array_buffer.clone())),

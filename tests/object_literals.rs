@@ -154,4 +154,179 @@ mod object_literal_tests {
             _ => panic!("Expected number 42.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_object_to_string() {
+        let script = r#"
+            let obj = {a: 1, b: 2};
+            obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "[object Object]".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string '[object Object]', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_to_string_with_super() {
+        let script = r#"
+            class Base {
+                toString() {
+                    return "Base toString";
+                }
+            }
+            class Derived extends Base {}
+            let obj = new Derived();
+            obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "Base toString".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'Base toString', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_to_string_with_super_2() {
+        let script = r#"
+            class A {
+                toString() {
+                    return "A toString";
+                }
+            }
+            class B extends A {
+                toString() {
+                    return "B " + super.toString();
+                }
+            }
+            let obj = new B();
+            obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "B A toString".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'B A toString', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_to_string_with_super_3() {
+        let script = r#"
+            var obj = { toString() { return 'obj -> ' + super.toString(); } };
+            return obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "obj -> [object Object]".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'obj -> [object Object]', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_to_string_with_super_4() {
+        let script = r#"
+            const proto = {
+                toString() {
+                    return 'proto';
+                }
+            };
+
+            const obj = {
+                toString() {
+                    return 'obj -> ' + super.toString();
+                }
+            };
+
+            Reflect.setPrototypeOf(obj, proto);
+
+            return obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "obj -> proto".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'obj -> proto', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_to_string_with_super_5() {
+        let script = r#"
+            const proto = {
+                toString() {
+                    return 'proto';
+                }
+            };
+
+            const obj = {
+                toString() {
+                    return 'obj -> ' + super.toString();
+                }
+            };
+
+            // Reflect.setPrototypeOf(obj, proto);
+
+            return obj.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "obj -> [object Object]".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'obj -> [object Object]', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_with_reference_error() {
+        let script = r#"
+            let obj = {
+                get value() { return nonExistentVar; }
+            };
+            obj.value;
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                assert!(err_msg.contains("nonExistentVar"), "Expected nonExistentVar, got {:?}", err_msg);
+            }
+            _ => panic!("Expected nonExistentVar, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_object_with_reference_error_2() {
+        let script = r#"
+            const obj = {
+                __proto__: theProtoObj,
+                handler,
+            };
+            console.log(obj);
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Err(e) => {
+                let err_msg = format!("{:?}", e);
+                assert!(err_msg.contains("theProtoObj"), "Expected theProtoObj error, got {:?}", err_msg);
+            }
+            _ => panic!("Expected theProtoObj error, got {:?}", result),
+        }
+    }
 }

@@ -658,6 +658,7 @@ fn create_resolve_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
             env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
             closure_env
         },
+        None,
     )
 }
 
@@ -687,6 +688,7 @@ fn create_reject_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
             env_set(&closure_env, "__captured_promise", Value::Promise(promise)).unwrap();
             closure_env
         },
+        None,
     )
 }
 
@@ -775,6 +777,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
                 env_set(&env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
                 env
             },
+            None,
         );
         promise_borrow.on_fulfilled.push((pass_through_fulfill, new_promise.clone()));
     }
@@ -797,6 +800,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
                 env_set(&env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
                 env
             },
+            None,
         );
         promise_borrow.on_rejected.push((pass_through_reject, new_promise.clone()));
     }
@@ -914,6 +918,7 @@ pub fn handle_promise_catch_direct(
             env_set(&env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
             env
         },
+        None,
     );
     promise_borrow.on_fulfilled.push((pass_through_fulfill, new_promise.clone()));
 
@@ -935,6 +940,7 @@ pub fn handle_promise_catch_direct(
                 env_set(&env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
                 env
             },
+            None,
         );
         promise_borrow.on_rejected.push((pass_through_reject, new_promise.clone()));
     }
@@ -1043,11 +1049,12 @@ pub fn handle_promise_finally_direct(
                 obj_set_key_value(&new_env, &"finally_func".into(), callback)?;
             } else {
                 // No-op if no callback provided
-                let noop = Value::Closure(vec![], vec![], env.clone());
+                let noop = Value::Closure(vec![], vec![], env.clone(), None);
                 obj_set_key_value(&new_env, &"finally_func".into(), noop)?;
             }
             new_env
         },
+        None,
     );
 
     // Add the same callback to both fulfilled and rejected lists
@@ -1116,6 +1123,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
                     crate::core::env_set(&env, "__current_promise", Value::Promise(current_promise.clone())).unwrap();
                     env
                 },
+                None,
             );
             let catch_callback = Value::Closure(
                 vec![("reason".to_string(), None)],
@@ -1131,6 +1139,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
                     crate::core::env_set(&env, "__current_promise", Value::Promise(current_promise)).unwrap();
                     env
                 },
+                None,
             );
 
             let other_promise_borrow = other_promise.borrow();
@@ -1374,6 +1383,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 obj_set_key_value(&new_env, &"__state".into(), Value::Object(state_obj_clone.clone()))?;
                                                 new_env
                                             },
+                                            None,
                                         );
 
                                         let catch_callback = Value::Closure(
@@ -1390,6 +1400,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 obj_set_key_value(&new_env, &"__state".into(), Value::Object(state_obj_clone))?;
                                                 new_env
                                             },
+                                            None,
                                         );
 
                                         // Attach then and catch to the promise
@@ -1640,6 +1651,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         )?;
                                         new_env
                                     },
+                                    None,
                                 );
 
                                 let catch_callback = Value::Closure(
@@ -1666,6 +1678,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         obj_set_key_value(&new_env, &"__result_promise".into(), Value::Promise(result_promise_clone))?;
                                         new_env
                                     },
+                                    None,
                                 );
 
                                 handle_promise_then(&obj, &[Expr::Value(then_callback)], env)?;
@@ -1761,6 +1774,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 )?;
                                                 new_env
                                             },
+                                            None,
                                         );
 
                                         let catch_callback = Value::Closure(
@@ -1781,6 +1795,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                                 )?;
                                                 new_env
                                             },
+                                            None,
                                         );
 
                                         handle_promise_then(&obj, &[Expr::Value(then_callback)], env)?;
@@ -2148,6 +2163,7 @@ fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value
             ],
         ))],
         Rc::new(RefCell::new(crate::core::JSObjectData::new())), // Empty environment
+        None,
     )
 }
 
@@ -2174,6 +2190,7 @@ fn create_allsettled_reject_callback(state_index: usize, index: usize) -> Value 
             ],
         ))],
         Rc::new(RefCell::new(crate::core::JSObjectData::new())), // Empty environment
+        None,
     )
 }
 

@@ -103,7 +103,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         }
                     }
                     Value::Function(name) => print!("function {}() {{ [native code] }}", name),
-                    Value::Closure(params, _, _) | Value::AsyncClosure(params, _, _) => {
+                    Value::Closure(params, ..) | Value::AsyncClosure(params, _, _, _) => {
                         print!("function(");
                         for (i, param) in params.iter().enumerate() {
                             if i > 0 {
@@ -114,8 +114,8 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         print!(") {{ [closure code] }}");
                     }
                     Value::ClassDefinition(ref class_def) => print!("class {}", class_def.name),
-                    Value::Getter(_, _) => print!("[Getter]"),
-                    Value::Setter(_, _, _) => print!("[Setter]"),
+                    Value::Getter(..) => print!("[Getter]"),
+                    Value::Setter(..) => print!("[Setter]"),
                     Value::Property { value, getter, setter } => {
                         print!("[Property");
                         if value.is_some() {

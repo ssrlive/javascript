@@ -403,7 +403,7 @@ pub enum Expr {
     GeneratorFunction(Option<String>, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // optional name, parameters, body for generator functions
     ArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                     // parameters, body
     AsyncArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                // parameters, body for async arrow functions
-    Object(Vec<(String, Expr)>),                                                         // object literal: key-value pairs
+    Object(Vec<(String, Expr, bool)>),                                                   // object literal: key-value pairs, is_method
     Array(Vec<Expr>),                                                                    // array literal: [elem1, elem2, ...]
     Getter(Box<Expr>),                                                                   // getter function
     Setter(Box<Expr>),                                                                   // setter function

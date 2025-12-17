@@ -670,7 +670,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                     // and doesn't accidentally capture following comma-separated
                     // properties via the comma operator.
                     let expr = parse_assignment(tokens)?;
-                    properties.push(("".to_string(), Expr::Spread(Box::new(expr))));
+                    properties.push(("".to_string(), Expr::Spread(Box::new(expr)), false));
                 } else {
                     // Check for getter/setter: only treat as getter/setter if the
                     // identifier 'get'/'set' is followed by a property key and
@@ -797,7 +797,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                     return Err(raise_parse_error_at(tokens));
                                 }
                                 tokens.remove(0); // consume '}'
-                                properties.push((key_str, Expr::Function(None, params, body)));
+                                properties.push((key_str, Expr::Function(None, params, body), true));
                                 // After adding method, skip any newline/semicolons and handle comma/end in outer loop
                                 while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
                                     tokens.remove(0);
@@ -817,7 +817,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                 // Computed property: [expr]: value
                                 tokens.remove(0); // consume ':'
                                 let value = parse_assignment(tokens)?;
-                                properties.push((key_str, value));
+                                properties.push((key_str, value, false));
 
                                 while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
                                     tokens.remove(0);
@@ -854,7 +854,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                     return Err(raise_parse_error_at(tokens));
                                 }
                                 tokens.remove(0); // consume '}'
-                                properties.push((name, Expr::Function(None, params, body)));
+                                properties.push((name, Expr::Function(None, params, body), true));
                                 while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
                                     tokens.remove(0);
                                 }
@@ -983,9 +983,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                         tokens.remove(0); // consume }
 
                         if is_getter {
-                            properties.push((key, Expr::Getter(Box::new(Expr::Function(None, params, body)))));
+                            properties.push((key, Expr::Getter(Box::new(Expr::Function(None, params, body))), false));
                         } else {
-                            properties.push((key, Expr::Setter(Box::new(Expr::Function(None, params, body)))));
+                            properties.push((key, Expr::Setter(Box::new(Expr::Function(None, params, body))), false));
                         }
                     } else {
                         // Regular property: support both key: value and shorthand `key` forms.
@@ -1002,11 +1002,11 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                 tokens.iter().take(8).collect::<Vec<_>>()
                             );
                             let value = parse_assignment(tokens)?;
-                            properties.push((key, value));
+                            properties.push((key, value, false));
                         } else {
                             // Shorthand property: `{ key }` means `key: key` where the value
                             // is the variable named by the key.
-                            properties.push((key.clone(), Expr::Var(key.clone(), key_loc.0, key_loc.1)));
+                            properties.push((key.clone(), Expr::Var(key.clone(), key_loc.0, key_loc.1), false));
                         }
                     }
                 }

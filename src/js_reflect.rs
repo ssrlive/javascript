@@ -98,7 +98,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
             // If target is a closure or function, invoke appropriately
             match target {
-                Value::Closure(params, body, captured_env) => {
+                Value::Closure(params, body, captured_env, _) => {
                     // Create function environment and bind 'this'
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -122,7 +122,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // Execute function body
                     crate::core::evaluate_statements(&func_env, &body)
                 }
-                Value::AsyncClosure(params, body, captured_env) => {
+                Value::AsyncClosure(params, body, captured_env, _) => {
                     // Similar handling to async closures in evaluate_call: return a Promise object
                     let mut evaluated_args = Vec::new();
                     for ae in &arg_exprs {
@@ -179,7 +179,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     // script-defined function stored as an object.
                     if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
-                            Value::Closure(params, body, captured_env) => {
+                            Value::Closure(params, body, captured_env, _) => {
                                 // Evaluate argument expressions to Values
                                 let mut evaluated_args: Vec<Value> = Vec::new();
                                 for ae in &arg_exprs {
@@ -209,7 +209,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 // Execute function body
                                 return crate::core::evaluate_statements(&func_env, body);
                             }
-                            Value::AsyncClosure(params, body, captured_env) => {
+                            Value::AsyncClosure(params, body, captured_env, _) => {
                                 // Evaluate argument expressions to Values
                                 let mut evaluated_args: Vec<Value> = Vec::new();
                                 for ae in &arg_exprs {

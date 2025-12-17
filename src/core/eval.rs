@@ -5068,7 +5068,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 if let Some(home) = home_obj {
+                                    log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
                                     obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                } else {
+                                    log::trace!("DEBUG: home_obj is None in evaluate_call (generic method)");
                                 }
                                 // Bind parameters: assign provided args, set missing params to undefined
                                 for (i, param) in params.iter().enumerate() {
@@ -5640,13 +5643,17 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // being callable.
                 if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                     match &*cl_rc.borrow() {
-                        Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => {
+                        Value::Closure(params, body, captured_env, home_obj)
+                        | Value::AsyncClosure(params, body, captured_env, home_obj) => {
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                             // Create new environment starting with captured environment (fresh frame)
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            if let Some(home) = home_obj {
+                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            }
                             // ensure this env is a proper function scope
                             func_env.borrow_mut().is_function_scope = true;
                             // Attach minimal frame info for this callable (derive name from func object if present)

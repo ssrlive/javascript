@@ -525,7 +525,7 @@ pub(crate) fn create_class_object(
         match member {
             ClassMember::Method(method_name, params, body) => {
                 // Create a closure for the method
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), None);
+                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
                 obj_set_key_value(&prototype_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::Constructor(_, _) => {
@@ -536,17 +536,17 @@ pub(crate) fn create_class_object(
             }
             ClassMember::Getter(getter_name, body) => {
                 // Create a getter for the prototype
-                let getter = Value::Getter(body.clone(), env.clone(), None);
+                let getter = Value::Getter(body.clone(), env.clone(), Some(prototype_obj.clone()));
                 obj_set_key_value(&prototype_obj, &getter_name.into(), getter)?;
             }
             ClassMember::Setter(setter_name, param, body) => {
                 // Create a setter for the prototype
-                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), None);
+                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
                 obj_set_key_value(&prototype_obj, &setter_name.into(), setter)?;
             }
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Add static method to class object
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), None);
+                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
                 obj_set_key_value(&class_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
@@ -556,12 +556,12 @@ pub(crate) fn create_class_object(
             }
             ClassMember::StaticGetter(getter_name, body) => {
                 // Create a static getter for the class object
-                let getter = Value::Getter(body.clone(), env.clone(), None);
+                let getter = Value::Getter(body.clone(), env.clone(), Some(class_obj.clone()));
                 obj_set_key_value(&class_obj, &getter_name.into(), getter)?;
             }
             ClassMember::StaticSetter(setter_name, param, body) => {
                 // Create a static setter for the class object
-                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), None);
+                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
                 obj_set_key_value(&class_obj, &setter_name.into(), setter)?;
             }
         }
@@ -616,12 +616,16 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
     if let Some(method_val) = obj_get_key_value(&proto_obj, &method.into())? {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
-            Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => {
+            Value::Closure(params, body, captured_env, home_obj) | Value::AsyncClosure(params, body, captured_env, home_obj) => {
                 log::trace!("Method is a closure with {} params", params.len());
                 // Use the closure's captured environment as the base for the
                 // function environment so outer-scope lookups work as expected.
                 let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
+
+                if let Some(home) = home_obj {
+                    crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                }
 
                 // Bind 'this' to the instance (use env_set to avoid invoking setters)
                 crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
@@ -791,10 +795,15 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                     // We need to call this method with the current 'this'
                     if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
                         match &*method_val.borrow() {
-                            Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => {
+                            Value::Closure(params, body, captured_env, home_obj)
+                            | Value::AsyncClosure(params, body, captured_env, home_obj) => {
                                 // Create function environment with 'this' bound to instance
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
+
+                                if let Some(home) = home_obj {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                }
 
                                 // Bind 'this' to the instance
                                 obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;
@@ -825,11 +834,15 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                             Value::Object(func_obj) => {
                                 if let Some(cl_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {
                                     match &*cl_rc.borrow() {
-                                        Value::Closure(params, body, captured_env, _)
-                                        | Value::AsyncClosure(params, body, captured_env, _) => {
+                                        Value::Closure(params, body, captured_env, home_obj)
+                                        | Value::AsyncClosure(params, body, captured_env, home_obj) => {
                                             // Create function environment with 'this' bound to instance
                                             let func_env = new_js_object_data();
                                             func_env.borrow_mut().prototype = Some(captured_env.clone());
+
+                                            if let Some(home) = home_obj {
+                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            }
 
                                             // Bind 'this' to the instance
                                             obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;

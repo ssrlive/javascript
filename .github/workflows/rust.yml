@@ -52,6 +52,7 @@ jobs:
         cargo run --example js -- js-scripts/function_object.js
         cargo run --example js -- js-scripts/globel_assert.js
         cargo run --example js -- js-scripts/object_teats.js
+        cargo run --example js -- js-scripts/object_super_method_stack_overflow.js
         cargo run --example js -- js-scripts/proper_dataview_test.js
         cargo run --example js -- js-scripts/regex_test_2.js
         cargo run --example js -- js-scripts/regex_test_3.js

@@ -2568,6 +2568,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             evaluate_expr(env, left)?;
             evaluate_expr(env, right)
         }
+        Expr::TaggedTemplate(tag, strings, exprs) => evaluate_tagged_template(env, tag, strings, exprs),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
@@ -4653,6 +4654,7 @@ fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         (Value::Undefined, Value::Undefined) => Ok(Value::Boolean(true)),
         (Value::Null, Value::Null) => Ok(Value::Boolean(true)),
         (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
+        (Value::Function(sa), Value::Function(sb)) => Ok(Value::Boolean(sa == sb)),
         _ => Ok(Value::Boolean(false)),
     }
 }
@@ -5000,6 +5002,61 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
     }
 }
 
+pub(crate) fn bind_function_parameters(
+    env: &JSObjectDataPtr,
+    params: &[(String, Option<Box<Expr>>)],
+    args: &[Value],
+) -> Result<(), JSError> {
+    for (i, param) in params.iter().enumerate() {
+        let (name, default_expr_opt) = param;
+        if let Some(rest_param_name) = name.strip_prefix("...") {
+            let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
+
+            // Create array object
+            let array_obj = new_js_object_data();
+            obj_set_key_value(&array_obj, &"length".into(), Value::Number(rest_args.len() as f64))?;
+            array_obj.borrow_mut().set_non_enumerable("length".into());
+
+            for (j, arg) in rest_args.into_iter().enumerate() {
+                obj_set_key_value(&array_obj, &j.to_string().into(), arg)?;
+            }
+
+            env_set(env, rest_param_name, Value::Object(array_obj))?;
+            break; // Rest parameter must be last
+        }
+
+        if i < args.len() {
+            env_set(env, name.as_str(), args[i].clone())?;
+        } else if let Some(expr) = default_expr_opt {
+            let val = evaluate_expr(env, expr)?;
+            env_set(env, name.as_str(), val)?;
+        } else {
+            env_set(env, name.as_str(), Value::Undefined)?;
+        }
+    }
+    Ok(())
+}
+
+fn evaluate_tagged_template(env: &JSObjectDataPtr, tag: &Expr, strings: &[Vec<u16>], exprs: &[Expr]) -> Result<Value, JSError> {
+    let strings_array = new_js_object_data();
+    obj_set_key_value(&strings_array, &"length".into(), Value::Number(strings.len() as f64))?;
+    let raw_array = new_js_object_data();
+    obj_set_key_value(&raw_array, &"length".into(), Value::Number(strings.len() as f64))?;
+
+    for (i, s) in strings.iter().enumerate() {
+        let val = Value::String(s.clone());
+        obj_set_key_value(&strings_array, &i.to_string().into(), val.clone())?;
+        obj_set_key_value(&raw_array, &i.to_string().into(), val)?;
+    }
+    obj_set_key_value(&strings_array, &"raw".into(), Value::Object(raw_array))?;
+
+    let mut new_args = Vec::new();
+    new_args.push(Expr::Value(Value::Object(strings_array)));
+    new_args.extend_from_slice(exprs);
+
+    evaluate_call(env, tag, &new_args)
+}
+
 fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Result<Value, JSError> {
     log::trace!("evaluate_call entry: args_len={} func_expr=...", args.len());
     if let Expr::Property(_, method) = func_expr {
@@ -5232,18 +5289,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     log::trace!("DEBUG: home_obj is None in evaluate_call (generic method)");
                                 }
                                 // Bind parameters: assign provided args, set missing params to undefined
-                                for (i, param) in params.iter().enumerate() {
-                                    let (name, default_expr_opt) = param;
-                                    if i < evaluated_args.len() {
-                                        env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                                    } else if let Some(expr) = default_expr_opt {
-                                        // Evaluate default initializer in function scope where previous params are already bound
-                                        let val = evaluate_expr(&func_env, expr)?;
-                                        env_set(&func_env, name.as_str(), val)?;
-                                    } else {
-                                        env_set(&func_env, name.as_str(), Value::Undefined)?;
-                                    }
-                                }
+                                bind_function_parameters(&func_env, &params, &evaluated_args)?;
                                 // Attach frame/caller information for stack traces
                                 let frame = build_frame_name(env, method);
                                 let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
@@ -5376,17 +5422,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             // Bind `this` to the receiver object
                                             env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                                             // Bind parameters: provide provided args, set missing params to undefined
-                                            for (i, param) in params.iter().enumerate() {
-                                                let (name, default_expr_opt) = param;
-                                                if i < evaluated_args.len() {
-                                                    env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                                                } else if let Some(expr) = default_expr_opt {
-                                                    let val = evaluate_expr(&func_env, expr)?;
-                                                    env_set(&func_env, name.as_str(), val)?;
-                                                } else {
-                                                    env_set(&func_env, name.as_str(), Value::Undefined)?;
-                                                }
-                                            }
+                                            bind_function_parameters(&func_env, params, &evaluated_args)?;
                                             // Attach frame/caller information for stack traces
                                             let frame = build_frame_name(env, method);
                                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
@@ -5433,17 +5469,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             // Bind `this` to the receiver object
                                             env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                                             // Bind parameters
-                                            for (i, param) in params.iter().enumerate() {
-                                                let (name, default_expr_opt) = param;
-                                                let val = if i < evaluated_args.len() {
-                                                    evaluated_args[i].clone()
-                                                } else if let Some(expr) = default_expr_opt {
-                                                    evaluate_expr(&func_env, expr)?
-                                                } else {
-                                                    Value::Undefined
-                                                };
-                                                env_set(&func_env, name.as_str(), val)?;
-                                            }
+                                            bind_function_parameters(&func_env, params, &evaluated_args)?;
                                             // Execute function body synchronously (for now)
                                             let result = evaluate_statements(&func_env, body);
                                             match result {
@@ -5628,17 +5654,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             // For direct calls, `this` is undefined
                             env_set(&func_env, "this", Value::Undefined)?;
                             // Bind parameters
-                            for (i, param) in params.iter().enumerate() {
-                                let (name, default_expr_opt) = param;
-                                let val = if i < evaluated_args.len() {
-                                    evaluated_args[i].clone()
-                                } else if let Some(expr) = default_expr_opt {
-                                    evaluate_expr(&func_env, expr)?
-                                } else {
-                                    Value::Undefined
-                                };
-                                env_set(&func_env, name.as_str(), val)?;
-                            }
+                            bind_function_parameters(&func_env, params, &evaluated_args)?;
                             // Execute function body and resolve/reject promise
                             let result = evaluate_statements(&func_env, body);
                             match result {
@@ -5678,17 +5694,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                             // Bind parameters: provide provided args, set missing params to undefined
-                            for (i, param) in params.iter().enumerate() {
-                                let (name, default_expr_opt) = param;
-                                if i < evaluated_args.len() {
-                                    env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                                } else if let Some(expr) = default_expr_opt {
-                                    let val = evaluate_expr(&func_env, expr)?;
-                                    env_set(&func_env, name.as_str(), val)?;
-                                } else {
-                                    env_set(&func_env, name.as_str(), Value::Undefined)?;
-                                }
-                            }
+                            bind_function_parameters(&func_env, params, &evaluated_args)?;
                             // Execute function body
                             evaluate_statements(&func_env, body)
                         }
@@ -5735,17 +5741,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                 let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                 // Bind parameters: provide provided args, set missing params to undefined
-                for (i, param) in params.iter().enumerate() {
-                    let (name, default_expr_opt) = param;
-                    if i < evaluated_args.len() {
-                        env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                    } else if let Some(expr) = default_expr_opt {
-                        let val = evaluate_expr(&func_env, expr)?;
-                        env_set(&func_env, name.as_str(), val)?;
-                    } else {
-                        env_set(&func_env, name.as_str(), Value::Undefined)?;
-                    }
-                }
+                bind_function_parameters(&func_env, &params, &evaluated_args)?;
                 // Execute function body
                 evaluate_statements(&func_env, &body)
             }
@@ -5766,17 +5762,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 func_env.borrow_mut().is_function_scope = true;
                 // Bind parameters
-                for (i, param) in params.iter().enumerate() {
-                    let (name, default_expr_opt) = param;
-                    let val = if i < evaluated_args.len() {
-                        evaluated_args[i].clone()
-                    } else if let Some(expr) = default_expr_opt {
-                        evaluate_expr(&func_env, expr)?
-                    } else {
-                        Value::Undefined
-                    };
-                    env_set(&func_env, name.as_str(), val)?;
-                }
+                bind_function_parameters(&func_env, &params, &evaluated_args)?;
                 // Execute function body synchronously (for now)
                 let result = evaluate_statements(&func_env, &body);
                 match result {
@@ -5828,17 +5814,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                             // Bind parameters: provide provided args, set missing params to undefined
-                            for (i, param) in params.iter().enumerate() {
-                                let (name, default_expr_opt) = param;
-                                if i < evaluated_args.len() {
-                                    env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                                } else if let Some(expr) = default_expr_opt {
-                                    let val = evaluate_expr(&func_env, expr)?;
-                                    env_set(&func_env, name.as_str(), val)?;
-                                } else {
-                                    env_set(&func_env, name.as_str(), Value::Undefined)?;
-                                }
-                            }
+                            bind_function_parameters(&func_env, params, &evaluated_args)?;
                             // Execute function body
                             return evaluate_statements(&func_env, body);
                         }
@@ -6119,17 +6095,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // Bind parameters: provide provided args, set missing params to undefined
-                for (i, param) in params.iter().enumerate() {
-                    let (name, default_expr_opt) = param;
-                    if i < evaluated_args.len() {
-                        env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                    } else if let Some(expr) = default_expr_opt {
-                        let val = evaluate_expr(&func_env, expr)?;
-                        env_set(&func_env, name.as_str(), val)?;
-                    } else {
-                        env_set(&func_env, name.as_str(), Value::Undefined)?;
-                    }
-                }
+                bind_function_parameters(&func_env, &params, &evaluated_args)?;
                 // Execute function body
                 evaluate_statements(&func_env, &body)
             }
@@ -6548,17 +6514,7 @@ fn handle_optional_method_call(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         // Bind parameters: provide provided args, set missing params to undefined
-                        for (i, param) in params.iter().enumerate() {
-                            let (name, default_expr_opt) = param;
-                            if i < evaluated_args.len() {
-                                env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                            } else if let Some(expr) = default_expr_opt {
-                                let val = evaluate_expr(&func_env, expr)?;
-                                env_set(&func_env, name.as_str(), val)?;
-                            } else {
-                                env_set(&func_env, name.as_str(), Value::Undefined)?;
-                            }
-                        }
+                        bind_function_parameters(&func_env, &params, &evaluated_args)?;
                         // Execute function body
                         evaluate_statements(&func_env, &body)
                     } else if let Value::Function(func_name) = prop {
@@ -6632,7 +6588,7 @@ fn handle_symbol_static_method(method: &str, args: &[Expr], env: &JSObjectDataPt
 }
 
 /// Expand spread operator in function call arguments
-fn expand_spread_in_call_args(env: &JSObjectDataPtr, args: &[Expr], evaluated_args: &mut Vec<Value>) -> Result<(), JSError> {
+pub(crate) fn expand_spread_in_call_args(env: &JSObjectDataPtr, args: &[Expr], evaluated_args: &mut Vec<Value>) -> Result<(), JSError> {
     for arg_expr in args {
         if let Expr::Spread(spread_expr) = arg_expr {
             let spread_val = evaluate_expr(env, spread_expr)?;

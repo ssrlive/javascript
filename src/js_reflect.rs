@@ -105,19 +105,12 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     func_env.borrow_mut().is_function_scope = true;
                     obj_set_key_value(&func_env, &"this".into(), this_arg)?;
 
-                    // Bind parameters using evaluated values (Expr::Value will evaluate to exact Value)
-                    for (i, param) in params.iter().enumerate() {
-                        let (name, default_expr_opt) = param;
-                        if i < arg_exprs.len() {
-                            let arg_val = evaluate_expr(env, &arg_exprs[i])?;
-                            crate::core::env_set(&func_env, name.as_str(), arg_val)?;
-                        } else if let Some(expr) = default_expr_opt {
-                            let val = crate::core::evaluate_expr(&func_env, expr)?;
-                            crate::core::env_set(&func_env, name.as_str(), val)?;
-                        } else {
-                            crate::core::env_set(&func_env, name.as_str(), Value::Undefined)?;
-                        }
-                    }
+                    // Collect all arguments, expanding spreads
+                    let mut evaluated_args = Vec::new();
+                    crate::core::expand_spread_in_call_args(env, &arg_exprs, &mut evaluated_args)?;
+
+                    // Bind parameters
+                    crate::core::bind_function_parameters(&func_env, &params, &evaluated_args)?;
 
                     // Execute function body
                     crate::core::evaluate_statements(&func_env, &body)
@@ -139,17 +132,8 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     func_env.borrow_mut().is_function_scope = true;
                     obj_set_key_value(&func_env, &"this".into(), this_arg)?;
-                    for (i, param) in params.iter().enumerate() {
-                        let (name, default_expr_opt) = param;
-                        let val = if i < evaluated_args.len() {
-                            evaluated_args[i].clone()
-                        } else if let Some(expr) = default_expr_opt {
-                            crate::core::evaluate_expr(&func_env, expr)?
-                        } else {
-                            Value::Undefined
-                        };
-                        crate::core::env_set(&func_env, name.as_str(), val)?;
-                    }
+                    // Bind parameters
+                    crate::core::bind_function_parameters(&func_env, &params, &evaluated_args)?;
                     let result = crate::core::evaluate_statements(&func_env, &body);
                     match result {
                         Ok(val) => {
@@ -194,17 +178,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 crate::core::env_set(&func_env, "this", this_arg)?;
 
                                 // Bind parameters
-                                for (i, param) in params.iter().enumerate() {
-                                    let (name, default_expr_opt) = param;
-                                    if i < evaluated_args.len() {
-                                        crate::core::env_set(&func_env, name.as_str(), evaluated_args[i].clone())?;
-                                    } else if let Some(expr) = default_expr_opt {
-                                        let val = crate::core::evaluate_expr(&func_env, expr)?;
-                                        crate::core::env_set(&func_env, name.as_str(), val)?;
-                                    } else {
-                                        crate::core::env_set(&func_env, name.as_str(), Value::Undefined)?;
-                                    }
-                                }
+                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                 // Execute function body
                                 return crate::core::evaluate_statements(&func_env, body);
@@ -231,17 +205,8 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                 crate::core::env_set(&func_env, "this", this_arg)?;
 
                                 // Bind parameters
-                                for (i, param) in params.iter().enumerate() {
-                                    let (name, default_expr_opt) = param;
-                                    let val = if i < evaluated_args.len() {
-                                        evaluated_args[i].clone()
-                                    } else if let Some(expr) = default_expr_opt {
-                                        crate::core::evaluate_expr(&func_env, expr)?
-                                    } else {
-                                        Value::Undefined
-                                    };
-                                    crate::core::env_set(&func_env, name.as_str(), val)?;
-                                }
+                                // Bind parameters
+                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                 // Execute function body and resolve/reject promise
                                 let result = crate::core::evaluate_statements(&func_env, body);

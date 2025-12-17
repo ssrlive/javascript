@@ -95,6 +95,35 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<(String, Opti
                     "parse_parameters: consumed comma, remaining (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
+            } else if matches!(tokens[0].token, Token::Spread) {
+                // Handle rest parameter: ...args
+                tokens.remove(0); // consume ...
+                if let Some(Token::Identifier(param)) = tokens.first().map(|t| &t.token).cloned() {
+                    tokens.remove(0);
+                    // Store rest param with a special prefix convention "..."
+                    // This allows the evaluator to detect it without changing the AST structure for now.
+                    params.push((format!("...{}", param), None));
+
+                    if tokens.is_empty() {
+                        return Err(raise_parse_error!(format!(
+                            "Unexpected end of parameters after rest; next tokens: {:?}",
+                            tokens.iter().take(8).collect::<Vec<_>>()
+                        )));
+                    }
+                    // Rest parameter must be the last one
+                    if !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error!(format!(
+                            "Rest parameter must be last formal parameter; next tokens: {:?}",
+                            tokens.iter().take(8).collect::<Vec<_>>()
+                        )));
+                    }
+                    break;
+                } else {
+                    return Err(raise_parse_error!(format!(
+                        "Expected identifier after spread operator in parameter list; next tokens: {:?}",
+                        tokens.iter().take(8).collect::<Vec<_>>()
+                    )));
+                }
             } else {
                 return Err(raise_parse_error!(format!(
                     "Expected identifier in parameter list; next tokens: {:?}",
@@ -1288,6 +1317,56 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                             valid = false;
                             break;
                         }
+                    } else if matches!(tokens[0].token, Token::Spread) {
+                        // Handle rest parameter: ...args
+                        let t_spread = tokens.remove(0);
+                        local_consumed.push(t_spread);
+                        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                            let t_name = tokens.remove(0);
+                            local_consumed.push(t_name);
+                            // Rest parameter must be the last one, so expect RParen
+                            if !tokens.is_empty() && matches!(tokens[0].token, Token::RParen) {
+                                let t_paren = tokens.remove(0);
+                                local_consumed.push(t_paren);
+                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
+                                    tokens.remove(0);
+                                    is_arrow = true;
+                                    // Store rest param as a regular param for now, but we might need
+                                    // to mark it specially in the AST if we want strict validation.
+                                    // For now, just treating it as a param named "...name" or similar
+                                    // isn't quite right because the AST expects (String, Option<Expr>).
+                                    // We'll store it as the name, but the evaluator needs to know it's a rest param.
+                                    // A common hack if AST doesn't support it is to prefix the name,
+                                    // but let's see if we can just support it by convention or if we need AST changes.
+                                    // For this fix, we'll just accept it and maybe the evaluator handles it?
+                                    // Actually, the evaluator likely doesn't support rest params in arrow functions yet
+                                    // if the AST doesn't have a way to represent them.
+                                    // Let's check `Expr::ArrowFunction`. It takes `Vec<(String, Option<Box<Expr>>)>`.
+                                    // We might need to change the AST or use a convention.
+                                    // Let's try using a convention for now: if name starts with "...", it's a rest param?
+                                    // Or better, just pass it through and see if we can handle it.
+                                    // Wait, `parse_parameters` handles rest params?
+                                    // Let's check `parse_parameters`.
+                                    param_names.push((format!("...{}", name), None)); // We need to flag this as rest!
+                                // But `Expr::ArrowFunction` signature is `Vec<(String, Option<Box<Expr>>)>`.
+                                // It doesn't seem to have a separate field for rest param.
+                                // However, `FunctionDeclaration` also uses `Vec<(String, Option<Box<Expr>>)>`.
+                                // If `parse_parameters` supports rest, how does it return it?
+                                // `parse_parameters` returns `Result<Vec<(String, Option<Box<Expr>>)>, JSError>`.
+                                // It seems it DOES NOT support rest parameters in its return type signature either!
+                                // Let's look at `parse_parameters` implementation.
+                                } else {
+                                    valid = false;
+                                }
+                                break;
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        } else {
+                            valid = false;
+                            break;
+                        }
                     } else {
                         valid = false;
                         break;
@@ -1503,6 +1582,23 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
             Token::Decrement => {
                 tokens.remove(0);
                 expr = Expr::PostDecrement(Box::new(expr));
+            }
+            Token::TemplateString(parts) => {
+                let parts = parts.clone();
+                tokens.remove(0);
+                let mut strings = Vec::new();
+                let mut exprs = Vec::new();
+                for part in parts {
+                    match part {
+                        TemplatePart::String(s) => strings.push(s.clone()),
+                        TemplatePart::Expr(expr_tokens) => {
+                            let mut expr_tokens = expr_tokens.clone();
+                            let e = parse_expression(&mut expr_tokens)?;
+                            exprs.push(e);
+                        }
+                    }
+                }
+                expr = Expr::TaggedTemplate(Box::new(expr), strings, exprs);
             }
             _ => break,
         }

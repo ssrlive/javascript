@@ -130,17 +130,12 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
                     obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
-                    // Bind parameters from args
-                    for (i, param) in params.iter().enumerate() {
-                        let (name, default_expr_opt) = param;
-                        if i < args.len() {
-                            let arg_val = evaluate_expr(env, &args[i])?;
-                            obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                        } else if let Some(expr) = default_expr_opt {
-                            let val = evaluate_expr(&func_env, expr)?;
-                            obj_set_key_value(&func_env, &name.into(), val)?;
-                        }
-                    }
+                    // Collect all arguments, expanding spreads
+                    let mut evaluated_args = Vec::new();
+                    crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
+                    // Bind parameters
+                    crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                     // Execute constructor body
                     evaluate_statements(&func_env, body)?;
@@ -201,17 +196,12 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                         // Bind 'this' to the instance
                         obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
+                        // Collect all arguments, expanding spreads
+                        let mut evaluated_args = Vec::new();
+                        crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                         // Bind parameters
-                        for (i, param) in params.iter().enumerate() {
-                            let (name, default_expr_opt) = param;
-                            if i < args.len() {
-                                let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                            } else if let Some(expr) = default_expr_opt {
-                                let val = evaluate_expr(&func_env, expr)?;
-                                obj_set_key_value(&func_env, &name.into(), val)?;
-                            }
-                        }
+                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                         // Execute constructor body
                         evaluate_statements(&func_env, body)?;
@@ -385,17 +375,12 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             // Bind 'this' to the instance
             obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
+            // Collect all arguments, expanding spreads
+            let mut evaluated_args = Vec::new();
+            crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
             // Bind parameters
-            for (i, param) in params.iter().enumerate() {
-                let (name, default_expr_opt) = param;
-                if i < args.len() {
-                    let arg_val = evaluate_expr(env, &args[i])?;
-                    obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                } else if let Some(expr) = default_expr_opt {
-                    let val = evaluate_expr(&func_env, expr)?;
-                    obj_set_key_value(&func_env, &name.into(), val)?;
-                }
-            }
+            crate::core::bind_function_parameters(&func_env, &params, &evaluated_args)?;
 
             // Execute function body
             evaluate_statements(&func_env, &body)?;
@@ -587,17 +572,12 @@ pub(crate) fn call_static_method(
                 // 'this' in static methods refers to the class itself
                 obj_set_key_value(&func_env, &"this".into(), Value::Object(class_obj.clone()))?;
 
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                 // Bind parameters
-                for (i, param) in params.iter().enumerate() {
-                    let (name, default_expr_opt) = param;
-                    if i < args.len() {
-                        let arg_val = evaluate_expr(env, &args[i])?;
-                        obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                    } else if let Some(expr) = default_expr_opt {
-                        let val = crate::core::evaluate_expr(&func_env, expr)?;
-                        obj_set_key_value(&func_env, &name.into(), val)?;
-                    }
-                }
+                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                 // Execute method body
                 return evaluate_statements(&func_env, body);
@@ -631,19 +611,12 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                 log::trace!("Bound 'this' to instance");
 
-                // Bind parameters (missing params become undefined)
-                for (i, param) in params.iter().enumerate() {
-                    let (name, default_expr_opt) = param;
-                    if i < args.len() {
-                        let arg_val = evaluate_expr(env, &args[i])?;
-                        crate::core::env_set(&func_env, name.as_str(), arg_val)?;
-                    } else if let Some(expr) = default_expr_opt {
-                        let val = crate::core::evaluate_expr(&func_env, expr)?;
-                        crate::core::env_set(&func_env, name.as_str(), val)?;
-                    } else {
-                        crate::core::env_set(&func_env, name.as_str(), Value::Undefined)?;
-                    }
-                }
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
+                // Bind parameters
+                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                 // Execute method body
                 log::trace!("Executing method body");
@@ -725,17 +698,12 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                         // Bind 'this' to the instance
                         obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
+                        // Collect all arguments, expanding spreads
+                        let mut evaluated_args = Vec::new();
+                        crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                         // Bind parameters
-                        for (i, param) in params.iter().enumerate() {
-                            let (name, default_expr_opt) = param;
-                            if i < args.len() {
-                                let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                            } else if let Some(expr) = default_expr_opt {
-                                let val = evaluate_expr(&func_env, expr)?;
-                                obj_set_key_value(&func_env, &name.into(), val)?;
-                            }
-                        }
+                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                         // Execute parent constructor body
                         return evaluate_statements(&func_env, body);
@@ -808,17 +776,12 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                 // Bind 'this' to the instance
                                 obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;
 
+                                // Collect all arguments, expanding spreads
+                                let mut evaluated_args = Vec::new();
+                                crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                                 // Bind parameters
-                                for (i, param) in params.iter().enumerate() {
-                                    let (name, default_expr_opt) = param;
-                                    if i < args.len() {
-                                        let arg_val = evaluate_expr(env, &args[i])?;
-                                        obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                                    } else if let Some(expr) = default_expr_opt {
-                                        let val = evaluate_expr(&func_env, expr)?;
-                                        obj_set_key_value(&func_env, &name.into(), val)?;
-                                    }
-                                }
+                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                 // Execute method body
                                 return evaluate_statements(&func_env, body);
@@ -847,17 +810,12 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                             // Bind 'this' to the instance
                                             obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;
 
+                                            // Collect all arguments, expanding spreads
+                                            let mut evaluated_args = Vec::new();
+                                            crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                                             // Bind parameters
-                                            for (i, param) in params.iter().enumerate() {
-                                                let (name, default_expr_opt) = param;
-                                                if i < args.len() {
-                                                    let arg_val = evaluate_expr(env, &args[i])?;
-                                                    obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                                                } else if let Some(expr) = default_expr_opt {
-                                                    let val = evaluate_expr(&func_env, expr)?;
-                                                    obj_set_key_value(&func_env, &name.into(), val)?;
-                                                }
-                                            }
+                                            crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                             // Execute method body
                                             return evaluate_statements(&func_env, body);
@@ -894,17 +852,12 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                         // Bind 'this' to the instance
                         obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
 
+                        // Collect all arguments, expanding spreads
+                        let mut evaluated_args = Vec::new();
+                        crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
                         // Bind parameters
-                        for (i, param) in params.iter().enumerate() {
-                            let (name, default_expr_opt) = param;
-                            if i < args.len() {
-                                let arg_val = evaluate_expr(env, &args[i])?;
-                                obj_set_key_value(&func_env, &name.into(), arg_val)?;
-                            } else if let Some(expr) = default_expr_opt {
-                                let val = evaluate_expr(&func_env, expr)?;
-                                obj_set_key_value(&func_env, &name.into(), val)?;
-                            }
-                        }
+                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                         // Execute method body
                         return evaluate_statements(&func_env, body);

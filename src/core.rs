@@ -428,8 +428,9 @@ pub enum Expr {
     /// Logical operators with short-circuit semantics
     LogicalAnd(Box<Expr>, Box<Expr>),
     LogicalOr(Box<Expr>, Box<Expr>),
-    Comma(Box<Expr>, Box<Expr>), // comma operator: expr1, expr2
-    Value(Value),                // literal value
+    Comma(Box<Expr>, Box<Expr>),                         // comma operator: expr1, expr2
+    TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>), // tag, strings, expressions
+    Value(Value),                                        // literal value
 }
 
 #[derive(Debug, Clone)]

@@ -691,7 +691,8 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Null, Value::Null) => true,
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b), // Objects equal only if same reference
         (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
-        _ => false,                                               // Different types are not equal
+        (Value::Function(sa), Value::Function(sb)) => sa == sb,
+        _ => false, // Different types are not equal
     }
 }
 

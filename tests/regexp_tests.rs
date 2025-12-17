@@ -115,7 +115,7 @@ mod regexp_tests {
         let script = r#"
         (function(){
             var s = 'Please email me with hello@world.com and test123@abc.org.cn and fake@abc';
-            var r = new RegExp('[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}','g');
+            var r = new RegExp('[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[A-Za-z]{2,}','g');
             var res = [];
             var m = r.exec(s);
             if (m) { res.push(m[0]); }

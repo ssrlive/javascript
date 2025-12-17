@@ -924,7 +924,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1; // skip opening quote
                 column += 1;
                 let mut start = i;
-                let str_lit = parse_string_literal(&chars, &mut start, '"')?;
+                let str_lit = parse_string_literal(&chars, &mut start, '"', line, column)?;
                 tokens.push(TokenData {
                     token: Token::StringLit(str_lit),
                     line,
@@ -947,7 +947,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1; // skip opening quote
                 column += 1;
                 let mut start = i;
-                let str_lit = parse_string_literal(&chars, &mut start, '\'')?;
+                let str_lit = parse_string_literal(&chars, &mut start, '\'', line, column)?;
                 tokens.push(TokenData {
                     token: Token::StringLit(str_lit),
                     line,
@@ -971,12 +971,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 column += 1;
                 let mut parts = Vec::new();
                 let mut current_start = i;
+                let mut part_start_line = line;
+                let mut part_start_col = column;
                 while i < chars.len() && chars[i] != '`' {
                     if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
                         // Found ${, add string part before it
                         if current_start < i {
                             let mut start_idx = current_start;
-                            let str_part = parse_string_literal(&chars, &mut start_idx, '$')?;
+                            let str_part = parse_string_literal(&chars, &mut start_idx, '$', part_start_line, part_start_col)?;
                             parts.push(TemplatePart::String(str_part));
 
                             for &chars_k in chars[current_start..start_idx].iter() {
@@ -1015,6 +1017,8 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         let expr_tokens = tokenize(&expr_str)?;
                         parts.push(TemplatePart::Expr(expr_tokens));
                         current_start = i;
+                        part_start_line = line;
+                        part_start_col = column;
                     } else {
                         // Handle escapes to avoid stopping at escaped backtick
                         if chars[i] == '\\' {
@@ -1051,7 +1055,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 // Add remaining string part
                 if current_start < i {
                     let mut start_idx = current_start;
-                    let str_part = parse_string_literal(&chars, &mut start_idx, '`')?;
+                    let str_part = parse_string_literal(&chars, &mut start_idx, '`', part_start_line, part_start_col)?;
                     parts.push(TemplatePart::String(str_part));
                     for &chars_k in chars[current_start..start_idx].iter() {
                         if chars_k == '\n' {
@@ -1167,38 +1171,108 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
     Ok(tokens)
 }
 
-fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Result<Vec<u16>, JSError> {
+fn parse_string_literal(
+    chars: &[char],
+    start: &mut usize,
+    end_char: char,
+    start_line: usize,
+    start_col: usize,
+) -> Result<Vec<u16>, JSError> {
     let mut result = Vec::new();
+    let mut current_line = start_line;
+    let mut current_col = start_col;
+
     while *start < chars.len() && chars[*start] != end_char {
         if chars[*start] == '\\' {
             *start += 1;
+            current_col += 1;
             if *start >= chars.len() {
-                return Err(raise_tokenize_error!());
+                let mut err = raise_tokenize_error!();
+                err.set_js_location(current_line, current_col);
+                return Err(err);
             }
             match chars[*start] {
-                'n' => result.push('\n' as u16),
-                't' => result.push('\t' as u16),
-                'r' => result.push('\r' as u16),
-                '\\' => result.push('\\' as u16),
-                '"' => result.push('"' as u16),
-                '\'' => result.push('\'' as u16),
-                '`' => result.push('`' as u16),
+                'n' => {
+                    result.push('\n' as u16);
+                    current_col += 1;
+                }
+                't' => {
+                    result.push('\t' as u16);
+                    current_col += 1;
+                }
+                'r' => {
+                    result.push('\r' as u16);
+                    current_col += 1;
+                }
+                'b' => {
+                    result.push(0x08);
+                    current_col += 1;
+                }
+                'f' => {
+                    result.push(0x0C);
+                    current_col += 1;
+                }
+                'v' => {
+                    result.push(0x0B);
+                    current_col += 1;
+                }
+                '0' => {
+                    result.push(0x00);
+                    current_col += 1;
+                }
+                '\\' => {
+                    result.push('\\' as u16);
+                    current_col += 1;
+                }
+                '"' => {
+                    result.push('"' as u16);
+                    current_col += 1;
+                }
+                '\'' => {
+                    result.push('\'' as u16);
+                    current_col += 1;
+                }
+                '`' => {
+                    result.push('`' as u16);
+                    current_col += 1;
+                }
+                '\n' => {
+                    // Line continuation
+                    current_line += 1;
+                    current_col = 1;
+                }
+                '\r' => {
+                    // Handle \r\n
+                    if *start + 1 < chars.len() && chars[*start + 1] == '\n' {
+                        *start += 1;
+                    }
+                    // Line continuation
+                    current_line += 1;
+                    current_col = 1;
+                }
                 'u' => {
                     // Unicode escape sequences: either \uXXXX or \u{HEX...}
                     *start += 1;
+                    current_col += 1;
                     if *start >= chars.len() {
-                        return Err(raise_tokenize_error!());
+                        let mut err = raise_tokenize_error!();
+                        err.set_js_location(current_line, current_col);
+                        return Err(err);
                     }
                     if chars[*start] == '{' {
                         // \u{HEX...}
                         *start += 1; // skip '{'
+                        current_col += 1;
                         let mut hex_str = String::new();
                         while *start < chars.len() && chars[*start] != '}' {
                             hex_str.push(chars[*start]);
                             *start += 1;
+                            current_col += 1;
                         }
                         if *start >= chars.len() || chars[*start] != '}' {
-                            return Err(raise_tokenize_error!()); // no closing brace
+                            let mut err = raise_tokenize_error!();
+                            err.set_js_location(current_line, current_col);
+                            return Err(err); // no closing brace
                         }
                         // parse hex as codepoint
                         match u32::from_str_radix(&hex_str, 16) {
@@ -1214,57 +1288,92 @@ fn parse_string_literal(chars: &[char], start: &mut usize, end_char: char) -> Re
                                     result.push(low);
                                 }
                             }
-                            _ => return Err(raise_tokenize_error!()),
+                            _ => {
+                                let mut err = raise_tokenize_error!();
+                                err.set_js_location(current_line, current_col);
+                                return Err(err);
+                            }
                         }
                         // `start` currently at closing '}', the outer loop will increment it further
+                        current_col += 1;
                     } else {
                         // Unicode escape sequence \uXXXX
                         if *start + 4 > chars.len() {
-                            return Err(raise_tokenize_error!());
+                            let mut err = raise_tokenize_error!();
+                            err.set_js_location(current_line, current_col);
+                            return Err(err);
                         }
                         let hex_str: String = chars[*start..*start + 4].iter().collect();
                         *start += 3; // will be incremented by 1 at the end
+                        current_col += 3;
                         match u16::from_str_radix(&hex_str, 16) {
                             Ok(code) => {
                                 result.push(code);
                             }
-                            Err(_) => return Err(raise_tokenize_error!()), // Invalid hex
+                            Err(_) => {
+                                let mut err = raise_tokenize_error!();
+                                err.set_js_location(current_line, current_col);
+                                return Err(err); // Invalid hex
+                            }
                         }
+                        current_col += 1;
                     }
                 }
                 'x' => {
                     // Hex escape sequence \xHH
                     *start += 1;
+                    current_col += 1;
                     if *start + 2 > chars.len() {
-                        return Err(raise_tokenize_error!());
+                        let mut err = raise_tokenize_error!();
+                        err.set_js_location(current_line, current_col);
+                        return Err(err);
                     }
                     let hex_str: String = chars[*start..*start + 2].iter().collect();
                     *start += 1; // will be incremented by 1 at the end
+                    current_col += 1;
                     match u8::from_str_radix(&hex_str, 16) {
                         Ok(code) => {
                             result.push(code as u16);
                         }
-                        Err(_) => return Err(raise_tokenize_error!()),
+                        Err(_) => {
+                            let mut err = raise_tokenize_error!();
+                            err.set_js_location(current_line, current_col);
+                            return Err(err);
+                        }
                     }
+                    current_col += 1;
                 }
-                // For other escapes (regex escapes like \., \s, \], etc.) keep the backslash
-                // so the regex engine receives the escape sequence. Push '\' then the char.
                 other => {
-                    result.push('\\' as u16);
+                    // Unknown escape sequence: ignore backslash, keep character
                     result.push(other as u16);
+                    current_col += 1;
                 }
             }
         } else {
+            // Check for unescaped line terminators in string literals (but not template literals)
+            if (end_char == '"' || end_char == '\'') && (chars[*start] == '\n' || chars[*start] == '\r') {
+                let mut err = raise_tokenize_error!();
+                err.set_js_location(current_line, current_col);
+                return Err(err);
+            }
             // Properly encode Unicode scalar values into UTF-16 code units
             let ch = chars[*start];
             for code_unit in ch.to_string().encode_utf16() {
                 result.push(code_unit);
             }
+            if ch == '\n' {
+                current_line += 1;
+                current_col = 1;
+            } else {
+                current_col += 1;
+            }
         }
         *start += 1;
     }
     if *start >= chars.len() {
-        return Err(raise_tokenize_error!()); // Unterminated string literal
+        let mut err = raise_tokenize_error!();
+        err.set_js_location(current_line, current_col);
+        return Err(err); // Unterminated string literal
     }
     Ok(result)
 }

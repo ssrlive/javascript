@@ -981,7 +981,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
         let iter_body = vec![
             Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
             Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                "next".to_string(),
+                Expr::Value(Value::String(utf8_to_utf16("next"))),
                 Expr::Function(None, Vec::new(), next_body),
                 false,
             )])))),
@@ -1030,12 +1030,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 )),
                             ))),
                             Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                ("value".to_string(), Expr::Var("v".to_string(), None, None), false),
-                                ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                (
+                                    Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                    Expr::Var("v".to_string(), None, None),
+                                    false,
+                                ),
+                                (
+                                    Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                    Expr::Value(Value::Boolean(false)),
+                                    false,
+                                ),
                             ])))),
                         ],
                         Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                            "done".to_string(),
+                            Expr::Value(Value::String(utf8_to_utf16("done"))),
                             Expr::Value(Value::Boolean(true)),
                             false,
                         )]))))]),
@@ -1098,12 +1106,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("entry".to_string(), None, None), false),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                        Expr::Var("entry".to_string(), None, None),
+                                        false,
+                                    ),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                        Expr::Value(Value::Boolean(false)),
+                                        false,
+                                    ),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
+                                Expr::Value(Value::String(utf8_to_utf16("done"))),
                                 Expr::Value(Value::Boolean(true)),
                                 false,
                             )]))))]),
@@ -1236,8 +1252,16 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                                     )),
                                                 ))),
                                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None), false),
-                                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                                    (
+                                                        Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                                        Expr::Var("ch".to_string(), None, None),
+                                                        false,
+                                                    ),
+                                                    (
+                                                        Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                                        Expr::Value(Value::Boolean(false)),
+                                                        false,
+                                                    ),
                                                 ])))),
                                             ],
                                             // else: fallthrough to single-unit char
@@ -1267,12 +1291,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("ch".to_string(), None, None), false),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                        Expr::Var("ch".to_string(), None, None),
+                                        false,
+                                    ),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                        Expr::Value(Value::Boolean(false)),
+                                        false,
+                                    ),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
+                                Expr::Value(Value::String(utf8_to_utf16("done"))),
                                 Expr::Value(Value::Boolean(true)),
                                 false,
                             )]))))]),
@@ -1323,12 +1355,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("value".to_string(), None, None), false),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                        Expr::Var("value".to_string(), None, None),
+                                        false,
+                                    ),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                        Expr::Value(Value::Boolean(false)),
+                                        false,
+                                    ),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
+                                Expr::Value(Value::String(utf8_to_utf16("done"))),
                                 Expr::Value(Value::Boolean(true)),
                                 false,
                             )]))))]),
@@ -1338,7 +1378,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     let set_iter_body = vec![
                         Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                            "next".to_string(),
+                            Expr::Value(Value::String(utf8_to_utf16("next"))),
                             Expr::Function(None, Vec::new(), next_body),
                             false,
                         )])))),
@@ -1395,12 +1435,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     )),
                                 ))),
                                 Statement::from(StatementKind::Return(Some(Expr::Object(vec![
-                                    ("value".to_string(), Expr::Var("v".to_string(), None, None), false),
-                                    ("done".to_string(), Expr::Value(Value::Boolean(false)), false),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("value"))),
+                                        Expr::Var("v".to_string(), None, None),
+                                        false,
+                                    ),
+                                    (
+                                        Expr::Value(Value::String(utf8_to_utf16("done"))),
+                                        Expr::Value(Value::Boolean(false)),
+                                        false,
+                                    ),
                                 ])))),
                             ],
                             Some(vec![Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                                "done".to_string(),
+                                Expr::Value(Value::String(utf8_to_utf16("done"))),
                                 Expr::Value(Value::Boolean(true)),
                                 false,
                             )]))))]),
@@ -1410,7 +1458,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     let str_iter_body = vec![
                         Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
-                            "next".to_string(),
+                            Expr::Value(Value::String(utf8_to_utf16("next"))),
                             Expr::Function(None, Vec::new(), next_body),
                             false,
                         )])))),

@@ -124,7 +124,13 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
         Expr::Object(pairs) => Expr::Object(
             pairs
                 .iter()
-                .map(|(k, v, is_method)| (k.clone(), replace_first_yield_in_expr(v, send_value, replaced), *is_method))
+                .map(|(k, v, is_method)| {
+                    (
+                        replace_first_yield_in_expr(k, send_value, replaced),
+                        replace_first_yield_in_expr(v, send_value, replaced),
+                        *is_method,
+                    )
+                })
                 .collect(),
         ),
         Expr::Array(items) => Expr::Array(
@@ -264,7 +270,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
         Expr::Index(a, b) => expr_contains_yield(a) || expr_contains_yield(b),
         Expr::Property(a, _) => expr_contains_yield(a),
         Expr::Call(a, args) => expr_contains_yield(a) || args.iter().any(expr_contains_yield),
-        Expr::Object(pairs) => pairs.iter().any(|(_, v, _)| expr_contains_yield(v)),
+        Expr::Object(pairs) => pairs.iter().any(|(k, v, _)| expr_contains_yield(k) || expr_contains_yield(v)),
         Expr::Array(items) => items.iter().any(expr_contains_yield),
         Expr::UnaryNeg(a)
         | Expr::LogicalNot(a)

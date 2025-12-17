@@ -5973,7 +5973,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
     }
 }
 
-fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>) -> Result<Value, JSError> {
+fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) -> Result<Value, JSError> {
     let obj = new_js_object_data();
     // Attempt to set the default prototype for object literals to Object.prototype
     // by finding the global 'Object' constructor and using its 'prototype' property.
@@ -5991,20 +5991,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
         crate::core::set_internal_prototype_from_constructor(&obj, &root_env, "Object")?;
     }
 
-    for (key, value_expr, is_method) in properties {
-        // helper: convert parser-produced computed keys like "[Symbol.toPrimitive]"
-        fn key_to_property_key(key: &str) -> PropertyKey {
-            if key.starts_with('[') && key.ends_with(']') {
-                let inner = &key[1..key.len() - 1];
-                if let Some(sym_name) = inner.strip_prefix("Symbol.")
-                    && let Some(sym_rc) = get_well_known_symbol_rc(sym_name)
-                {
-                    return PropertyKey::Symbol(sym_rc.clone());
-                }
-            }
-            PropertyKey::String(key.to_string())
-        }
-        if key.is_empty() && matches!(value_expr, Expr::Spread(_)) {
+    for (key_expr, value_expr, is_method) in properties {
+        if matches!(value_expr, Expr::Spread(_)) {
             // Spread operator: evaluate the expression and spread its properties
             if let Expr::Spread(expr) = value_expr {
                 let spread_val = evaluate_expr(env, expr)?;
@@ -6018,11 +6006,23 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
                 }
             }
         } else {
+            // Evaluate key expression
+            let key_val = evaluate_expr(env, key_expr)?;
+            let pk = if let Value::Symbol(_) = key_val {
+                PropertyKey::Symbol(Rc::new(RefCell::new(key_val)))
+            } else {
+                let key_str = match &key_val {
+                    Value::String(s) => String::from_utf16_lossy(s),
+                    Value::BigInt(b) => b.to_string(),
+                    _ => key_val.to_string(),
+                };
+                PropertyKey::String(key_str)
+            };
+
             match value_expr {
                 Expr::Getter(func_expr) => {
                     if let Expr::Function(_name, _params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let pk = key_to_property_key(key);
                         let existing_opt = get_own_property(&obj, &pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
@@ -6060,7 +6060,6 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
                 Expr::Setter(func_expr) => {
                     if let Expr::Function(_name, params, body) = func_expr.as_ref() {
                         // Check if property already exists
-                        let pk = key_to_property_key(key);
                         let existing_opt = get_own_property(&obj, &pk);
                         if let Some(existing) = existing_opt {
                             let mut val = existing.borrow().clone();
@@ -6089,8 +6088,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
                                 getter: None,
                                 setter: Some((params.clone(), body.clone(), env.clone(), None)),
                             };
-                            obj.borrow_mut()
-                                .insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(prop)));
+                            obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
                         return Err(raise_eval_error!("Setter must be a function"));
@@ -6118,7 +6116,6 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
                         }
                     }
                     // Check if property already exists
-                    let pk = key_to_property_key(key);
                     let existing_rc = get_own_property(&obj, &pk);
                     if let Some(existing) = existing_rc {
                         let mut existing_val = existing.borrow().clone();
@@ -6141,7 +6138,6 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(String, Expr, bool)>
                             obj.borrow_mut().insert(pk.clone(), Rc::new(RefCell::new(prop)));
                         }
                     } else {
-                        let pk = key_to_property_key(key);
                         obj_set_key_value(&obj, &pk, value)?;
                     }
                 }

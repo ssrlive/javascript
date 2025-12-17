@@ -501,7 +501,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                     TemplatePart::String(s) => Expr::StringLit(s.clone()),
                     TemplatePart::Expr(expr_tokens) => {
                         let mut expr_tokens = expr_tokens.clone();
-                        parse_expression(&mut expr_tokens)?
+                        let e = parse_expression(&mut expr_tokens)?;
+                        // Force string context by prepending "" + e
+                        Expr::Binary(Box::new(Expr::StringLit(Vec::new())), BinaryOp::Add, Box::new(e))
                     }
                 }
             } else {
@@ -510,7 +512,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                     TemplatePart::String(s) => Expr::StringLit(s.clone()),
                     TemplatePart::Expr(expr_tokens) => {
                         let mut expr_tokens = expr_tokens.clone();
-                        parse_expression(&mut expr_tokens)?
+                        let e = parse_expression(&mut expr_tokens)?;
+                        // Force string context by prepending "" + e
+                        Expr::Binary(Box::new(Expr::StringLit(Vec::new())), BinaryOp::Add, Box::new(e))
                     }
                 };
                 for part in &parts[1..] {

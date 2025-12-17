@@ -1,8 +1,8 @@
 use crate::{
     JSError,
     core::{
-        DestructuringElement, Expr, ObjectDestructuringElement, Token, TokenData, parse_array_destructuring_pattern, parse_expression,
-        parse_object_destructuring_pattern, parse_parameters, parse_statement_block,
+        DestructuringElement, Expr, ObjectDestructuringElement, Token, TokenData, parse_array_destructuring_pattern, parse_assignment,
+        parse_expression, parse_object_destructuring_pattern, parse_parameters, parse_statement_block,
     },
     js_class::ClassMember,
     raise_parse_error, raise_parse_error_with_token,
@@ -170,9 +170,9 @@ pub fn parse_statements(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, J
                 // Provide context for parse errors to aid debugging large harness files.
                 // Use the snapshot (pre-parse) so partial consumption doesn't hide
                 // the original tokens at the start of the statement.
-                log::error!("parse_statements error at token start. remaining tokens (first 40):");
+                log::warn!("parse_statements error at token start. remaining tokens (first 40):");
                 for (i, t) in tokens_snapshot.iter().take(40).enumerate() {
-                    log::error!("  {}: {:?}", i, t);
+                    log::warn!("  {}: {:?}", i, t);
                 }
                 return Err(e);
             }
@@ -1192,7 +1192,9 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                         tokens.iter().take(40).collect::<Vec<_>>()
                     );
                     // parse initializer with debug: if parsing fails, print a short token context
-                    let expr = match parse_expression(tokens) {
+                    // Use parse_assignment instead of parse_expression to avoid consuming the comma operator
+                    // which separates variable declarations.
+                    let expr = match parse_assignment(tokens) {
                         Ok(e) => {
                             log::trace!(
                                 "parse_statement: succeeded parsing initializer for '{}' ; remaining tokens after init (first 40): {:?}",
@@ -1203,7 +1205,7 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                         }
                         Err(err) => {
                             // Provide a clearer debug dump on failure so we can
-                            // see whether parse_expression failed mid-consumption
+                            // see whether parse_assignment failed mid-consumption
                             // or returned an error without consuming tokens.
                             log::error!(
                                 "parse_statement: failed parsing initializer for '{}' ; remaining tokens (first 40): {:?}",

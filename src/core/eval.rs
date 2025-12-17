@@ -105,19 +105,67 @@ fn validate_declarations(statements: &[Statement]) -> Result<(), JSError> {
                 }
                 lexical_names.insert(name.clone());
             }
-            StatementKind::FunctionDeclaration(name, _, _, _) => {
+            StatementKind::FunctionDeclaration(name, _, body, _) => {
                 if lexical_names.contains(name) {
                     let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
                     err.set_js_location(stmt.line, stmt.column);
                     return Err(err);
                 }
                 lexical_names.insert(name.clone());
+                // Recursively validate function body
+                validate_declarations(body)?;
             }
             StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
                 collect_lexical_names_from_array(pattern, &mut lexical_names, stmt.line, stmt.column)?;
             }
             StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
                 collect_lexical_names_from_object(pattern, &mut lexical_names, stmt.line, stmt.column)?;
+            }
+            StatementKind::Block(stmts) => {
+                validate_declarations(stmts)?;
+            }
+            StatementKind::If(_, then_body, else_body) => {
+                validate_declarations(then_body)?;
+                if let Some(else_stmts) = else_body {
+                    validate_declarations(else_stmts)?;
+                }
+            }
+            StatementKind::For(_, _, _, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::ForIn(_, _, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::ForOf(_, _, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::ForOfDestructuringArray(_, _, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::ForOfDestructuringObject(_, _, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::While(_, body) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::DoWhile(body, _) => {
+                validate_declarations(body)?;
+            }
+            StatementKind::Switch(_, cases) => {
+                for case in cases {
+                    match case {
+                        SwitchCase::Case(_, stmts) | SwitchCase::Default(stmts) => {
+                            validate_declarations(stmts)?;
+                        }
+                    }
+                }
+            }
+            StatementKind::TryCatch(try_block, _, catch_block, finally_block) => {
+                validate_declarations(try_block)?;
+                validate_declarations(catch_block)?;
+                if let Some(finally_stmts) = finally_block {
+                    validate_declarations(finally_stmts)?;
+                }
             }
             _ => {}
         }
@@ -128,14 +176,17 @@ fn validate_declarations(statements: &[Statement]) -> Result<(), JSError> {
 
     for name in lexical_names {
         if var_names.contains(&name) {
-            // We don't have exact location for the var declaration here easily without re-scanning,
-            // but we can at least report the error.
-            // Ideally we should find the conflicting var statement to report its location,
-            // or report the location of the let/const that conflicts.
-            // For now, let's try to find the statement that declared this lexical name to report its location.
-            if let Some(stmt) = statements.iter().find(|s| declares_lexical_name(s, &name)) {
+            // We have a conflict between a lexical declaration and a var declaration.
+            // We should report the error at the location of the declaration that appears later in the source.
+            let lexical_stmt = statements.iter().find(|s| declares_lexical_name(s, &name));
+            let var_loc = find_first_var_location(statements, &name);
+
+            if let (Some(l_stmt), Some(v_loc)) = (lexical_stmt, var_loc) {
+                let l_loc = (l_stmt.line, l_stmt.column);
+                let (err_line, err_col) = if l_loc > v_loc { l_loc } else { v_loc };
+
                 let mut err = raise_syntax_error!(format!("Identifier '{}' has already been declared", name));
-                err.set_js_location(stmt.line, stmt.column);
+                err.set_js_location(err_line, err_col);
                 return Err(err);
             }
             return Err(raise_syntax_error!(format!("Identifier '{}' has already been declared", name)));
@@ -156,6 +207,104 @@ fn declares_lexical_name(stmt: &Statement, name: &str) -> bool {
         }
         _ => false,
     }
+}
+
+fn find_first_var_location(statements: &[Statement], name: &str) -> Option<(usize, usize)> {
+    for stmt in statements {
+        match &stmt.kind {
+            StatementKind::Var(n, _) if n == name => return Some((stmt.line, stmt.column)),
+            StatementKind::If(_, then_body, else_body) => {
+                if let Some(loc) = find_first_var_location(then_body, name) {
+                    return Some(loc);
+                }
+                if let Some(else_stmts) = else_body {
+                    if let Some(loc) = find_first_var_location(else_stmts, name) {
+                        return Some(loc);
+                    }
+                }
+            }
+            StatementKind::For(_, _, _, body) => {
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::ForOf(_, _, body) => {
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::ForIn(var, _, body) => {
+                if var == name {
+                    return Some((stmt.line, stmt.column));
+                }
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::ForOfDestructuringObject(pattern, _, body) => {
+                if object_pattern_contains_name(pattern, name) {
+                    return Some((stmt.line, stmt.column));
+                }
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::ForOfDestructuringArray(pattern, _, body) => {
+                if pattern_contains_name(pattern, name) {
+                    return Some((stmt.line, stmt.column));
+                }
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::While(_, body) => {
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::DoWhile(body, _) => {
+                if let Some(loc) = find_first_var_location(body, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::Switch(_, cases) => {
+                for case in cases {
+                    match case {
+                        SwitchCase::Case(_, stmts) | SwitchCase::Default(stmts) => {
+                            if let Some(loc) = find_first_var_location(stmts, name) {
+                                return Some(loc);
+                            }
+                        }
+                    }
+                }
+            }
+            StatementKind::TryCatch(try_body, _, catch_body, finally_body) => {
+                if let Some(loc) = find_first_var_location(try_body, name) {
+                    return Some(loc);
+                }
+                if let Some(loc) = find_first_var_location(catch_body, name) {
+                    return Some(loc);
+                }
+                if let Some(finally_stmts) = finally_body {
+                    if let Some(loc) = find_first_var_location(finally_stmts, name) {
+                        return Some(loc);
+                    }
+                }
+            }
+            StatementKind::Block(stmts) => {
+                if let Some(loc) = find_first_var_location(stmts, name) {
+                    return Some(loc);
+                }
+            }
+            StatementKind::Label(_, stmt) => {
+                if let Some(loc) = find_first_var_location(std::slice::from_ref(stmt), name) {
+                    return Some(loc);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn pattern_contains_name(pattern: &[DestructuringElement], name: &str) -> bool {

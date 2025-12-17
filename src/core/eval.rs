@@ -393,6 +393,9 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
 }
 
 fn evaluate_stmt_let(env: &JSObjectDataPtr, name: &str, expr_opt: &Option<Expr>) -> Result<Value, JSError> {
+    if get_own_property(env, &name.into()).is_some() {
+        return Err(raise_syntax_error!(format!("Identifier '{name}' has already been declared")));
+    }
     let val = expr_opt.clone().map_or(Ok(Value::Undefined), |expr| evaluate_expr(env, &expr))?;
     set_function_name_if_needed(&val, name)?;
     if let Value::Object(obj_map) = &val {
@@ -412,6 +415,9 @@ fn evaluate_stmt_var(env: &JSObjectDataPtr, name: &str, expr_opt: &Option<Expr>)
 }
 
 fn evaluate_stmt_const(env: &JSObjectDataPtr, name: &str, expr: &Expr) -> Result<Value, JSError> {
+    if get_own_property(env, &name.into()).is_some() {
+        return Err(raise_syntax_error!(format!("Identifier '{name}' has already been declared")));
+    }
     let val = evaluate_expr(env, expr)?;
     set_function_name_if_needed(&val, name)?;
     env_set_const(env, name, val.clone());
@@ -424,6 +430,9 @@ fn evaluate_stmt_class(
     extends: &Option<Expr>,
     members: &[crate::js_class::ClassMember],
 ) -> Result<(), JSError> {
+    if get_own_property(env, &name.into()).is_some() {
+        return Err(raise_syntax_error!(format!("Identifier '{name}' has already been declared")));
+    }
     let class_obj = create_class_object(name, extends, members, env)?;
     env_set(env, name, class_obj)?;
     Ok(())

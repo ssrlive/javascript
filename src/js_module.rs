@@ -23,7 +23,7 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         let identity_func = Value::Closure(
             vec![("x".to_string(), None)],
             vec![crate::core::Statement {
-                kind: crate::core::StatementKind::Return(Some(crate::core::Expr::Var("x".to_string()))),
+                kind: crate::core::StatementKind::Return(Some(crate::core::Expr::Var("x".to_string(), None, None))),
                 line: 0,
                 column: 0,
             }],

@@ -162,6 +162,9 @@ where
     // Expose `globalThis` binding to the global environment (points to the global object)
     obj_set_key_value(&env, &"globalThis".into(), Value::Object(env.clone()))?;
 
+    // Expose `undefined` binding to the global environment
+    obj_set_key_value(&env, &"undefined".into(), Value::Undefined)?;
+
     let v = evaluate_statements(&env, &statements)?;
     // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
     if let Value::Object(obj) = &v
@@ -294,7 +297,7 @@ pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Op
     }
 
     // If not found, attempt to evaluate the variable to force lazy creation
-    match evaluate_expr(env, &Expr::Var(name.to_string())) {
+    match evaluate_expr(env, &Expr::Var(name.to_string(), None, None)) {
         Ok(Value::Object(ctor_obj)) => {
             if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
@@ -360,11 +363,10 @@ where
 #[derive(Debug, Clone)]
 pub enum Expr {
     Number(f64),
-    /// BigInt literal (string form)
-    BigInt(String),
+    BigInt(String), // BigInt literal (string form)
     StringLit(Vec<u16>),
     Boolean(bool),
-    Var(String),
+    Var(String, Option<usize>, Option<usize>), // name, line, column
     Binary(Box<Expr>, BinaryOp, Box<Expr>),
     UnaryNeg(Box<Expr>),
     UnaryPlus(Box<Expr>),

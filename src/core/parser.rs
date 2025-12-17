@@ -365,7 +365,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     if tokens.is_empty() {
         return Err(raise_parse_error_at(tokens));
     }
-    let current = tokens.remove(0).token;
+    let token_data = tokens.remove(0);
+    let current = token_data.token.clone();
     let mut expr = match current {
         Token::Number(n) => Expr::Number(n),
         Token::BigInt(s) => Expr::BigInt(s.clone()),
@@ -414,8 +415,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
         Token::New => {
             // Constructor should be a simple identifier or property access, not a full expression
             let constructor = if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                let line = tokens[0].line;
+                let column = tokens[0].column;
                 tokens.remove(0);
-                Expr::Var(name)
+                Expr::Var(name, Some(line), Some(column))
             } else {
                 return Err(raise_parse_error_at(tokens));
             };
@@ -524,7 +527,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
             }
         }
         Token::Identifier(name) => {
-            let mut expr = Expr::Var(name.clone());
+            let line = token_data.line;
+            let column = token_data.column;
+            let mut expr = Expr::Var(name.clone(), Some(line), Some(column));
             if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
                 tokens.remove(0);
                 let body = parse_arrow_body(tokens)?;
@@ -532,7 +537,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
             }
             expr
         }
-        Token::Import => Expr::Var("import".to_string()),
+        Token::Import => Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column)),
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
         Token::Super => {
@@ -763,24 +768,24 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                 inner.push(tokens.remove(0));
                             }
                             // If next is '(', this is a method definition
-                            if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                                // Create a simple printed key for storage (e.g. "[Symbol.toPrimitive]")
-                                let mut key_str = String::new();
-                                key_str.push('[');
-                                for t in &inner {
-                                    match &t.token {
-                                        Token::Identifier(n) => {
-                                            key_str.push_str(n);
-                                        }
-                                        Token::Dot => {
-                                            key_str.push('.');
-                                        }
-                                        Token::StringLit(s) => key_str.push_str(&String::from_utf16_lossy(s)),
-                                        _ => {}
+                            // Create a simple printed key for storage (e.g. "[Symbol.toPrimitive]")
+                            let mut key_str = String::new();
+                            key_str.push('[');
+                            for t in &inner {
+                                match &t.token {
+                                    Token::Identifier(n) => {
+                                        key_str.push_str(n);
                                     }
+                                    Token::Dot => {
+                                        key_str.push('.');
+                                    }
+                                    Token::StringLit(s) => key_str.push_str(&String::from_utf16_lossy(s)),
+                                    _ => {}
                                 }
-                                key_str.push(']');
+                            }
+                            key_str.push(']');
 
+                            if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
                                 tokens.remove(0); // consume '('
                                 let params = parse_parameters(tokens)?;
                                 if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
@@ -794,6 +799,26 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                                 tokens.remove(0); // consume '}'
                                 properties.push((key_str, Expr::Function(None, params, body)));
                                 // After adding method, skip any newline/semicolons and handle comma/end in outer loop
+                                while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
+                                    tokens.remove(0);
+                                }
+                                if tokens.is_empty() {
+                                    return Err(raise_parse_error_at(tokens));
+                                }
+                                if matches!(tokens[0].token, Token::RBrace) {
+                                    tokens.remove(0);
+                                    break;
+                                }
+                                if matches!(tokens[0].token, Token::Comma) {
+                                    tokens.remove(0);
+                                    continue;
+                                }
+                            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Colon) {
+                                // Computed property: [expr]: value
+                                tokens.remove(0); // consume ':'
+                                let value = parse_assignment(tokens)?;
+                                properties.push((key_str, value));
+
                                 while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
                                     tokens.remove(0);
                                 }
@@ -859,7 +884,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                     }
 
                     // Parse key
+                    let mut key_loc = (None, None);
                     let key = if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                        key_loc = (Some(tokens[0].line), Some(tokens[0].column));
                         tokens.remove(0);
                         name
                     } else if let Some(Token::Number(n)) = tokens.first().map(|t| t.token.clone()) {
@@ -979,7 +1006,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
                         } else {
                             // Shorthand property: `{ key }` means `key: key` where the value
                             // is the variable named by the key.
-                            properties.push((key.clone(), Expr::Var(key.clone())));
+                            properties.push((key.clone(), Expr::Var(key.clone(), key_loc.0, key_loc.1)));
                         }
                     }
                 }

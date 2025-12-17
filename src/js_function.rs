@@ -627,7 +627,7 @@ fn evaluate_new_expression(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value
     // Handle new expressions: new Constructor(args)
     if args.len() == 1
         && let Expr::Call(constructor_expr, constructor_args) = &args[0]
-        && let Expr::Var(constructor_name) = &**constructor_expr
+        && let Expr::Var(constructor_name, _, _) = &**constructor_expr
     {
         match constructor_name.as_str() {
             "RegExp" => return crate::js_regexp::handle_regexp_constructor(constructor_args, env),

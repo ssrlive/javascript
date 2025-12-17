@@ -20,7 +20,7 @@ use crate::{
     js_reflect::make_reflect_object,
     js_regexp::is_regex_object,
     js_testintl::make_testintl_object,
-    obj_get_key_value, raise_eval_error, raise_syntax_error, raise_throw_error, raise_type_error,
+    obj_get_key_value, raise_eval_error, raise_syntax_error, raise_throw_error, raise_type_error, raise_variable_not_found_error,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
     unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_slice, utf16_to_utf8},
@@ -330,7 +330,7 @@ fn ensure_object_destructuring_target(val: &Value, pattern: &[ObjectDestructurin
         });
 
         let message = if let Some(first) = first_key {
-            if let Expr::Var(name) = expr {
+            if let Expr::Var(name, _, _) = expr {
                 let value_desc = match val {
                     Value::Undefined => "undefined",
                     Value::Object(_) => "object",
@@ -1070,7 +1070,7 @@ fn statement_for_init_condition_increment(
             match &incr_stmt.kind {
                 StatementKind::Expr(expr) => match expr {
                     Expr::Assign(target, value) => {
-                        if let Expr::Var(name) = target.as_ref() {
+                        if let Expr::Var(name, _, _) = target.as_ref() {
                             let val = evaluate_expr(&for_env, value)?;
                             env_set_recursive(&for_env, name.as_str(), val)?;
                         }
@@ -1434,7 +1434,7 @@ fn perform_statement_label(
 
 fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Result<Value, JSError> {
     match target {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             env_set_recursive(env, name.as_str(), value.clone())?;
             Ok(value)
         }
@@ -2366,7 +2366,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::BigInt(s) => Ok(Value::BigInt(parse_bigint_string(s)?)),
         Expr::StringLit(s) => evaluate_string_lit(s),
         Expr::Boolean(b) => evaluate_boolean(*b),
-        Expr::Var(name) => evaluate_var(env, name),
+        Expr::Var(name, line, column) => evaluate_var(env, name, *line, *column),
         Expr::Assign(target, value) => evaluate_assign(env, target, value),
         Expr::LogicalAndAssign(target, value) => evaluate_logical_and_assign(env, target, value),
         Expr::LogicalOrAssign(target, value) => evaluate_logical_or_assign(env, target, value),
@@ -2598,7 +2598,7 @@ fn evaluate_boolean(b: bool) -> Result<Value, JSError> {
     Ok(Value::Boolean(b))
 }
 
-fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
+fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: Option<usize>) -> Result<Value, JSError> {
     // First, attempt to resolve the name in the current scope chain.
     // This ensures script-defined bindings shadow engine-provided helpers
     // such as `assert`.
@@ -2805,8 +2805,12 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str) -> Result<Value, JSError> {
                 }
             }
         }
-        log::trace!("evaluate_var - {name} not found -> Undefined");
-        Ok(Value::Undefined)
+        log::trace!("evaluate_var - {name} not found -> ReferenceError");
+        let mut err = raise_variable_not_found_error!(name);
+        if let (Some(l), Some(c)) = (line, column) {
+            err.set_js_location(l, c);
+        }
+        Err(err)
     }
 }
 
@@ -3257,7 +3261,7 @@ fn evaluate_unsigned_right_shift_assign(env: &JSObjectDataPtr, target: &Expr, va
 fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) -> Result<Value, JSError> {
     let val = evaluate_expr(env, value)?;
     match target {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             log::debug!("evaluate_assignment_expr: assigning Var '{}' = {:?}", name, val);
             env_set_recursive(env, name, val.clone())?;
             Ok(val)
@@ -3326,7 +3330,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     };
     // Assign back
     match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             env_set_recursive(env, name, new_val.clone())?;
             Ok(new_val)
         }
@@ -3377,7 +3381,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
     };
     // Assign back
     match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             env_set_recursive(env, name, new_val.clone())?;
             Ok(new_val)
         }
@@ -3429,7 +3433,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     };
     // Assign back
     match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             env_set_recursive(env, name, new_val)?;
             Ok(old_val)
         }
@@ -3481,7 +3485,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
     };
     // Assign back
     match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             env_set_recursive(env, name, new_val)?;
             Ok(old_val)
         }
@@ -3585,7 +3589,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
     // performing a lexical lookup only (walk the environment chain) and
     // treat missing bindings as `undefined` per JS semantics.
     let val = match expr {
-        Expr::Var(name) => {
+        Expr::Var(name, _, _) => {
             // Walk env chain searching for own properties; do not consult
             // evaluator fallbacks or built-in helpers here — `typeof` must
             // act like an existence check for declared bindings.
@@ -3649,7 +3653,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
 
 fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     match expr {
-        Expr::Var(_) => {
+        Expr::Var(..) => {
             // Cannot delete local variables
             Ok(Value::Boolean(false))
         }
@@ -4847,7 +4851,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
     }
 
     // Special case for dynamic import: import("module")
-    if let Expr::Var(func_name) = func_expr
+    if let Expr::Var(func_name, _, _) = func_expr
         && func_name == "import"
         && args.len() == 1
     {
@@ -4878,21 +4882,21 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods
-        if let Expr::Var(var_name) = &**obj_expr
+        if let Expr::Var(var_name, _, _) = &**obj_expr
             && var_name == "Array"
         {
             return crate::js_array::handle_array_static_method(method_name, args, env);
         }
 
         // Special case for Symbol static methods
-        if let Expr::Var(var_name) = &**obj_expr
+        if let Expr::Var(var_name, _, _) = &**obj_expr
             && var_name == "Symbol"
         {
             return handle_symbol_static_method(method_name, args, env);
         }
 
         // Special case for Proxy static methods
-        if let Expr::Var(var_name) = &**obj_expr
+        if let Expr::Var(var_name, _, _) = &**obj_expr
             && var_name == "Proxy"
             && method_name == "revocable"
         {
@@ -5697,7 +5701,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     if let Some(first_arg_expr) = args.first() {
                         use crate::core::Expr;
                         if let Expr::Call(func_expr, call_args) = first_arg_expr
-                            && let Expr::Var(fname) = &**func_expr
+                            && let Expr::Var(fname, _, _) = &**func_expr
                             && fname == "isCanonicalizedStructurallyValidLanguageTag"
                             && call_args.len() == 1
                         {
@@ -5708,7 +5712,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 let s = String::from_utf16_lossy(&s_utf16);
                                 // Evaluate canonicalizeLanguageTag(s)
                                 let canon_call = Expr::Call(
-                                    Box::new(Expr::Var("canonicalizeLanguageTag".to_string())),
+                                    Box::new(Expr::Var("canonicalizeLanguageTag".to_string(), None, None)),
                                     vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
                                 );
                                 match evaluate_expr(env, &canon_call) {
@@ -5740,7 +5744,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
 
                                 // Evaluate isStructurallyValidLanguageTag(s)
                                 let struct_call = Expr::Call(
-                                    Box::new(Expr::Var("isStructurallyValidLanguageTag".to_string())),
+                                    Box::new(Expr::Var("isStructurallyValidLanguageTag".to_string(), None, None)),
                                     vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
                                 );
                                 match evaluate_expr(env, &struct_call) {
@@ -5819,7 +5823,7 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
     // Check if it's a method call first
     if let Expr::Property(obj_expr, method_name) = func_expr {
         // Special case for Array static methods
-        if let Expr::Var(var_name) = &**obj_expr
+        if let Expr::Var(var_name, _, _) = &**obj_expr
             && var_name == "Array"
         {
             return crate::js_array::handle_array_static_method(method_name, args, env);
@@ -6494,7 +6498,7 @@ pub fn get_well_known_symbol(name: &str) -> Option<Value> {
 //   the caller can decide what to do with the updated object value.
 pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Value) -> Result<Option<Value>, JSError> {
     // Fast path: obj_expr is a variable that we can mutate in-place in env
-    if let Expr::Var(varname) = obj_expr
+    if let Expr::Var(varname, _, _) = obj_expr
         && let Some(rc_val) = env_get(env, varname)
     {
         let mut borrowed = rc_val.borrow_mut();

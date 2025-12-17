@@ -1544,7 +1544,7 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
     let expr = parse_expression(tokens)?;
     // Check if this is an assignment expression
     if let Expr::Assign(target, value) = &expr
-        && let Expr::Var(name) = target.as_ref()
+        && let Expr::Var(name, _, _) = target.as_ref()
     {
         return Ok(StatementKind::Assign(name.clone(), *value.clone()));
     }

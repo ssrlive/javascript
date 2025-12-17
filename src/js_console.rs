@@ -9,6 +9,127 @@ pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
     Ok(console_obj)
 }
 
+fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JSError> {
+    match val {
+        Value::Number(n) => Ok(n.to_string()),
+        Value::BigInt(h) => Ok(h.to_string()),
+        Value::String(s) => Ok(String::from_utf16_lossy(s)),
+        Value::Boolean(b) => Ok(b.to_string()),
+        Value::Undefined => Ok("undefined".to_string()),
+        Value::Null => Ok("null".to_string()),
+        Value::Object(obj) => {
+            if crate::js_regexp::is_regex_object(obj) {
+                match crate::js_regexp::get_regex_literal_pattern(obj) {
+                    Ok(pat) => Ok(pat),
+                    Err(_) => Ok("[object RegExp]".to_string()),
+                }
+            } else if crate::js_date::is_date_object(obj) {
+                match crate::js_date::handle_date_method(obj, "toISOString", &[], env) {
+                    Ok(Value::String(s)) => Ok(String::from_utf16_lossy(&s)),
+                    _ => Ok("[object Date]".to_string()),
+                }
+            } else if crate::js_array::is_array(obj) {
+                let len = crate::js_array::get_array_length(obj).unwrap_or(0);
+                let mut s = String::from("[");
+                for i in 0..len {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    if let Some(val_rc) = obj_get_key_value(obj, &i.to_string().into())? {
+                        match &*val_rc.borrow() {
+                            Value::Number(n) => s.push_str(&n.to_string()),
+                            Value::BigInt(h) => s.push_str(&h.to_string()),
+                            Value::String(str_val) => {
+                                s.push('\'');
+                                s.push_str(&String::from_utf16_lossy(str_val));
+                                s.push('\'');
+                            }
+                            Value::Boolean(b) => s.push_str(&b.to_string()),
+                            Value::Undefined => s.push_str("undefined"),
+                            Value::Null => s.push_str("null"),
+                            _ => s.push_str("[object Object]"),
+                        }
+                    }
+                }
+                s.push(']');
+                Ok(s)
+            } else {
+                let mut s = String::from("{");
+                let mut first = true;
+                for (key, val_rc) in obj.borrow().properties.iter() {
+                    if !first {
+                        s.push_str(", ");
+                    }
+                    first = false;
+                    s.push_str(key.as_ref());
+                    s.push_str(": ");
+                    match &*val_rc.borrow() {
+                        Value::Number(n) => s.push_str(&n.to_string()),
+                        Value::String(str_val) => {
+                            s.push('"');
+                            s.push_str(&String::from_utf16_lossy(str_val));
+                            s.push('"');
+                        }
+                        Value::Boolean(b) => s.push_str(&b.to_string()),
+                        Value::Undefined => s.push_str("undefined"),
+                        Value::Object(inner_obj) => {
+                            if crate::js_array::is_array(inner_obj) {
+                                s.push_str("[Array]");
+                            } else {
+                                s.push_str("[object Object]");
+                            }
+                        }
+                        _ => s.push_str("[object Object]"),
+                    }
+                }
+                s.push('}');
+                Ok(s)
+            }
+        }
+        Value::Function(name) => Ok(format!("function {}() {{ [native code] }}", name)),
+        Value::Closure(params, ..) | Value::AsyncClosure(params, _, _, _) => {
+            let mut s = String::from("function(");
+            for (i, param) in params.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&param.0);
+            }
+            s.push_str(") { [closure code] }");
+            Ok(s)
+        }
+        Value::ClassDefinition(class_def) => Ok(format!("class {}", class_def.name)),
+        Value::Getter(..) => Ok("[Getter]".to_string()),
+        Value::Setter(..) => Ok("[Setter]".to_string()),
+        Value::Property { value, getter, setter } => {
+            let mut s = String::from("[Property");
+            if value.is_some() {
+                s.push_str(" value");
+            }
+            if getter.is_some() {
+                s.push_str(" getter");
+            }
+            if setter.is_some() {
+                s.push_str(" setter");
+            }
+            s.push(']');
+            Ok(s)
+        }
+        Value::Promise(_) => Ok("[object Promise]".to_string()),
+        Value::Symbol(_) => Ok("[object Symbol]".to_string()),
+        Value::Map(_) => Ok("[object Map]".to_string()),
+        Value::Set(_) => Ok("[object Set]".to_string()),
+        Value::WeakMap(_) => Ok("[object WeakMap]".to_string()),
+        Value::WeakSet(_) => Ok("[object WeakSet]".to_string()),
+        Value::GeneratorFunction(..) => Ok("[GeneratorFunction]".to_string()),
+        Value::Generator(_) => Ok("[object Generator]".to_string()),
+        Value::Proxy(_) => Ok("[object Proxy]".to_string()),
+        Value::ArrayBuffer(_) => Ok("[object ArrayBuffer]".to_string()),
+        Value::DataView(_) => Ok("[object DataView]".to_string()),
+        Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
+    }
+}
+
 /// Handle console object method calls
 pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
@@ -19,134 +140,98 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                 js_promise::current_tick(),
                 js_promise::task_queue_len()
             );
-            // console.log call
-            let count = args.len();
-            for (i, arg) in args.iter().enumerate() {
-                let arg_val = evaluate_expr(env, arg)?;
-                match arg_val {
-                    Value::Number(n) => print!("{}", n),
-                    Value::BigInt(h) => print!("{h}"),
-                    Value::String(s) => {
-                        print!("{}", String::from_utf16_lossy(&s))
-                    }
-                    Value::Boolean(b) => print!("{}", b),
-                    Value::Undefined => print!("undefined"),
-                    Value::Null => print!("null"),
-                    Value::Object(obj) => {
-                        // Check if this is a RegExp object
-                        if crate::js_regexp::is_regex_object(&obj) {
-                            // Print regex in /pattern/flags form
-                            match crate::js_regexp::get_regex_literal_pattern(&obj) {
-                                Ok(pat) => print!("{}", pat),
-                                Err(_) => print!("[object RegExp]"),
-                            }
-                        } else if crate::js_date::is_date_object(&obj) {
-                            // For Date objects, call toString method
-                            match crate::js_date::handle_date_method(&obj, "toISOString", &[], env) {
-                                Ok(Value::String(s)) => print!("{}", String::from_utf16_lossy(&s)),
-                                _ => print!("[object Date]"),
-                            }
-                        } else if crate::js_array::is_array(&obj) {
-                            // Print array contents
-                            let len = crate::js_array::get_array_length(&obj).unwrap_or(0);
-                            print!("[");
-                            // Print elements
-                            for i in 0..len {
-                                if i > 0 {
-                                    print!(", ");
-                                }
-                                if let Some(val_rc) = obj_get_key_value(&obj, &i.to_string().into())? {
-                                    match &*val_rc.borrow() {
-                                        Value::Number(n) => print!("{}", n),
-                                        Value::BigInt(h) => print!("{h}"),
-                                        Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
-                                        Value::Boolean(b) => print!("{}", b),
-                                        Value::Undefined => print!("undefined"),
-                                        Value::Null => print!("null"),
-                                        _ => print!("[object Object]"),
-                                    }
-                                } else {
-                                    // missing element -> print nothing (sparse arrays not shown)
-                                }
-                            }
 
-                            // Print additional own non-index properties, not enabled by default
-                            // _print_additional_info_for_array(&obj)?;
+            let mut values = Vec::new();
+            for arg in args {
+                values.push(evaluate_expr(env, arg)?);
+            }
 
-                            print!("]");
-                        } else {
-                            // Print object properties
-                            print!("{{");
-                            let mut first = true;
-                            for (key, val_rc) in obj.borrow().properties.iter() {
-                                if !first {
-                                    print!(", ");
-                                }
-                                first = false;
-                                print!("{}: ", key);
-                                match &*val_rc.borrow() {
-                                    Value::Number(n) => print!("{}", n),
-                                    Value::String(s) => print!("\"{}\"", String::from_utf16_lossy(s)),
-                                    Value::Boolean(b) => print!("{}", b),
-                                    Value::Undefined => print!("undefined"),
-                                    Value::Object(inner_obj) => {
-                                        if crate::js_array::is_array(inner_obj) {
-                                            print!("[Array]");
+            if values.is_empty() {
+                println!();
+                return Ok(Value::Undefined);
+            }
+
+            let mut output = String::new();
+            let mut arg_idx = 0;
+
+            // Check for format string
+            let mut formatted = false;
+            if let Value::String(s_utf16) = &values[0] {
+                let s = String::from_utf16_lossy(s_utf16);
+                if s.contains('%') && values.len() > 1 {
+                    formatted = true;
+                    let mut chars = s.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '%' {
+                            if let Some(&next_char) = chars.peek() {
+                                match next_char {
+                                    's' | 'd' | 'i' | 'f' | 'o' | 'O' | 'c' => {
+                                        chars.next(); // consume specifier
+                                        arg_idx += 1;
+                                        if arg_idx < values.len() {
+                                            let val = &values[arg_idx];
+                                            match next_char {
+                                                's' => output.push_str(&format_console_value(val, env)?),
+                                                'd' | 'i' => {
+                                                    if let Value::Number(n) = val {
+                                                        output.push_str(&format!("{:.0}", n));
+                                                    } else {
+                                                        output.push_str("NaN");
+                                                    }
+                                                }
+                                                'f' => {
+                                                    if let Value::Number(n) = val {
+                                                        output.push_str(&n.to_string());
+                                                    } else {
+                                                        output.push_str("NaN");
+                                                    }
+                                                }
+                                                'o' | 'O' => {
+                                                    output.push_str(&format_console_value(val, env)?);
+                                                }
+                                                'c' => {
+                                                    // Ignore CSS
+                                                }
+                                                _ => {}
+                                            }
                                         } else {
-                                            print!("[object Object]");
+                                            output.push('%');
+                                            output.push(next_char);
                                         }
                                     }
-                                    _ => print!("[object Object]"),
+                                    '%' => {
+                                        chars.next();
+                                        output.push('%');
+                                    }
+                                    _ => {
+                                        output.push('%');
+                                    }
                                 }
+                            } else {
+                                output.push('%');
                             }
-                            print!("}}");
+                        } else {
+                            output.push(c);
                         }
                     }
-                    Value::Function(name) => print!("function {}() {{ [native code] }}", name),
-                    Value::Closure(params, ..) | Value::AsyncClosure(params, _, _, _) => {
-                        print!("function(");
-                        for (i, param) in params.iter().enumerate() {
-                            if i > 0 {
-                                print!(", ");
-                            }
-                            print!("{}", param.0);
-                        }
-                        print!(") {{ [closure code] }}");
-                    }
-                    Value::ClassDefinition(ref class_def) => print!("class {}", class_def.name),
-                    Value::Getter(..) => print!("[Getter]"),
-                    Value::Setter(..) => print!("[Setter]"),
-                    Value::Property { value, getter, setter } => {
-                        print!("[Property");
-                        if value.is_some() {
-                            print!(" value");
-                        }
-                        if getter.is_some() {
-                            print!(" getter");
-                        }
-                        if setter.is_some() {
-                            print!(" setter");
-                        }
-                        print!("]");
-                    }
-                    Value::Promise(_) => print!("[object Promise]"),
-                    Value::Symbol(_) => print!("[object Symbol]"),
-                    Value::Map(_) => print!("[object Map]"),
-                    Value::Set(_) => print!("[object Set]"),
-                    Value::WeakMap(_) => print!("[object WeakMap]"),
-                    Value::WeakSet(_) => print!("[object WeakSet]"),
-                    Value::GeneratorFunction(..) => print!("[GeneratorFunction]"),
-                    Value::Generator(_) => print!("[object Generator]"),
-                    Value::Proxy(_) => print!("[object Proxy]"),
-                    Value::ArrayBuffer(_) => print!("[object ArrayBuffer]"),
-                    Value::DataView(_) => print!("[object DataView]"),
-                    Value::TypedArray(_) => print!("[object TypedArray]"),
-                }
-                if i < count - 1 {
-                    print!(" ");
                 }
             }
-            println!();
+
+            if !formatted {
+                // Just print first arg
+                output.push_str(&format_console_value(&values[0], env)?);
+                arg_idx = 0;
+            }
+
+            // Print remaining args
+            for values_i in &values[(arg_idx + 1)..] {
+                if !output.is_empty() {
+                    output.push(' ');
+                }
+                output.push_str(&format_console_value(values_i, env)?);
+            }
+
+            println!("{}", output);
             Ok(Value::Undefined)
         }
         _ => Err(raise_eval_error!(format!("Console method {method} not implemented"))),

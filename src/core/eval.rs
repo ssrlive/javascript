@@ -5459,6 +5459,19 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                                             // Bind parameters: provide provided args, set missing params to undefined
                                             bind_function_parameters(&func_env, params, &evaluated_args)?;
+
+                                            // Create arguments object
+                                            let arguments_obj = new_js_object_data();
+                                            obj_set_key_value(
+                                                &arguments_obj,
+                                                &"length".into(),
+                                                Value::Number(evaluated_args.len() as f64),
+                                            )?;
+                                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                                obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                                            }
+                                            obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
                                             // Attach frame/caller information for stack traces
                                             let frame = build_frame_name(env, method);
                                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
@@ -5731,6 +5744,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                             // Bind parameters: provide provided args, set missing params to undefined
                             bind_function_parameters(&func_env, params, &evaluated_args)?;
+
+                            // Create arguments object
+                            let arguments_obj = new_js_object_data();
+                            obj_set_key_value(&arguments_obj, &"length".into(), Value::Number(evaluated_args.len() as f64))?;
+                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                            }
+                            obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
                             // Execute function body
                             evaluate_statements(&func_env, body)
                         }
@@ -6463,6 +6485,17 @@ fn handle_optional_method_call(obj_map: &JSObjectDataPtr, method: &str, args: &[
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         // Bind parameters: provide provided args, set missing params to undefined
                         bind_function_parameters(&func_env, &params, &evaluated_args)?;
+
+                        // Create arguments object if it's a regular function (not an arrow function)
+                        if let Value::Object(_) = prop {
+                            let arguments_obj = new_js_object_data();
+                            obj_set_key_value(&arguments_obj, &"length".into(), Value::Number(evaluated_args.len() as f64))?;
+                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                            }
+                            obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+                        }
+
                         // Execute function body
                         evaluate_statements(&func_env, &body)
                     } else if let Value::Function(func_name) = prop {

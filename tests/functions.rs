@@ -194,4 +194,153 @@ mod function_tests {
             _ => panic!("Expected number 40320.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_function_expression_as_immediate_argument() {
+        let script = r#"
+            function assert(condition, message) {
+                if (!condition) {
+                    throw new Error(message || "Assertion failed");
+                }
+            }
+
+            function map(f, a) {
+                const result = new Array(a.length);
+                for (let i = 0; i < a.length; i++) {
+                    result[i] = f(a[i]);
+                }
+                return result;
+            }
+
+            const cube = function (x) {
+                return x * x * x;
+            };
+
+            const numbers = [0, 1, 2, 5, 10];
+            var result = map(cube, numbers);
+            console.log(result); // [0, 1, 8, 125, 1000]
+            assert(
+                JSON.stringify(result) === JSON.stringify([0, 1, 8, 125, 1000]),
+                "Higher-order function map is not working correctly"
+            );
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 0.0), // Last element of the result array
+            _ => panic!("Expected undefined, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_dymamic_function_creation() {
+        let script = r#"
+            let myFunc;
+            let car = { make: "Honda", model: "Accord", year: 1998 };
+            let num = 0;
+            if (num === 0) {
+                myFunc = function (theObject) {
+                    theObject.make = "Toyota";
+                };
+            }
+            myFunc(car);
+            return car.make;
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "Toyota".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'Toyota', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_function_scopes_and_closures() {
+        let script = r#"
+            const _name = "Chamakh";
+            // A nested function example
+            function getScore() {
+                const num1 = 2;
+                const num2 = 3;
+
+                function add() {
+                    return `${_name} scored ${num1 + num2}`;
+                }
+
+                return add();
+            }
+
+            return getScore(); // "Chamakh scored 5"
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::String(s)) => {
+                let expected = "Chamakh scored 5".encode_utf16().collect::<Vec<u16>>();
+                assert_eq!(s, expected);
+            }
+            _ => panic!("Expected string 'Chamakh scored 5', got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_function_with_iterators() {
+        let script = r#"
+            let node = {
+              nodeName: "DIV",
+              childNodes: [
+                {
+                  nodeName: "SPAN",
+                  childNodes: [],
+                },
+                {
+                  nodeName: "A",
+                  childNodes: [
+                    {
+                      nodeName: "IMG",
+                      childNodes: [],
+                    },
+                  ],
+                },
+              ],
+            };
+
+            function walkTree(node) {
+              if (node === null) {
+                return;
+              }
+              // do something with node
+              console.log(node.nodeName);
+              for (let i = 0; i < node.childNodes.length; i++) {
+                walkTree(node.childNodes[i]);
+              }
+            }
+
+            walkTree(node);
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(_) => {} // Just ensure no errors occur during execution
+            _ => panic!("Expected successful execution, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_arguments_object() {
+        let script = r#"
+            function sum() {
+                let total = 0;
+                for (let i = 0; i < arguments.length; i++) {
+                    total += arguments[i];
+                }
+                return total;
+            }
+            sum(1, 2, 3, 4, 5)
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 15.0),
+            _ => panic!("Expected number 15.0, got {:?}", result),
+        }
+    }
 }

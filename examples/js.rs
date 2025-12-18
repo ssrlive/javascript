@@ -94,7 +94,12 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
     let mut buffer = String::new();
 
     loop {
-        let prompt = if buffer.is_empty() { "js> " } else { ".... " };
+        // Use ANSI escape codes for color: \x1b[1;32m is bold green, \x1b[1;33m is bold yellow, \x1b[0m is reset
+        let prompt = if buffer.is_empty() {
+            "\x1b[1;32mjs> \x1b[0m"
+        } else {
+            "\x1b[1;33m... \x1b[0m"
+        };
 
         match rl.readline(prompt) {
             Ok(line) => {

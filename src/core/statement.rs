@@ -55,8 +55,10 @@ pub enum StatementKind {
     Const(String, Expr),
     FunctionDeclaration(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, bool), // name, params, body, is_generator
     LetDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: let [a, b] = [1, 2];
+    VarDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: var [a, b] = [1, 2];
     ConstDestructuringArray(Vec<DestructuringElement>, Expr),                            // const [a, b] = [1, 2];
     LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                       // object destructuring: let {a, b} = {a: 1, b: 2};
+    VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                       // object destructuring: var {a, b} = {a: 1, b: 2};
     ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                     // const {a, b} = {a: 1, b: 2};
     Class(String, Option<crate::core::Expr>, Vec<ClassMember>),                          // name, extends, members
     Assign(String, Expr),                                                                // variable assignment
@@ -91,8 +93,10 @@ impl std::fmt::Debug for StatementKind {
                 write!(f, "FunctionDeclaration({}, {:?}, {:?}, {})", name, params, body, is_gen)
             }
             StatementKind::LetDestructuringArray(pattern, expr) => write!(f, "LetDestructuringArray({:?}, {:?})", pattern, expr),
+            StatementKind::VarDestructuringArray(pattern, expr) => write!(f, "VarDestructuringArray({:?}, {:?})", pattern, expr),
             StatementKind::ConstDestructuringArray(pattern, expr) => write!(f, "ConstDestructuringArray({:?}, {:?})", pattern, expr),
             StatementKind::LetDestructuringObject(pattern, expr) => write!(f, "LetDestructuringObject({:?}, {:?})", pattern, expr),
+            StatementKind::VarDestructuringObject(pattern, expr) => write!(f, "VarDestructuringObject({:?}, {:?})", pattern, expr),
             StatementKind::ConstDestructuringObject(pattern, expr) => write!(f, "ConstDestructuringObject({:?}, {:?})", pattern, expr),
             StatementKind::Class(name, extends, members) => write!(f, "Class({name}, {extends:?}, {members:?})"),
             StatementKind::Assign(var, expr) => write!(f, "Assign({}, {:?})", var, expr),
@@ -1142,6 +1146,8 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
             let expr = parse_expression(tokens)?;
             if is_const {
                 return Ok(StatementKind::ConstDestructuringArray(pattern, expr));
+            } else if is_var {
+                return Ok(StatementKind::VarDestructuringArray(pattern, expr));
             } else {
                 return Ok(StatementKind::LetDestructuringArray(pattern, expr));
             }
@@ -1163,6 +1169,8 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
             let expr = parse_expression(tokens)?;
             if is_const {
                 return Ok(StatementKind::ConstDestructuringObject(pattern, expr));
+            } else if is_var {
+                return Ok(StatementKind::VarDestructuringObject(pattern, expr));
             } else {
                 return Ok(StatementKind::LetDestructuringObject(pattern, expr));
             }

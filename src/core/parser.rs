@@ -1658,7 +1658,6 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result<
             tokens.remove(0); // consume ]
             break;
         } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-            tokens.remove(0); // consume ,
             pattern.push(DestructuringElement::Empty);
         } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBracket) {
             // Nested array destructuring

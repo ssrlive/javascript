@@ -869,6 +869,31 @@ fn evaluate_stmt_const_destructuring_object(
     Ok(None)
 }
 
+fn evaluate_stmt_var_destructuring_array(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::DestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    perform_array_destructuring_var(env, pattern, &val)?;
+    *last_value = val;
+    Ok(None)
+}
+
+fn evaluate_stmt_var_destructuring_object(
+    env: &JSObjectDataPtr,
+    pattern: &[crate::core::ObjectDestructuringElement],
+    expr: &Expr,
+    last_value: &mut Value,
+) -> Result<Option<ControlFlow>, JSError> {
+    let val = evaluate_expr(env, expr)?;
+    ensure_object_destructuring_target(&val, pattern, expr)?;
+    perform_object_destructuring_var(env, pattern, &val)?;
+    *last_value = val;
+    Ok(None)
+}
+
 fn evaluate_stmt_for_of_destructuring_object(
     env: &JSObjectDataPtr,
     pattern: &[crate::core::ObjectDestructuringElement],
@@ -975,11 +1000,17 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 StatementKind::LetDestructuringArray(pattern, expr) => {
                     evaluate_stmt_let_destructuring_array(env, pattern, expr, &mut last_value)
                 }
+                StatementKind::VarDestructuringArray(pattern, expr) => {
+                    evaluate_stmt_var_destructuring_array(env, pattern, expr, &mut last_value)
+                }
                 StatementKind::ConstDestructuringArray(pattern, expr) => {
                     evaluate_stmt_const_destructuring_array(env, pattern, expr, &mut last_value)
                 }
                 StatementKind::LetDestructuringObject(pattern, expr) => {
                     evaluate_stmt_let_destructuring_object(env, pattern, expr, &mut last_value)
+                }
+                StatementKind::VarDestructuringObject(pattern, expr) => {
+                    evaluate_stmt_var_destructuring_object(env, pattern, expr, &mut last_value)
                 }
                 StatementKind::ConstDestructuringObject(pattern, expr) => {
                     evaluate_stmt_const_destructuring_object(env, pattern, expr, &mut last_value)
@@ -1909,6 +1940,158 @@ fn perform_object_destructuring(
                         } else {
                             env_set(env, var, rest_value)?;
                         }
+                    }
+                }
+            }
+        }
+        _ => {
+            return Err(raise_eval_error!("Cannot destructure non-object value"));
+        }
+    }
+    Ok(())
+}
+
+fn perform_array_destructuring_var(env: &JSObjectDataPtr, pattern: &[DestructuringElement], value: &Value) -> Result<(), JSError> {
+    match value {
+        Value::Object(arr) if is_array(arr) => {
+            let mut index = 0;
+            let mut rest_index = None;
+            let mut rest_var = None;
+
+            for element in pattern {
+                match element {
+                    DestructuringElement::Variable(var, default_opt) => {
+                        let key = PropertyKey::String(index.to_string());
+                        let val = if let Some(val_rc) = obj_get_key_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        // Apply default initializer when the value is undefined
+                        let assigned_val = if matches!(val, Value::Undefined) {
+                            if let Some(def_expr) = default_opt {
+                                evaluate_expr(env, def_expr)?
+                            } else {
+                                Value::Undefined
+                            }
+                        } else {
+                            val
+                        };
+                        env_set_var(env, var, assigned_val)?;
+                        index += 1;
+                    }
+                    DestructuringElement::NestedArray(nested_pattern) => {
+                        let key = PropertyKey::String(index.to_string());
+                        let val = if let Some(val_rc) = obj_get_key_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        perform_array_destructuring_var(env, nested_pattern, &val)?;
+                        index += 1;
+                    }
+                    DestructuringElement::NestedObject(nested_pattern) => {
+                        let key = PropertyKey::String(index.to_string());
+                        let val = if let Some(val_rc) = obj_get_key_value(arr, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        perform_object_destructuring_var(env, nested_pattern, &val)?;
+                        index += 1;
+                    }
+                    DestructuringElement::Rest(var) => {
+                        rest_index = Some(index);
+                        rest_var = Some(var.clone());
+                        break;
+                    }
+                    DestructuringElement::Empty => {
+                        index += 1;
+                    }
+                }
+            }
+
+            // Handle rest element
+            if let (Some(rest_start), Some(var)) = (rest_index, rest_var) {
+                let mut rest_elements: Vec<Value> = Vec::new();
+                let len = get_array_length(arr).unwrap_or(0);
+                for i in rest_start..len {
+                    let key = PropertyKey::String(i.to_string());
+                    if let Some(val_rc) = obj_get_key_value(arr, &key)? {
+                        rest_elements.push(val_rc.borrow().clone());
+                    }
+                }
+                let rest_obj = new_js_object_data();
+                let mut rest_index = 0;
+                for elem in rest_elements {
+                    obj_set_key_value(&rest_obj, &rest_index.to_string().into(), elem)?;
+                    rest_index += 1;
+                }
+                set_array_length(&rest_obj, rest_index)?;
+                let rest_value = Value::Object(rest_obj);
+                env_set_var(env, &var, rest_value)?;
+            }
+        }
+        _ => {
+            return Err(raise_eval_error!("Cannot destructure non-array value"));
+        }
+    }
+    Ok(())
+}
+
+fn perform_object_destructuring_var(env: &JSObjectDataPtr, pattern: &[ObjectDestructuringElement], value: &Value) -> Result<(), JSError> {
+    match value {
+        Value::Object(obj) => {
+            for element in pattern {
+                match element {
+                    ObjectDestructuringElement::Property { key, value: dest } => {
+                        let key = PropertyKey::String(key.clone());
+                        let prop_val = if let Some(val_rc) = obj_get_key_value(obj, &key)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+                        match dest {
+                            DestructuringElement::Variable(var, default_opt) => {
+                                let final_val = if matches!(prop_val, Value::Undefined) {
+                                    if let Some(def_expr) = default_opt {
+                                        evaluate_expr(env, def_expr)?
+                                    } else {
+                                        Value::Undefined
+                                    }
+                                } else {
+                                    prop_val
+                                };
+                                env_set_var(env, var, final_val)?;
+                            }
+                            DestructuringElement::NestedArray(nested_pattern) => {
+                                perform_array_destructuring_var(env, nested_pattern, &prop_val)?;
+                            }
+                            DestructuringElement::NestedObject(nested_pattern) => {
+                                perform_object_destructuring_var(env, nested_pattern, &prop_val)?;
+                            }
+                            _ => {
+                                return Err(raise_eval_error!("Invalid destructuring pattern"));
+                            }
+                        }
+                    }
+                    ObjectDestructuringElement::Rest(var) => {
+                        let rest_obj = new_js_object_data();
+                        let mut assigned_keys = std::collections::HashSet::new();
+                        for element in pattern {
+                            if let ObjectDestructuringElement::Property { key, .. } = element {
+                                assigned_keys.insert(key.clone());
+                            }
+                        }
+                        for (key, val_rc) in obj.borrow().properties.iter() {
+                            if let PropertyKey::String(k) = key
+                                && !assigned_keys.contains(k)
+                            {
+                                rest_obj.borrow_mut().insert(key.clone(), val_rc.clone());
+                            }
+                        }
+                        let rest_value = Value::Object(rest_obj);
+                        env_set_var(env, var, rest_value)?;
                     }
                 }
             }
@@ -6309,6 +6492,12 @@ fn collect_var_names(statements: &[Statement], names: &mut std::collections::Has
         match &stmt.kind {
             StatementKind::Var(name, _) => {
                 names.insert(name.clone());
+            }
+            StatementKind::VarDestructuringArray(pattern, _) => {
+                collect_names_from_array_pattern(pattern, names);
+            }
+            StatementKind::VarDestructuringObject(pattern, _) => {
+                collect_names_from_object_pattern(pattern, names);
             }
             StatementKind::If(_, then_body, else_body) => {
                 collect_var_names(then_body, names);

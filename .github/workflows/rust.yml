@@ -60,6 +60,7 @@ jobs:
         cargo run --example js -- js-scripts/regex_test_2.js
         cargo run --example js -- js-scripts/regex_test_3.js
         cargo run --example js -- js-scripts/regex_test.js
+        cargo run --example js -- js-scripts/set_time_out_tests.js
         cargo run --example js -- js-scripts/sharedarraybuffer_test.js
         cargo run --example js -- js-scripts/simple_dataview_test.js
         cargo run --example js -- js-scripts/template_string_tests_2.js

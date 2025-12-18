@@ -1429,8 +1429,8 @@ fn statement_try_catch(
 
                 let catch_value = create_catch_value(env, &err)?;
                 env_set(&catch_env, catch_param, catch_value)?;
-                match evaluate_statements_with_context(&catch_env, catch_body)? {
-                    ControlFlow::Normal(val) => {
+                match evaluate_statements_with_context(&catch_env, catch_body) {
+                    Ok(ControlFlow::Normal(val)) => {
                         *last_value = val;
                         if let Some(finally_body) = finally_body_opt {
                             execute_finally(env, finally_body, None, last_value)
@@ -1438,11 +1438,25 @@ fn statement_try_catch(
                             Ok(None)
                         }
                     }
-                    cf => {
+                    Ok(cf) => {
                         if let Some(finally_body) = finally_body_opt {
                             execute_finally(env, finally_body, Some(cf), last_value)
                         } else {
                             Ok(Some(cf))
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(finally_body) = finally_body_opt {
+                            let block_env = new_js_object_data();
+                            block_env.borrow_mut().prototype = Some(env.clone());
+                            block_env.borrow_mut().is_function_scope = false;
+                            match evaluate_statements_with_context(&block_env, finally_body) {
+                                Ok(ControlFlow::Normal(_)) => Err(e),
+                                Ok(other) => Ok(Some(other)),
+                                Err(finally_e) => Err(finally_e),
+                            }
+                        } else {
+                            Err(e)
                         }
                     }
                 }

@@ -66,6 +66,7 @@ jobs:
         cargo run --example js -- js-scripts/test_array_join_split.js
         cargo run --example js -- js-scripts/test_dataview_js.js
         cargo run --example js -- js-scripts/test_typedarray_constructors.js
+        cargo run --example js -- js-scripts/try_catch_finally.js
         cargo run --example js -- js-scripts/typeof_n_callable.js
 
     - name: Abort on error

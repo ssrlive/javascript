@@ -205,6 +205,15 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
 
                         // Execute constructor body
                         evaluate_statements(&func_env, body)?;
+
+                        // Retrieve 'this' from env, as it might have been changed by super()
+                        if let Some(final_this) = obj_get_key_value(&func_env, &"this".into())? {
+                            if let Value::Object(final_instance) = &*final_this.borrow() {
+                                // Ensure instance.constructor points back to the constructor object
+                                obj_set_key_value(final_instance, &"constructor".into(), Value::Object(class_obj.clone()))?;
+                                return Ok(Value::Object(final_instance.clone()));
+                            }
+                        }
                         break;
                     }
                 }
@@ -709,6 +718,42 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                         return evaluate_statements(&func_env, body);
                     }
                 }
+                return Ok(Value::Undefined);
+            } else {
+                // Fallback: Handle built-in constructors (like Error, Array, etc.)
+                // parent_proto_obj is the prototype of the parent class (e.g. Error.prototype).
+                // We need the constructor itself (e.g. Error).
+
+                let parent_ctor_val = if let Some(ctor) = obj_get_key_value(parent_proto_obj, &"constructor".into())? {
+                    ctor.borrow().clone()
+                } else {
+                    Value::Undefined
+                };
+
+                if let Value::Object(parent_ctor_obj) = parent_ctor_val {
+                    let parent_ctor_expr = Expr::Value(Value::Object(parent_ctor_obj));
+                    let new_instance_val = evaluate_new(env, &parent_ctor_expr, args)?;
+
+                    if let Value::Object(new_instance) = new_instance_val {
+                        // Fix up the prototype chain:
+                        // The new instance has Parent.prototype.
+                        // We want it to have the original instance's prototype (CurrentClass.prototype).
+                        if let Some(original_proto) = obj_get_key_value(instance, &"__proto__".into())? {
+                            obj_set_key_value(&new_instance, &"__proto__".into(), original_proto.borrow().clone())?;
+                            if let Value::Object(proto_obj) = &*original_proto.borrow() {
+                                new_instance.borrow_mut().prototype = Some(proto_obj.clone());
+                            }
+                        }
+
+                        // Update 'this' in the current environment to point to the new instance
+                        obj_set_key_value(env, &"this".into(), Value::Object(new_instance.clone()))?;
+
+                        return Ok(Value::Object(new_instance));
+                    }
+                    return Ok(new_instance_val);
+                }
+                // If we can't find a constructor, we can't call super().
+                return Err(raise_type_error!("super() failed: parent constructor not found"));
             }
         }
     }

@@ -7,7 +7,6 @@ use crate::{
         to_primitive, value_to_string, values_equal,
     },
     js_array::{get_array_length, is_array, set_array_length},
-    js_assert::make_assert_object,
     js_class::{
         call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
         evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
@@ -2773,10 +2772,6 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
 
     if name == "console" {
         let v = Value::Object(make_console_object()?);
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
-        Ok(v)
-    } else if name == "assert" {
-        let v = Value::Object(make_assert_object()?);
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "testIntl" {
@@ -5835,108 +5830,6 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                         _ => {}
                     }
                 }
-                // Support calling the `assert` testing object as a function as well
-                // Many tests use `assert(condition, message)` in addition to
-                // `assert.sameValue(...)`. If this object appears to be the
-                // assert object (it exposes `sameValue`), treat a direct call
-                // as an assertion: evaluate the first argument for truthiness
-                // and throw an EvaluationError with the given message when
-                // the assertion fails.
-                if get_own_property(&obj_map, &"sameValue".into()).is_some() {
-                    if args.is_empty() {
-                        return Err(raise_eval_error!("assert requires at least one argument"));
-                    }
-                    // Evaluate the condition
-                    let cond_val = evaluate_expr(env, &args[0])?;
-                    if is_truthy(&cond_val) {
-                        return Ok(Value::Undefined);
-                    }
-
-                    // Build a message from the optional second argument
-                    let message = if args.len() > 1 {
-                        let msg_val = evaluate_expr(env, &args[1])?;
-                        match msg_val {
-                            Value::String(s) => String::from_utf16_lossy(&s),
-                            other => value_to_string(&other),
-                        }
-                    } else {
-                        "Assertion failed".to_string()
-                    };
-
-                    // Extra diagnostic: when the assertion is of the form
-                    // isCanonicalizedStructurallyValidLanguageTag(x) and it
-                    // failed, log canonicalize/isStructurallyValid results for x.
-                    if let Some(first_arg_expr) = args.first() {
-                        use crate::core::Expr;
-                        if let Expr::Call(func_expr, call_args) = first_arg_expr
-                            && let Expr::Var(fname, _, _) = &**func_expr
-                            && fname == "isCanonicalizedStructurallyValidLanguageTag"
-                            && call_args.len() == 1
-                        {
-                            // Try to evaluate the inner argument to a string
-                            if let Ok(val) = evaluate_expr(env, &call_args[0])
-                                && let Value::String(s_utf16) = val
-                            {
-                                let s = String::from_utf16_lossy(&s_utf16);
-                                // Evaluate canonicalizeLanguageTag(s)
-                                let canon_call = Expr::Call(
-                                    Box::new(Expr::Var("canonicalizeLanguageTag".to_string(), None, None)),
-                                    vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
-                                );
-                                match evaluate_expr(env, &canon_call) {
-                                    Ok(Value::String(canon_utf16)) => {
-                                        let canon = String::from_utf16_lossy(&canon_utf16);
-                                        log::error!("Assertion diagnostic: input='{}' canonicalizeLanguageTag='{}'", s, canon);
-                                        // Raw UTF-16 buffer dump for deeper diagnostics
-                                        log::error!(
-                                            "Assertion diagnostic RAW UTF-16: input_vec={:?} canonical_vec={:?}",
-                                            s_utf16,
-                                            canon_utf16
-                                        );
-                                        // Also print hex codepoints for easier visual diff
-                                        let input_hex: Vec<String> = s_utf16.iter().map(|u| format!("0x{:04x}", u)).collect();
-                                        let canon_hex: Vec<String> = canon_utf16.iter().map(|u| format!("0x{:04x}", u)).collect();
-                                        log::error!(
-                                            "Assertion diagnostic RAW HEX: input_hex={} canonical_hex={}",
-                                            input_hex.join(","),
-                                            canon_hex.join(",")
-                                        );
-                                    }
-                                    Ok(other) => {
-                                        log::error!("Assertion diagnostic: canonicalizeLanguageTag returned non-string: {:?}", other);
-                                    }
-                                    Err(e) => {
-                                        log::error!("Assertion diagnostic: canonicalizeLanguageTag error: {:?}", e);
-                                    }
-                                }
-
-                                // Evaluate isStructurallyValidLanguageTag(s)
-                                let struct_call = Expr::Call(
-                                    Box::new(Expr::Var("isStructurallyValidLanguageTag".to_string(), None, None)),
-                                    vec![Expr::StringLit(crate::unicode::utf8_to_utf16(&s))],
-                                );
-                                match evaluate_expr(env, &struct_call) {
-                                    Ok(Value::Boolean(b)) => {
-                                        log::error!("Assertion diagnostic: isStructurallyValidLanguageTag('{}') = {}", s, b);
-                                    }
-                                    Ok(other) => {
-                                        log::error!(
-                                            "Assertion diagnostic: isStructurallyValidLanguageTag returned non-boolean: {:?}",
-                                            other
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!("Assertion diagnostic: isStructurallyValidLanguageTag error: {:?}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    return Err(raise_eval_error!(format!("{message}")));
-                }
-                // If this object is the global `Object` constructor (stored in the
-                // root environment as an object), route the call to the
                 // Object constructor handler. This ensures that calling the
                 // constructor object (e.g. `Object(123n)`) behaves like a
                 // constructor instead of attempting to call the object as a

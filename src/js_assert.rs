@@ -1,18 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 
-/// Create the assert object with testing functions
-pub fn make_assert_object() -> Result<JSObjectDataPtr, JSError> {
-    let assert_obj = new_js_object_data();
-    obj_set_key_value(&assert_obj, &"sameValue".into(), Value::Function("assert.sameValue".to_string()))?;
-    obj_set_key_value(
-        &assert_obj,
-        &"notSameValue".into(),
-        Value::Function("assert.notSameValue".to_string()),
-    )?;
-    Ok(assert_obj)
-}
-
 /// Handle assert object method calls
 pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {

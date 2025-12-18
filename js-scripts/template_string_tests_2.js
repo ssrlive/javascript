@@ -37,14 +37,17 @@ ${todos}
 
 console.log(res);
 
+// Normalize newlines to \n for cross-platform compatibility
+const normalize = (str) => str.replace(/\r\n/g, "\n");
+
 assert(
-  res === `我需要做：
+  normalize(res) === normalize(`我需要做：
 - 学习 JavaScript
 - 学习 Web API
 - 构建网站
 - 利润！
 当前进度为：{"css":10,"html":50,"javascript":20}
-`,
+`),
   "模板字面量标签功能错误"
 );
 

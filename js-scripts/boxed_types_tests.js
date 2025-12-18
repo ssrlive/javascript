@@ -49,3 +49,38 @@ try {
     console.log("Symbol test skipped or failed setup:", e);
     throw e;
 }
+
+
+{
+    // Simple assertion function defined inside a block but it can be used in the whole file
+    function assert(condition, message) {
+        if (!condition) {
+            throw new Error(message || "Assertion failed");
+        }
+    }
+}
+
+/*
+下面这些值求值为 false（也叫做假值）：
+    false
+    undefined
+    null
+    0
+    NaN
+    空字符串（""）
+*/
+
+assert(!false, "false should be falsy");
+assert(!undefined, "undefined should be falsy");
+assert(!null, "null should be falsy");
+assert(!0, "0 should be falsy");
+assert(!NaN, "NaN should be falsy");
+assert(!"", "empty string should be falsy");
+
+assert(!!true, "true should be truthy");
+assert(!!{}, "non-empty object should be truthy");
+assert(!![], "non-empty array should be truthy");
+assert(!!42, "non-zero number should be truthy");
+assert(!!"hello", "non-empty string should be truthy");
+
+console.log("All assertions passed!");

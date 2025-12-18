@@ -899,17 +899,30 @@ fn string_ends_with_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> R
 }
 
 fn string_includes_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    if args.len() == 1 {
-        let search_val = evaluate_expr(env, &args[0])?;
-        if let Value::String(search) = search_val {
-            let includes = utf16_find(s, &search).is_some();
-            Ok(Value::Boolean(includes))
-        } else {
-            Err(raise_eval_error!("includes: argument must be a string"))
-        }
-    } else {
-        Err(raise_eval_error!(format!("includes method expects 1 argument, got {}", args.len())))
+    if args.is_empty() {
+        return Err(raise_eval_error!("includes method expects at least 1 argument"));
     }
+    let search_val = evaluate_expr(env, &args[0])?;
+    let search_str = to_primitive(&search_val, "string", env)?;
+    let search = if let Value::String(s) = search_str {
+        s
+    } else {
+        return Err(raise_eval_error!("includes: argument must be a string"));
+    };
+
+    let position = if args.len() > 1 {
+        let pos_val = evaluate_expr(env, &args[1])?;
+        if let Value::Number(n) = pos_val { n as usize } else { 0 }
+    } else {
+        0
+    };
+
+    if position >= s.len() {
+        return Ok(Value::Boolean(false));
+    }
+
+    let includes = utf16_find(&s[position..], &search).is_some();
+    Ok(Value::Boolean(includes))
 }
 
 fn string_repeat_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

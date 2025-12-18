@@ -109,6 +109,8 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "testWithIntlConstructors" => test_with_intl_constructors(args, env),
         "setTimeout" => crate::js_promise::handle_set_timeout(args, env),
         "clearTimeout" => crate::js_promise::handle_clear_timeout(args, env),
+        "setInterval" => crate::js_promise::handle_set_interval(args, env),
+        "clearInterval" => crate::js_promise::handle_clear_interval(args, env),
 
         // Basic Function.prototype.call support so builtin methods can be invoked
         // via `.call` (e.g., Object.prototype.hasOwnProperty.call(obj, 'key'))

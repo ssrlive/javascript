@@ -42,6 +42,7 @@ use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 /// Asynchronous task types for the promise event loop.
 ///
@@ -61,7 +62,20 @@ enum Task {
         callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
     },
     /// Task to execute a setTimeout callback
-    Timeout { id: usize, callback: Value, args: Vec<Value> },
+    Timeout {
+        id: usize,
+        callback: Value,
+        args: Vec<Value>,
+        target_time: Instant,
+    },
+    /// Task to execute a setInterval callback
+    Interval {
+        id: usize,
+        callback: Value,
+        args: Vec<Value>,
+        target_time: Instant,
+        interval: Duration,
+    },
     /// Task to check for unhandled rejection after potential handler attachment
     UnhandledCheck { promise: Rc<RefCell<JSPromise>>, reason: Value },
     // Previously this variant represented a queued unhandled-check task.
@@ -160,8 +174,234 @@ fn queue_task(task: Task) {
 /// tasks in FIFO order, executing promise callbacks asynchronously.
 ///
 /// # Returns
-/// * `Result<(), JSError>` - Success or evaluation error during callback execution
-pub fn run_event_loop() -> Result<(), JSError> {
+/// Result of polling the event loop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PollResult {
+    /// A task was executed.
+    Executed,
+    /// No tasks were ready, but there are pending timers.
+    /// The caller should wait for the specified duration.
+    Wait(Duration),
+    /// The queue is empty and there are no pending timers.
+    Empty,
+}
+
+/// Process a single task.
+fn process_task(task: Task) -> Result<(), JSError> {
+    match task {
+        Task::Resolution { promise, callbacks } => {
+            log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
+            for (callback, new_promise) in callbacks {
+                // Call the callback and resolve the new promise with the result
+                if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                    let func_env = new_js_object_data();
+                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                    if !params.is_empty() {
+                        let name = &params[0].0;
+                        env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                    }
+                    match evaluate_statements(&func_env, &body) {
+                        Ok(result) => {
+                            log::trace!("Callback executed successfully, resolving promise");
+                            resolve_promise(&new_promise, result);
+                        }
+                        Err(e) => {
+                            log::trace!("Callback execution failed: {:?}", e);
+                            // If the callback threw a JS value, propagate that value
+                            // as the rejection reason. Otherwise fall back to stringifying
+                            // the error for the rejection reason.
+                            if let crate::error::JSErrorKind::Throw { value } = e.kind() {
+                                reject_promise(&new_promise, value.clone());
+                            } else {
+                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                            }
+                        }
+                    }
+                } else {
+                    // If callback is not a function, resolve with undefined
+                    log::trace!("Callback is not a function, resolving with undefined");
+                    resolve_promise(&new_promise, Value::Undefined);
+                }
+            }
+        }
+        Task::Rejection { promise, callbacks } => {
+            log::trace!("Processing Rejection task with {} callbacks", callbacks.len());
+            for (callback, new_promise) in callbacks {
+                // Call the callback and resolve the new promise with the result
+                if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                    let func_env = new_js_object_data();
+                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                    if !params.is_empty() {
+                        let name = &params[0].0;
+                        env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
+                    }
+                    match evaluate_statements(&func_env, &body) {
+                        Ok(result) => {
+                            resolve_promise(&new_promise, result);
+                        }
+                        Err(e) => {
+                            if let crate::error::JSErrorKind::Throw { value } = e.kind() {
+                                reject_promise(&new_promise, value.clone());
+                            } else {
+                                reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                            }
+                        }
+                    }
+                } else {
+                    // If callback is not a function, resolve with undefined
+                    resolve_promise(&new_promise, Value::Undefined);
+                }
+            }
+        }
+        Task::Timeout { id: _, callback, args, .. } => {
+            log::trace!("Processing Timeout task");
+            // Call the callback with the provided args
+            if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                let func_env = new_js_object_data();
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
+
+                // If callback is a standard function (Value::Object), bind `this` to global.
+                // Arrow functions (Value::Closure) should inherit `this` from captured_env.
+                if let Value::Object(_) = callback {
+                    let mut global_env = captured_env.clone();
+                    while let Some(proto) = global_env.clone().borrow().prototype.clone() {
+                        global_env = proto;
+                    }
+                    env_set(&func_env, "this", Value::Object(global_env))?;
+                }
+
+                for (i, arg) in args.iter().enumerate() {
+                    if i < params.len() {
+                        let name = &params[i].0;
+                        env_set(&func_env, name.as_str(), arg.clone())?;
+                    }
+                }
+                let _ = evaluate_statements(&func_env, &body)?;
+            }
+        }
+        Task::Interval {
+            id,
+            callback,
+            args,
+            interval,
+            ..
+        } => {
+            log::trace!("Processing Interval task");
+            // Call the callback with the provided args
+            if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                let func_env = new_js_object_data();
+                func_env.borrow_mut().prototype = Some(captured_env.clone());
+
+                // If callback is a standard function (Value::Object), bind `this` to global.
+                // Arrow functions (Value::Closure) should inherit `this` from captured_env.
+                if let Value::Object(_) = callback {
+                    let mut global_env = captured_env.clone();
+                    while let Some(proto) = global_env.clone().borrow().prototype.clone() {
+                        global_env = proto;
+                    }
+                    env_set(&func_env, "this", Value::Object(global_env))?;
+                }
+
+                for (i, arg) in args.iter().enumerate() {
+                    if i < params.len() {
+                        let name = &params[i].0;
+                        env_set(&func_env, name.as_str(), arg.clone())?;
+                    }
+                }
+                let _ = evaluate_statements(&func_env, &body)?;
+
+                // Re-queue the interval task
+                queue_task(Task::Interval {
+                    id,
+                    callback: callback.clone(),
+                    args: args.clone(),
+                    target_time: Instant::now() + interval,
+                    interval,
+                });
+            }
+        }
+        Task::UnhandledCheck { promise, reason } => {
+            log::trace!("Processing UnhandledCheck task for promise ptr={:p}", Rc::as_ptr(&promise));
+            // Check if the promise still has no rejection handlers
+            let promise_borrow = promise.borrow();
+            if promise_borrow.on_rejected.is_empty() {
+                // Still no handlers: record insertion tick for later processing
+                let insertion_tick = CURRENT_TICK.load(Ordering::SeqCst);
+                log::trace!(
+                    "UnhandledCheck: adding to PENDING_UNHANDLED_CHECKS for promise ptr={:p} insertion_tick={}",
+                    Rc::as_ptr(&promise),
+                    insertion_tick
+                );
+                PENDING_UNHANDLED_CHECKS.with(|pending| {
+                    pending.borrow_mut().push((promise.clone(), reason, insertion_tick));
+                });
+            } else {
+                log::trace!("UnhandledCheck: handlers attached, skipping unhandled recording");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Poll the event loop for a single task.
+///
+/// This function checks the task queue and executes the first ready task.
+/// If no tasks are ready but timers are pending, it returns `PollResult::Wait`.
+/// If the queue is empty, it returns `PollResult::Empty`.
+pub fn poll_event_loop() -> Result<PollResult, JSError> {
+    let now = Instant::now();
+    let (task, should_sleep) = GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        if queue_borrow.is_empty() {
+            return (None, None);
+        }
+
+        let mut ready_index = None;
+        let mut min_wait_time: Option<Duration> = None;
+
+        for (i, task) in queue_borrow.iter().enumerate() {
+            match task {
+                Task::Timeout { target_time, .. } | Task::Interval { target_time, .. } => {
+                    if *target_time <= now {
+                        ready_index = Some(i);
+                        break;
+                    } else {
+                        let wait = *target_time - now;
+                        min_wait_time = Some(min_wait_time.map_or(wait, |m| m.min(wait)));
+                    }
+                }
+                _ => {
+                    ready_index = Some(i);
+                    break;
+                }
+            }
+        }
+
+        if let Some(index) = ready_index {
+            (Some(queue_borrow.remove(index)), None)
+        } else {
+            (None, min_wait_time)
+        }
+    });
+
+    if let Some(task) = task {
+        process_task(task)?;
+        Ok(PollResult::Executed)
+    } else if let Some(wait) = should_sleep {
+        Ok(PollResult::Wait(wait))
+    } else {
+        Ok(PollResult::Empty)
+    }
+}
+
+/// Execute the event loop to process all queued asynchronous tasks.
+///
+/// This function simulates JavaScript's event loop for promises. It processes
+/// tasks in FIFO order, executing promise callbacks asynchronously.
+///
+/// # Returns
+/// * `Result<PollResult, JSError>` - The result of the poll operation
+pub fn run_event_loop() -> Result<PollResult, JSError> {
     log::trace!("run_event_loop called");
     // Mark that we're entering an event-loop run (may be nested).
     let nesting_before = RUN_LOOP_NESTING.fetch_add(1, Ordering::SeqCst);
@@ -170,128 +410,10 @@ pub fn run_event_loop() -> Result<(), JSError> {
         nesting_before,
         nesting_before + 1
     );
-    let mut processed_any = false;
-    loop {
-        let task = GLOBAL_TASK_QUEUE.with(|queue| {
-            let mut queue_borrow = queue.borrow_mut();
-            log::trace!("Task queue size before pop: {}", queue_borrow.len());
-            if queue_borrow.is_empty() {
-                None
-            } else {
-                Some(queue_borrow.remove(0))
-            }
-        });
-        match task {
-            // `UnhandledCheck` tasks removed: pending unhandled checks are
-            // processed once when leaving the outermost `run_event_loop`.
-            Some(Task::Resolution { promise, callbacks }) => {
-                processed_any = true;
-                log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
-                for (callback, new_promise) in callbacks {
-                    // Call the callback and resolve the new promise with the result
-                    if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        if !params.is_empty() {
-                            let name = &params[0].0;
-                            env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
-                        }
-                        match evaluate_statements(&func_env, &body) {
-                            Ok(result) => {
-                                log::trace!("Callback executed successfully, resolving promise");
-                                resolve_promise(&new_promise, result);
-                            }
-                            Err(e) => {
-                                log::trace!("Callback execution failed: {:?}", e);
-                                // If the callback threw a JS value, propagate that value
-                                // as the rejection reason. Otherwise fall back to stringifying
-                                // the error for the rejection reason.
-                                if let crate::error::JSErrorKind::Throw { value } = e.kind() {
-                                    reject_promise(&new_promise, value.clone());
-                                } else {
-                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
-                                }
-                            }
-                        }
-                    } else {
-                        // If callback is not a function, resolve with undefined
-                        log::trace!("Callback is not a function, resolving with undefined");
-                        resolve_promise(&new_promise, Value::Undefined);
-                    }
-                }
-            }
-            Some(Task::Rejection { promise, callbacks }) => {
-                log::trace!("Processing Rejection task with {} callbacks", callbacks.len());
-                for (callback, new_promise) in callbacks {
-                    // Call the callback and resolve the new promise with the result
-                    if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        if !params.is_empty() {
-                            let name = &params[0].0;
-                            env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
-                        }
-                        match evaluate_statements(&func_env, &body) {
-                            Ok(result) => {
-                                resolve_promise(&new_promise, result);
-                            }
-                            Err(e) => {
-                                if let crate::error::JSErrorKind::Throw { value } = e.kind() {
-                                    reject_promise(&new_promise, value.clone());
-                                } else {
-                                    reject_promise(&new_promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
-                                }
-                            }
-                        }
-                    } else {
-                        // If callback is not a function, resolve with undefined
-                        resolve_promise(&new_promise, Value::Undefined);
-                    }
-                }
-            }
-            Some(Task::Timeout { id: _, callback, args }) => {
-                processed_any = true;
-                log::trace!("Processing Timeout task");
-                // Call the callback with the provided args
-                if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    for (i, arg) in args.iter().enumerate() {
-                        if i < params.len() {
-                            let name = &params[i].0;
-                            env_set(&func_env, name.as_str(), arg.clone())?;
-                        }
-                    }
-                    let _ = evaluate_statements(&func_env, &body)?;
-                }
-            }
-            Some(Task::UnhandledCheck { promise, reason }) => {
-                processed_any = true;
-                log::trace!("Processing UnhandledCheck task for promise ptr={:p}", Rc::as_ptr(&promise));
-                // Check if the promise still has no rejection handlers
-                let promise_borrow = promise.borrow();
-                if promise_borrow.on_rejected.is_empty() {
-                    // Still no handlers: record insertion tick for later processing
-                    let insertion_tick = CURRENT_TICK.load(Ordering::SeqCst);
-                    log::trace!(
-                        "UnhandledCheck: adding to PENDING_UNHANDLED_CHECKS for promise ptr={:p} insertion_tick={}",
-                        Rc::as_ptr(&promise),
-                        insertion_tick
-                    );
-                    PENDING_UNHANDLED_CHECKS.with(|pending| {
-                        pending.borrow_mut().push((promise.clone(), reason, insertion_tick));
-                    });
-                } else {
-                    log::trace!("UnhandledCheck: handlers attached, skipping unhandled recording");
-                }
-            }
 
-            None => {
-                log::trace!("No more tasks, exiting event loop");
-                break;
-            }
-        }
-    }
+    let result = poll_event_loop()?;
+    let processed_any = matches!(result, PollResult::Executed);
+
     // If this was the outermost run and we didn't process any tasks, process
     // any pending unhandled checks. Only counting down on idle outermost
     // ticks prevents consuming the grace window while work is actively
@@ -359,7 +481,7 @@ pub fn run_event_loop() -> Result<(), JSError> {
 
     // Leaving this run: decrement nesting
     RUN_LOOP_NESTING.fetch_sub(1, Ordering::SeqCst);
-    Ok(())
+    Ok(result)
 }
 
 /// Represents the current state of a JavaScript Promise.
@@ -2217,6 +2339,14 @@ pub fn handle_set_timeout(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value,
     }
 
     let callback = evaluate_expr(env, &args[0])?;
+    let delay = if args.len() > 1 {
+        match evaluate_expr(env, &args[1])? {
+            Value::Number(n) => n.max(0.0) as u64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
     let mut timeout_args = Vec::new();
 
     // Additional arguments to pass to the callback
@@ -2237,6 +2367,7 @@ pub fn handle_set_timeout(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value,
         id,
         callback,
         args: timeout_args,
+        target_time: Instant::now() + Duration::from_millis(delay),
     });
 
     // Return the timeout ID
@@ -2269,6 +2400,71 @@ pub fn handle_clear_timeout(args: &[Expr], env: &JSObjectDataPtr) -> Result<Valu
     GLOBAL_TASK_QUEUE.with(|queue| {
         let mut queue_borrow = queue.borrow_mut();
         queue_borrow.retain(|task| !matches!(task, Task::Timeout { id: task_id, .. } if *task_id == id));
+    });
+
+    Ok(Value::Undefined)
+}
+
+/// Handle setInterval function calls.
+pub fn handle_set_interval(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        return Err(raise_eval_error!("setInterval requires at least one argument"));
+    }
+
+    let callback = evaluate_expr(env, &args[0])?;
+    let delay = if args.len() > 1 {
+        match evaluate_expr(env, &args[1])? {
+            Value::Number(n) => n.max(0.0) as u64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let mut interval_args = Vec::new();
+
+    // Additional arguments to pass to the callback
+    for arg in args.iter().skip(2) {
+        interval_args.push(evaluate_expr(env, arg)?);
+    }
+
+    // Generate a unique timeout ID (shared with timeouts)
+    let id = NEXT_TIMEOUT_ID.with(|counter| {
+        let mut id = counter.borrow_mut();
+        let current_id = *id;
+        *id += 1;
+        current_id
+    });
+
+    let interval = Duration::from_millis(delay);
+    // Queue the interval task
+    queue_task(Task::Interval {
+        id,
+        callback,
+        args: interval_args,
+        target_time: Instant::now() + interval,
+        interval,
+    });
+
+    // Return the interval ID
+    Ok(Value::Number(id as f64))
+}
+
+/// Handle clearInterval function calls.
+pub fn handle_clear_interval(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
+
+    let id_val = evaluate_expr(env, &args[0])?;
+    let id = match id_val {
+        Value::Number(n) => n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+
+    // Remove the interval task with the matching ID
+    GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        queue_borrow.retain(|task| !matches!(task, Task::Interval { id: task_id, .. } if *task_id == id));
     });
 
     Ok(Value::Undefined)

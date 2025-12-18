@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::error::JSError;
-use crate::js_promise::{PromiseState, run_event_loop};
+use crate::js_promise::{PollResult, PromiseState, run_event_loop};
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
@@ -33,10 +33,23 @@ thread_local! {
     static WELL_KNOWN_SYMBOLS: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
 
+/// Helper to run the event loop until empty or a condition is met.
+/// This restores the blocking behavior for the CLI/tests.
+pub(crate) fn drain_event_loop() -> Result<(), JSError> {
+    loop {
+        match run_event_loop()? {
+            PollResult::Executed => continue,
+            PollResult::Wait(duration) => std::thread::sleep(duration),
+            PollResult::Empty => break,
+        }
+    }
+    Ok(())
+}
+
 fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise>>) -> Result<Value, JSError> {
     // Run the event loop until the promise is resolved
     loop {
-        run_event_loop()?;
+        drain_event_loop()?;
         let promise_borrow = promise.borrow();
         match &promise_borrow.state {
             PromiseState::Fulfilled(val) => return Ok(val.clone()),
@@ -52,7 +65,7 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                 for _ in 0..EXTRA_ITERATIONS {
                     // If there are already attached handlers, run the loop once
                     // to give them a chance to execute and settle the promise.
-                    run_event_loop()?;
+                    drain_event_loop()?;
                     // If the promise is no longer rejected, we can continue
                     if let PromiseState::Pending | PromiseState::Fulfilled(_) = &promise.borrow().state {
                         break;
@@ -60,7 +73,7 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                     // If the promise has attached rejection handlers, run again
                     // to let queued rejection tasks execute.
                     if !promise.borrow().on_rejected.is_empty() {
-                        run_event_loop()?;
+                        drain_event_loop()?;
                         break;
                     }
                 }
@@ -76,7 +89,7 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                         if crate::js_promise::pending_unhandled_count() == 0 {
                             break;
                         }
-                        run_event_loop()?;
+                        drain_event_loop()?;
                     }
                     // If a recorded unhandled rejection exists, run a small
                     // deterministic final drain (multiple ticks) to let
@@ -87,7 +100,7 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                     if crate::js_promise::peek_unhandled_rejection().is_some() {
                         log::trace!("evaluate_script: peek_unhandled_rejection -> Some; running final drain");
                         for _ in 0..FINAL_DRAIN_ITER {
-                            run_event_loop()?;
+                            drain_event_loop()?;
                             // Wait until there are no pending unhandled checks and
                             // no queued tasks to give the harness a final chance
                             // to register handlers and flush logs.
@@ -100,7 +113,7 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                     }
                     // Run one extra event loop turn to advance the tick once more,
                     // giving late handlers a final chance to attach before consuming.
-                    run_event_loop()?;
+                    drain_event_loop()?;
                     // Only surface the top-level rejected promise as an error if the
                     // promise machinery recorded it as an unhandled rejection. This
                     // prevents prematurely converting a rejected Promise into a
@@ -174,14 +187,14 @@ where
         return run_promise_resolution_loop(promise);
     }
     // Run the event loop to process any queued asynchronous tasks
-    run_event_loop()?;
+    drain_event_loop()?;
     // Give some extra iterations to allow pending unhandled checks to settle
     const EXTRA_UNHANDLED_ITER: usize = 3;
     for _ in 0..EXTRA_UNHANDLED_ITER {
         if crate::js_promise::pending_unhandled_count() == 0 {
             break;
         }
-        run_event_loop()?;
+        drain_event_loop()?;
     }
     // If an unhandled rejection was recorded by the promise machinery, give
     // a deterministic final drain (multiple ticks) to allow late-attached
@@ -190,7 +203,7 @@ where
     const FINAL_DRAIN_ITER: usize = 5;
     if crate::js_promise::peek_unhandled_rejection().is_some() {
         for _ in 0..FINAL_DRAIN_ITER {
-            run_event_loop()?;
+            drain_event_loop()?;
             if crate::js_promise::pending_unhandled_count() == 0 && crate::js_promise::task_queue_len() == 0 {
                 break;
             }
@@ -726,6 +739,18 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     env_borrow.insert(
         PropertyKey::String("clearTimeout".to_string()),
         Rc::new(RefCell::new(Value::Function("clearTimeout".to_string()))),
+    );
+
+    // setInterval function
+    env_borrow.insert(
+        PropertyKey::String("setInterval".to_string()),
+        Rc::new(RefCell::new(Value::Function("setInterval".to_string()))),
+    );
+
+    // clearInterval function
+    env_borrow.insert(
+        PropertyKey::String("clearInterval".to_string()),
+        Rc::new(RefCell::new(Value::Function("clearInterval".to_string()))),
     );
 
     // Global NaN and Infinity properties

@@ -1,10 +1,11 @@
 use crate::{
     JSError,
+    core::drain_event_loop,
     core::{
         JSObjectDataPtr, Value, evaluate_statements, initialize_global_constructors, new_js_object_data, obj_get_key_value,
         parse_statements, tokenize,
     },
-    js_promise::{PromiseState, run_event_loop},
+    js_promise::PromiseState,
 };
 
 /// A small persistent REPL environment wrapper.
@@ -51,7 +52,7 @@ impl Repl {
                 {
                     // Run the event loop until the promise is resolved
                     loop {
-                        run_event_loop()?;
+                        drain_event_loop()?;
                         let promise_borrow = promise.borrow();
                         match &promise_borrow.state {
                             PromiseState::Fulfilled(val) => return Ok(val.clone()),
@@ -68,7 +69,7 @@ impl Repl {
                     }
                 }
                 // Run event loop once to process any queued asynchronous tasks
-                run_event_loop()?;
+                drain_event_loop()?;
                 Ok(v)
             }
             Err(e) => Err(e),

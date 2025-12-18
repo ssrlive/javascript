@@ -175,4 +175,23 @@ mod function_tests {
             _ => panic!("Expected number 42.0, got {:?}", result),
         }
     }
+
+    #[test]
+    fn test_named_function_expression() {
+        let script = r#"
+            // Named Function Expressions (NFE).
+            const factorial = function fac(n) {
+                return n < 2 ? 1 : n * fac(n - 1);
+            };
+
+            console.log(factorial(3));
+
+            factorial(8)
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match result {
+            Ok(Value::Number(n)) => assert_eq!(n, 40320.0), // 8! = 40320
+            _ => panic!("Expected number 40320.0, got {:?}", result),
+        }
+    }
 }

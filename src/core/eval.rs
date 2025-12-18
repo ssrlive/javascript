@@ -2733,8 +2733,21 @@ fn evaluate_function_expression(
     // Create the associated prototype object for instances
     let prototype_obj = new_js_object_data();
 
+    // Determine the environment to capture.
+    // If this is a named function expression, we must create a new environment
+    // that binds the function name to the function object itself, so that
+    // the function can refer to itself recursively.
+    let closure_env = if let Some(n) = &name {
+        let new_env = new_js_object_data();
+        new_env.borrow_mut().prototype = Some(env.clone());
+        obj_set_key_value(&new_env, &n.into(), Value::Object(func_obj.clone()))?;
+        new_env
+    } else {
+        env.clone()
+    };
+
     // Store the closure under an internal key
-    let closure_val = Value::Closure(params.to_vec(), body.to_vec(), env.clone(), None);
+    let closure_val = Value::Closure(params.to_vec(), body.to_vec(), closure_env, None);
     obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
 
     // If this is a named function expression, expose the `name` property

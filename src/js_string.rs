@@ -67,6 +67,7 @@ pub(crate) fn string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
 pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "toString" => string_to_string_method(s, args, env),
+        "valueOf" => string_to_string_method(s, args, env),
         "substring" => string_substring_method(s, args, env),
         "substr" => string_substr_method(s, args, env),
         "slice" => string_slice_method(s, args, env),

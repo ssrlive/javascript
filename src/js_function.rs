@@ -58,8 +58,12 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "BigInt" => crate::js_bigint::bigint_constructor(args, env),
         "Number" => crate::js_number::number_constructor(args, env),
         "Boolean" => boolean_constructor(args, env),
+        "Boolean_toString" => crate::js_class::boolean_prototype_to_string(args, env),
+        "Boolean_valueOf" => crate::js_class::boolean_prototype_value_of(args, env),
         "Date" => handle_date_constructor(args, env),
         "Symbol" => symbol_constructor(args, env),
+        "Symbol_valueOf" => symbol_prototype_value_of(args, env),
+        "Symbol_toString" => symbol_prototype_to_string(args, env),
         "new" => evaluate_new_expression(args, env),
         "eval" => evalute_eval_function(args, env),
         "encodeURI" => encode_uri(args, env),
@@ -599,6 +603,44 @@ fn boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JS
         _ => false,
     };
     Ok(Value::Boolean(bool_val))
+}
+
+fn symbol_prototype_value_of(_args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let this_val = crate::js_class::evaluate_this(env)?;
+    match this_val {
+        Value::Symbol(s) => Ok(Value::Symbol(s)),
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())?
+                && let Value::Symbol(s) = &*val.borrow()
+            {
+                return Ok(Value::Symbol(s.clone()));
+            }
+            Err(raise_type_error!("Symbol.prototype.valueOf requires that 'this' be a Symbol"))
+        }
+        _ => Err(raise_type_error!("Symbol.prototype.valueOf requires that 'this' be a Symbol")),
+    }
+}
+
+fn symbol_prototype_to_string(_args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let this_val = crate::js_class::evaluate_this(env)?;
+    let sym = match this_val {
+        Value::Symbol(s) => s,
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+                if let Value::Symbol(s) = &*val.borrow() {
+                    s.clone()
+                } else {
+                    return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol"));
+                }
+            } else {
+                return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol"));
+            }
+        }
+        _ => return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol")),
+    };
+
+    let desc = sym.description.as_deref().unwrap_or("");
+    Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc))))
 }
 
 fn symbol_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

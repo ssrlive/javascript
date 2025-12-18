@@ -932,6 +932,16 @@ pub(crate) fn handle_object_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             crate::core::set_internal_prototype_from_constructor(&obj, env, "BigInt")?;
             Ok(Value::Object(obj))
         }
+        Value::Symbol(sd) => {
+            // Object(symbol) creates Symbol object
+            let obj = new_js_object_data();
+            obj_set_key_value(&obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
+            obj_set_key_value(&obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
+            obj_set_key_value(&obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
+            // Set internal prototype to Symbol.prototype if available
+            crate::core::set_internal_prototype_from_constructor(&obj, env, "Symbol")?;
+            Ok(Value::Object(obj))
+        }
         _ => {
             // For other types, return empty object
             let obj = new_js_object_data();
@@ -1003,6 +1013,38 @@ pub(crate) fn handle_boolean_constructor(args: &[Expr], env: &JSObjectDataPtr) -
     // Set internal prototype to Boolean.prototype if available
     crate::core::set_internal_prototype_from_constructor(&obj, env, "Boolean")?;
     Ok(Value::Object(obj))
+}
+
+pub(crate) fn boolean_prototype_to_string(_args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let this_val = evaluate_this(env)?;
+    match this_val {
+        Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+                if let Value::Boolean(b) = *val.borrow() {
+                    return Ok(Value::String(utf8_to_utf16(&b.to_string())));
+                }
+            }
+            Err(raise_type_error!("Boolean.prototype.toString requires that 'this' be a Boolean"))
+        }
+        _ => Err(raise_type_error!("Boolean.prototype.toString requires that 'this' be a Boolean")),
+    }
+}
+
+pub(crate) fn boolean_prototype_value_of(_args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let this_val = evaluate_this(env)?;
+    match this_val {
+        Value::Boolean(b) => Ok(Value::Boolean(b)),
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+                if let Value::Boolean(b) = *val.borrow() {
+                    return Ok(Value::Boolean(b));
+                }
+            }
+            Err(raise_type_error!("Boolean.prototype.valueOf requires that 'this' be a Boolean"))
+        }
+        _ => Err(raise_type_error!("Boolean.prototype.valueOf requires that 'this' be a Boolean")),
+    }
 }
 
 /// Handle String constructor calls

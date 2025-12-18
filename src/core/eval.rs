@@ -5233,6 +5233,20 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                         match &*val_rc.borrow() {
                             Value::Number(_) => crate::js_number::handle_number_object_method(&obj_map, method, args, env),
                             Value::BigInt(_) => crate::js_bigint::handle_bigint_object_method(&obj_map, method, args, env),
+                            Value::String(s) => crate::js_string::handle_string_method(s, method, args, env),
+                            Value::Boolean(b) => match method {
+                                "toString" => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                                "valueOf" => Ok(Value::Boolean(*b)),
+                                _ => Err(raise_eval_error!(format!("Boolean.prototype.{method} is not implemented"))),
+                            },
+                            Value::Symbol(s) => match method {
+                                "toString" => Ok(Value::String(utf8_to_utf16(&format!(
+                                    "Symbol({})",
+                                    s.description.as_deref().unwrap_or("")
+                                )))),
+                                "valueOf" => Ok(Value::Symbol(s.clone())),
+                                _ => Err(raise_eval_error!(format!("Symbol.prototype.{method} is not implemented"))),
+                            },
                             _ => Err(raise_eval_error!("Invalid __value__ for boxed object")),
                         }
                     } else {
@@ -6041,6 +6055,20 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                         match &*val_rc.borrow() {
                             Value::Number(_) => crate::js_number::handle_number_object_method(&obj_map, method_name, args, env),
                             Value::BigInt(_) => crate::js_bigint::handle_bigint_object_method(&obj_map, method_name, args, env),
+                            Value::String(s) => crate::js_string::handle_string_method(s, method_name, args, env),
+                            Value::Boolean(b) => match method_name.as_str() {
+                                "toString" => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                                "valueOf" => Ok(Value::Boolean(*b)),
+                                _ => Err(raise_eval_error!(format!("Boolean.prototype.{method_name} is not implemented"))),
+                            },
+                            Value::Symbol(s) => match method_name.as_str() {
+                                "toString" => Ok(Value::String(utf8_to_utf16(&format!(
+                                    "Symbol({})",
+                                    s.description.as_deref().unwrap_or("")
+                                )))),
+                                "valueOf" => Ok(Value::Symbol(s.clone())),
+                                _ => Err(raise_eval_error!(format!("Symbol.prototype.{method_name} is not implemented"))),
+                            },
                             _ => Err(raise_eval_error!("Invalid __value__ for boxed object")),
                         }
                     } else {

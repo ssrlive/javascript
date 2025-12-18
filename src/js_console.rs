@@ -12,7 +12,7 @@ pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
 fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JSError> {
     match val {
         Value::Number(n) => Ok(n.to_string()),
-        Value::BigInt(h) => Ok(h.to_string()),
+        Value::BigInt(h) => Ok(format!("{h}n")),
         Value::String(s) => Ok(String::from_utf16_lossy(s)),
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Undefined => Ok("undefined".to_string()),
@@ -54,6 +54,19 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                 s.push(']');
                 Ok(s)
             } else {
+                // Check for boxed primitive
+                if let Some(val_rc) = obj_get_key_value(obj, &"__value__".into())? {
+                    let val = val_rc.borrow();
+                    match *val {
+                        Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
+                        Value::Number(n) => return Ok(format!("[Number: {}]", n)),
+                        Value::String(ref s) => return Ok(format!("[String: '{}']", String::from_utf16_lossy(s))),
+                        Value::BigInt(ref b) => return Ok(format!("[BigInt: {}n]", b)),
+                        Value::Symbol(ref s) => return Ok(format!("[Symbol: Symbol({})]", s.description.as_deref().unwrap_or(""))),
+                        _ => {}
+                    }
+                }
+
                 let mut s = String::from("{");
                 let mut first = true;
                 for (key, val_rc) in obj.borrow().properties.iter() {
@@ -116,7 +129,7 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
             Ok(s)
         }
         Value::Promise(_) => Ok("[object Promise]".to_string()),
-        Value::Symbol(_) => Ok("[object Symbol]".to_string()),
+        Value::Symbol(s) => Ok(format!("Symbol({})", s.description.as_deref().unwrap_or(""))),
         Value::Map(_) => Ok("[object Map]".to_string()),
         Value::Set(_) => Ok("[object Set]".to_string()),
         Value::WeakMap(_) => Ok("[object WeakMap]".to_string()),

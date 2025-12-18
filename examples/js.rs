@@ -12,10 +12,24 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
-    let cli = <Cli as clap::Parser>::parse();
-
     // Initialize logger (controlled by RUST_LOG)
     env_logger::init();
+
+    #[cfg(windows)]
+    {
+        // Spawn a thread with larger stack size (8MB) to avoid stack overflow on Windows
+        // where the default stack size is 1MB.
+        let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+        let handler = builder.spawn(|| run_main())?;
+        handler.join().unwrap()
+    }
+
+    #[cfg(unix)]
+    run_main()
+}
+
+fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let cli = <Cli as clap::Parser>::parse();
 
     let script_content = if let Some(script) = cli.eval {
         script

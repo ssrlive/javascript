@@ -52,6 +52,7 @@ jobs:
         cargo run --example js -- js-scripts/date_utc_n_get_time_zone_offset.js
         cargo run --example js -- js-scripts/function_object.js
         cargo run --example js -- js-scripts/globel_assert.js
+        cargo run --example js -- js-scripts/loops_n_iteration.js
         cargo run --example js -- js-scripts/object_super_method_stack_overflow.js
         cargo run --example js -- js-scripts/object_teats.js
         cargo run --example js -- js-scripts/parameter_rest.js

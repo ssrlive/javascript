@@ -114,16 +114,16 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
         match arg_val {
             Value::Number(n) => {
                 if n.is_nan() {
-                    return Err(raise_type_error!("Invalid array length"));
+                    return Err(raise_range_error!("Invalid array length"));
                 }
                 if n.fract() != 0.0 {
-                    return Err(raise_type_error!("Array length must be an integer"));
+                    return Err(raise_range_error!("Invalid array length"));
                 }
                 if n < 0.0 {
-                    return Err(raise_type_error!("Array length cannot be negative"));
+                    return Err(raise_range_error!("Invalid array length"));
                 }
                 if n > u32::MAX as f64 {
-                    return Err(raise_type_error!("Array length too large"));
+                    return Err(raise_range_error!("Invalid array length"));
                 }
                 // Array(length) - create array with specified length
                 let array_obj = create_array(env)?;

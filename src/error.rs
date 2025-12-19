@@ -18,6 +18,9 @@ pub enum JSErrorKind {
     #[error("Type error: {message}")]
     TypeError { message: String },
 
+    #[error("Range error: {message}")]
+    RangeError { message: String },
+
     #[error("Syntax error: {message}")]
     SyntaxError { message: String },
 
@@ -98,6 +101,7 @@ impl JSError {
                 format!("ReferenceError: '{}' is not defined", name)
             }
             JSErrorKind::TypeError { message } => format!("TypeError: {}", message),
+            JSErrorKind::RangeError { message } => format!("RangeError: {}", message),
             JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
             JSErrorKind::Throw { value } => {
@@ -265,6 +269,14 @@ macro_rules! raise_variable_not_found_error {
 macro_rules! raise_type_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::TypeError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_range_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::RangeError { message: $msg.to_string() })
     };
 }
 

@@ -1455,6 +1455,7 @@ fn create_catch_value(env: &JSObjectDataPtr, err: &JSError) -> Result<Value, JSE
             Ok(cloned)
         }
         JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", err),
+        JSErrorKind::RangeError { .. } => create_js_error_instance(env, "RangeError", err),
         JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", err),
         JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", err),
         _ => create_js_error_instance(env, "Error", err),

@@ -1,6 +1,6 @@
 [package]
 name = "javascript"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 authors = ["ssrlive"]
 license = "MIT"

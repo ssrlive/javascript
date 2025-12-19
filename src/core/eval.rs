@@ -3039,9 +3039,93 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
         let v = Value::Function("testWithIntlConstructors".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
+    } else if name == "Date" {
+        let ctor = super::ensure_constructor_object(env, "Date", "__is_date_constructor")?;
+        if let Some(proto_val) = obj_get_key_value(&ctor, &"prototype".into())? {
+            if let Value::Object(proto) = &*proto_val.borrow() {
+                let methods = [
+                    "toString",
+                    "valueOf",
+                    "getTime",
+                    "getFullYear",
+                    "getYear",
+                    "getMonth",
+                    "getDate",
+                    "getDay",
+                    "getHours",
+                    "getMinutes",
+                    "getSeconds",
+                    "getMilliseconds",
+                    "getTimezoneOffset",
+                    "setFullYear",
+                    "setMonth",
+                    "setDate",
+                    "setHours",
+                    "setMinutes",
+                    "setSeconds",
+                    "setMilliseconds",
+                    "setTime",
+                    "toISOString",
+                    "toUTCString",
+                    "toGMTString",
+                    "toDateString",
+                    "toTimeString",
+                    "toLocaleDateString",
+                    "toLocaleTimeString",
+                    "toLocaleString",
+                    "toJSON",
+                ];
+                for m in methods.iter() {
+                    if get_own_property(proto, &m.to_string().into()).is_none() {
+                        obj_set_key_value(proto, &m.to_string().into(), Value::Function(format!("Date.prototype.{}", m)))?;
+                    }
+                }
+            }
+        }
+        let v = Value::Object(ctor);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "String" {
         // Ensure a singleton String constructor object exists in the global env
         let ctor = super::ensure_constructor_object(env, "String", "__is_string_constructor")?;
+
+        // Populate String.prototype with methods
+        if let Some(proto_val) = obj_get_key_value(&ctor, &"prototype".into())? {
+            if let Value::Object(proto) = &*proto_val.borrow() {
+                let methods = [
+                    "toString",
+                    "valueOf",
+                    "substring",
+                    "substr",
+                    "slice",
+                    "toUpperCase",
+                    "toLowerCase",
+                    "indexOf",
+                    "lastIndexOf",
+                    "replace",
+                    "split",
+                    "match",
+                    "charAt",
+                    "charCodeAt",
+                    "trim",
+                    "trimEnd",
+                    "trimStart",
+                    "startsWith",
+                    "endsWith",
+                    "includes",
+                    "repeat",
+                    "concat",
+                    "padStart",
+                    "padEnd",
+                ];
+                for m in methods.iter() {
+                    if get_own_property(proto, &m.to_string().into()).is_none() {
+                        obj_set_key_value(proto, &m.to_string().into(), Value::Function(format!("String.prototype.{}", m)))?;
+                    }
+                }
+            }
+        }
+
         let v = Value::Object(ctor);
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
@@ -3138,10 +3222,6 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
         // Ensure a singleton Boolean constructor object exists in the global env
         let ctor = super::ensure_constructor_object(env, "Boolean", "__is_boolean_constructor")?;
         let v = Value::Object(ctor);
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
-        Ok(v)
-    } else if name == "Date" {
-        let v = Value::Function("Date".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "RegExp" {
@@ -4024,7 +4104,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
     };
     let type_str = match &val {
         Value::Undefined => "undefined",
-        Value::Null => "null",
+        Value::Null => "object",
         Value::Boolean(_) => "boolean",
         Value::Number(_) => "number",
         Value::String(_) => "string",
@@ -4252,10 +4332,12 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                     Ok(Value::String(result))
                 }
                 // Mixing BigInt and Number for `+` should raise a TypeError
-                (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
-                    Err(raise_type_error!("Cannot mix BigInt and other types"))
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(raise_type_error!("Cannot mix BigInt and other types")),
+                (l_val, r_val) => {
+                    let ln = to_num(&l_val)?;
+                    let rn = to_num(&r_val)?;
+                    Ok(Value::Number(ln + rn))
                 }
-                _ => Err(raise_eval_error!("error")),
             }
         }
         BinaryOp::Sub => {
@@ -5062,7 +5144,20 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
     match obj_val {
         Value::String(s) if prop == "length" => Ok(Value::Number(utf16_len(&s) as f64)),
         // Accessing other properties on string primitives should return undefined
-        Value::String(_) => Ok(Value::Undefined),
+        Value::String(_) => {
+            // Force initialization of String constructor if not present
+            let string_ctor_val = evaluate_expr(env, &Expr::Var("String".to_string(), None, None))?;
+            if let Value::Object(ctor_obj) = string_ctor_val {
+                if let Some(proto) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
+                    if let Value::Object(proto_obj) = &*proto.borrow() {
+                        if let Some(val) = obj_get_key_value(proto_obj, &prop.into())? {
+                            return Ok(val.borrow().clone());
+                        }
+                    }
+                }
+            }
+            Ok(Value::Undefined)
+        }
         // Special cases for wrapped Map and Set objects
         Value::Object(obj_map) if prop == "size" && get_own_property(&obj_map, &"__map__".into()).is_some() => {
             if let Some(map_val) = get_own_property(&obj_map, &"__map__".into()) {
@@ -5379,6 +5474,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             return crate::js_array::handle_array_static_method(method_name, args, env);
         }
 
+        // Special case for Date static methods
+        if let Expr::Var(var_name, _, _) = &**obj_expr
+            && var_name == "Date"
+        {
+            return crate::js_date::handle_date_static_method(method_name, args, env);
+        }
+
         // Special case for Symbol static methods
         if let Expr::Var(var_name, _, _) = &**obj_expr
             && var_name == "Symbol"
@@ -5599,6 +5701,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 }
                                 if func_name == "BigInt_valueOf" {
                                     return crate::js_bigint::handle_bigint_object_method(&obj_map, "valueOf", args, env);
+                                }
+                                if func_name.starts_with("Date.prototype.") {
+                                    let method_name = func_name.strip_prefix("Date.prototype.").unwrap();
+                                    return crate::js_date::handle_date_method(&obj_map, method_name, args, env);
                                 }
                                 if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
                                     match func_name.as_str() {

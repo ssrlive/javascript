@@ -118,36 +118,55 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
         return None;
     }
 
-    let year = components[0] as i32;
-    let month = if components.len() > 1 { components[1] as u32 } else { 0 };
-    let day = if components.len() > 2 { components[2] as u32 } else { 1 };
-    let hour = if components.len() > 3 { components[3] as u32 } else { 0 };
-    let minute = if components.len() > 4 { components[4] as u32 } else { 0 };
-    let second = if components.len() > 5 { components[5] as u32 } else { 0 };
-    let millisecond = if components.len() > 6 { components[6] as u32 } else { 0 };
+    let year_val = components[0];
+    let month_val = if components.len() > 1 { components[1] } else { 0.0 };
+    let day_val = if components.len() > 2 { components[2] } else { 1.0 };
+    let hour_val = if components.len() > 3 { components[3] } else { 0.0 };
+    let minute_val = if components.len() > 4 { components[4] } else { 0.0 };
+    let second_val = if components.len() > 5 { components[5] } else { 0.0 };
+    let millisecond_val = if components.len() > 6 { components[6] } else { 0.0 };
 
-    // JavaScript Date months are 0-based, chrono months are 1-based
-    let chrono_month = month + 1;
-
-    // Handle year conversion (JavaScript allows 2-digit years)
-    let full_year = if (0..100).contains(&year) {
-        if year < 50 { 2000 + year } else { 1900 + year }
-    } else {
-        year
-    };
-
-    // Validate ranges
-    if !(1..=12).contains(&chrono_month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 59 || millisecond > 999 {
-        return None;
+    // Handle 2-digit years (0-99) -> 1900-1999
+    let mut year = year_val as i32;
+    if (0..=99).contains(&year) {
+        year += 1900;
     }
 
-    // Try to create the date
-    if let Some(date) = NaiveDate::from_ymd_opt(full_year, chrono_month, day)
-        && let Some(time) = NaiveTime::from_hms_milli_opt(hour, minute, second, millisecond)
-    {
-        let datetime = NaiveDateTime::new(date, time);
-        let utc_dt = Utc.from_utc_datetime(&datetime);
-        return Some(utc_dt.timestamp_millis() as f64);
+    // Normalize month/year
+    let mut year_int = year as i64;
+
+    // Adjust year based on month overflow
+    year_int += (month_val / 12.0).floor() as i64;
+
+    let mut month_rem = (month_val % 12.0) as i64;
+    if month_rem < 0 {
+        month_rem += 12;
+    }
+
+    let chrono_month = (month_rem + 1) as u32;
+    let chrono_year = year_int as i32;
+
+    // Create base date at 1st of the month
+    if let Some(base_date) = NaiveDate::from_ymd_opt(chrono_year, chrono_month, 1) {
+        // Calculate total offset in milliseconds
+        // Add (day - 1) days
+        let day_offset = (day_val - 1.0) * 86_400_000.0;
+
+        let time_ms = hour_val * 3_600_000.0 + minute_val * 60_000.0 + second_val * 1_000.0 + millisecond_val;
+
+        let total_offset_ms = day_offset + time_ms;
+
+        // Convert base_date to DateTime<Utc> at midnight
+        if let Some(base_dt) = base_date.and_hms_opt(0, 0, 0) {
+            let base_dt_utc = Utc.from_utc_datetime(&base_dt);
+
+            // Add milliseconds
+            let duration = chrono::Duration::milliseconds(total_offset_ms as i64);
+
+            if let Some(final_dt) = base_dt_utc.checked_add_signed(duration) {
+                return Some(final_dt.timestamp_millis() as f64);
+            }
+        }
     }
 
     None
@@ -205,7 +224,9 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     let date_obj = new_js_object_data();
     set_time_stamp_value(&date_obj, timestamp)?;
 
-    // Add toString method
+    // Set prototype
+    crate::core::set_internal_prototype_from_constructor(&date_obj, env, "Date")?;
+
     Ok(Value::Object(date_obj))
 }
 

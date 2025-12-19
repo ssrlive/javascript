@@ -12,6 +12,30 @@ pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     math_obj.borrow_mut().set_non_configurable("E".into());
     math_obj.borrow_mut().set_non_writable("E".into());
 
+    obj_set_key_value(&math_obj, &"LN2".into(), Value::Number(std::f64::consts::LN_2))?;
+    math_obj.borrow_mut().set_non_configurable("LN2".into());
+    math_obj.borrow_mut().set_non_writable("LN2".into());
+
+    obj_set_key_value(&math_obj, &"LN10".into(), Value::Number(std::f64::consts::LN_10))?;
+    math_obj.borrow_mut().set_non_configurable("LN10".into());
+    math_obj.borrow_mut().set_non_writable("LN10".into());
+
+    obj_set_key_value(&math_obj, &"LOG2E".into(), Value::Number(std::f64::consts::LOG2_E))?;
+    math_obj.borrow_mut().set_non_configurable("LOG2E".into());
+    math_obj.borrow_mut().set_non_writable("LOG2E".into());
+
+    obj_set_key_value(&math_obj, &"LOG10E".into(), Value::Number(std::f64::consts::LOG10_E))?;
+    math_obj.borrow_mut().set_non_configurable("LOG10E".into());
+    math_obj.borrow_mut().set_non_writable("LOG10E".into());
+
+    obj_set_key_value(&math_obj, &"SQRT1_2".into(), Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
+    math_obj.borrow_mut().set_non_configurable("SQRT1_2".into());
+    math_obj.borrow_mut().set_non_writable("SQRT1_2".into());
+
+    obj_set_key_value(&math_obj, &"SQRT2".into(), Value::Number(std::f64::consts::SQRT_2))?;
+    math_obj.borrow_mut().set_non_configurable("SQRT2".into());
+    math_obj.borrow_mut().set_non_writable("SQRT2".into());
+
     obj_set_key_value(&math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;
     obj_set_key_value(&math_obj, &"ceil".into(), Value::Function("Math.ceil".to_string()))?;
     obj_set_key_value(&math_obj, &"round".into(), Value::Function("Math.round".to_string()))?;

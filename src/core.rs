@@ -606,11 +606,11 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
         Rc::new(RefCell::new(Value::Function("Array".to_string()))),
     );
 
-    // Date constructor (already handled by js_date module)
-    env_borrow.insert(
-        PropertyKey::String("Date".to_string()),
-        Rc::new(RefCell::new(Value::Function("Date".to_string()))),
-    );
+    // Date constructor - handled by evaluate_var
+    // env_borrow.insert(
+    //     PropertyKey::String("Date".to_string()),
+    //     Rc::new(RefCell::new(Value::Function("Date".to_string()))),
+    // );
 
     // RegExp constructor (already handled by js_regexp module)
     env_borrow.insert(
@@ -761,6 +761,32 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     env_borrow.insert(
         PropertyKey::String("Infinity".to_string()),
         Rc::new(RefCell::new(Value::Number(f64::INFINITY))),
+    );
+
+    // Global functions
+    let global_funcs = [
+        "eval",
+        "isNaN",
+        "isFinite",
+        "parseInt",
+        "parseFloat",
+        "encodeURI",
+        "encodeURIComponent",
+        "decodeURI",
+        "decodeURIComponent",
+    ];
+    for func_name in global_funcs.iter() {
+        env_borrow.insert(
+            PropertyKey::String(func_name.to_string()),
+            Rc::new(RefCell::new(Value::Function(func_name.to_string()))),
+        );
+    }
+
+    // Math object
+    let math_obj = crate::js_math::make_math_object()?;
+    env_borrow.insert(
+        PropertyKey::String("Math".to_string()),
+        Rc::new(RefCell::new(Value::Object(math_obj))),
     );
 
     drop(env_borrow);

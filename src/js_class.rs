@@ -235,6 +235,9 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             if get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
                 return handle_boolean_constructor(args, env);
             }
+            if get_own_property(&class_obj, &"__is_date_constructor".into()).is_some() {
+                return crate::js_date::handle_date_constructor(args, env);
+            }
             if get_own_property(&class_obj, &"__is_function_constructor".into()).is_some() {
                 return crate::js_function::handle_global_function("Function", args, env);
             }

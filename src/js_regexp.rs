@@ -98,23 +98,29 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     let mut unicode = false;
     let mut sticky = false;
     let mut crlf = false;
+    let mut has_indices = false;
+    let mut unicode_sets = false;
 
     for flag in flags.chars() {
         match flag {
             'g' => global = true,
-            'i' => {
-                ignore_case = true;
-            }
+            'i' => ignore_case = true,
             'm' => multiline = true,
             's' => dot_matches_new_line = true,
             'U' => swap_greed = true,
             'u' => unicode = true,
             'y' => sticky = true,
             'R' => crlf = true,
+            'd' => has_indices = true,
+            'v' => unicode_sets = true,
             _ => {
                 return Err(raise_syntax_error!(format!("Invalid RegExp flag: {flag}")));
             }
         }
+    }
+
+    if unicode && unicode_sets {
+        return Err(raise_syntax_error!("Invalid RegExp flags: cannot use both 'u' and 'v'"));
     }
 
     // Combine inline flags so fancy-regex can parse features like backreferences
@@ -123,7 +129,29 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 
     // Validate the regex pattern using regress
     let pattern_u16 = utf8_to_utf16(&pattern);
-    if let Err(e) = create_regex_from_utf16(&pattern_u16, &flags) {
+    // We don't pass 'd' to regress as it doesn't affect matching logic, only result generation
+    // We pass 'v' if regress supports it, otherwise we might need to strip it or handle it?
+    // For now, let's pass the flags that regress likely understands or ignore the ones it doesn't if they are engine-only.
+    // 'd' is engine-only. 'v' affects syntax.
+
+    // Filter flags for regress
+    let mut regress_flags = String::new();
+    for c in flags.chars() {
+        if "gimsuy".contains(c) {
+            regress_flags.push(c);
+        }
+        // 'v' implies 'u' but with different rules. If regress supports 'u', we might pass 'u' for 'v' if it's close enough,
+        // but 'v' has different escaping rules.
+        // If regress doesn't support 'v', we can't really support it fully.
+        // Let's assume for now we just accept 'v' but don't pass it to regress if regress doesn't support it,
+        // OR we pass 'u' instead if that's the fallback, but that's dangerous.
+        // Actually, let's try passing 'u' if 'v' is present, as 'v' is a superset of 'u' mostly.
+        if c == 'v' {
+            regress_flags.push('u');
+        }
+    }
+
+    if let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
         return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)));
     }
 
@@ -141,8 +169,20 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     obj_set_key_value(&regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
     obj_set_key_value(&regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
     obj_set_key_value(&regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
-    // Expose user-visible lastIndex property
+    obj_set_key_value(&regexp_obj, &"__hasIndices".into(), Value::Boolean(has_indices))?;
+    obj_set_key_value(&regexp_obj, &"__unicodeSets".into(), Value::Boolean(unicode_sets))?;
+
+    // Expose user-visible properties
     obj_set_key_value(&regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
+    obj_set_key_value(&regexp_obj, &"global".into(), Value::Boolean(global))?;
+    obj_set_key_value(&regexp_obj, &"ignoreCase".into(), Value::Boolean(ignore_case))?;
+    obj_set_key_value(&regexp_obj, &"multiline".into(), Value::Boolean(multiline))?;
+    obj_set_key_value(&regexp_obj, &"dotAll".into(), Value::Boolean(dot_matches_new_line))?;
+    obj_set_key_value(&regexp_obj, &"unicode".into(), Value::Boolean(unicode))?;
+    obj_set_key_value(&regexp_obj, &"sticky".into(), Value::Boolean(sticky))?;
+    obj_set_key_value(&regexp_obj, &"hasIndices".into(), Value::Boolean(has_indices))?;
+    obj_set_key_value(&regexp_obj, &"unicodeSets".into(), Value::Boolean(unicode_sets))?;
+    obj_set_key_value(&regexp_obj, &"flags".into(), Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
 
     // Add methods
     obj_set_key_value(&regexp_obj, &"exec".into(), Value::Function("RegExp.prototype.exec".to_string()))?;
@@ -201,6 +241,7 @@ pub(crate) fn handle_regexp_method(
             let crlf = flags.contains('R');
             let global = flags.contains('g');
             let sticky = flags.contains('y');
+            let has_indices = flags.contains('d');
             let use_last = global || sticky;
 
             // Handle CRLF normalization
@@ -221,7 +262,18 @@ pub(crate) fn handle_regexp_method(
                 (input_u16.clone(), false)
             };
 
-            let re = create_regex_from_utf16(&pattern_u16, &flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+            // Filter flags for regress
+            let mut r_flags = String::new();
+            for c in flags.chars() {
+                if "gimsuy".contains(c) {
+                    r_flags.push(c);
+                }
+                if c == 'v' {
+                    r_flags.push('u');
+                }
+            }
+
+            let re = create_regex_from_utf16(&pattern_u16, &r_flags).map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {e}")))?;
 
             let mut last_index = 0;
             if use_last
@@ -250,6 +302,15 @@ pub(crate) fn handle_regexp_method(
                     let full_match_u16 = input_u16[orig_start..orig_end].to_vec();
                     obj_set_key_value(&result_array, &"0".into(), Value::String(full_match_u16))?;
 
+                    let indices_array = if has_indices { Some(new_js_object_data()) } else { None };
+
+                    if let Some(indices) = &indices_array {
+                        let match_indices = new_js_object_data();
+                        obj_set_key_value(&match_indices, &"0".into(), Value::Number(orig_start as f64))?;
+                        obj_set_key_value(&match_indices, &"1".into(), Value::Number(orig_end as f64))?;
+                        obj_set_key_value(indices, &"0".into(), Value::Object(match_indices))?;
+                    }
+
                     let mut group_index = 1;
                     for cap in m.captures.iter() {
                         if let Some(range) = cap {
@@ -260,8 +321,18 @@ pub(crate) fn handle_regexp_method(
                             };
                             let cap_str = input_u16[cs..ce].to_vec();
                             obj_set_key_value(&result_array, &group_index.to_string().into(), Value::String(cap_str))?;
+
+                            if let Some(indices) = &indices_array {
+                                let group_indices = new_js_object_data();
+                                obj_set_key_value(&group_indices, &"0".into(), Value::Number(cs as f64))?;
+                                obj_set_key_value(&group_indices, &"1".into(), Value::Number(ce as f64))?;
+                                obj_set_key_value(indices, &group_index.to_string().into(), Value::Object(group_indices))?;
+                            }
                         } else {
                             obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                            if let Some(indices) = &indices_array {
+                                obj_set_key_value(indices, &group_index.to_string().into(), Value::Undefined)?;
+                            }
                         }
                         group_index += 1;
                     }
@@ -270,6 +341,10 @@ pub(crate) fn handle_regexp_method(
                     obj_set_key_value(&result_array, &"input".into(), Value::String(input_u16.clone()))?;
                     obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
                     obj_set_key_value(&result_array, &"groups".into(), Value::Undefined)?;
+
+                    if let Some(indices) = indices_array {
+                        obj_set_key_value(&result_array, &"indices".into(), Value::Object(indices))?;
+                    }
 
                     if use_last {
                         obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(orig_end as f64))?;

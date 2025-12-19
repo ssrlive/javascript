@@ -98,6 +98,7 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
         "toLocaleUpperCase" => string_to_locale_uppercase(s, args, env),
         "normalize" => string_normalize_method(s, args, env),
         "toWellFormed" => string_to_well_formed_method(s, args, env),
+        "replaceAll" => string_replace_all_method(s, args, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}"))), // method not found
     }
 }
@@ -532,21 +533,8 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                 let mut start = 0usize;
                 while parts.len() < limit {
                     if let Some(pos) = utf16_find(&s[start..], &sep) {
-                        if parts.len() == limit - 1 {
-                            if pos == 0 {
-                                parts.push(vec![]);
-                            } else {
-                                parts.push(utf16_slice(s, start, utf16_len(s)));
-                            }
-                            break;
-                        }
-                        if pos == 0 {
-                            parts.push(vec![]);
-                            start += utf16_len(&sep);
-                        } else {
-                            parts.push(utf16_slice(s, start, start + pos));
-                            start += pos + utf16_len(&sep);
-                        }
+                        parts.push(utf16_slice(s, start, start + pos));
+                        start += pos + utf16_len(&sep);
                     } else {
                         parts.push(utf16_slice(s, start, utf16_len(s)));
                         break;
@@ -585,7 +573,7 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
             let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
                 .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
 
-            let mut parts: Vec<Vec<u16>> = Vec::new();
+            let mut parts: Vec<Value> = Vec::new();
             let mut start = 0usize;
             let mut offset = 0usize;
 
@@ -599,29 +587,30 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                         let match_start = m.range.start;
                         let match_end = m.range.end;
 
-                        // If match is empty and at the same position as start, we need to advance
                         if match_start == match_end && match_start == start {
                             if offset < s.len() {
                                 offset += 1;
                                 continue;
                             } else {
-                                // End of string matched as empty?
-                                // If we are at end, and match is empty, we might have one last part?
-                                // JS split behavior is complex.
-                                // If we match empty at end, we split?
-                                // "ab".split(/$/) -> ["ab", ""]
-                                // "ab".split(/./) -> ["", "", ""]
-
-                                // If we match at end (empty), we push s[start..match_start] (which is empty if start==match_start)
-                                // and then update start.
-
-                                // But here `match_start == start`. So we push empty string.
-                                parts.push(Vec::new());
+                                parts.push(Value::String(Vec::new()));
                                 break;
                             }
                         }
 
-                        parts.push(s[start..match_start].to_vec());
+                        parts.push(Value::String(s[start..match_start].to_vec()));
+
+                        // Capturing groups
+                        for cap in m.captures.iter() {
+                            if let Some(range) = cap {
+                                parts.push(Value::String(s[range.start..range.end].to_vec()));
+                            } else {
+                                parts.push(Value::Undefined);
+                            }
+                            if parts.len() >= limit {
+                                break;
+                            }
+                        }
+
                         start = match_end;
                         offset = match_end;
 
@@ -630,7 +619,7 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                         }
                     }
                     None => {
-                        parts.push(s[start..].to_vec());
+                        parts.push(Value::String(s[start..].to_vec()));
                         break;
                     }
                 }
@@ -647,13 +636,11 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                 }
             }
             for (i, part) in parts.into_iter().enumerate() {
-                obj_set_key_value(&arr, &i.to_string().into(), Value::String(part))?;
+                obj_set_key_value(&arr, &i.to_string().into(), part)?;
             }
             let len = arr.borrow().properties.len();
             set_array_length(&arr, len)?;
             Ok(Value::Object(arr))
-            // All paths above return a constructed array result.
-            // This code path should be unreachable because both branches returned.
         } else {
             Err(raise_eval_error!("split: argument must be a string, RegExp, or undefined"))
         }
@@ -1311,4 +1298,166 @@ fn make_array_from_values(env: &JSObjectDataPtr, values: Vec<Value>) -> Result<V
     }
     obj_set_key_value(&arr, &"length".into(), Value::Number(len as f64))?;
     Ok(Value::Object(arr))
+}
+
+fn string_replace_all_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if args.len() == 2 {
+        let search_val = evaluate_expr(env, &args[0])?;
+        let replace_val = evaluate_expr(env, &args[1])?;
+
+        if let Value::Object(obj_map) = search_val {
+            if is_regex_object(&obj_map) {
+                // get flags
+                let flags = match get_own_property(&obj_map, &"__flags".into()) {
+                    Some(val) => match &*val.borrow() {
+                        Value::String(s) => utf16_to_utf8(s),
+                        _ => "".to_string(),
+                    },
+                    None => "".to_string(),
+                };
+                if !flags.contains('g') {
+                    return Err(raise_type_error!(
+                        "String.prototype.replaceAll called with a non-global RegExp argument"
+                    ));
+                }
+
+                // Extract pattern
+                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
+
+                let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
+                    .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
+
+                if let Value::String(repl_u16) = replace_val {
+                    let repl = utf16_to_utf8(&repl_u16);
+                    let mut out: Vec<u16> = Vec::new();
+                    let mut last_pos = 0usize;
+
+                    // helper to expand replacement tokens
+                    fn expand_replacement(
+                        repl: &str,
+                        matched: &[u16],
+                        captures: &[Option<Vec<u16>>],
+                        before: &[u16],
+                        after: &[u16],
+                    ) -> Vec<u16> {
+                        let mut out = String::new();
+                        let mut chars = repl.chars().peekable();
+                        while let Some(ch) = chars.next() {
+                            if ch == '$' {
+                                if let Some(&next) = chars.peek() {
+                                    match next {
+                                        '&' => {
+                                            chars.next();
+                                            out.push_str(&utf16_to_utf8(matched));
+                                        }
+                                        '`' => {
+                                            chars.next();
+                                            out.push_str(&utf16_to_utf8(before));
+                                        }
+                                        '\'' => {
+                                            chars.next();
+                                            out.push_str(&utf16_to_utf8(after));
+                                        }
+                                        '$' => {
+                                            chars.next();
+                                            out.push('$');
+                                        }
+                                        '0'..='9' => {
+                                            let mut num_str = String::new();
+                                            num_str.push(next);
+                                            chars.next();
+                                            while let Some(&digit @ '0'..='9') = chars.peek() {
+                                                num_str.push(digit);
+                                                chars.next();
+                                            }
+                                            if let Ok(n) = num_str.parse::<usize>() {
+                                                if n > 0 && n <= captures.len() {
+                                                    if let Some(ref cap) = captures[n - 1] {
+                                                        out.push_str(&utf16_to_utf8(cap));
+                                                    }
+                                                } else {
+                                                    out.push('$');
+                                                    out.push_str(&num_str);
+                                                }
+                                            }
+                                        }
+                                        _ => {
+                                            out.push('$');
+                                        }
+                                    }
+                                } else {
+                                    out.push('$');
+                                }
+                            } else {
+                                out.push(ch);
+                            }
+                        }
+                        utf8_to_utf16(&out)
+                    }
+
+                    let mut offset = 0usize;
+                    while let Some(m) = re.find_from_utf16(s, offset).next() {
+                        let start = m.range.start;
+                        let end = m.range.end;
+
+                        let before = &s[..start];
+                        let after = &s[end..];
+                        let matched = &s[start..end];
+
+                        let mut captures = Vec::new();
+                        for cap in m.captures.iter() {
+                            if let Some(range) = cap {
+                                captures.push(Some(s[range.start..range.end].to_vec()));
+                            } else {
+                                captures.push(None);
+                            }
+                        }
+
+                        out.extend_from_slice(&s[last_pos..start]);
+                        out.extend_from_slice(&expand_replacement(&repl, matched, &captures, before, after));
+                        last_pos = end;
+
+                        if start == end {
+                            offset = end + 1;
+                        } else {
+                            offset = end;
+                        }
+                        if offset > s.len() {
+                            break;
+                        }
+                    }
+
+                    out.extend_from_slice(&s[last_pos..]);
+                    Ok(Value::String(out))
+                } else {
+                    Err(raise_eval_error!(
+                        "replaceAll only supports string as replacement argument for RegExp search"
+                    ))
+                }
+            } else {
+                Err(raise_eval_error!("replaceAll: search argument must be a string or RegExp"))
+            }
+        } else if let (Value::String(search), Value::String(replace)) = (search_val, replace_val) {
+            // String replaceAll
+            let mut out = Vec::new();
+            let mut last_pos = 0;
+            let mut start = 0;
+            while let Some(pos) = utf16_find(&s[start..], &search) {
+                let abs_pos = start + pos;
+                out.extend_from_slice(&s[last_pos..abs_pos]);
+                out.extend_from_slice(&replace);
+                last_pos = abs_pos + search.len();
+                start = last_pos;
+            }
+            out.extend_from_slice(&s[last_pos..]);
+            Ok(Value::String(out))
+        } else {
+            Err(raise_eval_error!("replaceAll: both arguments must be strings"))
+        }
+    } else {
+        Err(raise_eval_error!(format!(
+            "replaceAll method expects 2 arguments, got {}",
+            args.len()
+        )))
+    }
 }

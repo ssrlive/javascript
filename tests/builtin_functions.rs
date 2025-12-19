@@ -690,9 +690,9 @@ mod builtin_functions_tests {
         match result {
             Ok(Value::String(s)) => {
                 let str_val = String::from_utf16_lossy(&s);
-                assert_eq!(str_val, "b,c,d");
+                assert_eq!(str_val, "b");
             }
-            _ => panic!("Expected split with limit [1] to be 'b,c,d', got {:?}", result),
+            _ => panic!("Expected split with limit [1] to be 'b', got {:?}", result),
         }
     }
 

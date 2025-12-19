@@ -42,6 +42,21 @@ pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
         &"toLocaleString".into(),
         Value::Function("Number.prototype.toLocaleString".to_string()),
     )?;
+    obj_set_key_value(
+        &number_prototype,
+        &"toExponential".into(),
+        Value::Function("Number.prototype.toExponential".to_string()),
+    )?;
+    obj_set_key_value(
+        &number_prototype,
+        &"toFixed".into(),
+        Value::Function("Number.prototype.toFixed".to_string()),
+    )?;
+    obj_set_key_value(
+        &number_prototype,
+        &"toPrecision".into(),
+        Value::Function("Number.prototype.toPrecision".to_string()),
+    )?;
 
     // Set prototype on Number constructor
     obj_set_key_value(&number_obj, &"prototype".into(), Value::Object(number_prototype))?;
@@ -259,6 +274,80 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
                 Err(raise_eval_error!(msg))
             }
         }
+        "toExponential" => {
+            let fraction_digits = if !args.is_empty() {
+                match evaluate_expr(_env, &args[0])? {
+                    Value::Number(d) => Some(d as usize),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            match fraction_digits {
+                Some(d) => Ok(Value::String(utf8_to_utf16(&format!("{:.1$e}", n, d)))),
+                None => Ok(Value::String(utf8_to_utf16(&format!("{:e}", n)))),
+            }
+        }
+        "toFixed" => {
+            let digits = if !args.is_empty() {
+                match evaluate_expr(_env, &args[0])? {
+                    Value::Number(d) => d as usize,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+
+            if digits > 100 {
+                return Err(raise_eval_error!("toFixed() digits argument must be between 0 and 100"));
+            }
+
+            Ok(Value::String(utf8_to_utf16(&format!("{:.1$}", n, digits))))
+        }
+        "toPrecision" => {
+            let precision = if !args.is_empty() {
+                match evaluate_expr(_env, &args[0])? {
+                    Value::Number(p) => Some(p as usize),
+                    Value::Undefined => None,
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            match precision {
+                Some(p) => {
+                    if !(1..=100).contains(&p) {
+                        return Err(raise_eval_error!("toPrecision() argument must be between 1 and 100"));
+                    }
+
+                    if n.is_nan() || n.is_infinite() {
+                        return Ok(Value::String(utf8_to_utf16(&n.to_string())));
+                    }
+
+                    // Format in exponential to get the exponent
+                    let s_exp = format!("{:.1$e}", n, p - 1);
+                    let parts: Vec<&str> = s_exp.split('e').collect();
+                    let exponent: i32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+                    if exponent < -6 || exponent >= p as i32 {
+                        Ok(Value::String(utf8_to_utf16(&s_exp)))
+                    } else {
+                        // Use fixed notation
+                        // digits after decimal = p - 1 - exponent
+                        let digits_after_decimal = p as i32 - 1 - exponent;
+                        let width = if digits_after_decimal < 0 {
+                            0
+                        } else {
+                            digits_after_decimal as usize
+                        };
+                        Ok(Value::String(utf8_to_utf16(&format!("{:.1$}", n, width))))
+                    }
+                }
+                None => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+            }
+        }
         _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),
     }
 }
@@ -267,18 +356,13 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
 pub fn handle_number_object_method(
     obj_map: &JSObjectDataPtr,
     method: &str,
-    _args: &[Expr],
-    _env: &JSObjectDataPtr,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Handle Number instance methods
     if let Some(value_val) = obj_get_key_value(obj_map, &"__value__".into())? {
         if let Value::Number(n) = *value_val.borrow() {
-            match method {
-                "toString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                "valueOf" => Ok(Value::Number(n)),
-                "toLocaleString" => Ok(Value::String(utf8_to_utf16(&n.to_string()))), // For now, same as toString
-                _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),
-            }
+            handle_number_instance_method(&n, method, args, env)
         } else {
             Err(raise_eval_error!("Invalid __value__ for Number instance"))
         }

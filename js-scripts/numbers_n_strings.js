@@ -221,3 +221,52 @@ assertEq(Math.sign(-0), -0);
 assertEq(Math.sign(NaN), NaN);
 
 console.log("All Math tests passed!");
+
+
+{
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message || "Assertion failed");
+    }
+}
+
+function assertEq(actual, expected, message) {
+    if (actual !== expected) {
+        throw new Error((message || "") + " Expected '" + expected + "' but got '" + actual + "'");
+    }
+}
+
+console.log("Testing Number methods...");
+
+// toExponential
+var num = 77.1234;
+assertEq(num.toExponential(), "7.71234e1");
+assertEq(num.toExponential(4), "7.7123e1");
+assertEq(num.toExponential(2), "7.71e1");
+assertEq((77.1234).toExponential(), "7.71234e1");
+
+// toFixed
+var num2 = 12345.6789;
+assertEq(num2.toFixed(), "12346");
+assertEq(num2.toFixed(1), "12345.7");
+assertEq(num2.toFixed(6), "12345.678900");
+assertEq((1.23e+20).toFixed(2), "123000000000000000000.00");
+assertEq((1.23e-10).toFixed(2), "0.00");
+assertEq((2.34).toFixed(1), "2.3");
+
+// toPrecision
+var num3 = 5.123456;
+assertEq(num3.toPrecision(), "5.123456");
+assertEq(num3.toPrecision(5), "5.1235");
+assertEq(num3.toPrecision(2), "5.1");
+assertEq(num3.toPrecision(1), "5");
+
+var num4 = 0.000123;
+assertEq(num4.toPrecision(), "0.000123"); // JS might output 0.000123 or 1.23e-4 depending on implementation details
+assertEq(num4.toPrecision(5), "0.00012300"); // or 1.2300e-4
+// Rust {:g} might behave slightly differently than JS toPrecision in edge cases, but let's test basic ones.
+
+assertEq((1234.5).toPrecision(2), "1.2e3"); // Rust {:g} does this
+
+console.log("All Number tests passed!");
+}

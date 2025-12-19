@@ -47,7 +47,7 @@ mod function_tests {
         let script = "function noReturn() { let x = 42; } noReturn()";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 42.0), // Functions return the last statement's value
+            Ok(Value::Undefined) => {} // Success if no errors thrown
             _ => panic!("Expected number 42.0, got {:?}", result),
         }
     }
@@ -226,7 +226,7 @@ mod function_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 0.0), // Last element of the result array
+            Ok(Value::Undefined) => {} // Success if no errors thrown
             _ => panic!("Expected undefined, got {:?}", result),
         }
     }

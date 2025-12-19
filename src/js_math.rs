@@ -5,7 +5,13 @@ use crate::error::JSError;
 pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     let math_obj = new_js_object_data();
     obj_set_key_value(&math_obj, &"PI".into(), Value::Number(std::f64::consts::PI))?;
+    math_obj.borrow_mut().set_non_configurable("PI".into());
+    math_obj.borrow_mut().set_non_writable("PI".into());
+
     obj_set_key_value(&math_obj, &"E".into(), Value::Number(std::f64::consts::E))?;
+    math_obj.borrow_mut().set_non_configurable("E".into());
+    math_obj.borrow_mut().set_non_writable("E".into());
+
     obj_set_key_value(&math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;
     obj_set_key_value(&math_obj, &"ceil".into(), Value::Function("Math.ceil".to_string()))?;
     obj_set_key_value(&math_obj, &"round".into(), Value::Function("Math.round".to_string()))?;

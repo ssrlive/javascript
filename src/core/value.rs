@@ -980,7 +980,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
     //   function() { let __i = 0; return { next: function() { ... } } }
     fn make_iterator_closure(next_body: Vec<Statement>, captured_env: JSObjectDataPtr) -> Value {
         let iter_body = vec![
-            Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
+            Statement::from(StatementKind::Let(vec![("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))])),
             Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                 Expr::Value(Value::String(utf8_to_utf16("next"))),
                 Expr::Function(None, Vec::new(), next_body),
@@ -1001,10 +1001,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             if is_array(js_obj) {
                 // next function body
                 let next_body = vec![
-                    Statement::from(StatementKind::Let(
+                    Statement::from(StatementKind::Let(vec![(
                         "idx".to_string(),
                         Some(Expr::Var("__i".to_string(), None, None)),
-                    )),
+                    )])),
                     Statement::from(StatementKind::If(
                         Expr::Binary(
                             Box::new(Expr::Var("idx".to_string(), None, None)),
@@ -1015,13 +1015,13 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                             )),
                         ),
                         vec![
-                            Statement::from(StatementKind::Let(
+                            Statement::from(StatementKind::Let(vec![(
                                 "v".to_string(),
                                 Some(Expr::Index(
                                     Box::new(Expr::Var("__array".to_string(), None, None)),
                                     Box::new(Expr::Var("idx".to_string(), None, None)),
                                 )),
-                            )),
+                            )])),
                             Statement::from(StatementKind::Expr(Expr::Assign(
                                 Box::new(Expr::Var("__i".to_string(), None, None)),
                                 Box::new(Expr::Binary(
@@ -1068,10 +1068,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
 
                     // next function body for Map iteration (returns [key, value] pairs)
                     let next_body = vec![
-                        Statement::from(StatementKind::Let(
+                        Statement::from(StatementKind::Let(vec![(
                             "idx".to_string(),
                             Some(Expr::Var("__i".to_string(), None, None)),
-                        )),
+                        )])),
                         Statement::from(StatementKind::If(
                             Expr::Binary(
                                 Box::new(Expr::Var("idx".to_string(), None, None)),
@@ -1079,7 +1079,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 Box::new(Expr::Value(Value::Number(map_entries.len() as f64))),
                             ),
                             vec![
-                                Statement::from(StatementKind::Let(
+                                Statement::from(StatementKind::Let(vec![(
                                     "entry".to_string(),
                                     Some(Expr::Array(vec![
                                         Expr::Property(
@@ -1097,7 +1097,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                             "1".to_string(),
                                         ),
                                     ])),
-                                )),
+                                )])),
                                 Statement::from(StatementKind::Expr(Expr::Assign(
                                     Box::new(Expr::Var("__i".to_string(), None, None)),
                                     Box::new(Expr::Binary(
@@ -1154,10 +1154,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                 if let Value::String(s) = &*val_rc.borrow() {
                     // next function body for string iteration (returns whole Unicode characters)
                     let next_body = vec![
-                        Statement::from(StatementKind::Let(
+                        Statement::from(StatementKind::Let(vec![(
                             "idx".to_string(),
                             Some(Expr::Var("__i".to_string(), None, None)),
-                        )),
+                        )])),
                         // if idx < __str.length then proceed
                         Statement::from(StatementKind::If(
                             Expr::Binary(
@@ -1170,7 +1170,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                             ),
                             vec![
                                 // first = __str.charCodeAt(idx)
-                                Statement::from(StatementKind::Let(
+                                Statement::from(StatementKind::Let(vec![(
                                     "first".to_string(),
                                     Some(Expr::Call(
                                         Box::new(Expr::Property(
@@ -1179,7 +1179,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                         )),
                                         vec![Expr::Var("idx".to_string(), None, None)],
                                     )),
-                                )),
+                                )])),
                                 // if first is high surrogate (>=0xD800 && <=0xDBFF)
                                 Statement::from(StatementKind::If(
                                     Expr::LogicalAnd(
@@ -1196,7 +1196,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     ),
                                     vec![
                                         // second = __str.charCodeAt(idx + 1)
-                                        Statement::from(StatementKind::Let(
+                                        Statement::from(StatementKind::Let(vec![(
                                             "second".to_string(),
                                             Some(Expr::Call(
                                                 Box::new(Expr::Property(
@@ -1209,7 +1209,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                                     Box::new(Expr::Value(Value::Number(1.0))),
                                                 )],
                                             )),
-                                        )),
+                                        )])),
                                         // if second is low surrogate (>=0xDC00 && <=0xDFFF)
                                         Statement::from(StatementKind::If(
                                             Expr::LogicalAnd(
@@ -1226,7 +1226,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                             ),
                                             vec![
                                                 // ch = __str.substring(idx, idx+2)
-                                                Statement::from(StatementKind::Let(
+                                                Statement::from(StatementKind::Let(vec![(
                                                     "ch".to_string(),
                                                     Some(Expr::Call(
                                                         Box::new(Expr::Property(
@@ -1242,7 +1242,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                                             ),
                                                         ],
                                                     )),
-                                                )),
+                                                )])),
                                                 // __i = idx + 2
                                                 Statement::from(StatementKind::Expr(Expr::Assign(
                                                     Box::new(Expr::Var("__i".to_string(), None, None)),
@@ -1273,7 +1273,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                     None,
                                 )),
                                 // Single-unit char fallback: ch = __str.charAt(idx)
-                                Statement::from(StatementKind::Let(
+                                Statement::from(StatementKind::Let(vec![(
                                     "ch".to_string(),
                                     Some(Expr::Call(
                                         Box::new(Expr::Property(
@@ -1282,7 +1282,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                         )),
                                         vec![Expr::Var("idx".to_string(), None, None)],
                                     )),
-                                )),
+                                )])),
                                 Statement::from(StatementKind::Expr(Expr::Assign(
                                     Box::new(Expr::Var("__i".to_string(), None, None)),
                                     Box::new(Expr::Binary(
@@ -1329,10 +1329,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     let set_values = set_rc.borrow().values.clone();
                     // next function body for Set iteration (returns values)
                     let next_body = vec![
-                        Statement::from(StatementKind::Let(
+                        Statement::from(StatementKind::Let(vec![(
                             "idx".to_string(),
                             Some(Expr::Var("__i".to_string(), None, None)),
-                        )),
+                        )])),
                         Statement::from(StatementKind::If(
                             Expr::Binary(
                                 Box::new(Expr::Var("idx".to_string(), None, None)),
@@ -1340,13 +1340,13 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 Box::new(Expr::Value(Value::Number(set_values.len() as f64))),
                             ),
                             vec![
-                                Statement::from(StatementKind::Let(
+                                Statement::from(StatementKind::Let(vec![(
                                     "value".to_string(),
                                     Some(Expr::Index(
                                         Box::new(Expr::Var("__values".to_string(), None, None)),
                                         Box::new(Expr::Var("idx".to_string(), None, None)),
                                     )),
-                                )),
+                                )])),
                                 Statement::from(StatementKind::Expr(Expr::Assign(
                                     Box::new(Expr::Var("__i".to_string(), None, None)),
                                     Box::new(Expr::Binary(
@@ -1377,7 +1377,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     ];
 
                     let set_iter_body = vec![
-                        Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
+                        Statement::from(StatementKind::Let(vec![("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))])),
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                             Expr::Value(Value::String(utf8_to_utf16("next"))),
                             Expr::Function(None, Vec::new(), next_body),
@@ -1406,10 +1406,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             if let Some(wrapped) = wrapped_opt {
                 if let Value::String(_) = &*wrapped.borrow() {
                     let next_body = vec![
-                        Statement::from(StatementKind::Let(
+                        Statement::from(StatementKind::Let(vec![(
                             "idx".to_string(),
                             Some(Expr::Var("__i".to_string(), None, None)),
-                        )),
+                        )])),
                         Statement::from(StatementKind::If(
                             Expr::Binary(
                                 Box::new(Expr::Var("idx".to_string(), None, None)),
@@ -1420,13 +1420,13 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 )),
                             ),
                             vec![
-                                Statement::from(StatementKind::Let(
+                                Statement::from(StatementKind::Let(vec![(
                                     "v".to_string(),
                                     Some(Expr::Index(
                                         Box::new(Expr::Var("__s".to_string(), None, None)),
                                         Box::new(Expr::Var("idx".to_string(), None, None)),
                                     )),
-                                )),
+                                )])),
                                 Statement::from(StatementKind::Expr(Expr::Assign(
                                     Box::new(Expr::Var("__i".to_string(), None, None)),
                                     Box::new(Expr::Binary(
@@ -1457,7 +1457,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                     ];
 
                     let str_iter_body = vec![
-                        Statement::from(StatementKind::Let("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))),
+                        Statement::from(StatementKind::Let(vec![("__i".to_string(), Some(Expr::Value(Value::Number(0.0))))])),
                         Statement::from(StatementKind::Return(Some(Expr::Object(vec![(
                             Expr::Value(Value::String(utf8_to_utf16("next"))),
                             Expr::Function(None, Vec::new(), next_body),
@@ -1676,14 +1676,18 @@ pub fn env_set_var(env: &JSObjectDataPtr, key: &str, val: Value) -> Result<(), J
     let mut current = env.clone();
     loop {
         if current.borrow().is_function_scope {
-            return env_set(&current, key, val);
+            env_set(&current, key, val)?;
+            current.borrow_mut().set_non_configurable(PropertyKey::String(key.to_string()));
+            return Ok(());
         }
         let parent_opt = current.borrow().prototype.clone();
         if let Some(parent) = parent_opt {
             current = parent;
         } else {
             // If no function scope found, set in current env (global)
-            return env_set(env, key, val);
+            env_set(env, key, val)?;
+            env.borrow_mut().set_non_configurable(PropertyKey::String(key.to_string()));
+            return Ok(());
         }
     }
 }
@@ -1692,4 +1696,5 @@ pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
     let mut env_mut = env.borrow_mut();
     env_mut.insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
     env_mut.set_const(key.to_string());
+    env_mut.set_non_configurable(PropertyKey::String(key.to_string()));
 }

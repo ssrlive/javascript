@@ -50,9 +50,9 @@ impl From<StatementKind> for Statement {
 
 #[derive(Clone)]
 pub enum StatementKind {
-    Let(String, Option<Expr>),
-    Var(String, Option<Expr>),
-    Const(String, Expr),
+    Let(Vec<(String, Option<Expr>)>),
+    Var(Vec<(String, Option<Expr>)>),
+    Const(Vec<(String, Expr)>),
     FunctionDeclaration(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, bool), // name, params, body, is_generator
     LetDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: let [a, b] = [1, 2];
     VarDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: var [a, b] = [1, 2];
@@ -86,9 +86,9 @@ pub enum StatementKind {
 impl std::fmt::Debug for StatementKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StatementKind::Let(var, expr) => write!(f, "Let({}, {:?})", var, expr),
-            StatementKind::Var(var, expr) => write!(f, "Var({}, {:?})", var, expr),
-            StatementKind::Const(var, expr) => write!(f, "Const({}, {:?})", var, expr),
+            StatementKind::Let(decls) => write!(f, "Let({:?})", decls),
+            StatementKind::Var(decls) => write!(f, "Var({:?})", decls),
+            StatementKind::Const(decls) => write!(f, "Const({:?})", decls),
             StatementKind::FunctionDeclaration(name, params, body, is_gen) => {
                 write!(f, "FunctionDeclaration({}, {:?}, {:?}, {})", name, params, body, is_gen)
             }
@@ -416,16 +416,22 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
             // export <declaration> (const, let, var, function, class)
             let stmt = parse_statement(tokens)?;
             match stmt.clone().kind {
-                StatementKind::Const(name, _expr) => {
-                    specifiers.push(ExportSpecifier::Named(name, None));
+                StatementKind::Const(decls) => {
+                    for (name, _) in decls {
+                        specifiers.push(ExportSpecifier::Named(name, None));
+                    }
                     return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                StatementKind::Let(name, Some(_expr)) => {
-                    specifiers.push(ExportSpecifier::Named(name, None));
+                StatementKind::Let(decls) => {
+                    for (name, _) in decls {
+                        specifiers.push(ExportSpecifier::Named(name, None));
+                    }
                     return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
-                StatementKind::Var(name, Some(_expr)) => {
-                    specifiers.push(ExportSpecifier::Named(name, None));
+                StatementKind::Var(decls) => {
+                    for (name, _) in decls {
+                        specifiers.push(ExportSpecifier::Named(name, None));
+                    }
                     return Ok(StatementKind::Export(specifiers, Some(Box::new(stmt))));
                 }
                 StatementKind::Class(name, _, _) => {
@@ -720,10 +726,10 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                         return Err(raise_parse_error_at(tokens));
                     }
                     tokens.remove(0); // consume }
-                    return Ok(StatementKind::Let(
+                    return Ok(StatementKind::Let(vec![(
                         name.clone(),
                         Some(Expr::AsyncFunction(Some(name), params, body)),
-                    ));
+                    )]));
                 }
             }
         }
@@ -1176,232 +1182,52 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
             }
         } else {
             // Regular variable declaration
-            if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                tokens.remove(0);
-                log::trace!(
-                    "parse_statement: consumed identifier {}; next tokens (first 8): {:?}",
-                    name,
-                    tokens.iter().take(8).collect::<Vec<_>>()
-                );
-                // Handle optional initializer (e.g., var x = 1)
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
+            let mut declarations = Vec::new();
+            loop {
+                let name = if let Some(Token::Identifier(n)) = tokens.first().map(|t| t.token.clone()) {
                     tokens.remove(0);
-                    log::trace!(
-                        "parse_statement: consumed '='; next tokens (first 8): {:?}",
-                        tokens.iter().take(8).collect::<Vec<_>>()
-                    );
-                    // Debug: log a short snapshot of tokens before attempting to
-                    // parse a potentially large/complex initializer. This helps
-                    // triage failures in big merged harness files where
-                    // parse_expression may fail silently after consuming tokens.
-                    log::trace!(
-                        "parse_statement: parsing initializer for '{}' ; next tokens (first 40): {:?}",
-                        name,
-                        tokens.iter().take(40).collect::<Vec<_>>()
-                    );
-                    // parse initializer with debug: if parsing fails, print a short token context
-                    // Use parse_assignment instead of parse_expression to avoid consuming the comma operator
-                    // which separates variable declarations.
-                    let expr = match parse_assignment(tokens) {
-                        Ok(e) => {
-                            log::trace!(
-                                "parse_statement: succeeded parsing initializer for '{}' ; remaining tokens after init (first 40): {:?}",
-                                name,
-                                tokens.iter().take(40).collect::<Vec<_>>()
-                            );
-                            e
-                        }
-                        Err(err) => {
-                            // Provide a clearer debug dump on failure so we can
-                            // see whether parse_assignment failed mid-consumption
-                            // or returned an error without consuming tokens.
-                            log::error!(
-                                "parse_statement: failed parsing initializer for '{}' ; remaining tokens (first 40): {:?}",
-                                name,
-                                tokens.iter().take(40).collect::<Vec<_>>()
-                            );
-                            return Err(err);
-                        }
-                    };
-
-                    // If there's a comma after this initialized declarator, we
-                    // need to handle the rest of the comma-separated list. The
-                    // parser represents single-declarator statements as
-                    // `StatementKind::Var/Let/Const`, so we convert each following
-                    // declarator into its own standalone declaration token
-                    // sequence and insert them at the front of the token
-                    // stream (reverse insertion to preserve order) so they
-                    // get parsed on subsequent iterations.
-                    let mut follow_decls: Vec<Vec<TokenData>> = Vec::new();
-                    loop {
-                        // Skip any blank lines between the comma and next ident
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                            tokens.remove(0);
-                        }
-
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::Comma) {
-                            break;
-                        }
-
-                        tokens.remove(0); // consume comma
-
-                        // Skip blank lines after comma
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                            tokens.remove(0);
-                        }
-
-                        // Next must be an identifier
-                        let next_name_token = if let Some(Token::Identifier(_)) = tokens.first().map(|t| &t.token) {
-                            tokens.remove(0)
-                        } else {
-                            return Err(raise_parse_error_at(tokens));
-                        };
-                        let next_name = if let Token::Identifier(n) = &next_name_token.token {
-                            n.clone()
-                        } else {
-                            unreachable!()
-                        };
-
-                        // Capture initializer tokens if present (we'll build a
-                        // separate statement for this declarator later).
-                        let mut init_tokens: Vec<TokenData> = Vec::new();
-                        let mut assign_token: Option<TokenData> = None;
-                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                            assign_token = Some(tokens.remove(0)); // consume '='
-                            // Grab tokens into init_tokens until top-level comma/semicolon
-                            let mut depth: i32 = 0;
-                            while !tokens.is_empty() {
-                                if depth == 0 && (matches!(tokens[0].token, Token::Comma) || matches!(tokens[0].token, Token::Semicolon)) {
-                                    break;
-                                }
-                                match tokens[0].token {
-                                    Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
-                                    Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
-                                    _ => {}
-                                }
-                                init_tokens.push(tokens.remove(0));
-                            }
-                        }
-
-                        // Build a token sequence for the standalone declaration
-                        // in left-to-right order: <var/let/const> <ident> [= <init>];
-                        let mut decl_tokens: Vec<TokenData> = Vec::new();
-                        decl_tokens.push(decl_keyword_token.clone());
-                        // keep a copy for debug logging (we'll move the original into the token list)
-                        let next_name_for_log = next_name.clone();
-                        decl_tokens.push(next_name_token);
-                        if !init_tokens.is_empty() {
-                            if let Some(at) = assign_token {
-                                decl_tokens.push(at);
-                            }
-                            decl_tokens.extend(init_tokens);
-                        }
-                        decl_tokens.push(TokenData {
-                            token: Token::Semicolon,
-                            line: 0,
-                            column: 0,
-                        });
-
-                        log::trace!(
-                            "parse_statement: collected follow-declarator '{}' ({} tokens)",
-                            next_name_for_log,
-                            decl_tokens.len()
-                        );
-                        follow_decls.push(decl_tokens);
-
-                        // If the next token is a semicolon that terminates the
-                        // whole declaration, consume it and stop extracting more
-                        // declarators.
-                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon) {
-                            tokens.remove(0);
-                            break;
-                        }
+                    n
+                } else {
+                    // Not an identifier, put back the declaration token if this is the first one
+                    if declarations.is_empty() {
+                        tokens.insert(0, decl_keyword_token);
                     }
+                    return Err(raise_parse_error_at(tokens));
+                };
 
-                    // Insert the collected following declarations back into
-                    // the token stream so they will be parsed as standalone
-                    // statements in left-to-right order on subsequent
-                    // iterations.
-                    log::trace!("parse_statement: reinserting {} following declarator(s)", follow_decls.len());
-                    for decl in follow_decls.into_iter().rev() {
-                        for t in decl.into_iter().rev() {
-                            tokens.insert(0, t);
-                        }
+                let init = if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
+                    tokens.remove(0); // consume '='
+                    Some(parse_assignment(tokens)?)
+                } else {
+                    None
+                };
+
+                declarations.push((name, init));
+
+                if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
+                    tokens.remove(0); // consume comma
+                    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
+                        tokens.remove(0);
                     }
+                } else {
+                    break;
+                }
+            }
 
-                    if is_const {
-                        return Ok(StatementKind::Const(name, expr));
-                    } else if is_var {
-                        return Ok(StatementKind::Var(name, Some(expr)));
+            if is_const {
+                let mut const_decls = Vec::new();
+                for (name, init) in declarations {
+                    if let Some(expr) = init {
+                        const_decls.push((name, expr));
                     } else {
-                        return Ok(StatementKind::Let(name, Some(expr)));
-                    }
-                } else if !is_const {
-                    // Support comma-separated declarations like `var a, b, c;` by
-                    // inserting subsequent simple declarators back into the token
-                    // stream as separate var/let statements. For now we only support
-                    // subsequent declarators without initializers (e.g., `, b, c`).
-                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-                        let mut extra_names: Vec<String> = Vec::new();
-                        // Collect following identifiers separated by commas
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-                            tokens.remove(0); // consume comma
-                            // Skip blank lines between comma and identifier
-                            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                                tokens.remove(0);
-                            }
-                            if let Some(Token::Identifier(n)) = tokens.first().map(|t| t.token.clone()) {
-                                tokens.remove(0);
-                                // If there is an initializer on the later decl, bail out (not supported here)
-                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                                    return Err(raise_parse_error_at(tokens));
-                                }
-                                extra_names.push(n);
-                            } else {
-                                return Err(raise_parse_error_at(tokens));
-                            }
-                        }
-
-                        // Insert the remaining declarations back into tokens as separate
-                        // var/let statements so the parser will parse them on subsequent
-                        // iterations. Insert in reverse order so they are parsed in the
-                        // original left-to-right order.
-                        for n in extra_names.into_iter().rev() {
-                            // Add a semicolon terminator for each inserted declaration
-                            tokens.insert(
-                                0,
-                                TokenData {
-                                    token: Token::Semicolon,
-                                    line: 0,
-                                    column: 0,
-                                },
-                            );
-                            // Identifier
-                            tokens.insert(
-                                0,
-                                TokenData {
-                                    token: Token::Identifier(n),
-                                    line: 0,
-                                    column: 0,
-                                },
-                            );
-                            // var/let token
-                            tokens.insert(0, decl_keyword_token.clone());
-                        }
-
-                        // Return the first declaration
-                        if is_var {
-                            return Ok(StatementKind::Var(name, None));
-                        } else {
-                            return Ok(StatementKind::Let(name, None));
-                        }
-                    }
-                    if is_var {
-                        return Ok(StatementKind::Var(name, None));
-                    } else {
-                        return Ok(StatementKind::Let(name, None));
+                        return Err(raise_parse_error!("Const declaration must have initializer"));
                     }
                 }
+                return Ok(StatementKind::Const(const_decls));
+            } else if is_var {
+                return Ok(StatementKind::Var(declarations));
+            } else {
+                return Ok(StatementKind::Let(declarations));
             }
         }
     }

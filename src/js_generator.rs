@@ -184,11 +184,17 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
         StatementKind::Expr(e) => {
             *e = replace_first_yield_in_expr(e, send_value, replaced);
         }
-        StatementKind::Let(_, Some(expr)) | StatementKind::Var(_, Some(expr)) => {
-            *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (_, expr_opt) in decls.iter_mut() {
+                if let Some(expr) = expr_opt {
+                    *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+                }
+            }
         }
-        StatementKind::Const(_, expr) => {
-            *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+        StatementKind::Const(decls) => {
+            for (_, expr) in decls.iter_mut() {
+                *expr = replace_first_yield_in_expr(expr, send_value, replaced);
+            }
         }
         StatementKind::Return(Some(expr)) => {
             *expr = replace_first_yield_in_expr(expr, send_value, replaced);
@@ -301,10 +307,23 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        StatementKind::Let(_, Some(expr)) | StatementKind::Var(_, Some(expr)) | StatementKind::Const(_, expr) => {
-            if expr_contains_yield(expr) {
-                stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
-                return true;
+        StatementKind::Let(decls) | StatementKind::Var(decls) => {
+            for (_, expr_opt) in decls {
+                if let Some(expr) = expr_opt
+                    && expr_contains_yield(expr)
+                {
+                    stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::Const(decls) => {
+            for (_, expr) in decls {
+                if expr_contains_yield(expr) {
+                    stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
+                    return true;
+                }
             }
             false
         }

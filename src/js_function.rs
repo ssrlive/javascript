@@ -47,6 +47,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
         "Object.prototype.valueOf" => object_prototype_value_of(args, env),
         "String" => crate::js_string::string_constructor(args, env),
+        "Function" => function_constructor(args, env),
         "parseInt" => parse_int_function(args, env),
         "parseFloat" => parse_float_function(args, env),
         "isNaN" => is_nan_function(args, env),
@@ -520,6 +521,54 @@ fn is_finite_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSE
         Value::Boolean(_) => Ok(Value::Boolean(true)), // Booleans are finite
         Value::Undefined => Ok(Value::Boolean(false)), // undefined is not finite
         _ => Ok(Value::Boolean(false)),                // Objects, functions, etc. are not finite
+    }
+}
+
+fn function_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // Evaluate arguments
+    let mut evaluated_args = Vec::new();
+    for arg in args {
+        evaluated_args.push(evaluate_expr(env, arg)?);
+    }
+
+    let body_str = if !evaluated_args.is_empty() {
+        let val = evaluated_args.last().unwrap();
+        match val {
+            Value::String(s) => String::from_utf16_lossy(s),
+            _ => crate::core::value_to_string(val),
+        }
+    } else {
+        "".to_string()
+    };
+
+    let mut params_str = String::new();
+    if evaluated_args.len() > 1 {
+        for (i, arg) in evaluated_args.iter().take(evaluated_args.len() - 1).enumerate() {
+            if i > 0 {
+                params_str.push(',');
+            }
+            let arg_str = match arg {
+                Value::String(s) => String::from_utf16_lossy(s),
+                _ => crate::core::value_to_string(arg),
+            };
+            params_str.push_str(&arg_str);
+        }
+    }
+
+    let func_source = format!("function anonymous({}) {{ {} }}", params_str, body_str);
+    let mut tokens = crate::core::tokenize(&func_source)?;
+
+    let stmts = crate::core::parse_statements(&mut tokens)?;
+
+    if let Some(crate::core::Statement {
+        kind: crate::core::StatementKind::FunctionDeclaration(_name, params, body, _is_generator),
+        ..
+    }) = stmts.first()
+    {
+        // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
+        Ok(Value::Closure(params.clone(), body.clone(), env.clone(), None))
+    } else {
+        Err(raise_type_error!("Failed to parse function body"))
     }
 }
 

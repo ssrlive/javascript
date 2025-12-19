@@ -96,7 +96,27 @@ fn validate_declarations(statements: &[Statement]) -> Result<(), JSError> {
 
     for stmt in statements {
         match &stmt.kind {
-            StatementKind::Let(name, _) | StatementKind::Const(name, _) | StatementKind::Class(name, _, _) => {
+            StatementKind::Let(decls) => {
+                for (name, _) in decls {
+                    if lexical_names.contains(name) {
+                        let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
+                        err.set_js_location(stmt.line, stmt.column);
+                        return Err(err);
+                    }
+                    lexical_names.insert(name.clone());
+                }
+            }
+            StatementKind::Const(decls) => {
+                for (name, _) in decls {
+                    if lexical_names.contains(name) {
+                        let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
+                        err.set_js_location(stmt.line, stmt.column);
+                        return Err(err);
+                    }
+                    lexical_names.insert(name.clone());
+                }
+            }
+            StatementKind::Class(name, _, _) => {
                 if lexical_names.contains(name) {
                     let mut err = raise_syntax_error!(format!("Identifier '{name}' has already been declared"));
                     err.set_js_location(stmt.line, stmt.column);
@@ -196,7 +216,9 @@ fn validate_declarations(statements: &[Statement]) -> Result<(), JSError> {
 
 fn declares_lexical_name(stmt: &Statement, name: &str) -> bool {
     match &stmt.kind {
-        StatementKind::Let(n, _) | StatementKind::Const(n, _) | StatementKind::Class(n, _, _) => n == name,
+        StatementKind::Let(decls) => decls.iter().any(|(n, _)| n == name),
+        StatementKind::Const(decls) => decls.iter().any(|(n, _)| n == name),
+        StatementKind::Class(n, _, _) => n == name,
         StatementKind::FunctionDeclaration(n, _, _, _) => n == name,
         StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
             pattern_contains_name(pattern, name)
@@ -211,7 +233,13 @@ fn declares_lexical_name(stmt: &Statement, name: &str) -> bool {
 fn find_first_var_location(statements: &[Statement], name: &str) -> Option<(usize, usize)> {
     for stmt in statements {
         match &stmt.kind {
-            StatementKind::Var(n, _) if n == name => return Some((stmt.line, stmt.column)),
+            StatementKind::Var(decls) => {
+                for (n, _) in decls {
+                    if n == name {
+                        return Some((stmt.line, stmt.column));
+                    }
+                }
+            }
             StatementKind::If(_, then_body, else_body) => {
                 if let Some(loc) = find_first_var_location(then_body, name) {
                     return Some(loc);
@@ -504,6 +532,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
         collect_var_names(statements, &mut var_names);
         for name in var_names {
             env_set(env, &name, Value::Undefined)?;
+            env.borrow_mut().set_non_configurable(PropertyKey::String(name));
         }
     }
 
@@ -530,6 +559,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 Value::Object(func_obj)
             };
             env_set(env, name, func_val.clone())?;
+            env.borrow_mut().set_non_configurable(PropertyKey::String(name.clone()));
             // In non-strict mode (assumed), function declarations in blocks are hoisted
             // to the nearest function/global scope (Annex B.3.3).
             if !env.borrow().is_function_scope {
@@ -552,6 +582,7 @@ fn evaluate_stmt_let(env: &JSObjectDataPtr, name: &str, expr_opt: &Option<Expr>)
         log::debug!("DBG Let - binding '{name}' into env -> value={val:?}");
     }
     env_set(env, name, val.clone())?;
+    env.borrow_mut().set_non_configurable(PropertyKey::String(name.to_string()));
     Ok(val)
 }
 
@@ -637,14 +668,20 @@ fn evaluate_stmt_export(
 ) -> Result<(), JSError> {
     if let Some(decl_stmt) = maybe_decl {
         match &decl_stmt.kind {
-            StatementKind::Const(name, expr) => {
-                evaluate_stmt_const(env, name, expr)?;
+            StatementKind::Const(decls) => {
+                for (name, expr) in decls {
+                    evaluate_stmt_const(env, name, expr)?;
+                }
             }
-            StatementKind::Let(name, expr_opt) => {
-                evaluate_stmt_let(env, name, expr_opt)?;
+            StatementKind::Let(decls) => {
+                for (name, expr_opt) in decls {
+                    evaluate_stmt_let(env, name, expr_opt)?;
+                }
             }
-            StatementKind::Var(name, expr_opt) => {
-                evaluate_stmt_var(env, name, expr_opt)?;
+            StatementKind::Var(decls) => {
+                for (name, expr_opt) in decls {
+                    evaluate_stmt_var(env, name, expr_opt)?;
+                }
             }
             StatementKind::Class(name, extends, members) => evaluate_stmt_class(env, name, extends, members)?,
             StatementKind::FunctionDeclaration(name, params, body, is_generator) => {
@@ -945,16 +982,22 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
         // `Err(e)` means an error that we log and then return.
         let eval_res: Result<Option<ControlFlow>, JSError> = (|| -> Result<Option<ControlFlow>, JSError> {
             match &stmt.kind {
-                StatementKind::Let(name, expr_opt) => {
-                    last_value = evaluate_stmt_let(env, name, expr_opt)?;
+                StatementKind::Let(decls) => {
+                    for (name, expr_opt) in decls {
+                        last_value = evaluate_stmt_let(env, name, expr_opt)?;
+                    }
                     Ok(None)
                 }
-                StatementKind::Var(name, expr_opt) => {
-                    last_value = evaluate_stmt_var(env, name, expr_opt)?;
+                StatementKind::Var(decls) => {
+                    for (name, expr_opt) in decls {
+                        last_value = evaluate_stmt_var(env, name, expr_opt)?;
+                    }
                     Ok(None)
                 }
-                StatementKind::Const(name, expr) => {
-                    last_value = evaluate_stmt_const(env, name, expr)?;
+                StatementKind::Const(decls) => {
+                    for (name, expr) in decls {
+                        last_value = evaluate_stmt_const(env, name, expr)?;
+                    }
                     Ok(None)
                 }
                 StatementKind::FunctionDeclaration(..) => {
@@ -1189,17 +1232,21 @@ fn statement_for_init_condition_increment(
     // Execute initialization in for_env
     if let Some(init_stmt) = init {
         match &init_stmt.kind {
-            StatementKind::Let(name, expr_opt) => {
-                let val = expr_opt
-                    .clone()
-                    .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
-                env_set(&for_env, name.as_str(), val)?;
+            StatementKind::Let(decls) => {
+                for (name, expr_opt) in decls {
+                    let val = expr_opt
+                        .clone()
+                        .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                    env_set(&for_env, name.as_str(), val)?;
+                }
             }
-            StatementKind::Var(name, expr_opt) => {
-                let val = expr_opt
-                    .clone()
-                    .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
-                env_set_var(&for_env, name.as_str(), val)?;
+            StatementKind::Var(decls) => {
+                for (name, expr_opt) in decls {
+                    let val = expr_opt
+                        .clone()
+                        .map_or(Ok(Value::Undefined), |expr| evaluate_expr(&for_env, &expr))?;
+                    env_set_var(&for_env, name.as_str(), val)?;
+                }
             }
             StatementKind::Expr(expr) => {
                 evaluate_expr(&for_env, expr)?;
@@ -4017,9 +4064,20 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
 
 fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError> {
     match expr {
-        Expr::Var(..) => {
-            // Cannot delete local variables
-            Ok(Value::Boolean(false))
+        Expr::Var(name, _, _) => {
+            // Walk the scope chain to find the variable
+            let mut current_opt = Some(env.clone());
+            while let Some(current_env) = current_opt {
+                if get_own_property(&current_env, &name.into()).is_some() {
+                    // Found the environment record containing the binding.
+                    // Try to delete it.
+                    let deleted = obj_delete(&current_env, &name.into())?;
+                    return Ok(Value::Boolean(deleted));
+                }
+                current_opt = current_env.borrow().prototype.clone();
+            }
+            // If not found, return true
+            Ok(Value::Boolean(true))
         }
         Expr::Property(obj, prop) => {
             // Delete property from object
@@ -4618,12 +4676,25 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
         }
         BinaryOp::In => {
             // Check if property exists in object
-            match (l, r) {
-                (Value::String(prop), Value::Object(obj)) => {
-                    let prop_str = PropertyKey::String(String::from_utf16_lossy(&prop));
-                    Ok(Value::Boolean(obj_get_key_value(&obj, &prop_str)?.is_some()))
-                }
-                _ => Ok(Value::Boolean(false)),
+            if let Value::Object(obj) = r {
+                let prim = to_primitive(&l, "string", env)?;
+                let key = match prim {
+                    Value::Symbol(s) => PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(s)))),
+                    Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                    Value::Number(n) => PropertyKey::String(n.to_string()),
+                    Value::Boolean(b) => PropertyKey::String(b.to_string()),
+                    Value::Undefined => PropertyKey::String("undefined".to_string()),
+                    Value::Null => PropertyKey::String("null".to_string()),
+                    Value::BigInt(b) => PropertyKey::String(b.to_string()),
+                    _ => PropertyKey::String("[object Object]".to_string()),
+                };
+                Ok(Value::Boolean(obj_get_key_value(&obj, &key)?.is_some()))
+            } else {
+                Err(raise_type_error!(format!(
+                    "Cannot use 'in' operator to search for '{}' in {:?}",
+                    value_to_string(&l),
+                    r
+                )))
             }
         }
         BinaryOp::BitAnd => {
@@ -5660,7 +5731,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                             // Execute function body
-                                            evaluate_statements(&func_env, body)
+                                            match evaluate_statements_with_context(&func_env, body)? {
+                                                ControlFlow::Normal(_) => Ok(Value::Undefined),
+                                                ControlFlow::Return(val) => Ok(val),
+                                                ControlFlow::Break(_) => Err(raise_eval_error!("break statement not in loop or switch")),
+                                                ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
+                                            }
                                         }
                                         Value::GeneratorFunction(_, params, body, captured_env, home_obj) => {
                                             // Generator method-style call - return a generator object
@@ -5937,7 +6013,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
 
                             // Execute function body
-                            evaluate_statements(&func_env, body)
+                            match evaluate_statements_with_context(&func_env, body)? {
+                                ControlFlow::Normal(_) => Ok(Value::Undefined),
+                                ControlFlow::Return(val) => Ok(val),
+                                ControlFlow::Break(_) => Err(raise_eval_error!("break statement not in loop or switch")),
+                                ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
+                            }
                         }
 
                         Value::GeneratorFunction(_, params, body, captured_env, _) => {
@@ -5984,7 +6065,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Bind parameters: provide provided args, set missing params to undefined
                 bind_function_parameters(&func_env, &params, &evaluated_args)?;
                 // Execute function body
-                evaluate_statements(&func_env, &body)
+                match evaluate_statements_with_context(&func_env, &body)? {
+                    ControlFlow::Normal(_) => Ok(Value::Undefined),
+                    ControlFlow::Return(val) => Ok(val),
+                    ControlFlow::Break(_) => Err(raise_eval_error!("break statement not in loop or switch")),
+                    ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
+                }
             }
             Value::AsyncClosure(params, body, captured_env, _) => {
                 // Function call
@@ -6100,6 +6186,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if get_own_property(&obj_map, &"__is_bigint_constructor".into()).is_some() {
                     // BigInt constructor-like object: handle conversion via global function
                     crate::js_function::handle_global_function("BigInt", args, env)
+                } else if get_own_property(&obj_map, &"__is_function_constructor".into()).is_some() {
+                    crate::js_function::handle_global_function("Function", args, env)
                 } else {
                     // Log diagnostic context before returning a generic evaluation error
                     log::error!("evaluate_call - unexpected object method dispatch: obj_map={:?}", obj_map);
@@ -6490,8 +6578,10 @@ fn evaluate_object_destructuring(_env: &JSObjectDataPtr, _pattern: &Vec<ObjectDe
 fn collect_var_names(statements: &[Statement], names: &mut std::collections::HashSet<String>) {
     for stmt in statements {
         match &stmt.kind {
-            StatementKind::Var(name, _) => {
-                names.insert(name.clone());
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    names.insert(name.clone());
+                }
             }
             StatementKind::VarDestructuringArray(pattern, _) => {
                 collect_names_from_array_pattern(pattern, names);

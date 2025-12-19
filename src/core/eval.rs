@@ -1727,7 +1727,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                         }
                         Ok(value)
                     } else {
-                        Err(raise_eval_error!("Cannot assign to property of non-object"))
+                        Ok(value)
                     }
                 }
                 Value::String(s) => {
@@ -1744,7 +1744,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                         }
                         Ok(value)
                     } else {
-                        Err(raise_eval_error!("Cannot assign to property of non-object"))
+                        Ok(value)
                     }
                 }
                 Value::Symbol(sym) => {
@@ -1753,7 +1753,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                         obj_set_key_value(&obj, &key, value.clone())?;
                         Ok(value)
                     } else {
-                        Err(raise_eval_error!("Cannot assign to property of non-object"))
+                        Ok(value)
                     }
                 }
                 _ => Err(raise_eval_error!("Invalid index type")),
@@ -3764,7 +3764,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                     obj_set_key_value(&obj_map, &prop.into(), val.clone())?;
                     Ok(val)
                 }
-                _ => Err(raise_eval_error!("Cannot assign to property of non-object")),
+                _ => Ok(val),
             }
         }
         Expr::Index(obj, idx) => {
@@ -3803,7 +3803,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
                     obj_set_key_value(&obj_map, &key, val.clone())?;
                     Ok(val)
                 }
-                _ => Err(raise_eval_error!("Invalid index assignment")),
+                _ => Ok(val),
             }
         }
         _ => Err(raise_eval_error!("Invalid assignment target")),
@@ -7053,7 +7053,11 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
             obj_set_key_value(&obj, &prop.into(), val)?;
             Ok(Some(Value::Object(obj)))
         }
-        _ => Err(raise_eval_error!("not an object")),
+        _ => {
+            // In non-strict mode, assigning to a primitive is ignored.
+            // We don't support strict mode yet, so we just ignore it.
+            Ok(None)
+        }
     }
 }
 

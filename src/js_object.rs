@@ -2,7 +2,7 @@
 
 use crate::core::{
     Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc, new_js_object_data, obj_get_key_value,
-    obj_set_key_value,
+    obj_set_key_value, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
@@ -90,6 +90,42 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     Ok(Value::Object(result_obj))
                 }
             }
+        }
+        "hasOwn" => {
+            if args.len() != 2 {
+                return Err(raise_type_error!("Object.hasOwn requires exactly two arguments"));
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            let prop_val = evaluate_expr(env, &args[1])?;
+
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot convert undefined or null to object"));
+            }
+
+            let key = match prop_val {
+                Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(prop_val))),
+                _ => PropertyKey::String(value_to_string(&prop_val)),
+            };
+
+            let has_own = match obj_val {
+                Value::Object(obj) => obj.borrow().properties.contains_key(&key),
+                Value::String(s) => {
+                    if let PropertyKey::String(k) = key {
+                        if k == "length" {
+                            true
+                        } else if let Ok(idx) = k.parse::<usize>() {
+                            idx < s.len()
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            };
+
+            Ok(Value::Boolean(has_own))
         }
         "create" => {
             if args.is_empty() {

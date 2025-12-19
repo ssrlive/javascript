@@ -1,9 +1,6 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{
-    Expr, JSObjectDataPtr, Value, env_get, evaluate_expr, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value,
-    to_primitive,
-};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, obj_get_key_value, obj_set_key_value, to_primitive};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::js_regexp::{handle_regexp_constructor, handle_regexp_method, is_regex_object};
@@ -504,17 +501,7 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
         };
         if let Value::Undefined = sep_val {
             // No separator: return array with the whole string
-            let arr = new_js_object_data();
-            let array_result = env_get(env, "Array");
-            if let Some(array_val) = &array_result {
-                if let Value::Object(array_obj) = &*array_val.borrow() {
-                    if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                            arr.borrow_mut().prototype = Some(proto_obj.clone());
-                        }
-                    }
-                }
-            }
+            let arr = crate::js_array::create_array(env)?;
             obj_set_key_value(&arr, &"0".into(), Value::String(s.to_vec()))?;
             set_array_length(&arr, 1)?;
             Ok(Value::Object(arr))
@@ -541,21 +528,11 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                     }
                 }
             }
-            let arr = new_js_object_data();
-            if let Some(array_val) = env_get(env, "Array") {
-                if let Value::Object(array_obj) = &*array_val.borrow() {
-                    if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                            arr.borrow_mut().prototype = Some(proto_obj.clone());
-                        }
-                    }
-                }
+            let arr = crate::js_array::create_array(env)?;
+            for (i, part) in parts.iter().enumerate() {
+                obj_set_key_value(&arr, &i.to_string().into(), Value::String(part.clone()))?;
             }
-            for (i, part) in parts.into_iter().enumerate() {
-                obj_set_key_value(&arr, &i.to_string().into(), Value::String(part))?;
-            }
-            let len = arr.borrow().properties.len();
-            set_array_length(&arr, len)?;
+            set_array_length(&arr, parts.len())?;
             Ok(Value::Object(arr))
         } else if let Value::Object(obj_map) = sep_val {
             // Separator is a RegExp-like object
@@ -625,21 +602,11 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
                 }
             }
 
-            let arr = new_js_object_data();
-            if let Some(array_val) = env_get(env, "Array") {
-                if let Value::Object(array_obj) = &*array_val.borrow() {
-                    if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                        if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                            arr.borrow_mut().prototype = Some(proto_obj.clone());
-                        }
-                    }
-                }
+            let arr = crate::js_array::create_array(env)?;
+            for (i, part) in parts.iter().enumerate() {
+                obj_set_key_value(&arr, &i.to_string().into(), part.clone())?;
             }
-            for (i, part) in parts.into_iter().enumerate() {
-                obj_set_key_value(&arr, &i.to_string().into(), part)?;
-            }
-            let len = arr.borrow().properties.len();
-            set_array_length(&arr, len)?;
+            set_array_length(&arr, parts.len())?;
             Ok(Value::Object(arr))
         } else {
             Err(raise_eval_error!("split: argument must be a string, RegExp, or undefined"))
@@ -761,17 +728,7 @@ fn string_match_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
         }
 
         // Convert matches to JS array-like
-        let arr = new_js_object_data();
-        let array_proto = env_get(env, "Array");
-        if let Some(array_val) = &array_proto {
-            if let Value::Object(array_obj) = &*array_val.borrow() {
-                if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                    if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                        arr.borrow_mut().prototype = Some(proto_obj.clone());
-                    }
-                }
-            }
-        }
+        let arr = crate::js_array::create_array(env)?;
         for (i, m) in matches.iter().enumerate() {
             obj_set_key_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(m)))?;
         }
@@ -1282,17 +1239,7 @@ fn string_to_well_formed_method(s: &[u16], _args: &[Expr], _env: &JSObjectDataPt
 
 fn make_array_from_values(env: &JSObjectDataPtr, values: Vec<Value>) -> Result<Value, JSError> {
     let len = values.len();
-    let arr = new_js_object_data();
-    let array_proto = env_get(env, "Array");
-    if let Some(array_val) = &array_proto {
-        if let Value::Object(array_obj) = &*array_val.borrow() {
-            if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
-                if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    arr.borrow_mut().prototype = Some(proto_obj.clone());
-                }
-            }
-        }
-    }
+    let arr = crate::js_array::create_array(env)?;
     for (i, v) in values.into_iter().enumerate() {
         obj_set_key_value(&arr, &i.to_string().into(), v)?;
     }

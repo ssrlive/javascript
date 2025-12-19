@@ -45,9 +45,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
             match iterable {
                 Value::Object(obj_map) => {
                     // If it's an array-like object
-                    if is_array(&obj_map) {
-                        let len = get_array_length(&obj_map).unwrap_or(0);
-
+                    if let Some(len) = get_array_length(&obj_map) {
                         for i in 0..len {
                             if let Some(val) = obj_get_key_value(&obj_map, &i.to_string().into())? {
                                 let element = val.borrow().clone();
@@ -82,7 +80,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                 }
             }
 
-            let new_array = new_js_object_data();
+            let new_array = create_array(env)?;
             set_array_length(&new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_key_value(&new_array, &i.to_string().into(), val)?;
@@ -91,7 +89,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
         }
         "of" => {
             // Array.of(...elements)
-            let new_array = new_js_object_data();
+            let new_array = create_array(env)?;
             for (i, arg) in args.iter().enumerate() {
                 let val = evaluate_expr(env, arg)?;
                 obj_set_key_value(&new_array, &i.to_string().into(), val)?;
@@ -107,7 +105,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
 pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
         // Array() - create empty array
-        let array_obj = new_js_object_data();
+        let array_obj = create_array(env)?;
         set_array_length(&array_obj, 0)?;
         Ok(Value::Object(array_obj))
     } else if args.len() == 1 {
@@ -128,13 +126,13 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
                     return Err(raise_type_error!("Array length too large"));
                 }
                 // Array(length) - create array with specified length
-                let array_obj = new_js_object_data();
+                let array_obj = create_array(env)?;
                 set_array_length(&array_obj, n as usize)?;
                 Ok(Value::Object(array_obj))
             }
             _ => {
                 // Array(element) - create array with single element
-                let array_obj = new_js_object_data();
+                let array_obj = create_array(env)?;
                 obj_set_key_value(&array_obj, &"0".into(), arg_val)?;
                 set_array_length(&array_obj, 1)?;
                 Ok(Value::Object(array_obj))
@@ -142,7 +140,7 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
         }
     } else {
         // Array(element1, element2, ...) - create array with multiple elements
-        let array_obj = new_js_object_data();
+        let array_obj = create_array(env)?;
         for (i, arg) in args.iter().enumerate() {
             let arg_val = evaluate_expr(env, arg)?;
             obj_set_key_value(&array_obj, &i.to_string().into(), arg_val)?;
@@ -261,7 +259,7 @@ pub(crate) fn handle_array_instance_method(
             let start = start.max(0).min(len) as usize;
             let end = end.max(0).min(len) as usize;
 
-            let new_array = new_js_object_data();
+            let new_array = create_array(env)?;
             let mut idx = 0;
             for i in start..end {
                 if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
@@ -313,7 +311,7 @@ pub(crate) fn handle_array_instance_method(
                 let callback_val = evaluate_expr(env, &args[0])?;
                 let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                let new_array = new_js_object_data();
+                let new_array = create_array(env)?;
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
@@ -352,7 +350,7 @@ pub(crate) fn handle_array_instance_method(
                 let callback_val = evaluate_expr(env, &args[0])?;
                 let current_len = get_array_length(obj_map).unwrap_or(0);
 
-                let new_array = new_js_object_data();
+                let new_array = create_array(env)?;
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
@@ -655,7 +653,7 @@ pub(crate) fn handle_array_instance_method(
             }
         }
         "concat" => {
-            let result = new_js_object_data();
+            let result = create_array(env)?;
 
             // First, copy all elements from current array
             let current_len = get_array_length(obj_map).unwrap_or(0);
@@ -899,7 +897,7 @@ pub(crate) fn handle_array_instance_method(
             }
 
             // Create new array for deleted elements
-            let deleted_array = new_js_object_data();
+            let deleted_array = create_array(env)?;
             for (i, val) in deleted_elements.iter().enumerate() {
                 obj_set_key_value(&deleted_array, &i.to_string().into(), val.clone())?;
             }
@@ -1385,33 +1383,14 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> 
     Ok(())
 }
 
-/// Check if an object looks like an array (has length and consecutive numeric indices)
+/// Check if an object is an Array
 pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
-    if let Some(length_rc) = get_own_property(obj, &"length".into()) {
-        if let Value::Number(len) = *length_rc.borrow() {
-            let len = len as usize;
-            // Check if all indices from 0 to len-1 exist
-            for i in 0..len {
-                if get_own_property(obj, &i.to_string().into()).is_none() {
-                    return false;
-                }
-            }
-            // Check that there are no extra numeric keys beyond len
-            for key in obj.borrow().keys() {
-                if let PropertyKey::String(key_str) = key
-                    && let Ok(idx) = key_str.parse::<usize>()
-                    && idx >= len
-                {
-                    return false;
-                }
-            }
-            true
-        } else {
-            false
-        }
-    } else {
-        false
+    if let Some(val) = get_own_property(obj, &"__is_array".into())
+        && let Value::Boolean(b) = *val.borrow()
+    {
+        return b;
     }
+    false
 }
 
 pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
@@ -1429,4 +1408,29 @@ pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) -> Resu
     obj_set_key_value(obj, &"length".into(), Value::Number(new_length as f64))?;
     obj.borrow_mut().set_non_enumerable("length".into());
     Ok(())
+}
+
+pub(crate) fn create_array(env: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSError> {
+    let arr = new_js_object_data();
+    obj_set_key_value(&arr, &"__is_array".into(), Value::Boolean(true))?;
+    arr.borrow_mut().set_non_enumerable("__is_array".into());
+
+    // Set prototype
+    let mut root_env_opt = Some(env.clone());
+    while let Some(r) = root_env_opt.clone() {
+        if r.borrow().prototype.is_some() {
+            root_env_opt = r.borrow().prototype.clone();
+        } else {
+            break;
+        }
+    }
+    if let Some(root_env) = root_env_opt {
+        // Try to set prototype to Array.prototype
+        if crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Array").is_err() {
+            // Fallback to Object.prototype
+            let _ = crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Object");
+        }
+    }
+
+    Ok(arr)
 }

@@ -5384,9 +5384,8 @@ pub(crate) fn bind_function_parameters(
             let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
 
             // Create array object
-            let array_obj = new_js_object_data();
-            obj_set_key_value(&array_obj, &"length".into(), Value::Number(rest_args.len() as f64))?;
-            array_obj.borrow_mut().set_non_enumerable("length".into());
+            let array_obj = crate::js_array::create_array(env)?;
+            crate::js_array::set_array_length(&array_obj, rest_args.len())?;
 
             for (j, arg) in rest_args.into_iter().enumerate() {
                 obj_set_key_value(&array_obj, &j.to_string().into(), arg)?;
@@ -5409,10 +5408,10 @@ pub(crate) fn bind_function_parameters(
 }
 
 fn evaluate_tagged_template(env: &JSObjectDataPtr, tag: &Expr, strings: &[Vec<u16>], exprs: &[Expr]) -> Result<Value, JSError> {
-    let strings_array = new_js_object_data();
-    obj_set_key_value(&strings_array, &"length".into(), Value::Number(strings.len() as f64))?;
-    let raw_array = new_js_object_data();
-    obj_set_key_value(&raw_array, &"length".into(), Value::Number(strings.len() as f64))?;
+    let strings_array = crate::js_array::create_array(env)?;
+    crate::js_array::set_array_length(&strings_array, strings.len())?;
+    let raw_array = crate::js_array::create_array(env)?;
+    crate::js_array::set_array_length(&raw_array, strings.len())?;
 
     for (i, s) in strings.iter().enumerate() {
         let val = Value::String(s.clone());
@@ -6626,19 +6625,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
 }
 
 fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
-    let arr = new_js_object_data();
-    // Give arrays a default prototype (Object.prototype) until Array.prototype exists
-    let mut root_env_opt = Some(env.clone());
-    while let Some(r) = root_env_opt.clone() {
-        if r.borrow().prototype.is_some() {
-            root_env_opt = r.borrow().prototype.clone();
-        } else {
-            break;
-        }
-    }
-    if let Some(root_env) = root_env_opt {
-        crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Object")?;
-    }
+    let arr = crate::js_array::create_array(env)?;
     let mut index = 0;
     for elem_expr in elements {
         if let Expr::Spread(spread_expr) = elem_expr {

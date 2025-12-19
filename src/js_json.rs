@@ -12,7 +12,7 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     Value::String(s) => {
                         let json_str = utf16_to_utf8(&s);
                         match serde_json::from_str::<serde_json::Value>(&json_str) {
-                            Ok(json_value) => json_value_to_js_value(json_value),
+                            Ok(json_value) => json_value_to_js_value(json_value, env),
                             Err(_) => Err(raise_eval_error!("Invalid JSON")),
                         }
                     }
@@ -43,7 +43,7 @@ pub fn handle_json_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
     }
 }
 
-fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSError> {
+fn json_value_to_js_value(json_value: serde_json::Value, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match json_value {
         serde_json::Value::Null => Ok(Value::Undefined),
         serde_json::Value::Bool(b) => Ok(Value::Boolean(b)),
@@ -57,9 +57,9 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
         serde_json::Value::String(s) => Ok(Value::String(utf8_to_utf16(&s))),
         serde_json::Value::Array(arr) => {
             let len = arr.len();
-            let obj = new_js_object_data();
+            let obj = crate::js_array::create_array(env)?;
             for (i, item) in arr.into_iter().enumerate() {
-                let js_val = json_value_to_js_value(item)?;
+                let js_val = json_value_to_js_value(item, env)?;
                 obj_set_key_value(&obj, &i.to_string().into(), js_val)?;
             }
             set_array_length(&obj, len)?;
@@ -68,7 +68,7 @@ fn json_value_to_js_value(json_value: serde_json::Value) -> Result<Value, JSErro
         serde_json::Value::Object(obj) => {
             let js_obj = new_js_object_data();
             for (key, value) in obj.into_iter() {
-                let js_val = json_value_to_js_value(value)?;
+                let js_val = json_value_to_js_value(value, env)?;
                 obj_set_key_value(&js_obj, &key.into(), js_val)?;
             }
             Ok(Value::Object(js_obj))

@@ -6625,32 +6625,37 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
     Ok(Value::Object(obj))
 }
 
-fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Expr>) -> Result<Value, JSError> {
+fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Option<Expr>>) -> Result<Value, JSError> {
     let arr = crate::js_array::create_array(env)?;
     let mut index = 0;
-    for elem_expr in elements {
-        if let Expr::Spread(spread_expr) = elem_expr {
-            // Spread operator: evaluate the expression and spread its elements
-            let spread_val = evaluate_expr(env, spread_expr)?;
-            if let Value::Object(spread_obj) = spread_val {
-                // Assume it's an array-like object
-                let mut i = 0;
-                loop {
-                    let key = i.to_string();
-                    if let Some(val) = obj_get_key_value(&spread_obj, &key.into())? {
-                        obj_set_key_value(&arr, &index.to_string().into(), val.borrow().clone())?;
-                        index += 1;
-                        i += 1;
-                    } else {
-                        break;
+    for elem_opt in elements {
+        if let Some(elem_expr) = elem_opt {
+            if let Expr::Spread(spread_expr) = elem_expr {
+                // Spread operator: evaluate the expression and spread its elements
+                let spread_val = evaluate_expr(env, spread_expr)?;
+                if let Value::Object(spread_obj) = spread_val {
+                    // Assume it's an array-like object
+                    let mut i = 0;
+                    loop {
+                        let key = i.to_string();
+                        if let Some(val) = obj_get_key_value(&spread_obj, &key.into())? {
+                            obj_set_key_value(&arr, &index.to_string().into(), val.borrow().clone())?;
+                            index += 1;
+                            i += 1;
+                        } else {
+                            break;
+                        }
                     }
+                } else {
+                    return Err(raise_eval_error!("Spread operator can only be applied to arrays"));
                 }
             } else {
-                return Err(raise_eval_error!("Spread operator can only be applied to arrays"));
+                let value = evaluate_expr(env, elem_expr)?;
+                obj_set_key_value(&arr, &index.to_string().into(), value)?;
+                index += 1;
             }
         } else {
-            let value = evaluate_expr(env, elem_expr)?;
-            obj_set_key_value(&arr, &index.to_string().into(), value)?;
+            // Hole (elision) - just increment index, do not set property
             index += 1;
         }
     }

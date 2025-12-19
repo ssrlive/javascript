@@ -136,7 +136,7 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
         Expr::Array(items) => Expr::Array(
             items
                 .iter()
-                .map(|it| replace_first_yield_in_expr(it, send_value, replaced))
+                .map(|it| it.as_ref().map(|e| replace_first_yield_in_expr(e, send_value, replaced)))
                 .collect(),
         ),
         Expr::LogicalNot(a) => Expr::LogicalNot(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
@@ -277,7 +277,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
         Expr::Property(a, _) => expr_contains_yield(a),
         Expr::Call(a, args) => expr_contains_yield(a) || args.iter().any(expr_contains_yield),
         Expr::Object(pairs) => pairs.iter().any(|(k, v, _)| expr_contains_yield(k) || expr_contains_yield(v)),
-        Expr::Array(items) => items.iter().any(expr_contains_yield),
+        Expr::Array(items) => items.iter().any(|it| it.as_ref().is_some_and(expr_contains_yield)),
         Expr::UnaryNeg(a)
         | Expr::LogicalNot(a)
         | Expr::TypeOf(a)

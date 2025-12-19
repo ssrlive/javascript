@@ -980,8 +980,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 // Support elisions (sparse arrays) where a comma without an
                 // expression indicates an empty slot, e.g. `[ , ]` or `[a,,b]`.
                 if matches!(tokens[0].token, Token::Comma) {
-                    // Push an explicit `undefined` element to represent the elision
-                    elements.push(Expr::Value(Value::Undefined));
+                    // Push an explicit `None` element to represent the elision (hole)
+                    elements.push(None);
                     tokens.remove(0); // consume comma representing empty slot
                     // After consuming the comma, allow the loop to continue and
                     // possibly encounter another comma or the closing bracket.
@@ -991,7 +991,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
 
                 // Parse element expression
                 let elem = parse_assignment(tokens)?;
-                elements.push(elem);
+                elements.push(Some(elem));
 
                 // Check for comma or end. Allow intervening line terminators
                 // between elements so array items can be split across lines.

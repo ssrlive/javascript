@@ -78,7 +78,7 @@ fn json_value_to_js_value(json_value: serde_json::Value, env: &JSObjectDataPtr) 
 
 fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
     match js_value {
-        Value::Undefined => Some(serde_json::Value::Null),
+        Value::Undefined => None,
         Value::Boolean(b) => Some(serde_json::Value::Bool(b)),
         Value::Number(n) => {
             if n.is_finite() {
@@ -108,16 +108,12 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                         if let Some(json_val) = js_value_to_json_value(val_clone) {
                             arr.push(json_val);
                         } else {
-                            log::debug!(
-                                "js_value_to_json_value: array element {} could not be serialized: {:?}",
-                                i,
-                                val_rc.borrow().clone()
-                            );
-                            return None;
+                            // Undefined, Function, Symbol in array -> null
+                            arr.push(serde_json::Value::Null);
                         }
                     } else {
-                        log::debug!("js_value_to_json_value: array element {} missing", i);
-                        return None;
+                        // Hole -> null
+                        arr.push(serde_json::Value::Null);
                     }
                 }
                 Some(serde_json::Value::Array(arr))
@@ -130,7 +126,7 @@ fn js_value_to_json_value(js_value: Value) -> Option<serde_json::Value> {
                         if let Some(json_val) = js_value_to_json_value(value.borrow().clone()) {
                             map.insert(s.clone(), json_val);
                         } else {
-                            return None;
+                            // If None (undefined, function, etc), skip property
                         }
                     }
                 }

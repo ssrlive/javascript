@@ -417,7 +417,7 @@ pub enum Expr {
     ArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                     // parameters, body
     AsyncArrowFunction(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>),                // parameters, body for async arrow functions
     Object(Vec<(Expr, Expr, bool)>),                                                     // object literal: key-expr, value-expr, is_method
-    Array(Vec<Expr>),                                                                    // array literal: [elem1, elem2, ...]
+    Array(Vec<Option<Expr>>),                                                            // array literal: [elem1, elem2, ...]
     Getter(Box<Expr>),                                                                   // getter function
     Setter(Box<Expr>),                                                                   // setter function
     Spread(Box<Expr>),                                                                   // spread operator: ...expr

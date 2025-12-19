@@ -11,7 +11,7 @@ use crate::{
     js_array::is_array,
     js_class::ClassDefinition,
     js_promise::JSPromise,
-    raise_eval_error, raise_type_error,
+    raise_eval_error, raise_range_error, raise_type_error,
 };
 
 #[derive(Clone, Debug)]
@@ -1082,20 +1082,20 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                                 Statement::from(StatementKind::Let(vec![(
                                     "entry".to_string(),
                                     Some(Expr::Array(vec![
-                                        Expr::Property(
+                                        Some(Expr::Property(
                                             Box::new(Expr::Index(
                                                 Box::new(Expr::Var("__entries".to_string(), None, None)),
                                                 Box::new(Expr::Var("idx".to_string(), None, None)),
                                             )),
                                             "0".to_string(),
-                                        ),
-                                        Expr::Property(
+                                        )),
+                                        Some(Expr::Property(
                                             Box::new(Expr::Index(
                                                 Box::new(Expr::Var("__entries".to_string(), None, None)),
                                                 Box::new(Expr::Var("idx".to_string(), None, None)),
                                             )),
                                             "1".to_string(),
-                                        ),
+                                        )),
                                     ])),
                                 )])),
                                 Statement::from(StatementKind::Expr(Expr::Assign(
@@ -1576,6 +1576,48 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
         }
     }
     // No setter, just set the value normally
+
+    // Special handling for Array length property
+    if let PropertyKey::String(s) = key {
+        if s == "length" && is_array(js_obj) {
+            let new_len_num = match &val {
+                Value::Number(n) => *n,
+                _ => return Err(raise_range_error!("Invalid array length")),
+            };
+
+            if new_len_num < 0.0 || new_len_num.fract() != 0.0 || new_len_num > u32::MAX as f64 {
+                return Err(raise_range_error!("Invalid array length"));
+            }
+
+            let new_len = new_len_num as usize;
+
+            let old_len = if let Some(l) = get_own_property(js_obj, &"length".into()) {
+                match &*l.borrow() {
+                    Value::Number(n) => *n as usize,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+
+            if new_len < old_len {
+                let mut keys_to_remove = Vec::new();
+                for k in js_obj.borrow().properties.keys() {
+                    if let PropertyKey::String(ks) = k {
+                        if let Ok(idx) = ks.parse::<usize>() {
+                            if idx >= new_len {
+                                keys_to_remove.push(k.clone());
+                            }
+                        }
+                    }
+                }
+                for k in keys_to_remove {
+                    js_obj.borrow_mut().remove(&k);
+                }
+            }
+        }
+    }
+
     // Update array length if setting an indexed property
     if let PropertyKey::String(s) = key {
         if let Ok(index) = s.parse::<usize>() {

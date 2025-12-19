@@ -49,6 +49,13 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                             Value::Null => s.push_str("null"),
                             _ => s.push_str("[object Object]"),
                         }
+                    } else {
+                        // Hole: print nothing, but if it's the last element, add a trailing comma
+                        // to distinguish it from a non-hole ending.
+                        // e.g. [1, 2] vs [1, 2, <hole>] -> [1, 2, ]
+                        if i == len - 1 {
+                            s.push(',');
+                        }
                     }
                 }
                 s.push(']');

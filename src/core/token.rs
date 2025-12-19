@@ -1,4 +1,6 @@
 use crate::{JSError, raise_tokenize_error};
+use num_bigint::BigInt;
+use num_traits::{Num, ToPrimitive};
 
 #[derive(Debug, Clone)]
 pub enum Token {
@@ -853,6 +855,68 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
             }
             '0'..='9' => {
                 let start = i;
+                let mut radix = 10;
+
+                if chars[i] == '0' && i + 1 < chars.len() {
+                    match chars[i + 1] {
+                        'b' | 'B' => {
+                            radix = 2;
+                            i += 2;
+                            column += 2;
+                        }
+                        'o' | 'O' => {
+                            radix = 8;
+                            i += 2;
+                            column += 2;
+                        }
+                        'x' | 'X' => {
+                            radix = 16;
+                            i += 2;
+                            column += 2;
+                        }
+                        _ => {}
+                    }
+                }
+
+                if radix != 10 {
+                    while i < chars.len() && (chars[i].is_digit(radix) || chars[i] == '_') {
+                        i += 1;
+                        column += 1;
+                    }
+
+                    if i < chars.len() && chars[i] == 'n' {
+                        let mut num_str: String = chars[start..i].iter().collect();
+                        num_str.retain(|c| c != '_');
+                        tokens.push(TokenData {
+                            token: Token::BigInt(num_str),
+                            line,
+                            column: start_col,
+                        });
+                        i += 1;
+                        column += 1;
+                        continue;
+                    }
+
+                    let mut num_str: String = chars[start + 2..i].iter().collect();
+                    num_str.retain(|c| c != '_');
+                    if num_str.is_empty() {
+                        return Err(raise_tokenize_error!());
+                    }
+
+                    match BigInt::from_str_radix(&num_str, radix) {
+                        Ok(n) => {
+                            let f = n.to_f64().unwrap_or(f64::INFINITY);
+                            tokens.push(TokenData {
+                                token: Token::Number(f),
+                                line,
+                                column: start_col,
+                            });
+                        }
+                        Err(_) => return Err(raise_tokenize_error!()),
+                    }
+                    continue;
+                }
+
                 // integer part (allow underscores as numeric separators)
                 while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '_') {
                     i += 1;

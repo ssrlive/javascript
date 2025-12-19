@@ -90,6 +90,14 @@ pub fn handle_string_method(s: &[u16], method: &str, args: &[Expr], env: &JSObje
         "concat" => string_concat_method(s, args, env),
         "padStart" => string_pad_start_method(s, args, env),
         "padEnd" => string_pad_end_method(s, args, env),
+        "at" => string_at_method(s, args, env),
+        "codePointAt" => string_code_point_at_method(s, args, env),
+        "search" => string_search_method(s, args, env),
+        "matchAll" => string_match_all_method(s, args, env),
+        "toLocaleLowerCase" => string_to_locale_lowercase(s, args, env),
+        "toLocaleUpperCase" => string_to_locale_uppercase(s, args, env),
+        "normalize" => string_normalize_method(s, args, env),
+        "toWellFormed" => string_to_well_formed_method(s, args, env),
         _ => Err(raise_eval_error!(format!("Unknown string method: {method}"))), // method not found
     }
 }
@@ -1029,4 +1037,278 @@ fn string_pad_end_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
             args.len()
         )))
     }
+}
+
+fn string_at_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let idx = if !args.is_empty() {
+        match evaluate_expr(env, &args[0])? {
+            Value::Number(n) => n as i64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    let len = s.len() as i64;
+    let k = if idx >= 0 { idx } else { len + idx };
+    if k < 0 || k >= len {
+        Ok(Value::Undefined)
+    } else {
+        Ok(Value::String(vec![s[k as usize]]))
+    }
+}
+
+fn string_code_point_at_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let idx = if !args.is_empty() {
+        match evaluate_expr(env, &args[0])? {
+            Value::Number(n) => n as usize,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    if idx >= s.len() {
+        return Ok(Value::Undefined);
+    }
+    let first = s[idx];
+    if (0xD800..=0xDBFF).contains(&first) && idx + 1 < s.len() {
+        let second = s[idx + 1];
+        if (0xDC00..=0xDFFF).contains(&second) {
+            let code_point = 0x10000 + ((first as u32 - 0xD800) << 10) + (second as u32 - 0xDC00);
+            return Ok(Value::Number(code_point as f64));
+        }
+    }
+    Ok(Value::Number(first as f64))
+}
+
+fn string_search_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let (regexp_obj, _flags) = if !args.is_empty() {
+        let arg = evaluate_expr(env, &args[0])?;
+        match arg {
+            Value::Object(obj) if is_regex_object(&obj) => {
+                let _p = crate::js_regexp::internal_get_regex_pattern(&obj)?;
+                let f = match get_own_property(&obj, &"__flags".into()) {
+                    Some(val) => match &*val.borrow() {
+                        Value::String(s) => utf16_to_utf8(s),
+                        _ => String::new(),
+                    },
+                    None => String::new(),
+                };
+                (obj, f)
+            }
+            Value::String(p) => {
+                let re_args = vec![Expr::StringLit(p.clone())];
+                let val = handle_regexp_constructor(&re_args, env)?;
+                if let Value::Object(obj) = val {
+                    (obj, String::new())
+                } else {
+                    return Err(raise_eval_error!("Failed to create RegExp"));
+                }
+            }
+            v => {
+                let p = utf8_to_utf16(&v.to_string());
+                let re_args = vec![Expr::StringLit(p)];
+                let val = handle_regexp_constructor(&re_args, env)?;
+                if let Value::Object(obj) = val {
+                    (obj, String::new())
+                } else {
+                    return Err(raise_eval_error!("Failed to create RegExp"));
+                }
+            }
+        }
+    } else {
+        let re_args = vec![Expr::StringLit(Vec::new())];
+        let val = handle_regexp_constructor(&re_args, env)?;
+        if let Value::Object(obj) = val {
+            (obj, String::new())
+        } else {
+            return Err(raise_eval_error!("Failed to create RegExp"));
+        }
+    };
+
+    let pattern = crate::js_regexp::internal_get_regex_pattern(&regexp_obj)?;
+    let flags_str = match get_own_property(&regexp_obj, &"__flags".into()) {
+        Some(val) => match &*val.borrow() {
+            Value::String(s) => utf16_to_utf8(s),
+            _ => String::new(),
+        },
+        None => String::new(),
+    };
+
+    let re_args = vec![Expr::StringLit(pattern), Expr::StringLit(utf8_to_utf16(&flags_str))];
+    let matcher_val = handle_regexp_constructor(&re_args, env)?;
+    let matcher_obj = if let Value::Object(o) = matcher_val {
+        o
+    } else {
+        return Err(raise_eval_error!("Failed to clone RegExp"));
+    };
+
+    obj_set_key_value(&matcher_obj, &"lastIndex".into(), Value::Number(0.0))?;
+
+    let exec_args = vec![Expr::StringLit(s.to_vec())];
+    let res = handle_regexp_method(&matcher_obj, "exec", &exec_args, env)?;
+
+    match res {
+        Value::Object(match_obj) => {
+            if let Some(idx_val) = obj_get_key_value(&match_obj, &"index".into())? {
+                Ok(idx_val.borrow().clone())
+            } else {
+                Ok(Value::Number(-1.0))
+            }
+        }
+        _ => Ok(Value::Number(-1.0)),
+    }
+}
+
+fn string_match_all_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let (regexp_obj, flags) = if !args.is_empty() {
+        let arg = evaluate_expr(env, &args[0])?;
+        match arg {
+            Value::Object(obj) if is_regex_object(&obj) => {
+                let f = match get_own_property(&obj, &"__flags".into()) {
+                    Some(val) => match &*val.borrow() {
+                        Value::String(s) => utf16_to_utf8(s),
+                        _ => String::new(),
+                    },
+                    None => String::new(),
+                };
+                if !f.contains('g') {
+                    return Err(raise_type_error!(
+                        "String.prototype.matchAll called with a non-global RegExp argument"
+                    ));
+                }
+                (obj, f)
+            }
+            Value::String(p) => {
+                let re_args = vec![Expr::StringLit(p.clone()), Expr::StringLit(utf8_to_utf16("g"))];
+                let val = handle_regexp_constructor(&re_args, env)?;
+                if let Value::Object(obj) = val {
+                    (obj, String::from("g"))
+                } else {
+                    return Err(raise_eval_error!("Failed to create RegExp"));
+                }
+            }
+            _ => {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                let p = match arg_val {
+                    Value::String(s) => s,
+                    v => utf8_to_utf16(&v.to_string()),
+                };
+                let re_args = vec![Expr::StringLit(p), Expr::StringLit(utf8_to_utf16("g"))];
+                let val = handle_regexp_constructor(&re_args, env)?;
+                if let Value::Object(obj) = val {
+                    (obj, String::from("g"))
+                } else {
+                    return Err(raise_eval_error!("Failed to create RegExp"));
+                }
+            }
+        }
+    } else {
+        let re_args = vec![Expr::StringLit(Vec::new()), Expr::StringLit(utf8_to_utf16("g"))];
+        let val = handle_regexp_constructor(&re_args, env)?;
+        if let Value::Object(obj) = val {
+            (obj, String::from("g"))
+        } else {
+            return Err(raise_eval_error!("Failed to create RegExp"));
+        }
+    };
+
+    let pattern = crate::js_regexp::internal_get_regex_pattern(&regexp_obj)?;
+    let flags_u16 = utf8_to_utf16(&flags);
+    let re_args = vec![Expr::StringLit(pattern), Expr::StringLit(flags_u16)];
+    let matcher_val = handle_regexp_constructor(&re_args, env)?;
+    let matcher_obj = if let Value::Object(o) = matcher_val {
+        o
+    } else {
+        return Err(raise_eval_error!("Failed to clone RegExp"));
+    };
+
+    obj_set_key_value(&matcher_obj, &"lastIndex".into(), Value::Number(0.0))?;
+
+    let mut matches = Vec::new();
+    let exec_args = vec![Expr::StringLit(s.to_vec())];
+
+    loop {
+        let res = handle_regexp_method(&matcher_obj, "exec", &exec_args, env)?;
+        match res {
+            Value::Null => break,
+            Value::Object(match_obj) => {
+                matches.push(Value::Object(match_obj.clone()));
+
+                if let Some(m0) = obj_get_key_value(&match_obj, &"0".into())? {
+                    if let Value::String(s) = &*m0.borrow() {
+                        if s.is_empty() {
+                            if let Some(li) = obj_get_key_value(&matcher_obj, &"lastIndex".into())? {
+                                if let Value::Number(n) = *li.borrow() {
+                                    obj_set_key_value(&matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => break,
+        }
+    }
+
+    make_array_from_values(env, matches)
+}
+
+fn string_to_locale_lowercase(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    string_to_lowercase(s, args, env)
+}
+
+fn string_to_locale_uppercase(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    string_to_uppercase(s, args, env)
+}
+
+fn string_normalize_method(s: &[u16], _args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    Ok(Value::String(s.to_vec()))
+}
+
+fn string_to_well_formed_method(s: &[u16], _args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let mut res = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if (0xD800..=0xDBFF).contains(&c) {
+            if i + 1 < s.len() {
+                let next = s[i + 1];
+                if (0xDC00..=0xDFFF).contains(&next) {
+                    res.push(c);
+                    res.push(next);
+                    i += 2;
+                    continue;
+                }
+            }
+            res.push(0xFFFD);
+            i += 1;
+        } else if (0xDC00..=0xDFFF).contains(&c) {
+            res.push(0xFFFD);
+            i += 1;
+        } else {
+            res.push(c);
+            i += 1;
+        }
+    }
+    Ok(Value::String(res))
+}
+
+fn make_array_from_values(env: &JSObjectDataPtr, values: Vec<Value>) -> Result<Value, JSError> {
+    let len = values.len();
+    let arr = new_js_object_data();
+    let array_proto = env_get(env, "Array");
+    if let Some(array_val) = &array_proto {
+        if let Value::Object(array_obj) = &*array_val.borrow() {
+            if let Ok(Some(proto_val)) = obj_get_key_value(array_obj, &"prototype".into()) {
+                if let Value::Object(proto_obj) = &*proto_val.borrow() {
+                    arr.borrow_mut().prototype = Some(proto_obj.clone());
+                }
+            }
+        }
+    }
+    for (i, v) in values.into_iter().enumerate() {
+        obj_set_key_value(&arr, &i.to_string().into(), v)?;
+    }
+    obj_set_key_value(&arr, &"length".into(), Value::Number(len as f64))?;
+    Ok(Value::Object(arr))
 }

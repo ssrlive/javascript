@@ -50,6 +50,27 @@ pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
     obj_set_key_value(&math_obj, &"imul".into(), Value::Function("Math.imul".to_string()))?;
     obj_set_key_value(&math_obj, &"max".into(), Value::Function("Math.max".to_string()))?;
     obj_set_key_value(&math_obj, &"min".into(), Value::Function("Math.min".to_string()))?;
+    obj_set_key_value(&math_obj, &"asin".into(), Value::Function("Math.asin".to_string()))?;
+    obj_set_key_value(&math_obj, &"acos".into(), Value::Function("Math.acos".to_string()))?;
+    obj_set_key_value(&math_obj, &"atan".into(), Value::Function("Math.atan".to_string()))?;
+    obj_set_key_value(&math_obj, &"atan2".into(), Value::Function("Math.atan2".to_string()))?;
+    obj_set_key_value(&math_obj, &"sinh".into(), Value::Function("Math.sinh".to_string()))?;
+    obj_set_key_value(&math_obj, &"cosh".into(), Value::Function("Math.cosh".to_string()))?;
+    obj_set_key_value(&math_obj, &"tanh".into(), Value::Function("Math.tanh".to_string()))?;
+    obj_set_key_value(&math_obj, &"asinh".into(), Value::Function("Math.asinh".to_string()))?;
+    obj_set_key_value(&math_obj, &"acosh".into(), Value::Function("Math.acosh".to_string()))?;
+    obj_set_key_value(&math_obj, &"atanh".into(), Value::Function("Math.atanh".to_string()))?;
+    obj_set_key_value(&math_obj, &"exp".into(), Value::Function("Math.exp".to_string()))?;
+    obj_set_key_value(&math_obj, &"expm1".into(), Value::Function("Math.expm1".to_string()))?;
+    obj_set_key_value(&math_obj, &"log".into(), Value::Function("Math.log".to_string()))?;
+    obj_set_key_value(&math_obj, &"log10".into(), Value::Function("Math.log10".to_string()))?;
+    obj_set_key_value(&math_obj, &"log1p".into(), Value::Function("Math.log1p".to_string()))?;
+    obj_set_key_value(&math_obj, &"log2".into(), Value::Function("Math.log2".to_string()))?;
+    obj_set_key_value(&math_obj, &"fround".into(), Value::Function("Math.fround".to_string()))?;
+    obj_set_key_value(&math_obj, &"trunc".into(), Value::Function("Math.trunc".to_string()))?;
+    obj_set_key_value(&math_obj, &"cbrt".into(), Value::Function("Math.cbrt".to_string()))?;
+    obj_set_key_value(&math_obj, &"hypot".into(), Value::Function("Math.hypot".to_string()))?;
+    obj_set_key_value(&math_obj, &"sign".into(), Value::Function("Math.sign".to_string()))?;
     Ok(math_obj)
 }
 
@@ -255,6 +276,267 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
                     }
                 }
                 Ok(Value::Number(min_val))
+            }
+        }
+        "asin" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.asin()))
+                } else {
+                    Err(raise_eval_error!("Math.asin expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.asin expects exactly one argument"))
+            }
+        }
+        "acos" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.acos()))
+                } else {
+                    Err(raise_eval_error!("Math.acos expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.acos expects exactly one argument"))
+            }
+        }
+        "atan" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.atan()))
+                } else {
+                    Err(raise_eval_error!("Math.atan expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.atan expects exactly one argument"))
+            }
+        }
+        "atan2" => {
+            if args.len() == 2 {
+                let y_val = evaluate_expr(env, &args[0])?;
+                let x_val = evaluate_expr(env, &args[1])?;
+                if let (Value::Number(y), Value::Number(x)) = (y_val, x_val) {
+                    Ok(Value::Number(y.atan2(x)))
+                } else {
+                    Err(raise_eval_error!("Math.atan2 expects two numbers"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.atan2 expects exactly two arguments"))
+            }
+        }
+        "sinh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.sinh()))
+                } else {
+                    Err(raise_eval_error!("Math.sinh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.sinh expects exactly one argument"))
+            }
+        }
+        "cosh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.cosh()))
+                } else {
+                    Err(raise_eval_error!("Math.cosh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.cosh expects exactly one argument"))
+            }
+        }
+        "tanh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.tanh()))
+                } else {
+                    Err(raise_eval_error!("Math.tanh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.tanh expects exactly one argument"))
+            }
+        }
+        "asinh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.asinh()))
+                } else {
+                    Err(raise_eval_error!("Math.asinh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.asinh expects exactly one argument"))
+            }
+        }
+        "acosh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.acosh()))
+                } else {
+                    Err(raise_eval_error!("Math.acosh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.acosh expects exactly one argument"))
+            }
+        }
+        "atanh" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.atanh()))
+                } else {
+                    Err(raise_eval_error!("Math.atanh expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.atanh expects exactly one argument"))
+            }
+        }
+        "exp" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.exp()))
+                } else {
+                    Err(raise_eval_error!("Math.exp expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.exp expects exactly one argument"))
+            }
+        }
+        "expm1" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.exp_m1()))
+                } else {
+                    Err(raise_eval_error!("Math.expm1 expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.expm1 expects exactly one argument"))
+            }
+        }
+        "log" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.ln()))
+                } else {
+                    Err(raise_eval_error!("Math.log expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.log expects exactly one argument"))
+            }
+        }
+        "log10" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.log10()))
+                } else {
+                    Err(raise_eval_error!("Math.log10 expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.log10 expects exactly one argument"))
+            }
+        }
+        "log1p" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.ln_1p()))
+                } else {
+                    Err(raise_eval_error!("Math.log1p expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.log1p expects exactly one argument"))
+            }
+        }
+        "log2" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.log2()))
+                } else {
+                    Err(raise_eval_error!("Math.log2 expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.log2 expects exactly one argument"))
+            }
+        }
+        "fround" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number((n as f32) as f64))
+                } else {
+                    Err(raise_eval_error!("Math.fround expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.fround expects exactly one argument"))
+            }
+        }
+        "trunc" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.trunc()))
+                } else {
+                    Err(raise_eval_error!("Math.trunc expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.trunc expects exactly one argument"))
+            }
+        }
+        "cbrt" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    Ok(Value::Number(n.cbrt()))
+                } else {
+                    Err(raise_eval_error!("Math.cbrt expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.cbrt expects exactly one argument"))
+            }
+        }
+        "hypot" => {
+            let mut sum_sq = 0.0;
+            for arg in args {
+                let arg_val = evaluate_expr(env, arg)?;
+                if let Value::Number(n) = arg_val {
+                    sum_sq += n * n;
+                } else {
+                    return Ok(Value::Number(f64::NAN));
+                }
+            }
+            Ok(Value::Number(sum_sq.sqrt()))
+        }
+        "sign" => {
+            if args.len() == 1 {
+                let arg_val = evaluate_expr(env, &args[0])?;
+                if let Value::Number(n) = arg_val {
+                    if n.is_nan() {
+                        Ok(Value::Number(f64::NAN))
+                    } else if n == 0.0 {
+                        Ok(Value::Number(n)) // Preserves signed zero
+                    } else if n > 0.0 {
+                        Ok(Value::Number(1.0))
+                    } else {
+                        Ok(Value::Number(-1.0))
+                    }
+                } else {
+                    Err(raise_eval_error!("Math.sign expects a number"))
+                }
+            } else {
+                Err(raise_eval_error!("Math.sign expects exactly one argument"))
             }
         }
         _ => Err(raise_eval_error!(format!("Math.{method} is not implemented"))),

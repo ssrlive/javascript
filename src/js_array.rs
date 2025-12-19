@@ -47,28 +47,32 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                     // If it's an array-like object
                     if let Some(len) = get_array_length(&obj_map) {
                         for i in 0..len {
-                            if let Some(val) = obj_get_key_value(&obj_map, &i.to_string().into())? {
-                                let element = val.borrow().clone();
-                                if let Some(ref fn_val) = map_fn {
-                                    if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
-                                        let func_env = new_js_object_data();
-                                        func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                        if !params.is_empty() {
-                                            let name = &params[0].0;
-                                            env_set(&func_env, name.as_str(), element)?;
-                                        }
-                                        if params.len() >= 2 {
-                                            let name = &params[1].0;
-                                            env_set(&func_env, name.as_str(), Value::Number(i as f64))?;
-                                        }
-                                        let mapped = evaluate_statements(&func_env, &body)?;
-                                        result.push(mapped);
-                                    } else {
-                                        return Err(raise_eval_error!("Array.from map function must be a function"));
+                            let val_opt = obj_get_key_value(&obj_map, &i.to_string().into())?;
+                            let element = if let Some(val) = val_opt {
+                                val.borrow().clone()
+                            } else {
+                                Value::Undefined
+                            };
+
+                            if let Some(ref fn_val) = map_fn {
+                                if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
+                                    let func_env = new_js_object_data();
+                                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                    if !params.is_empty() {
+                                        let name = &params[0].0;
+                                        env_set(&func_env, name.as_str(), element)?;
                                     }
+                                    if params.len() >= 2 {
+                                        let name = &params[1].0;
+                                        env_set(&func_env, name.as_str(), Value::Number(i as f64))?;
+                                    }
+                                    let mapped = evaluate_statements(&func_env, &body)?;
+                                    result.push(mapped);
                                 } else {
-                                    result.push(element);
+                                    return Err(raise_eval_error!("Array.from map function must be a function"));
                                 }
+                            } else {
+                                result.push(element);
                             }
                         }
                     } else {

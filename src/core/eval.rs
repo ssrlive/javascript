@@ -2447,143 +2447,120 @@ fn statement_for_of_var_iter(
     let iterable_val = evaluate_expr(env, iterable)?;
     match iterable_val {
         Value::Object(obj_map) => {
-            if is_array(&obj_map) {
-                let len = get_array_length(&obj_map).unwrap_or(0);
-                for i in 0..len {
-                    let key = PropertyKey::String(i.to_string());
-                    if let Some(element_rc) = obj_get_key_value(&obj_map, &key)? {
-                        let element = element_rc.borrow().clone();
-                        env_set_recursive(env, var, element)?;
-                        let block_env = new_js_object_data();
-                        block_env.borrow_mut().prototype = Some(env.clone());
-                        block_env.borrow_mut().is_function_scope = false;
-                        match evaluate_statements_with_context(&block_env, body)? {
-                            ControlFlow::Normal(val) => *last_value = val,
-                            ControlFlow::Break(None) => break,
-                            ControlFlow::Break(Some(lbl)) => return Ok(Some(ControlFlow::Break(Some(lbl)))),
-                            ControlFlow::Continue(None) => {}
-                            ControlFlow::Continue(Some(lbl)) => return Ok(Some(ControlFlow::Continue(Some(lbl)))),
-                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+            // Attempt iterator protocol via Symbol.iterator
+            // Look up well-known Symbol.iterator and call it on the object to obtain an iterator
+            if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator") {
+                let key = PropertyKey::Symbol(iter_sym_rc.clone());
+                if let Some(method_rc) = obj_get_key_value(&obj_map, &key)? {
+                    // method can be a direct closure, an object-wrapped closure
+                    // (function-object), a native function, or an iterator object.
+                    let iterator_val = {
+                        let method_val = &*method_rc.borrow();
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(method_val) {
+                            // Call closure with 'this' bound to the object
+                            let func_env = new_js_object_data();
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // mark this as a function scope so var-hoisting and
+                            // env_set_var bind into this frame rather than parent
+                            func_env.borrow_mut().is_function_scope = true;
+                            obj_set_key_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                            // Bind params to undefined (no args passed)
+                            crate::core::bind_function_parameters(&func_env, &params, &[])?;
+                            // Execute body to produce iterator result
+                            // Attach minimal frame/caller info for stack traces
+                            let frame = build_frame_name(env, "[Symbol.iterator]");
+                            let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                            let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
+                            evaluate_statements(&func_env, &body)?
+                        } else if let Value::Function(func_name) = method_val {
+                            // Call built-in function (no arguments). Bind `this` to the receiver object.
+                            let call_env = new_js_object_data();
+                            call_env.borrow_mut().prototype = Some(env.clone());
+                            obj_set_key_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                            crate::js_function::handle_global_function(func_name, &[], &call_env)?
+                        } else if let Value::Object(iter_obj) = method_val {
+                            Value::Object(iter_obj.clone())
+                        } else {
+                            return Err(raise_eval_error!("iterator property is not callable"));
                         }
-                    }
-                }
-                Ok(None)
-            } else {
-                // Attempt iterator protocol via Symbol.iterator
-                // Look up well-known Symbol.iterator and call it on the object to obtain an iterator
-                if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator") {
-                    let key = PropertyKey::Symbol(iter_sym_rc.clone());
-                    if let Some(method_rc) = obj_get_key_value(&obj_map, &key)? {
-                        // method can be a direct closure, an object-wrapped closure
-                        // (function-object), a native function, or an iterator object.
-                        let iterator_val = {
-                            let method_val = &*method_rc.borrow();
-                            if let Some((params, body, captured_env)) = extract_closure_from_value(method_val) {
-                                // Call closure with 'this' bound to the object
-                                let func_env = new_js_object_data();
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                // mark this as a function scope so var-hoisting and
-                                // env_set_var bind into this frame rather than parent
-                                func_env.borrow_mut().is_function_scope = true;
-                                obj_set_key_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
-                                // Bind params to undefined (no args passed)
-                                crate::core::bind_function_parameters(&func_env, &params, &[])?;
-                                // Execute body to produce iterator result
-                                // Attach minimal frame/caller info for stack traces
-                                let frame = build_frame_name(env, "[Symbol.iterator]");
-                                let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
-                                let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
-                                evaluate_statements(&func_env, &body)?
-                            } else if let Value::Function(func_name) = method_val {
-                                // Call built-in function (no arguments). Bind `this` to the receiver object.
-                                let call_env = new_js_object_data();
-                                call_env.borrow_mut().prototype = Some(env.clone());
-                                obj_set_key_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
-                                crate::js_function::handle_global_function(func_name, &[], &call_env)?
-                            } else if let Value::Object(iter_obj) = method_val {
-                                Value::Object(iter_obj.clone())
-                            } else {
-                                return Err(raise_eval_error!("iterator property is not callable"));
-                            }
-                        };
+                    };
 
-                        // Now we have iterator_val, expected to be an object with next() method
-                        if let Value::Object(iter_obj) = iterator_val {
-                            loop {
-                                // call iter_obj.next()
-                                if let Some(next_rc) = obj_get_key_value(&iter_obj, &"next".into())? {
-                                    let next_val = {
-                                        let nv = &*next_rc.borrow();
-                                        if let Some((nparams, nbody, ncaptured_env)) = extract_closure_from_value(nv) {
-                                            let func_env = new_js_object_data();
-                                            func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
-                                            obj_set_key_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
-                                            // Bind params to undefined (no args)
-                                            crate::core::bind_function_parameters(&func_env, &nparams, &[])?;
-                                            // Attach frame/caller for iterator.next
-                                            let frame = build_frame_name(env, "iterator.next");
-                                            let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
-                                            let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
-                                            evaluate_statements(&func_env, &nbody)?
-                                        } else if let Value::Function(func_name) = nv {
-                                            crate::js_function::handle_global_function(func_name, &[], env)?
-                                        } else {
-                                            return Err(raise_eval_error!("next is not callable"));
-                                        }
+                    // Now we have iterator_val, expected to be an object with next() method
+                    if let Value::Object(iter_obj) = iterator_val {
+                        loop {
+                            // call iter_obj.next()
+                            if let Some(next_rc) = obj_get_key_value(&iter_obj, &"next".into())? {
+                                let next_val = {
+                                    let nv = &*next_rc.borrow();
+                                    if let Some((nparams, nbody, ncaptured_env)) = extract_closure_from_value(nv) {
+                                        let func_env = new_js_object_data();
+                                        func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
+                                        obj_set_key_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
+                                        // Bind params to undefined (no args)
+                                        crate::core::bind_function_parameters(&func_env, &nparams, &[])?;
+                                        // Attach frame/caller for iterator.next
+                                        let frame = build_frame_name(env, "iterator.next");
+                                        let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
+                                        let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
+                                        evaluate_statements(&func_env, &nbody)?
+                                    } else if let Value::Function(func_name) = nv {
+                                        crate::js_function::handle_global_function(func_name, &[], env)?
+                                    } else {
+                                        return Err(raise_eval_error!("next is not callable"));
+                                    }
+                                };
+
+                                // next_val should be an object with { value, done }
+                                if let Value::Object(res_obj) = next_val {
+                                    // Check done
+                                    let done_val = obj_get_key_value(&res_obj, &"done".into())?;
+                                    let done = match done_val {
+                                        Some(d) => is_truthy(&d.borrow().clone()),
+                                        None => false,
+                                    };
+                                    if done {
+                                        break;
+                                    }
+
+                                    // Extract value
+                                    let value_val = obj_get_key_value(&res_obj, &"value".into())?;
+                                    let element = match value_val {
+                                        Some(v) => v.borrow().clone(),
+                                        None => Value::Undefined,
                                     };
 
-                                    // next_val should be an object with { value, done }
-                                    if let Value::Object(res_obj) = next_val {
-                                        // Check done
-                                        let done_val = obj_get_key_value(&res_obj, &"done".into())?;
-                                        let done = match done_val {
-                                            Some(d) => is_truthy(&d.borrow().clone()),
-                                            None => false,
-                                        };
-                                        if done {
-                                            break;
+                                    env_set_recursive(env, var, element)?;
+                                    let block_env = new_js_object_data();
+                                    block_env.borrow_mut().prototype = Some(env.clone());
+                                    block_env.borrow_mut().is_function_scope = false;
+                                    match evaluate_statements_with_context(&block_env, body)? {
+                                        ControlFlow::Normal(val) => *last_value = val,
+                                        ControlFlow::Break(None) => break,
+                                        ControlFlow::Break(Some(lbl)) => {
+                                            return Ok(Some(ControlFlow::Break(Some(lbl))));
                                         }
-
-                                        // Extract value
-                                        let value_val = obj_get_key_value(&res_obj, &"value".into())?;
-                                        let element = match value_val {
-                                            Some(v) => v.borrow().clone(),
-                                            None => Value::Undefined,
-                                        };
-
-                                        env_set_recursive(env, var, element)?;
-                                        let block_env = new_js_object_data();
-                                        block_env.borrow_mut().prototype = Some(env.clone());
-                                        block_env.borrow_mut().is_function_scope = false;
-                                        match evaluate_statements_with_context(&block_env, body)? {
-                                            ControlFlow::Normal(val) => *last_value = val,
-                                            ControlFlow::Break(None) => break,
-                                            ControlFlow::Break(Some(lbl)) => {
-                                                return Ok(Some(ControlFlow::Break(Some(lbl))));
-                                            }
-                                            ControlFlow::Continue(None) => {}
-                                            ControlFlow::Continue(Some(lbl)) => {
-                                                return Ok(Some(ControlFlow::Continue(Some(lbl))));
-                                            }
-                                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                        ControlFlow::Continue(None) => {}
+                                        ControlFlow::Continue(Some(lbl)) => {
+                                            return Ok(Some(ControlFlow::Continue(Some(lbl))));
                                         }
-                                    } else {
-                                        return Err(raise_eval_error!("iterator.next() must return an object"));
+                                        ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
                                     }
                                 } else {
-                                    return Err(raise_eval_error!("iterator object missing next()"));
+                                    return Err(raise_eval_error!("iterator.next() must return an object"));
                                 }
+                            } else {
+                                return Err(raise_eval_error!("iterator object missing next()"));
                             }
-                            Ok(None)
-                        } else {
-                            Err(raise_eval_error!("iterator method did not return an object"))
                         }
+                        Ok(None)
                     } else {
-                        Err(raise_eval_error!("for-of loop requires an iterable"))
+                        Err(raise_eval_error!("iterator method did not return an object"))
                     }
                 } else {
                     Err(raise_eval_error!("for-of loop requires an iterable"))
                 }
+            } else {
+                Err(raise_eval_error!("for-of loop requires an iterable"))
             }
         }
         Value::String(s) => {
@@ -6668,23 +6645,101 @@ fn evaluate_array(env: &JSObjectDataPtr, elements: &Vec<Option<Expr>>) -> Result
     for elem_opt in elements {
         if let Some(elem_expr) = elem_opt {
             if let Expr::Spread(spread_expr) = elem_expr {
-                // Spread operator: evaluate the expression and spread its elements
                 let spread_val = evaluate_expr(env, spread_expr)?;
-                if let Value::Object(spread_obj) = spread_val {
-                    // Assume it's an array-like object
-                    let mut i = 0;
-                    loop {
-                        let key = i.to_string();
-                        if let Some(val) = obj_get_key_value(&spread_obj, &key.into())? {
-                            obj_set_key_value(&arr, &index.to_string().into(), val.borrow().clone())?;
-                            index += 1;
-                            i += 1;
+                match spread_val {
+                    Value::Object(spread_obj) => {
+                        if let Some(iter_sym_rc) = get_well_known_symbol_rc("iterator") {
+                            let key = PropertyKey::Symbol(iter_sym_rc.clone());
+                            if let Some(method_rc) = obj_get_key_value(&spread_obj, &key)? {
+                                let iterator_val = {
+                                    let method_val = &*method_rc.borrow();
+                                    if let Some((params, body, captured_env)) = extract_closure_from_value(method_val) {
+                                        let func_env = new_js_object_data();
+                                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                        func_env.borrow_mut().is_function_scope = true;
+                                        obj_set_key_value(&func_env, &"this".into(), Value::Object(spread_obj.clone()))?;
+                                        crate::core::bind_function_parameters(&func_env, &params, &[])?;
+                                        evaluate_statements(&func_env, &body)?
+                                    } else if let Value::Function(func_name) = method_val {
+                                        let call_env = new_js_object_data();
+                                        call_env.borrow_mut().prototype = Some(env.clone());
+                                        obj_set_key_value(&call_env, &"this".into(), Value::Object(spread_obj.clone()))?;
+                                        crate::js_function::handle_global_function(func_name, &[], &call_env)?
+                                    } else if let Value::Object(iter_obj) = method_val {
+                                        Value::Object(iter_obj.clone())
+                                    } else {
+                                        return Err(raise_type_error!("iterator property is not callable"));
+                                    }
+                                };
+
+                                if let Value::Object(iter_obj) = iterator_val {
+                                    loop {
+                                        if let Some(next_rc) = obj_get_key_value(&iter_obj, &"next".into())? {
+                                            let next_val = {
+                                                let nv = &*next_rc.borrow();
+                                                if let Some((nparams, nbody, ncaptured_env)) = extract_closure_from_value(nv) {
+                                                    let func_env = new_js_object_data();
+                                                    func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
+                                                    obj_set_key_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
+                                                    crate::core::bind_function_parameters(&func_env, &nparams, &[])?;
+                                                    evaluate_statements(&func_env, &nbody)?
+                                                } else if let Value::Function(func_name) = nv {
+                                                    crate::js_function::handle_global_function(func_name, &[], env)?
+                                                } else {
+                                                    return Err(raise_type_error!("next is not callable"));
+                                                }
+                                            };
+
+                                            if let Value::Object(res_obj) = next_val {
+                                                let done_val = obj_get_key_value(&res_obj, &"done".into())?;
+                                                let done = match done_val {
+                                                    Some(d) => is_truthy(&d.borrow().clone()),
+                                                    None => false,
+                                                };
+                                                if done {
+                                                    break;
+                                                }
+                                                let value_val = obj_get_key_value(&res_obj, &"value".into())?;
+                                                let element = match value_val {
+                                                    Some(v) => v.borrow().clone(),
+                                                    None => Value::Undefined,
+                                                };
+                                                obj_set_key_value(&arr, &index.to_string().into(), element)?;
+                                                index += 1;
+                                            } else {
+                                                return Err(raise_type_error!("iterator.next() must return an object"));
+                                            }
+                                        } else {
+                                            return Err(raise_type_error!("iterator object missing next()"));
+                                        }
+                                    }
+                                } else {
+                                    return Err(raise_type_error!("iterator method did not return an object"));
+                                }
+                            } else {
+                                return Err(raise_type_error!("Spread syntax requires ...iterable"));
+                            }
                         } else {
-                            break;
+                            return Err(raise_type_error!("Symbol.iterator not found"));
                         }
                     }
-                } else {
-                    return Err(raise_eval_error!("Spread operator can only be applied to arrays"));
+                    Value::String(s) => {
+                        let mut i = 0usize;
+                        while let Some(first) = utf16_char_at(&s, i) {
+                            let chunk: Vec<u16> = if (0xD800..=0xDBFF).contains(&first)
+                                && let Some(second) = utf16_char_at(&s, i + 1)
+                                && (0xDC00..=0xDFFF).contains(&second)
+                            {
+                                utf16_slice(&s, i, i + 2)
+                            } else {
+                                vec![first]
+                            };
+                            obj_set_key_value(&arr, &index.to_string().into(), Value::String(chunk.clone()))?;
+                            index += 1;
+                            i += chunk.len();
+                        }
+                    }
+                    _ => return Err(raise_type_error!("Spread syntax requires ...iterable")),
                 }
             } else {
                 let value = evaluate_expr(env, elem_expr)?;

@@ -320,7 +320,8 @@ pub(crate) fn handle_array_instance_method(
                 let current_len = get_array_length(obj_map).unwrap_or(0);
 
                 let new_array = create_array(env)?;
-                let mut idx = 0;
+                set_array_length(&new_array, current_len)?;
+
                 for i in 0..current_len {
                     if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
                         if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
@@ -331,14 +332,12 @@ pub(crate) fn handle_array_instance_method(
                             crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                             let res = evaluate_statements(&func_env, &body)?;
-                            obj_set_key_value(&new_array, &idx.to_string().into(), res)?;
-                            idx += 1;
+                            obj_set_key_value(&new_array, &i.to_string().into(), res)?;
                         } else {
                             return Err(raise_eval_error!("Array.map expects a function"));
                         }
                     }
                 }
-                set_array_length(&new_array, idx)?;
                 Ok(Value::Object(new_array))
             } else {
                 Err(raise_eval_error!("Array.map expects at least one argument"))

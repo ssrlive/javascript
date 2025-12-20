@@ -33,19 +33,19 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                             keys.push(Value::String(utf8_to_utf16(s)));
                         }
                     }
-                    // Create a simple array-like object for keys
-                    let result_obj = new_js_object_data();
+                    // Create a proper Array for keys
+                    let result_obj = crate::js_array::create_array(env)?;
+                    let len = keys.len();
                     for (i, key) in keys.into_iter().enumerate() {
                         obj_set_key_value(&result_obj, &i.to_string().into(), key)?;
                     }
-                    let len = result_obj.borrow().properties.len();
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => Err(raise_type_error!("Object.keys called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let result_obj = new_js_object_data();
+                    let result_obj = crate::js_array::create_array(env)?;
                     set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }
@@ -73,19 +73,19 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                             values.push(value.borrow().clone());
                         }
                     }
-                    // Create a simple array-like object for values
-                    let result_obj = new_js_object_data();
+                    // Create a proper Array for values
+                    let result_obj = crate::js_array::create_array(env)?;
+                    let len = values.len();
                     for (i, value) in values.into_iter().enumerate() {
                         obj_set_key_value(&result_obj, &i.to_string().into(), value)?;
                     }
-                    let len = result_obj.borrow().properties.len();
                     set_array_length(&result_obj, len)?;
                     Ok(Value::Object(result_obj))
                 }
                 Value::Undefined => Err(raise_type_error!("Object.values called on undefined")),
                 _ => {
                     // For primitive values, return empty array (like in JS)
-                    let result_obj = new_js_object_data();
+                    let result_obj = crate::js_array::create_array(env)?;
                     set_array_length(&result_obj, 0)?;
                     Ok(Value::Object(result_obj))
                 }

@@ -6489,9 +6489,11 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
             if let Expr::Spread(expr) = value_expr {
                 let spread_val = evaluate_expr(env, expr)?;
                 if let Value::Object(spread_obj) = spread_val {
-                    // Copy all properties from spread_obj to obj
+                    // Copy enumerable own properties from spread_obj to obj
                     for (prop_key, prop_val) in spread_obj.borrow().properties.iter() {
-                        obj.borrow_mut().insert(prop_key.clone(), prop_val.clone());
+                        if spread_obj.borrow().is_enumerable(prop_key) {
+                            obj.borrow_mut().insert(prop_key.clone(), prop_val.clone());
+                        }
                     }
                 } else {
                     return Err(raise_eval_error!("Spread operator can only be applied to objects"));

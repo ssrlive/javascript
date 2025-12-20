@@ -74,9 +74,14 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                     }
                 }
 
+                let obj_ref = obj.borrow();
                 let mut s = String::from("{");
+                let mut keys: Vec<_> = obj_ref.properties.keys().collect();
+                keys.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+
                 let mut first = true;
-                for (key, val_rc) in obj.borrow().properties.iter() {
+                for key in keys {
+                    let val_rc = obj_ref.properties.get(key).unwrap();
                     if !first {
                         s.push_str(", ");
                     }
@@ -92,6 +97,9 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                         }
                         Value::Boolean(b) => s.push_str(&b.to_string()),
                         Value::Undefined => s.push_str("undefined"),
+                        Value::Null => s.push_str("null"),
+                        Value::BigInt(h) => s.push_str(&format!("{}n", h)),
+                        Value::Symbol(sym) => s.push_str(&format!("Symbol({})", sym.description.as_deref().unwrap_or(""))),
                         Value::Object(inner_obj) => {
                             if crate::js_array::is_array(inner_obj) {
                                 s.push_str("[Array]");

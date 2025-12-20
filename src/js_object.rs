@@ -568,8 +568,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
         Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-        Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
-        Value::Null => Err(raise_type_error!("Cannot convert null to object")),
+        Value::Undefined => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
+        Value::Null => Ok(Value::String(utf8_to_utf16("[object Null]"))),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {

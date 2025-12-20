@@ -5925,8 +5925,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             (Value::Function(func_name), "call") => {
                 // Forward Object.prototype.* builtins when called via .call
                 if func_name.starts_with("Object.prototype.") {
-                    if args.len() < 2 {
-                        return Err(raise_eval_error!("call requires a receiver and at least one arg"));
+                    if args.is_empty() {
+                        return Err(raise_eval_error!("call requires a receiver"));
                     }
                     let method = func_name.trim_start_matches("Object.prototype.").to_string();
                     // Special-case hasOwnProperty: call should invoke the builtin
@@ -5934,6 +5934,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // property argument (args[1]) without requiring the receiver
                     // to have the method as an own property.
                     if method == "hasOwnProperty" {
+                        if args.len() < 2 {
+                            return Err(raise_eval_error!(
+                                "Object.prototype.hasOwnProperty.call requires a receiver and a property name"
+                            ));
+                        }
                         // receiver
                         let receiver_val = evaluate_expr(env, &args[0])?;
                         // property name arg
@@ -5953,6 +5958,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             _ => false,
                         };
                         return Ok(Value::Boolean(exists));
+                    }
+                    if method == "toString" {
+                        let receiver_val = evaluate_expr(env, &args[0])?;
+                        return crate::js_object::handle_to_string_method(&receiver_val, &[], env);
+                    }
+                    if method == "valueOf" {
+                        let receiver_val = evaluate_expr(env, &args[0])?;
+                        return crate::js_object::handle_value_of_method(&receiver_val, &[], env);
                     }
                     let receiver_expr = args[0].clone();
                     let forwarded = &args[1..];

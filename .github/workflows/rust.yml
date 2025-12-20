@@ -56,6 +56,7 @@ jobs:
         cargo run --example js -- js-scripts/globel_assert.js
         cargo run --example js -- js-scripts/loops_n_iteration.js
         cargo run --example js -- js-scripts/new_precedence.js
+        cargo run --example js -- js-scripts/null_n_undefined.js
         cargo run --example js -- js-scripts/numbers_n_strings.js
         cargo run --example js -- js-scripts/object_super_method_stack_overflow.js
         cargo run --example js -- js-scripts/object_teats.js

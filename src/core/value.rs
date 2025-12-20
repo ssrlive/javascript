@@ -7,7 +7,10 @@ use std::{cell::RefCell, rc::Rc};
 use crate::js_date::is_date_object;
 use crate::{
     JSError,
-    core::{BinaryOp, Expr, PropertyKey, Statement, StatementKind, evaluate_statements, get_well_known_symbol_rc, utf8_to_utf16},
+    core::{
+        BinaryOp, DestructuringElement, Expr, PropertyKey, Statement, StatementKind, evaluate_statements, get_well_known_symbol_rc,
+        utf8_to_utf16,
+    },
     js_array::is_array,
     js_class::ClassDefinition,
     js_promise::JSPromise,
@@ -36,7 +39,7 @@ pub struct JSWeakSet {
 
 #[derive(Clone, Debug)]
 pub struct JSGenerator {
-    pub params: Vec<(String, Option<Box<Expr>>)>,
+    pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr, // captured environment
     pub state: GeneratorState,
@@ -591,44 +594,24 @@ pub enum Value {
     Null,
     Object(JSObjectDataPtr), // Object with properties
     Function(String),        // Function name
-    Closure(
-        Vec<(String, Option<Box<Expr>>)>,
-        Vec<Statement>,
-        JSObjectDataPtr,
-        Option<JSObjectDataPtr>,
-    ), // parameters, body, captured environment, home object
-    AsyncClosure(
-        Vec<(String, Option<Box<Expr>>)>,
-        Vec<Statement>,
-        JSObjectDataPtr,
-        Option<JSObjectDataPtr>,
-    ), // parameters, body, captured environment, home object
+    Closure(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // parameters, body, captured environment, home object
+    AsyncClosure(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // parameters, body, captured environment, home object
     GeneratorFunction(
         Option<String>,
-        Vec<(String, Option<Box<Expr>>)>,
+        Vec<DestructuringElement>,
         Vec<Statement>,
         JSObjectDataPtr,
         Option<JSObjectDataPtr>,
     ), // optional name, parameters, body, captured environment, home object
-    ClassDefinition(Rc<ClassDefinition>), // Class definition
+    ClassDefinition(Rc<ClassDefinition>),                                                              // Class definition
     Getter(Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // getter body, captured environment, home object
-    Setter(
-        Vec<(String, Option<Box<Expr>>)>,
-        Vec<Statement>,
-        JSObjectDataPtr,
-        Option<JSObjectDataPtr>,
-    ), // setter parameter, body, captured environment, home object
+    Setter(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // setter parameter, body, captured environment, home object
     Property {
         // Property descriptor with getter/setter/value
         value: Option<Rc<RefCell<Value>>>,
         getter: Option<(Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)>,
         #[allow(clippy::type_complexity)]
-        setter: Option<(
-            Vec<(String, Option<Box<Expr>>)>,
-            Vec<Statement>,
-            JSObjectDataPtr,
-            Option<JSObjectDataPtr>,
-        )>,
+        setter: Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)>,
     },
     Promise(Rc<RefCell<JSPromise>>),         // Promise object
     Symbol(Rc<SymbolData>),                  // Symbol primitive with description
@@ -777,7 +760,7 @@ pub fn value_to_string(val: &Value) -> String {
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.
 #[allow(clippy::type_complexity)]
-pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, JSObjectDataPtr)> {
+pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr)> {
     match val {
         Value::Closure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
         Value::AsyncClosure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
@@ -815,10 +798,8 @@ pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Va
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                         // Pass hint as first param if the function declares params
-                        if !params.is_empty() {
-                            let name = &params[0].0;
-                            env_set(&func_env, name.as_str(), Value::String(utf8_to_utf16(hint)))?;
-                        }
+                        let args = vec![Value::String(utf8_to_utf16(hint))];
+                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
                         let result = evaluate_statements(&func_env, &body)?;
                         match result {
                             Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
@@ -1528,8 +1509,8 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                     let setter_env = new_js_object_data();
                     setter_env.borrow_mut().prototype = Some(env);
                     env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
-                    let name = &param[0].0;
-                    env_set(&setter_env, name.as_str(), val)?;
+                    let args = vec![val];
+                    crate::core::bind_function_parameters(&setter_env, &param, &args)?;
                     let _v = evaluate_statements(&setter_env, &body)?;
                 } else {
                     // No setter, update value
@@ -1567,8 +1548,8 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                 let setter_env = new_js_object_data();
                 setter_env.borrow_mut().prototype = Some(env);
                 env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
-                let name = &param[0].0;
-                env_set(&setter_env, name.as_str(), val)?;
+                let args = vec![val];
+                crate::core::bind_function_parameters(&setter_env, &param, &args)?;
                 evaluate_statements(&setter_env, &body)?;
                 return Ok(());
             }

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -314,10 +314,8 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
                 // Call the callback with the mock constructor
                 let func_env = captured_env.clone();
                 // Bind the mock constructor as the first parameter
-                if !params.is_empty() {
-                    let name = &params[0].0;
-                    env_set(&func_env, name.as_str(), mock_constructor)?;
-                }
+                let args = vec![mock_constructor];
+                crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                 // Execute the callback body
                 evaluate_statements(&func_env, &body)?;

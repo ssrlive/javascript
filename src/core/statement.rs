@@ -53,15 +53,15 @@ pub enum StatementKind {
     Let(Vec<(String, Option<Expr>)>),
     Var(Vec<(String, Option<Expr>)>),
     Const(Vec<(String, Expr)>),
-    FunctionDeclaration(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>, bool), // name, params, body, is_generator
-    LetDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: let [a, b] = [1, 2];
-    VarDestructuringArray(Vec<DestructuringElement>, Expr),                              // array destructuring: var [a, b] = [1, 2];
-    ConstDestructuringArray(Vec<DestructuringElement>, Expr),                            // const [a, b] = [1, 2];
-    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                       // object destructuring: let {a, b} = {a: 1, b: 2};
-    VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                       // object destructuring: var {a, b} = {a: 1, b: 2};
-    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                     // const {a, b} = {a: 1, b: 2};
-    Class(String, Option<crate::core::Expr>, Vec<ClassMember>),                          // name, extends, members
-    Assign(String, Expr),                                                                // variable assignment
+    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool), // name, params, body, is_generator
+    LetDestructuringArray(Vec<DestructuringElement>, Expr),                       // array destructuring: let [a, b] = [1, 2];
+    VarDestructuringArray(Vec<DestructuringElement>, Expr),                       // array destructuring: var [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr),                     // const [a, b] = [1, 2];
+    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                // object destructuring: let {a, b} = {a: 1, b: 2};
+    VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr),                // object destructuring: var {a, b} = {a: 1, b: 2};
+    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr),              // const {a, b} = {a: 1, b: 2};
+    Class(String, Option<crate::core::Expr>, Vec<ClassMember>),                   // name, extends, members
+    Assign(String, Expr),                                                         // variable assignment
     Expr(Expr),
     Return(Option<Expr>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>), // condition, then_body, else_body

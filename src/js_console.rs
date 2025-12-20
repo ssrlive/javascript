@@ -1,6 +1,11 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
+use crate::core::{
+    DestructuringElement, Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value,
+};
 use crate::error::JSError;
 use crate::js_promise;
+use std::cell::RefCell;
+use std::collections::HashSet;
+use std::rc::Rc;
 
 /// Create the console object with logging functions
 pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
@@ -10,10 +15,27 @@ pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
 }
 
 fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JSError> {
+    let mut seen = HashSet::new();
+    format_value_pretty(val, env, 0, &mut seen, false)
+}
+
+fn format_value_pretty(
+    val: &Value,
+    env: &JSObjectDataPtr,
+    _depth: usize,
+    seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
+    quote_strings: bool,
+) -> Result<String, JSError> {
     match val {
         Value::Number(n) => Ok(n.to_string()),
         Value::BigInt(h) => Ok(format!("{h}n")),
-        Value::String(s) => Ok(String::from_utf16_lossy(s)),
+        Value::String(s) => {
+            if quote_strings {
+                Ok(format!("\"{}\"", String::from_utf16_lossy(s)))
+            } else {
+                Ok(String::from_utf16_lossy(s))
+            }
+        }
         Value::Boolean(b) => Ok(b.to_string()),
         Value::Undefined => Ok("undefined".to_string()),
         Value::Null => Ok("null".to_string()),
@@ -29,6 +51,11 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                     _ => Ok("[object Date]".to_string()),
                 }
             } else if crate::js_array::is_array(obj) {
+                if seen.contains(&Rc::as_ptr(obj)) {
+                    return Ok("[Circular]".to_string());
+                }
+                seen.insert(Rc::as_ptr(obj));
+
                 let len = crate::js_array::get_array_length(obj).unwrap_or(0);
                 let mut s = String::from("[");
                 for i in 0..len {
@@ -36,29 +63,14 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                         s.push_str(", ");
                     }
                     if let Some(val_rc) = obj_get_key_value(obj, &i.to_string().into())? {
-                        match &*val_rc.borrow() {
-                            Value::Number(n) => s.push_str(&n.to_string()),
-                            Value::BigInt(h) => s.push_str(&h.to_string()),
-                            Value::String(str_val) => {
-                                s.push('\"');
-                                s.push_str(&String::from_utf16_lossy(str_val));
-                                s.push('\"');
-                            }
-                            Value::Boolean(b) => s.push_str(&b.to_string()),
-                            Value::Undefined => s.push_str("undefined"),
-                            Value::Null => s.push_str("null"),
-                            _ => s.push_str("[object Object]"),
-                        }
-                    } else {
-                        // Hole: print nothing, but if it's the last element, add a trailing comma
-                        // to distinguish it from a non-hole ending.
-                        // e.g. [1, 2] vs [1, 2, <hole>] -> [1, 2, ]
-                        if i == len - 1 {
-                            s.push(',');
-                        }
+                        let val_str = format_value_pretty(&val_rc.borrow(), env, _depth + 1, seen, true)?;
+                        s.push_str(&val_str);
+                    } else if i == len - 1 {
+                        s.push(',');
                     }
                 }
                 s.push(']');
+                seen.remove(&Rc::as_ptr(obj));
                 Ok(s)
             } else {
                 // Check for boxed primitive
@@ -74,6 +86,11 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                     }
                 }
 
+                if seen.contains(&Rc::as_ptr(obj)) {
+                    return Ok("[Circular]".to_string());
+                }
+                seen.insert(Rc::as_ptr(obj));
+
                 let mut s = String::from("{");
                 let mut first = true;
                 for (key, val_rc) in obj.borrow().properties.iter() {
@@ -83,29 +100,11 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                     first = false;
                     s.push_str(key.as_ref());
                     s.push_str(": ");
-                    match &*val_rc.borrow() {
-                        Value::Number(n) => s.push_str(&n.to_string()),
-                        Value::String(str_val) => {
-                            s.push('"');
-                            s.push_str(&String::from_utf16_lossy(str_val));
-                            s.push('"');
-                        }
-                        Value::Boolean(b) => s.push_str(&b.to_string()),
-                        Value::Undefined => s.push_str("undefined"),
-                        Value::Null => s.push_str("null"),
-                        Value::BigInt(h) => s.push_str(&format!("{}n", h)),
-                        Value::Symbol(sym) => s.push_str(&format!("Symbol({})", sym.description.as_deref().unwrap_or(""))),
-                        Value::Object(inner_obj) => {
-                            if crate::js_array::is_array(inner_obj) {
-                                s.push_str("[Array]");
-                            } else {
-                                s.push_str("[object Object]");
-                            }
-                        }
-                        _ => s.push_str("[object Object]"),
-                    }
+                    let val_str = format_value_pretty(&val_rc.borrow(), env, _depth + 1, seen, true)?;
+                    s.push_str(&val_str);
                 }
                 s.push('}');
+                seen.remove(&Rc::as_ptr(obj));
                 Ok(s)
             }
         }
@@ -116,7 +115,16 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&param.0);
+                match param {
+                    DestructuringElement::Variable(name, _) => s.push_str(name),
+                    DestructuringElement::Rest(name) => {
+                        s.push_str("...");
+                        s.push_str(name);
+                    }
+                    DestructuringElement::NestedObject(_) => s.push_str("{}"),
+                    DestructuringElement::NestedArray(_) => s.push_str("[]"),
+                    DestructuringElement::Empty => {}
+                }
             }
             s.push_str(") { [closure code] }");
             Ok(s)

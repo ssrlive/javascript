@@ -2285,10 +2285,7 @@ fn for_of_destructuring_array_iter(
                             // Bind `this` to the receiver
                             obj_set_key_value(&call_env, &"this".into(), Value::Object(obj_map.clone()))?;
                             // Bind any declared params to undefined (no args passed)
-                            for param in params.iter() {
-                                let (name, _) = param;
-                                obj_set_key_value(&call_env, &name.clone().into(), Value::Undefined)?;
-                            }
+                            crate::core::bind_function_parameters(&call_env, &params, &[])?;
                             evaluate_statements(&call_env, &body)?
                         } else {
                             return Err(raise_eval_error!("Symbol.iterator is not a function"));
@@ -2305,10 +2302,7 @@ fn for_of_destructuring_array_iter(
                                         // Bind `this` to iterator object
                                         obj_set_key_value(&call_env, &"this".into(), Value::Object(iterator_obj.clone()))?;
                                         // Bind params to undefined (no args)
-                                        for param in nparams.iter() {
-                                            let (name, _) = param;
-                                            obj_set_key_value(&call_env, &name.clone().into(), Value::Undefined)?;
-                                        }
+                                        crate::core::bind_function_parameters(&call_env, &nparams, &[])?;
                                         let next_result = evaluate_statements(&call_env, &nbody)?;
 
                                         if let Value::Object(result_obj) = next_result {
@@ -2493,10 +2487,7 @@ fn statement_for_of_var_iter(
                                 func_env.borrow_mut().is_function_scope = true;
                                 obj_set_key_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
                                 // Bind params to undefined (no args passed)
-                                for param in params.iter() {
-                                    let (name, _) = param;
-                                    obj_set_key_value(&func_env, &name.clone().into(), Value::Undefined)?;
-                                }
+                                crate::core::bind_function_parameters(&func_env, &params, &[])?;
                                 // Execute body to produce iterator result
                                 // Attach minimal frame/caller info for stack traces
                                 let frame = build_frame_name(env, "[Symbol.iterator]");
@@ -2528,10 +2519,7 @@ fn statement_for_of_var_iter(
                                             func_env.borrow_mut().prototype = Some(ncaptured_env.clone());
                                             obj_set_key_value(&func_env, &"this".into(), Value::Object(iter_obj.clone()))?;
                                             // Bind params to undefined (no args)
-                                            for param in nparams.iter() {
-                                                let (name, _) = param;
-                                                obj_set_key_value(&func_env, &name.clone().into(), Value::Undefined)?;
-                                            }
+                                            crate::core::bind_function_parameters(&func_env, &nparams, &[])?;
                                             // Attach frame/caller for iterator.next
                                             let frame = build_frame_name(env, "iterator.next");
                                             let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
@@ -2951,7 +2939,7 @@ fn evaluate_await_expression(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value
 fn evaluate_function_expression(
     env: &JSObjectDataPtr,
     name: Option<String>,
-    params: &[(String, Option<Box<Expr>>)],
+    params: &[DestructuringElement],
     body: &[Statement],
 ) -> Result<Value, JSError> {
     log::trace!("evaluate_function_expression: name={:?} params={:?}", name, params);
@@ -5374,36 +5362,72 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
     }
 }
 
-pub(crate) fn bind_function_parameters(
-    env: &JSObjectDataPtr,
-    params: &[(String, Option<Box<Expr>>)],
-    args: &[Value],
-) -> Result<(), JSError> {
+pub(crate) fn bind_function_parameters(env: &JSObjectDataPtr, params: &[DestructuringElement], args: &[Value]) -> Result<(), JSError> {
     for (i, param) in params.iter().enumerate() {
-        let (name, default_expr_opt) = param;
-        if let Some(rest_param_name) = name.strip_prefix("...") {
-            let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
+        let arg = if i < args.len() { Some(args[i].clone()) } else { None };
+        bind_destructuring_element(env, param, arg, args, i)?;
+    }
+    Ok(())
+}
 
-            // Create array object
+fn bind_destructuring_element(
+    env: &JSObjectDataPtr,
+    element: &DestructuringElement,
+    value: Option<Value>,
+    all_args: &[Value],
+    current_index: usize,
+) -> Result<(), JSError> {
+    match element {
+        DestructuringElement::Variable(name, default_expr) => {
+            let val = if let Some(v) = value {
+                if matches!(v, Value::Undefined) && default_expr.is_some() {
+                    evaluate_expr(env, default_expr.as_ref().unwrap())?
+                } else {
+                    v
+                }
+            } else if let Some(expr) = default_expr {
+                evaluate_expr(env, expr)?
+            } else {
+                Value::Undefined
+            };
+            env_set(env, name, val)?;
+        }
+        DestructuringElement::Rest(name) => {
+            let rest_args = if current_index < all_args.len() {
+                all_args[current_index..].to_vec()
+            } else {
+                Vec::new()
+            };
             let array_obj = crate::js_array::create_array(env)?;
             crate::js_array::set_array_length(&array_obj, rest_args.len())?;
-
             for (j, arg) in rest_args.into_iter().enumerate() {
                 obj_set_key_value(&array_obj, &j.to_string().into(), arg)?;
             }
-
-            env_set(env, rest_param_name, Value::Object(array_obj))?;
-            break; // Rest parameter must be last
+            env_set(env, name, Value::Object(array_obj))?;
         }
-
-        if i < args.len() {
-            env_set(env, name.as_str(), args[i].clone())?;
-        } else if let Some(expr) = default_expr_opt {
-            let val = evaluate_expr(env, expr)?;
-            env_set(env, name.as_str(), val)?;
-        } else {
-            env_set(env, name.as_str(), Value::Undefined)?;
+        DestructuringElement::NestedObject(elements) => {
+            let val = value.unwrap_or(Value::Undefined);
+            if matches!(val, Value::Undefined | Value::Null) {
+                return Err(raise_type_error!("Cannot destructure undefined or null"));
+            }
+            if let Value::Object(obj) = val {
+                for el in elements {
+                    match el {
+                        ObjectDestructuringElement::Property { key, value: target } => {
+                            let prop_val = obj_get_key_value(&obj, &key.clone().into())?.map(|v| v.borrow().clone());
+                            bind_destructuring_element(env, target, prop_val, &[], 0)?;
+                        }
+                        ObjectDestructuringElement::Rest(_name) => {
+                            // TODO: Implement object rest
+                        }
+                    }
+                }
+            }
         }
+        DestructuringElement::NestedArray(_elements) => {
+            // TODO: Implement array destructuring
+        }
+        DestructuringElement::Empty => {}
     }
     Ok(())
 }

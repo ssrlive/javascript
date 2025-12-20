@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, env_set, evaluate_expr};
+use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr};
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
@@ -977,10 +977,8 @@ fn test_with_intl_constructors(args: &[Expr], env: &JSObjectDataPtr) -> Result<V
     // Create new environment starting with captured environment
     let func_env = callback_func.2.clone();
     // Bind the mock constructor to the first parameter
-    if !callback_func.0.is_empty() {
-        let name = &callback_func.0[0].0;
-        env_set(&func_env, name.as_str(), mock_constructor)?;
-    }
+    let args = vec![mock_constructor];
+    crate::core::bind_function_parameters(&func_env, &callback_func.0, &args)?;
     // Execute function body
     crate::core::evaluate_statements(&func_env, &callback_func.1)?;
 

@@ -1,8 +1,8 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc, new_js_object_data, obj_get_key_value,
-    obj_set_key_value, value_to_string,
+    DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
+    new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
@@ -126,6 +126,66 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             };
 
             Ok(Value::Boolean(has_own))
+        }
+        "groupBy" => {
+            if args.len() != 2 {
+                return Err(raise_type_error!("Object.groupBy requires exactly two arguments"));
+            }
+            let items_val = evaluate_expr(env, &args[0])?;
+            let callback_val = evaluate_expr(env, &args[1])?;
+
+            let items_obj = match items_val {
+                Value::Object(obj) => obj,
+                _ => return Err(raise_type_error!("Object.groupBy expects an object as first argument")),
+            };
+
+            let result_obj = new_js_object_data();
+            // Object.groupBy returns a null-prototype object
+            result_obj.borrow_mut().prototype = None;
+
+            let len = get_array_length(&items_obj).unwrap_or(0);
+
+            for i in 0..len {
+                if let Some(val_rc) = obj_get_key_value(&items_obj, &i.to_string().into())? {
+                    let val = val_rc.borrow().clone();
+
+                    let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
+                        let func_env = new_js_object_data();
+                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                        let args = vec![val.clone(), Value::Number(i as f64)];
+                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                        crate::core::evaluate_statements(&func_env, &body)?
+                    } else {
+                        return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
+                    };
+
+                    let key = match key_val {
+                        Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                        Value::BigInt(b) => PropertyKey::String(b.to_string()),
+                        Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(key_val))),
+                        _ => PropertyKey::String(value_to_string(&key_val)),
+                    };
+
+                    let group_arr = if let Some(arr_rc) = obj_get_key_value(&result_obj, &key)? {
+                        if let Value::Object(arr) = &*arr_rc.borrow() {
+                            arr.clone()
+                        } else {
+                            crate::js_array::create_array(env)?
+                        }
+                    } else {
+                        let arr = crate::js_array::create_array(env)?;
+                        crate::js_array::set_array_length(&arr, 0)?;
+                        obj_set_key_value(&result_obj, &key, Value::Object(arr.clone()))?;
+                        arr
+                    };
+
+                    let current_len = get_array_length(&group_arr).unwrap_or(0);
+                    obj_set_key_value(&group_arr, &current_len.to_string().into(), val)?;
+                    crate::js_array::set_array_length(&group_arr, current_len + 1)?;
+                }
+            }
+
+            Ok(Value::Object(result_obj))
         }
         "create" => {
             if args.is_empty() {
@@ -496,12 +556,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             }
 
             #[allow(clippy::type_complexity)]
-            let mut setter_opt: Option<(
-                Vec<(String, Option<Box<Expr>>)>,
-                Vec<Statement>,
-                JSObjectDataPtr,
-                Option<JSObjectDataPtr>,
-            )> = None;
+            let mut setter_opt: Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
             if let Some(set_rc) = obj_get_key_value(&desc_obj, &"set".into())? {
                 match &*set_rc.borrow() {
                     Value::Closure(params, body, senv, _) => {

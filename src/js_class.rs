@@ -1,6 +1,8 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, new_js_object_data};
+use crate::core::{
+    DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, new_js_object_data,
+};
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
 use crate::{error::JSError, unicode::utf8_to_utf16};
@@ -8,15 +10,15 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum ClassMember {
-    Constructor(Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // parameters, body
-    Method(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameters, body
-    StaticMethod(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameters, body
-    Property(String, Expr),                                        // name, value
-    StaticProperty(String, Expr),                                  // name, value
-    Getter(String, Vec<Statement>),                                // name, body
-    Setter(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameter, body
-    StaticGetter(String, Vec<Statement>),                          // name, body
-    StaticSetter(String, Vec<(String, Option<Box<Expr>>)>, Vec<Statement>), // name, parameter, body
+    Constructor(Vec<DestructuringElement>, Vec<Statement>),          // parameters, body
+    Method(String, Vec<DestructuringElement>, Vec<Statement>),       // name, parameters, body
+    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    Property(String, Expr),                                          // name, value
+    StaticProperty(String, Expr),                                    // name, value
+    Getter(String, Vec<Statement>),                                  // name, body
+    Setter(String, Vec<DestructuringElement>, Vec<Statement>),       // name, parameter, body
+    StaticGetter(String, Vec<Statement>),                            // name, body
+    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
 }
 
 #[derive(Debug, Clone)]

@@ -1,5 +1,5 @@
 use crate::{
-    core::{Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr},
+    core::{DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr},
     error::JSError,
 };
 
@@ -14,7 +14,7 @@ pub fn _handle_generator_function_constructor(_args: &[Expr], _env: &JSObjectDat
 
 /// Handle generator function calls (creating generator objects)
 pub fn handle_generator_function_call(
-    params: &[(String, Option<Box<Expr>>)],
+    params: &[DestructuringElement],
     body: &[Statement],
     _args: &[Expr],
     env: &JSObjectDataPtr,

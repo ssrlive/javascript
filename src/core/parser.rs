@@ -50,7 +50,7 @@ fn flatten_commas(expr: Expr) -> Vec<Expr> {
 }
 
 #[allow(clippy::type_complexity)]
-pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<(String, Option<Box<Expr>>)>, JSError> {
+pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<DestructuringElement>, JSError> {
     let mut params = Vec::new();
     log::trace!(
         "parse_parameters: starting tokens (first 16): {:?}",
@@ -58,13 +58,32 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<(String, Opti
     );
     if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
         loop {
-            if let Some(Token::Identifier(param)) = tokens.first().map(|t| &t.token).cloned() {
+            if matches!(tokens[0].token, Token::Spread) {
+                // Handle rest parameter: ...args
+                tokens.remove(0); // consume ...
+                if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                    tokens.remove(0);
+                    params.push(DestructuringElement::Rest(name));
+
+                    if tokens.is_empty() {
+                        return Err(raise_parse_error!("Unexpected end of parameters after rest"));
+                    }
+                    // Rest parameter must be the last one
+                    if !matches!(tokens[0].token, Token::RParen) {
+                        return Err(raise_parse_error!("Rest parameter must be last formal parameter"));
+                    }
+                    break;
+                } else {
+                    return Err(raise_parse_error!("Expected identifier after spread operator in parameter list"));
+                }
+            } else if matches!(tokens[0].token, Token::LBrace) {
+                let pattern = parse_object_destructuring_pattern(tokens)?;
+                params.push(DestructuringElement::NestedObject(pattern));
+            } else if matches!(tokens[0].token, Token::LBracket) {
+                let pattern = parse_array_destructuring_pattern(tokens)?;
+                params.push(DestructuringElement::NestedArray(pattern));
+            } else if let Some(Token::Identifier(param)) = tokens.first().map(|t| &t.token).cloned() {
                 tokens.remove(0);
-                log::trace!(
-                    "parse_parameters: consumed identifier '{}', remaining (first 8): {:?}",
-                    param,
-                    tokens.iter().take(8).collect::<Vec<_>>()
-                );
                 let mut default_expr: Option<Box<Expr>> = None;
                 // Support default initializers: identifier '=' expression
                 if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
@@ -72,64 +91,24 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<(String, Opti
                     let expr = parse_assignment(tokens)?;
                     default_expr = Some(Box::new(expr));
                 }
-                params.push((param.clone(), default_expr));
-                // Support default initializers: identifier '=' expression
-
-                if tokens.is_empty() {
-                    return Err(raise_parse_error!(format!(
-                        "Unexpected end of parameters; next tokens: {:?}",
-                        tokens.iter().take(8).collect::<Vec<_>>()
-                    )));
-                }
-                if matches!(tokens[0].token, Token::RParen) {
-                    break;
-                }
-                if !matches!(tokens[0].token, Token::Comma) {
-                    return Err(raise_parse_error!(format!(
-                        "Expected ',' in parameter list; next tokens: {:?}",
-                        tokens.iter().take(8).collect::<Vec<_>>()
-                    )));
-                }
-                tokens.remove(0); // consume ,
-                log::trace!(
-                    "parse_parameters: consumed comma, remaining (first 8): {:?}",
-                    tokens.iter().take(8).collect::<Vec<_>>()
-                );
-            } else if matches!(tokens[0].token, Token::Spread) {
-                // Handle rest parameter: ...args
-                tokens.remove(0); // consume ...
-                if let Some(Token::Identifier(param)) = tokens.first().map(|t| &t.token).cloned() {
-                    tokens.remove(0);
-                    // Store rest param with a special prefix convention "..."
-                    // This allows the evaluator to detect it without changing the AST structure for now.
-                    params.push((format!("...{}", param), None));
-
-                    if tokens.is_empty() {
-                        return Err(raise_parse_error!(format!(
-                            "Unexpected end of parameters after rest; next tokens: {:?}",
-                            tokens.iter().take(8).collect::<Vec<_>>()
-                        )));
-                    }
-                    // Rest parameter must be the last one
-                    if !matches!(tokens[0].token, Token::RParen) {
-                        return Err(raise_parse_error!(format!(
-                            "Rest parameter must be last formal parameter; next tokens: {:?}",
-                            tokens.iter().take(8).collect::<Vec<_>>()
-                        )));
-                    }
-                    break;
-                } else {
-                    return Err(raise_parse_error!(format!(
-                        "Expected identifier after spread operator in parameter list; next tokens: {:?}",
-                        tokens.iter().take(8).collect::<Vec<_>>()
-                    )));
-                }
+                params.push(DestructuringElement::Variable(param, default_expr));
             } else {
                 return Err(raise_parse_error!(format!(
-                    "Expected identifier in parameter list; next tokens: {:?}",
+                    "Expected identifier or pattern in parameter list; next tokens: {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 )));
             }
+
+            if tokens.is_empty() {
+                return Err(raise_parse_error!("Unexpected end of parameters"));
+            }
+            if matches!(tokens[0].token, Token::RParen) {
+                break;
+            }
+            if !matches!(tokens[0].token, Token::Comma) {
+                return Err(raise_parse_error!("Expected ',' in parameter list"));
+            }
+            tokens.remove(0); // consume ,
         }
     }
     if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
@@ -558,7 +537,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
                 tokens.remove(0);
                 let body = parse_arrow_body(tokens)?;
-                expr = Expr::ArrowFunction(vec![(name, None)], body);
+                expr = Expr::ArrowFunction(vec![DestructuringElement::Variable(name, None)], body);
             }
             expr
         }
@@ -1143,7 +1122,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
                 // Async arrow function
                 tokens.remove(0); // consume (
-                let mut params: Vec<(String, Option<Box<Expr>>)> = Vec::new();
+                let mut params: Vec<DestructuringElement> = Vec::new();
                 let mut is_arrow = false;
                 if matches!(tokens.first().map(|t| &t.token), Some(&Token::RParen)) {
                     tokens.remove(0);
@@ -1155,14 +1134,14 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     }
                 } else {
                     // Try to parse params
-                    let mut param_names: Vec<(String, Option<Box<Expr>>)> = Vec::new();
+                    let mut param_names: Vec<DestructuringElement> = Vec::new();
                     let mut local_consumed = Vec::new();
                     let mut valid = true;
                     loop {
                         if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                             let t = tokens.remove(0);
                             local_consumed.push(t);
-                            param_names.push((name, None));
+                            param_names.push(DestructuringElement::Variable(name, None));
                             if tokens.is_empty() {
                                 valid = false;
                                 break;
@@ -1212,7 +1191,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
         }
         Token::LParen => {
             // Check if it's arrow function
-            let mut params: Vec<(String, Option<Box<Expr>>)> = Vec::new();
+            let mut params: Vec<DestructuringElement> = Vec::new();
             let mut is_arrow = false;
             let mut result_expr = None;
             if matches!(tokens.first().map(|t| &t.token), Some(&Token::RParen)) {
@@ -1225,7 +1204,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 }
             } else {
                 // Try to parse params
-                let mut param_names: Vec<(String, Option<Box<Expr>>)> = Vec::new();
+                let mut param_names: Vec<DestructuringElement> = Vec::new();
                 let mut local_consumed = Vec::new();
                 let mut valid = true;
                 loop {
@@ -1238,7 +1217,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
                         let t = tokens.remove(0);
                         local_consumed.push(t);
-                        param_names.push((name, None));
+                        param_names.push(DestructuringElement::Variable(name, None));
                         if tokens.is_empty() {
                             valid = false;
                             break;
@@ -1309,6 +1288,76 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             valid = false;
                             break;
                         }
+                    } else if let Some(Token::LBrace) = tokens.first().map(|t| t.token.clone()) {
+                        let mut tmp = tokens.clone();
+                        if let Ok(pattern) = parse_object_destructuring_pattern(&mut tmp) {
+                            let consumed = tokens.len() - tmp.len();
+                            for _ in 0..consumed {
+                                local_consumed.push(tokens.remove(0));
+                            }
+                            param_names.push(DestructuringElement::NestedObject(pattern));
+
+                            if tokens.is_empty() {
+                                valid = false;
+                                break;
+                            }
+
+                            if matches!(tokens[0].token, Token::RParen) {
+                                let t = tokens.remove(0);
+                                local_consumed.push(t);
+                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
+                                    tokens.remove(0);
+                                    is_arrow = true;
+                                } else {
+                                    valid = false;
+                                }
+                                break;
+                            } else if matches!(tokens[0].token, Token::Comma) {
+                                let t = tokens.remove(0);
+                                local_consumed.push(t);
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        } else {
+                            valid = false;
+                            break;
+                        }
+                    } else if let Some(Token::LBracket) = tokens.first().map(|t| t.token.clone()) {
+                        let mut tmp = tokens.clone();
+                        if let Ok(pattern) = parse_array_destructuring_pattern(&mut tmp) {
+                            let consumed = tokens.len() - tmp.len();
+                            for _ in 0..consumed {
+                                local_consumed.push(tokens.remove(0));
+                            }
+                            param_names.push(DestructuringElement::NestedArray(pattern));
+
+                            if tokens.is_empty() {
+                                valid = false;
+                                break;
+                            }
+
+                            if matches!(tokens[0].token, Token::RParen) {
+                                let t = tokens.remove(0);
+                                local_consumed.push(t);
+                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
+                                    tokens.remove(0);
+                                    is_arrow = true;
+                                } else {
+                                    valid = false;
+                                }
+                                break;
+                            } else if matches!(tokens[0].token, Token::Comma) {
+                                let t = tokens.remove(0);
+                                local_consumed.push(t);
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        } else {
+                            valid = false;
+                            break;
+                        }
                     } else if matches!(tokens[0].token, Token::Spread) {
                         // Handle rest parameter: ...args
                         let t_spread = tokens.remove(0);
@@ -1339,7 +1388,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                                     // Or better, just pass it through and see if we can handle it.
                                     // Wait, `parse_parameters` handles rest params?
                                     // Let's check `parse_parameters`.
-                                    param_names.push((format!("...{}", name), None)); // We need to flag this as rest!
+                                    param_names.push(DestructuringElement::Rest(name)); // We need to flag this as rest!
                                 // But `Expr::ArrowFunction` signature is `Vec<(String, Option<Box<Expr>>)>`.
                                 // It doesn't seem to have a separate field for rest param.
                                 // However, `FunctionDeclaration` also uses `Vec<(String, Option<Box<Expr>>)>`.
@@ -1583,6 +1632,11 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         if matches!(tokens[0].token, Token::RParen) {
                             break;
                         }
+                        // If we have a trailing comma but NOT a RParen, we loop again.
+                        // But wait, if we have a trailing comma, we expect another argument OR RParen.
+                        // If we see RParen, we break.
+                        // If we see something else, we loop and call parse_assignment.
+                        // But parse_assignment might fail if the next token is not an expression start.
                     }
                 }
                 if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
@@ -1641,7 +1695,7 @@ fn parse_arrow_body(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, JSErr
         tokens.remove(0);
         Ok(body)
     } else {
-        let expr = parse_expression(tokens)?;
+        let expr = parse_assignment(tokens)?;
         Ok(vec![Statement::from(StatementKind::Return(Some(expr)))])
     }
 }

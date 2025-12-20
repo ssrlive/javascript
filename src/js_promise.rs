@@ -24,8 +24,8 @@
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
 use crate::core::{
-    Expr, JSObjectDataPtr, Statement, StatementKind, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value,
-    value_to_string,
+    DestructuringElement, Expr, JSObjectDataPtr, Statement, StatementKind, Value, env_set, evaluate_expr, evaluate_statements,
+    extract_closure_from_value, value_to_string,
 };
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
@@ -196,10 +196,8 @@ fn process_task(task: Task) -> Result<(), JSError> {
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    if !params.is_empty() {
-                        let name = &params[0].0;
-                        env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
-                    }
+                    let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
+                    crate::core::bind_function_parameters(&func_env, &params, &args)?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             log::trace!("Callback executed successfully, resolving promise");
@@ -231,10 +229,8 @@ fn process_task(task: Task) -> Result<(), JSError> {
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    if !params.is_empty() {
-                        let name = &params[0].0;
-                        env_set(&func_env, name.as_str(), promise.borrow().value.clone().unwrap_or(Value::Undefined))?;
-                    }
+                    let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
+                    crate::core::bind_function_parameters(&func_env, &params, &args)?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             resolve_promise(&new_promise, result);
@@ -270,12 +266,7 @@ fn process_task(task: Task) -> Result<(), JSError> {
                     env_set(&func_env, "this", Value::Object(global_env))?;
                 }
 
-                for (i, arg) in args.iter().enumerate() {
-                    if i < params.len() {
-                        let name = &params[i].0;
-                        env_set(&func_env, name.as_str(), arg.clone())?;
-                    }
-                }
+                crate::core::bind_function_parameters(&func_env, &params, &args)?;
                 let _ = evaluate_statements(&func_env, &body)?;
             }
         }
@@ -302,12 +293,7 @@ fn process_task(task: Task) -> Result<(), JSError> {
                     env_set(&func_env, "this", Value::Object(global_env))?;
                 }
 
-                for (i, arg) in args.iter().enumerate() {
-                    if i < params.len() {
-                        let name = &params[i].0;
-                        env_set(&func_env, name.as_str(), arg.clone())?;
-                    }
-                }
+                crate::core::bind_function_parameters(&func_env, &params, &args)?;
                 let _ = evaluate_statements(&func_env, &body)?;
 
                 // Re-queue the interval task
@@ -721,13 +707,8 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     let executor_env = captured_env.clone();
     // Set resolve function (always the first parameter)
     if !params.is_empty() {
-        let name = &params[0].0;
-        env_set(&executor_env, name.as_str(), resolve_func.clone())?;
-        // Set reject function if executor accepts a second parameter
-        if params.len() > 1 {
-            let name2 = &params[1].0;
-            env_set(&executor_env, name2.as_str(), reject_func.clone())?;
-        }
+        let args = vec![resolve_func.clone(), reject_func.clone()];
+        crate::core::bind_function_parameters(&executor_env, &params, &args)?;
     }
 
     log::trace!("About to call executor function");
@@ -767,7 +748,7 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
 fn create_resolve_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
     log::trace!("create_resolve_function_direct called");
     Value::Closure(
-        vec![("value".to_string(), None)],
+        vec![DestructuringElement::Variable("value".to_string(), None)],
         vec![stmt_expr(Expr::Call(
             Box::new(Expr::Var("__internal_resolve_promise".to_string(), None, None)),
             vec![
@@ -797,7 +778,7 @@ fn create_resolve_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
 fn create_reject_function_direct(promise: Rc<RefCell<JSPromise>>) -> Value {
     log::trace!("create_reject_function_direct called");
     Value::Closure(
-        vec![("reason".to_string(), None)],
+        vec![DestructuringElement::Variable("reason".to_string(), None)],
         vec![stmt_expr(Expr::Call(
             Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
             vec![
@@ -886,7 +867,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
     } else {
         // Add pass-through for fulfillment
         let pass_through_fulfill = Value::Closure(
-            vec![("value".to_string(), None)],
+            vec![DestructuringElement::Variable("value".to_string(), None)],
             vec![stmt_expr(Expr::Call(
                 Box::new(Expr::Var("__internal_resolve_promise".to_string(), None, None)),
                 vec![
@@ -909,7 +890,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
     } else {
         // Add pass-through for rejection
         let pass_through_reject = Value::Closure(
-            vec![("reason".to_string(), None)],
+            vec![DestructuringElement::Variable("reason".to_string(), None)],
             vec![stmt_expr(Expr::Call(
                 Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                 vec![
@@ -1027,7 +1008,7 @@ pub fn handle_promise_catch_direct(
     let mut promise_borrow = promise.borrow_mut();
     // Add pass-through for fulfillment
     let pass_through_fulfill = Value::Closure(
-        vec![("value".to_string(), None)],
+        vec![DestructuringElement::Variable("value".to_string(), None)],
         vec![stmt_expr(Expr::Call(
             Box::new(Expr::Var("__internal_resolve_promise".to_string(), None, None)),
             vec![
@@ -1049,7 +1030,7 @@ pub fn handle_promise_catch_direct(
     } else {
         // Add pass-through for rejection
         let pass_through_reject = Value::Closure(
-            vec![("reason".to_string(), None)],
+            vec![DestructuringElement::Variable("reason".to_string(), None)],
             vec![stmt_expr(Expr::Call(
                 Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                 vec![
@@ -1157,7 +1138,7 @@ pub fn handle_promise_finally_direct(
 
     // Create a closure that executes finally and returns the original value
     let finally_callback = Value::Closure(
-        vec![("value".to_string(), None)],
+        vec![DestructuringElement::Variable("value".to_string(), None)],
         vec![
             // Execute finally callback if provided (no arguments)
             stmt_expr(Expr::Call(Box::new(Expr::Var("finally_func".to_string(), None, None)), vec![])),
@@ -1232,7 +1213,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
             // Adopt the state of the other promise
             let current_promise = promise.clone();
             let then_callback = Value::Closure(
-                vec![("val".to_string(), None)],
+                vec![DestructuringElement::Variable("val".to_string(), None)],
                 vec![stmt_expr(Expr::Call(
                     Box::new(Expr::Var("__internal_resolve_promise".to_string(), None, None)),
                     vec![
@@ -1248,7 +1229,7 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
                 None,
             );
             let catch_callback = Value::Closure(
-                vec![("reason".to_string(), None)],
+                vec![DestructuringElement::Variable("reason".to_string(), None)],
                 vec![stmt_expr(Expr::Call(
                     Box::new(Expr::Var("__internal_reject_promise".to_string(), None, None)),
                     vec![
@@ -1491,7 +1472,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                     PromiseState::Pending => {
                                         // Promise still pending, attach callbacks
                                         let then_callback = Value::Closure(
-                                            vec![("value".to_string(), None)],
+                                            vec![DestructuringElement::Variable("value".to_string(), None)],
                                             vec![stmt_expr(Expr::Call(
                                                 Box::new(Expr::Var("__internal_promise_all_resolve".to_string(), None, None)),
                                                 vec![
@@ -1509,7 +1490,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         );
 
                                         let catch_callback = Value::Closure(
-                                            vec![("reason".to_string(), None)],
+                                            vec![DestructuringElement::Variable("reason".to_string(), None)],
                                             vec![stmt_expr(Expr::Call(
                                                 Box::new(Expr::Var("__internal_promise_all_reject".to_string(), None, None)),
                                                 vec![
@@ -1756,7 +1737,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                         if let Some(promise_rc) = obj_get_key_value(&obj, &"__promise".into())? {
                             if let Value::Promise(_p) = &*promise_rc.borrow() {
                                 let then_callback = Value::Closure(
-                                    vec![("value".to_string(), None)],
+                                    vec![DestructuringElement::Variable("value".to_string(), None)],
                                     vec![stmt_expr(Expr::Call(
                                         Box::new(Expr::Var("__internal_promise_any_resolve".to_string(), None, None)),
                                         vec![
@@ -1777,7 +1758,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                 );
 
                                 let catch_callback = Value::Closure(
-                                    vec![("reason".to_string(), None)],
+                                    vec![DestructuringElement::Variable("reason".to_string(), None)],
                                     vec![stmt_expr(Expr::Call(
                                         Box::new(Expr::Var("__internal_promise_any_reject".to_string(), None, None)),
                                         vec![
@@ -1879,7 +1860,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                     PromiseState::Pending => {
                                         // Promise still pending, attach callbacks
                                         let then_callback = Value::Closure(
-                                            vec![("value".to_string(), None)],
+                                            vec![DestructuringElement::Variable("value".to_string(), None)],
                                             vec![stmt_expr(Expr::Call(
                                                 Box::new(Expr::Var("__internal_promise_race_resolve".to_string(), None, None)),
                                                 vec![
@@ -1900,7 +1881,7 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
                                         );
 
                                         let catch_callback = Value::Closure(
-                                            vec![("reason".to_string(), None)],
+                                            vec![DestructuringElement::Variable("reason".to_string(), None)],
                                             vec![stmt_expr(Expr::Call(
                                                 Box::new(Expr::Var("__internal_promise_race_reject".to_string(), None, None)),
                                                 vec![
@@ -2275,7 +2256,7 @@ pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64,
 /// A Value::Closure that can be used as a then callback
 fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value {
     Value::Closure(
-        vec![("value".to_string(), None)],
+        vec![DestructuringElement::Variable("value".to_string(), None)],
         vec![stmt_expr(Expr::Call(
             Box::new(Expr::Var("__internal_allsettled_state_record_fulfilled".to_string(), None, None)),
             vec![
@@ -2302,7 +2283,7 @@ fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value
 /// A Value::Closure that can be used as a catch callback
 fn create_allsettled_reject_callback(state_index: usize, index: usize) -> Value {
     Value::Closure(
-        vec![("reason".to_string(), None)],
+        vec![DestructuringElement::Variable("reason".to_string(), None)],
         vec![stmt_expr(Expr::Call(
             Box::new(Expr::Var("__internal_allsettled_state_record_rejected".to_string(), None, None)),
             vec![

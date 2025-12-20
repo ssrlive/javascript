@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::{
-    Expr, Value, env_set, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,
+    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,
     value_to_sort_string, values_equal,
 };
 
@@ -58,14 +58,8 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                     let func_env = new_js_object_data();
                                     func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                    if !params.is_empty() {
-                                        let name = &params[0].0;
-                                        env_set(&func_env, name.as_str(), element)?;
-                                    }
-                                    if params.len() >= 2 {
-                                        let name = &params[1].0;
-                                        env_set(&func_env, name.as_str(), Value::Number(i as f64))?;
-                                    }
+                                    let args = vec![element, Value::Number(i as f64)];
+                                    crate::core::bind_function_parameters(&func_env, &params, &args)?;
                                     let mapped = evaluate_statements(&func_env, &body)?;
                                     result.push(mapped);
                                 } else {
@@ -162,6 +156,26 @@ pub(crate) fn handle_array_instance_method(
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     match method {
+        "at" => {
+            let index = if !args.is_empty() {
+                match evaluate_expr(env, &args[0])? {
+                    Value::Number(n) => n as i64,
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+
+            let len = get_array_length(obj_map).unwrap_or(0) as i64;
+            let k = if index >= 0 { index } else { len + index };
+
+            if k < 0 || k >= len {
+                Ok(Value::Undefined)
+            } else {
+                let val_opt = obj_get_key_value(obj_map, &k.to_string().into())?;
+                Ok(val_opt.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
+            }
+        }
         "push" => {
             if !args.is_empty() {
                 // Try to mutate the original object in the environment when possible
@@ -287,18 +301,8 @@ pub(crate) fn handle_array_instance_method(
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             // Map params: (element, index, array)
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), val.borrow().clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), Value::Number(i as f64))?;
-                            }
-                            if params.len() >= 3 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
                             evaluate_statements(&func_env, &body)?;
                         } else {
                             return Err(raise_eval_error!("Array.forEach expects a function"));
@@ -323,18 +327,9 @@ pub(crate) fn handle_array_instance_method(
                             // Prepare function environment
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), val.borrow().clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), Value::Number(i as f64))?;
-                            }
-                            if params.len() >= 3 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
+
                             let res = evaluate_statements(&func_env, &body)?;
                             obj_set_key_value(&new_array, &idx.to_string().into(), res)?;
                             idx += 1;
@@ -361,18 +356,9 @@ pub(crate) fn handle_array_instance_method(
                         if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), val.borrow().clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), Value::Number(i as f64))?;
-                            }
-                            if params.len() >= 3 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
+
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
                             let include = match res {
@@ -428,22 +414,13 @@ pub(crate) fn handle_array_instance_method(
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
                             // build args for callback: first acc, then current element
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), accumulator.clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), val.borrow().clone())?;
-                            }
-                            if params.len() >= 3 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Number(i as f64))?;
-                            }
-                            if params.len() >= 4 {
-                                let name3 = &params[3].0;
-                                env_set(&func_env, name3.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![
+                                accumulator.clone(),
+                                val.borrow().clone(),
+                                Value::Number(i as f64),
+                                Value::Object(obj_map.clone()),
+                            ];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
                             let res = evaluate_statements(&func_env, &body)?;
                             accumulator = res;
                         } else {
@@ -454,6 +431,80 @@ pub(crate) fn handle_array_instance_method(
                 Ok(accumulator)
             } else {
                 Err(raise_eval_error!("Array.reduce expects at least one argument"))
+            }
+        }
+        "reduceRight" => {
+            if !args.is_empty() {
+                let callback_val = evaluate_expr(env, &args[0])?;
+                let initial_value = if args.len() >= 2 {
+                    Some(evaluate_expr(env, &args[1])?)
+                } else {
+                    None
+                };
+
+                let current_len = get_array_length(obj_map).unwrap_or(0);
+
+                if current_len == 0 && initial_value.is_none() {
+                    return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value"));
+                }
+
+                let mut accumulator: Value;
+                let mut start_idx_rev = 0; // How many items to skip from the end
+
+                if let Some(ref val) = initial_value {
+                    accumulator = val.clone();
+                    start_idx_rev = 0;
+                } else {
+                    // Find the last present element
+                    let mut found = false;
+                    accumulator = Value::Undefined; // Placeholder
+                    for i in (0..current_len).rev() {
+                        if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
+                            accumulator = val.borrow().clone();
+                            start_idx_rev = current_len - i;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        return Err(raise_eval_error!("Array.reduceRight called on empty array with no initial value"));
+                    }
+                }
+
+                // Iterate backwards
+                // If we found an initial value at index `last_idx`, we start loop from `last_idx - 1`.
+                // `start_idx_rev` is `current_len - last_idx`.
+                // So we want to iterate from `current_len - 1 - start_idx_rev` down to 0?
+                // No, if initial value was provided, start_idx_rev is 0. We iterate from `current_len - 1` down to 0.
+                // If initial value was from array at `last_idx`, we want to start from `last_idx - 1`.
+                // `last_idx` was `current_len - start_idx_rev`.
+                // So we start from `current_len - start_idx_rev - 1`.
+
+                let start_loop = current_len.saturating_sub(start_idx_rev);
+
+                for i in (0..start_loop).rev() {
+                    if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
+                        if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
+                            let func_env = new_js_object_data();
+                            func_env.borrow_mut().prototype = Some(captured_env.clone());
+                            // build args for callback: first acc, then current element
+                            let args = vec![
+                                accumulator.clone(),
+                                val.borrow().clone(),
+                                Value::Number(i as f64),
+                                Value::Object(obj_map.clone()),
+                            ];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                            let res = evaluate_statements(&func_env, &body)?;
+                            accumulator = res;
+                        } else {
+                            return Err(raise_eval_error!("Array.reduceRight expects a function"));
+                        }
+                    }
+                }
+                Ok(accumulator)
+            } else {
+                Err(raise_eval_error!("Array.reduceRight expects at least one argument"))
             }
         }
         "find" => {
@@ -470,18 +521,8 @@ pub(crate) fn handle_array_instance_method(
                             // Create new environment for callback
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), element.clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), index_val)?;
-                            }
-                            if params.len() > 2 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -520,18 +561,8 @@ pub(crate) fn handle_array_instance_method(
                             // Create new environment for callback
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), element.clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), index_val)?;
-                            }
-                            if params.len() > 2 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -570,18 +601,8 @@ pub(crate) fn handle_array_instance_method(
                             // Create new environment for callback (fresh frame whose prototype is captured_env)
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), element.clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), index_val)?;
-                            }
-                            if params.len() > 2 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -620,18 +641,8 @@ pub(crate) fn handle_array_instance_method(
                             // Create new environment for callback (fresh frame whose prototype is captured_env)
                             let func_env = new_js_object_data();
                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                            if !params.is_empty() {
-                                let name = &params[0].0;
-                                env_set(&func_env, name.as_str(), element.clone())?;
-                            }
-                            if params.len() >= 2 {
-                                let name1 = &params[1].0;
-                                env_set(&func_env, name1.as_str(), index_val)?;
-                            }
-                            if params.len() > 2 {
-                                let name2 = &params[2].0;
-                                env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                            }
+                            let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                            crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -792,18 +803,8 @@ pub(crate) fn handle_array_instance_method(
                         // Create function environment for comparison (fresh frame whose prototype is captured_env)
                         let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        let mut param_set = true;
-                        if !params.is_empty() && env_set(&func_env, params[0].0.as_str(), a.1.clone()).is_err() {
-                            param_set = false;
-                        }
-                        if params.len() >= 2 && param_set {
-                            let name1 = &params[1].0;
-                            if env_set(&func_env, name1.as_str(), b.1.clone()).is_err() {
-                                param_set = false;
-                            }
-                        }
-
-                        if !param_set {
+                        let args = vec![a.1.clone(), b.1.clone()];
+                        if crate::core::bind_function_parameters(&func_env, &params, &args).is_err() {
                             return std::cmp::Ordering::Equal;
                         }
 
@@ -907,44 +908,41 @@ pub(crate) fn handle_array_instance_method(
             }
             set_array_length(&deleted_array, deleted_elements.len())?;
 
-            // Remove deleted elements and shift remaining elements
-            let mut new_len = start;
-
-            // Copy elements before start (no change needed)
-
-            // Insert new items at start position
-            for item in args.iter().skip(2) {
-                let item_val = evaluate_expr(env, item)?;
-                obj_set_key_value(obj_map, &new_len.to_string().into(), item_val)?;
-                new_len += 1;
-            }
-
-            // Shift remaining elements after deleted section
+            // Collect tail elements (elements that need to be shifted)
+            // We must collect them before we start writing new items to avoid overwriting them
+            let mut tail_elements = Vec::new();
             let shift_start = start + delete_count;
             for i in shift_start..current_len {
-                if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
-                    let value = val.borrow().clone();
-                    obj_set_key_value(obj_map, &new_len.to_string().into(), value)?;
-                    new_len += 1;
-                }
+                let val_opt = obj_get_key_value(obj_map, &i.to_string().into())?;
+                tail_elements.push(val_opt.map(|v| v.borrow().clone()));
             }
 
-            // Remove old elements that are now beyond new length
-            let mut keys_to_remove = Vec::new();
-            for key in obj_map.borrow().keys() {
-                if let PropertyKey::String(key_str) = key
-                    && let Ok(idx) = key_str.parse::<usize>()
-                    && idx >= new_len
-                {
-                    keys_to_remove.push(key.clone());
-                }
+            // Insert new items at start position
+            let mut write_idx = start;
+            for item in args.iter().skip(2) {
+                let item_val = evaluate_expr(env, item)?;
+                obj_set_key_value(obj_map, &write_idx.to_string().into(), item_val)?;
+                write_idx += 1;
             }
-            for key in keys_to_remove {
-                obj_map.borrow_mut().remove(&key);
+
+            // Write tail elements back
+            for val_opt in tail_elements {
+                if let Some(val) = val_opt {
+                    obj_set_key_value(obj_map, &write_idx.to_string().into(), val)?;
+                } else {
+                    // If the element was a hole (or missing), ensure the destination is also a hole
+                    obj_map.borrow_mut().remove(&write_idx.to_string().into());
+                }
+                write_idx += 1;
+            }
+
+            // If the array shrank, remove the remaining properties at the end
+            for i in write_idx..current_len {
+                obj_map.borrow_mut().remove(&i.to_string().into());
             }
 
             // Update length
-            set_array_length(obj_map, new_len)?;
+            set_array_length(obj_map, write_idx)?;
 
             Ok(Value::Object(deleted_array))
         }
@@ -1110,7 +1108,7 @@ pub(crate) fn handle_array_instance_method(
             let mut result = Vec::new();
             flatten_array(obj_map, &mut result, depth)?;
 
-            let new_array = new_js_object_data();
+            let new_array = create_array(env)?;
             set_array_length(&new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_key_value(&new_array, &i.to_string().into(), val)?;
@@ -1131,18 +1129,8 @@ pub(crate) fn handle_array_instance_method(
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        if !params.is_empty() {
-                            let name = &params[0].0;
-                            env_set(&func_env, name.as_str(), val.borrow().clone())?;
-                        }
-                        if params.len() >= 2 {
-                            let name1 = &params[1].0;
-                            env_set(&func_env, name1.as_str(), Value::Number(i as f64))?;
-                        }
-                        if params.len() >= 3 {
-                            let name2 = &params[2].0;
-                            env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                        }
+                        let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(obj_map.clone())];
+                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
                         let mapped_val = evaluate_statements(&func_env, &body)?;
                         flatten_single_value(mapped_val, &mut result, 1)?;
                     } else {
@@ -1151,7 +1139,7 @@ pub(crate) fn handle_array_instance_method(
                 }
             }
 
-            let new_array = new_js_object_data();
+            let new_array = create_array(env)?;
             set_array_length(&new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
                 obj_set_key_value(&new_array, &i.to_string().into(), val)?;
@@ -1259,18 +1247,8 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback (fresh frame whose prototype is captured_env)
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    let name = &params[0].0;
-                                    env_set(&func_env, name.as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    let name1 = &params[1].0;
-                                    env_set(&func_env, name1.as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    let name2 = &params[2].0;
-                                    env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                                }
+                                let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                                crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                                 let res = evaluate_statements(&func_env, &body)?;
                                 // truthy check
@@ -1311,18 +1289,8 @@ pub(crate) fn handle_array_instance_method(
                                 // Create new environment for callback (fresh frame whose prototype is captured_env)
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                if !params.is_empty() {
-                                    let name = &params[0].0;
-                                    env_set(&func_env, name.as_str(), element.clone())?;
-                                }
-                                if params.len() >= 2 {
-                                    let name1 = &params[1].0;
-                                    env_set(&func_env, name1.as_str(), index_val)?;
-                                }
-                                if params.len() > 2 {
-                                    let name2 = &params[2].0;
-                                    env_set(&func_env, name2.as_str(), Value::Object(obj_map.clone()))?;
-                                }
+                                let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
+                                crate::core::bind_function_parameters(&func_env, &params, &args)?;
 
                                 let res = evaluate_statements(&func_env, &body)?;
                                 // truthy check

@@ -116,12 +116,7 @@ pub(crate) fn apply_proxy_trap(
             trap_env.borrow_mut().prototype = Some(captured_env);
 
             // Bind arguments to parameters
-            for (i, arg) in args.iter().enumerate() {
-                if i < params.len() {
-                    let name = params[i].0.clone();
-                    obj_set_key_value(&trap_env, &name.into(), arg.clone())?;
-                }
-            }
+            crate::core::bind_function_parameters(&trap_env, &params, &args)?;
 
             // Evaluate the body
             return evaluate_statements(&trap_env, &body);

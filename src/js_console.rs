@@ -98,7 +98,21 @@ fn format_value_pretty(
                         s.push_str(", ");
                     }
                     first = false;
-                    s.push_str(key.as_ref());
+
+                    let key_str = key.as_ref();
+                    // Check if key needs quotes
+                    let needs_quotes = key_str.is_empty()
+                        || key_str.chars().any(|c| c.is_whitespace())
+                        || key_str.parse::<f64>().is_ok()
+                        || key_str == "[object Object]"
+                        || !key_str.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$');
+
+                    if needs_quotes {
+                        s.push_str(&format!("\"{}\"", key_str));
+                    } else {
+                        s.push_str(key_str);
+                    }
+
                     s.push_str(": ");
                     let val_str = format_value_pretty(&val_rc.borrow(), env, _depth + 1, seen, true)?;
                     s.push_str(&val_str);

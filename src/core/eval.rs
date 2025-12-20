@@ -4,7 +4,7 @@ use crate::{
         BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind, SwitchCase,
         SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
         extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
-        to_primitive, value_to_string, values_equal,
+        to_primitive, value_to_sort_string, value_to_string, values_equal,
     },
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
@@ -1757,7 +1757,23 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                         Ok(value)
                     }
                 }
-                _ => Err(raise_eval_error!("Invalid index type")),
+                _ => {
+                    let key = value_to_sort_string(&idx_val);
+                    if let Value::Object(obj) = obj_val {
+                        if key == "__proto__" {
+                            if let Value::Object(proto_map) = &value {
+                                obj.borrow_mut().prototype = Some(proto_map.clone());
+                            } else {
+                                obj.borrow_mut().prototype = None;
+                            }
+                        } else {
+                            obj_set_key_value(&obj, &key.into(), value.clone())?;
+                        }
+                        Ok(value)
+                    } else {
+                        Ok(value)
+                    }
+                }
             }
         }
         _ => Err(raise_eval_error!("Invalid assignment target")),
@@ -5143,6 +5159,15 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
             // No symbol-keyed properties available on Function values in the current model
             Ok(Value::Undefined)
         }
+        (Value::Object(obj_map), other_idx) => {
+            let key_str = value_to_sort_string(&other_idx);
+            let key = PropertyKey::String(key_str);
+            if let Some(val) = obj_get_key_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
         _ => Err(raise_eval_error!("Invalid index type")), // other types of indexing not supported yet
     }
 }
@@ -5379,6 +5404,15 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
         }
         (Value::Function(_f), Value::Number(_n)) => Ok(Value::Undefined),
         (Value::Function(_f), Value::Symbol(_sym)) => Ok(Value::Undefined),
+        (Value::Object(obj_map), other_idx) => {
+            let key_str = value_to_sort_string(&other_idx);
+            let key = PropertyKey::String(key_str);
+            if let Some(val) = obj_get_key_value(&obj_map, &key)? {
+                Ok(val.borrow().clone())
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
         // If obj isn't undefined and index types aren't supported, propagate as error
         _ => Err(raise_eval_error!("Invalid index type")),
     }

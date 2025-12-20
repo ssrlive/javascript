@@ -2,6 +2,7 @@ use crate::core::{
     Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_key_value, obj_set_key_value,
 };
 use crate::error::JSError;
+use crate::js_array::set_array_length;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -457,12 +458,12 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
                     let keys_len = keys.len();
                     // Create an array-like object for keys
-                    let result_obj = new_js_object_data();
+                    let result_obj = crate::js_array::create_array(env)?;
                     for (i, key) in keys.into_iter().enumerate() {
                         obj_set_key_value(&result_obj, &i.to_string().into(), key)?;
                     }
                     // Set length property
-                    obj_set_key_value(&result_obj, &"length".into(), Value::Number(keys_len as f64))?;
+                    set_array_length(&result_obj, keys_len)?;
                     Ok(Value::Object(result_obj))
                 }
                 _ => Err(raise_type_error!("Reflect.ownKeys target must be an object")),

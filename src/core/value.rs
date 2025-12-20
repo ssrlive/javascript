@@ -4,6 +4,7 @@ use num_bigint::BigInt;
 use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
+use crate::js_array::{get_array_length, set_array_length};
 use crate::js_date::is_date_object;
 use crate::{
     JSError,
@@ -1572,14 +1573,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
 
             let new_len = new_len_num as usize;
 
-            let old_len = if let Some(l) = get_own_property(js_obj, &"length".into()) {
-                match &*l.borrow() {
-                    Value::Number(n) => *n as usize,
-                    _ => 0,
-                }
-            } else {
-                0
-            };
+            let old_len = get_array_length(js_obj).unwrap_or(0);
 
             if new_len < old_len {
                 let mut keys_to_remove = Vec::new();
@@ -1602,12 +1596,9 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
     // Update array length if setting an indexed property
     if let PropertyKey::String(s) = key {
         if let Ok(index) = s.parse::<usize>() {
-            if let Some(length_rc) = get_own_property(js_obj, &"length".into()) {
-                if let Value::Number(current_len) = &*length_rc.borrow() {
-                    if index >= *current_len as usize {
-                        let new_len = (index + 1) as f64;
-                        obj_set_key_value(js_obj, &"length".into(), Value::Number(new_len))?;
-                    }
+            if let Some(current_len) = get_array_length(js_obj) {
+                if index >= current_len {
+                    set_array_length(js_obj, index + 1)?;
                 }
             }
         }

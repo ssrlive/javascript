@@ -38,6 +38,7 @@ fn stmt_return(expr: Option<Expr>) -> Statement {
     Statement::from(StatementKind::Return(expr))
 }
 
+use crate::js_array::set_array_length;
 use crate::unicode::utf8_to_utf16;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -521,6 +522,7 @@ pub struct AllSettledState {
     pub completed: usize,
     pub total: usize,
     pub result_promise: Rc<RefCell<JSPromise>>,
+    pub env: JSObjectDataPtr,
 }
 
 impl AllSettledState {
@@ -529,12 +531,14 @@ impl AllSettledState {
     /// # Arguments
     /// * `total` - Number of promises to track
     /// * `result_promise` - The promise to resolve when all promises settle
-    pub fn new(total: usize, result_promise: Rc<RefCell<JSPromise>>) -> Self {
+    /// * `env` - The environment to create arrays in
+    pub fn new(total: usize, result_promise: Rc<RefCell<JSPromise>>, env: JSObjectDataPtr) -> Self {
         AllSettledState {
             results: vec![None; total],
             completed: 0,
             total,
             result_promise,
+            env,
         }
     }
 
@@ -572,7 +576,7 @@ impl AllSettledState {
         if self.completed == self.total {
             log::trace!("All promises settled, resolving result promise");
             // All promises have settled, create the result array
-            let result_array = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+            let result_array = crate::js_array::create_array(&self.env)?;
 
             for (i, result) in self.results.iter().enumerate() {
                 if let Some(settled_result) = result {
@@ -594,7 +598,7 @@ impl AllSettledState {
             }
 
             // Set the length property for array compatibility
-            obj_set_key_value(&result_array, &"length".into(), Value::Number(self.total as f64))?;
+            set_array_length(&result_array, self.total)?;
 
             // Resolve the main promise with the results array
             log::trace!("Resolving allSettled result promise");
@@ -1414,14 +1418,14 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
             let num_promises = promises.len();
             if num_promises == 0 {
                 // Empty array, resolve immediately with empty array
-                let result_arr = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+                let result_arr = crate::js_array::create_array(env)?;
                 resolve_promise(&result_promise, Value::Object(result_arr));
                 return Ok(Value::Object(result_promise_obj));
             }
 
             // Create state object for coordination
             let state_obj = new_js_object_data();
-            let results_obj = new_js_object_data();
+            let results_obj = crate::js_array::create_array(env)?;
             obj_set_key_value(&state_obj, &"results".into(), Value::Object(results_obj.clone()))?;
             obj_set_key_value(&state_obj, &"completed".into(), Value::Number(0.0))?;
             obj_set_key_value(&state_obj, &"total".into(), Value::Number(num_promises as f64))?;
@@ -1621,13 +1625,17 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 
             let num_promises = promises.len();
             if num_promises == 0 {
-                let result_arr = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+                let result_arr = crate::js_array::create_array(env)?;
                 resolve_promise(&result_promise, Value::Object(result_arr));
                 return Ok(Value::Object(result_promise_obj));
             }
 
             // Create dedicated state structure for coordination
-            let state = Rc::new(RefCell::new(AllSettledState::new(num_promises, result_promise.clone())));
+            let state = Rc::new(RefCell::new(AllSettledState::new(
+                num_promises,
+                result_promise.clone(),
+                env.clone(),
+            )));
 
             // Store state in global storage and get its index
             let state_index = ALLSETTLED_STATES.with(|states| {

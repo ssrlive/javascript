@@ -1,4 +1,5 @@
 use crate::core::JSMap;
+use crate::js_array::set_array_length;
 use crate::{
     core::{
         Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data,
@@ -111,12 +112,12 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.keys takes no arguments"));
             }
             // Create an array of keys
-            let keys_array = new_js_object_data();
+            let keys_array = crate::js_array::create_array(env)?;
             for (i, (key, _)) in map.borrow().entries.iter().enumerate() {
                 obj_set_key_value(&keys_array, &i.to_string().into(), key.clone())?;
             }
             // Set length
-            obj_set_key_value(&keys_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            set_array_length(&keys_array, map.borrow().entries.len())?;
             Ok(Value::Object(keys_array))
         }
         "values" => {
@@ -124,12 +125,12 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.values takes no arguments"));
             }
             // Create an array of values
-            let values_array = new_js_object_data();
+            let values_array = crate::js_array::create_array(env)?;
             for (i, (_, value)) in map.borrow().entries.iter().enumerate() {
                 obj_set_key_value(&values_array, &i.to_string().into(), value.clone())?;
             }
             // Set length
-            obj_set_key_value(&values_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            set_array_length(&values_array, map.borrow().entries.len())?;
             Ok(Value::Object(values_array))
         }
         "entries" => {
@@ -137,16 +138,16 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.entries takes no arguments"));
             }
             // Create an array of [key, value] pairs
-            let entries_array = new_js_object_data();
+            let entries_array = crate::js_array::create_array(env)?;
             for (i, (key, value)) in map.borrow().entries.iter().enumerate() {
-                let entry_array = new_js_object_data();
+                let entry_array = crate::js_array::create_array(env)?;
                 obj_set_key_value(&entry_array, &"0".into(), key.clone())?;
                 obj_set_key_value(&entry_array, &"1".into(), value.clone())?;
-                obj_set_key_value(&entry_array, &"length".into(), Value::Number(2.0))?;
+                set_array_length(&entry_array, 2)?;
                 obj_set_key_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
             }
             // Set length
-            obj_set_key_value(&entries_array, &"length".into(), Value::Number(map.borrow().entries.len() as f64))?;
+            set_array_length(&entries_array, map.borrow().entries.len())?;
             Ok(Value::Object(entries_array))
         }
         _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method))),

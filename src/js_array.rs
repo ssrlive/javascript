@@ -1216,12 +1216,12 @@ pub(crate) fn handle_array_instance_method(
         "entries" => {
             let length = get_array_length(obj_map).unwrap_or(0);
 
-            let result = new_js_object_data();
+            let result = create_array(env)?;
             set_array_length(&result, length)?;
             for i in 0..length {
                 if let Some(val) = obj_get_key_value(obj_map, &i.to_string().into())? {
                     // Create entry [i, value]
-                    let entry = new_js_object_data();
+                    let entry = create_array(env)?;
                     obj_set_key_value(&entry, &"0".into(), Value::Number(i as f64))?;
                     obj_set_key_value(&entry, &"1".into(), val.borrow().clone())?;
                     set_array_length(&entry, 2)?;
@@ -1383,6 +1383,8 @@ pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) -> Resu
 
 pub(crate) fn create_array(env: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSError> {
     let arr = new_js_object_data();
+    set_array_length(&arr, 0)?;
+
     obj_set_key_value(&arr, &"__is_array".into(), Value::Boolean(true))?;
     arr.borrow_mut().set_non_enumerable("__is_array".into());
 

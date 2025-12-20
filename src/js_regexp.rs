@@ -1,5 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
+use crate::js_array::set_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use regress::Regex;
 
@@ -297,17 +298,22 @@ pub(crate) fn handle_regexp_method(
                     };
 
                     // Construct result array
-                    let result_array = new_js_object_data();
+                    let result_array = crate::js_array::create_array(env)?;
 
                     let full_match_u16 = input_u16[orig_start..orig_end].to_vec();
                     obj_set_key_value(&result_array, &"0".into(), Value::String(full_match_u16))?;
 
-                    let indices_array = if has_indices { Some(new_js_object_data()) } else { None };
+                    let indices_array = if has_indices {
+                        Some(crate::js_array::create_array(env)?)
+                    } else {
+                        None
+                    };
 
                     if let Some(indices) = &indices_array {
-                        let match_indices = new_js_object_data();
+                        let match_indices = crate::js_array::create_array(env)?;
                         obj_set_key_value(&match_indices, &"0".into(), Value::Number(orig_start as f64))?;
                         obj_set_key_value(&match_indices, &"1".into(), Value::Number(orig_end as f64))?;
+                        set_array_length(&match_indices, 2)?;
                         obj_set_key_value(indices, &"0".into(), Value::Object(match_indices))?;
                     }
 
@@ -323,9 +329,10 @@ pub(crate) fn handle_regexp_method(
                             obj_set_key_value(&result_array, &group_index.to_string().into(), Value::String(cap_str))?;
 
                             if let Some(indices) = &indices_array {
-                                let group_indices = new_js_object_data();
+                                let group_indices = crate::js_array::create_array(env)?;
                                 obj_set_key_value(&group_indices, &"0".into(), Value::Number(cs as f64))?;
                                 obj_set_key_value(&group_indices, &"1".into(), Value::Number(ce as f64))?;
+                                set_array_length(&group_indices, 2)?;
                                 obj_set_key_value(indices, &group_index.to_string().into(), Value::Object(group_indices))?;
                             }
                         } else {
@@ -336,10 +343,10 @@ pub(crate) fn handle_regexp_method(
                         }
                         group_index += 1;
                     }
+                    set_array_length(&result_array, group_index)?;
 
                     obj_set_key_value(&result_array, &"index".into(), Value::Number(orig_start as f64))?;
                     obj_set_key_value(&result_array, &"input".into(), Value::String(input_u16.clone()))?;
-                    obj_set_key_value(&result_array, &"length".into(), Value::Number(group_index as f64))?;
                     obj_set_key_value(&result_array, &"groups".into(), Value::Undefined)?;
 
                     if let Some(indices) = indices_array {

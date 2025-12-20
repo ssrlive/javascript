@@ -4,6 +4,7 @@ use crate::{
         obj_set_key_value, values_equal,
     },
     error::JSError,
+    js_array::set_array_length,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -94,12 +95,12 @@ pub(crate) fn handle_set_instance_method(
                 return Err(raise_eval_error!("Set.prototype.values takes no arguments"));
             }
             // Create an array of values
-            let values_array = new_js_object_data();
+            let values_array = crate::js_array::create_array(env)?;
             for (i, value) in set.borrow().values.iter().enumerate() {
                 obj_set_key_value(&values_array, &i.to_string().into(), value.clone())?;
             }
             // Set length
-            obj_set_key_value(&values_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
+            set_array_length(&values_array, set.borrow().values.len())?;
             Ok(Value::Object(values_array))
         }
         "keys" => {
@@ -116,11 +117,11 @@ pub(crate) fn handle_set_instance_method(
                 let entry_array = new_js_object_data();
                 obj_set_key_value(&entry_array, &"0".into(), value.clone())?;
                 obj_set_key_value(&entry_array, &"1".into(), value.clone())?;
-                obj_set_key_value(&entry_array, &"length".into(), Value::Number(2.0))?;
+                set_array_length(&entry_array, 2)?;
                 obj_set_key_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
             }
             // Set length
-            obj_set_key_value(&entries_array, &"length".into(), Value::Number(set.borrow().values.len() as f64))?;
+            set_array_length(&entries_array, set.borrow().values.len())?;
             Ok(Value::Object(entries_array))
         }
         _ => Err(raise_eval_error!(format!("Set.prototype.{} is not implemented", method))),

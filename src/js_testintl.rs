@@ -1,6 +1,7 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
+use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::rc::Rc;
 
@@ -353,10 +354,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                 && crate::js_array::is_array(&arr_obj)
             {
                 // read length property
-                if let Some(len_val_rc) = obj_get_key_value(&arr_obj, &"length".into())?
-                    && let Value::Number(len_num) = &*len_val_rc.borrow()
-                {
-                    let len = *len_num as usize;
+                if let Some(len) = get_array_length(&arr_obj) {
                     for i in 0..len {
                         let key = i.to_string();
                         if let Some(elem_rc) = obj_get_key_value(&arr_obj, &key.into())?

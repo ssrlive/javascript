@@ -6,7 +6,7 @@ use crate::{
         extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
         to_primitive, value_to_string, values_equal,
     },
-    js_array::{get_array_length, is_array, set_array_length},
+    js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
         call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
         evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
@@ -1883,7 +1883,7 @@ fn perform_array_destructuring(
                         rest_elements.push(val_rc.borrow().clone());
                     }
                 }
-                let rest_obj = new_js_object_data();
+                let rest_obj = create_array(env)?;
                 let mut rest_index = 0;
                 for elem in rest_elements {
                     obj_set_key_value(&rest_obj, &rest_index.to_string().into(), elem)?;
@@ -2069,7 +2069,7 @@ fn perform_array_destructuring_var(env: &JSObjectDataPtr, pattern: &[Destructuri
                         rest_elements.push(val_rc.borrow().clone());
                     }
                 }
-                let rest_obj = new_js_object_data();
+                let rest_obj = create_array(env)?;
                 let mut rest_index = 0;
                 for elem in rest_elements {
                     obj_set_key_value(&rest_obj, &rest_index.to_string().into(), elem)?;
@@ -5822,12 +5822,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                             // Create arguments object
-                                            let arguments_obj = new_js_object_data();
-                                            obj_set_key_value(
-                                                &arguments_obj,
-                                                &"length".into(),
-                                                Value::Number(evaluated_args.len() as f64),
-                                            )?;
+                                            let arguments_obj = create_array(&func_env)?;
+                                            set_array_length(&arguments_obj, evaluated_args.len())?;
                                             for (i, arg) in evaluated_args.iter().enumerate() {
                                                 obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
                                             }
@@ -6125,8 +6121,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                             // Create arguments object
-                            let arguments_obj = new_js_object_data();
-                            obj_set_key_value(&arguments_obj, &"length".into(), Value::Number(evaluated_args.len() as f64))?;
+                            let arguments_obj = create_array(&func_env)?;
+                            set_array_length(&arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
                                 obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
                             }
@@ -6960,8 +6956,8 @@ fn handle_optional_method_call(obj_map: &JSObjectDataPtr, method: &str, args: &[
 
                         // Create arguments object if it's a regular function (not an arrow function)
                         if let Value::Object(_) = prop {
-                            let arguments_obj = new_js_object_data();
-                            obj_set_key_value(&arguments_obj, &"length".into(), Value::Number(evaluated_args.len() as f64))?;
+                            let arguments_obj = create_array(&func_env)?;
+                            set_array_length(&arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
                                 obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
                             }

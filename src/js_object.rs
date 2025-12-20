@@ -174,7 +174,6 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                         }
                     } else {
                         let arr = crate::js_array::create_array(env)?;
-                        crate::js_array::set_array_length(&arr, 0)?;
                         obj_set_key_value(&result_obj, &key, Value::Object(arr.clone()))?;
                         arr
                     };
@@ -238,7 +237,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    let result_obj = new_js_object_data();
+                    let result_obj = crate::js_array::create_array(env)?;
                     let mut idx = 0;
                     for (key, _value) in obj.borrow().properties.iter() {
                         if let PropertyKey::Symbol(sym) = key
@@ -262,7 +261,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    let result_obj = new_js_object_data();
+                    let result_obj = crate::js_array::create_array(env)?;
                     let mut idx = 0;
                     for (key, _value) in obj.borrow().properties.iter() {
                         if let PropertyKey::String(s) = key

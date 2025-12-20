@@ -732,7 +732,7 @@ fn string_match_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
         for (i, m) in matches.iter().enumerate() {
             obj_set_key_value(&arr, &i.to_string().into(), Value::String(utf8_to_utf16(m)))?;
         }
-        obj_set_key_value(&arr, &"length".into(), Value::Number(matches.len() as f64))?;
+        set_array_length(&arr, matches.len())?;
         Ok(Value::Object(arr))
     } else {
         // Non-global: delegate to RegExp.prototype.exec and return result
@@ -1243,7 +1243,7 @@ fn make_array_from_values(env: &JSObjectDataPtr, values: Vec<Value>) -> Result<V
     for (i, v) in values.into_iter().enumerate() {
         obj_set_key_value(&arr, &i.to_string().into(), v)?;
     }
-    obj_set_key_value(&arr, &"length".into(), Value::Number(len as f64))?;
+    crate::js_array::set_array_length(&arr, len)?;
     Ok(Value::Object(arr))
 }
 

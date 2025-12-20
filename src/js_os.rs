@@ -263,7 +263,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                     };
                     match std::fs::read_dir(&dirname) {
                         Ok(entries) => {
-                            let obj = new_js_object_data();
+                            let obj = crate::js_array::create_array(env)?;
                             let mut i = 0;
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
@@ -275,14 +275,12 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
-                            let obj = new_js_object_data();
-                            set_array_length(&obj, 0)?;
+                            let obj = crate::js_array::create_array(env)?;
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
-                let obj = new_js_object_data();
-                set_array_length(&obj, 0)?;
+                let obj = crate::js_array::create_array(env)?;
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {

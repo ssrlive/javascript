@@ -43,9 +43,83 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
 
             // Handle different types of iterables
             match iterable {
+                Value::Set(set) => {
+                    // Handle Set iteration
+                    for val in &set.borrow().values {
+                        if let Some(ref fn_val) = map_fn {
+                            if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
+                                let func_env = new_js_object_data();
+                                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                let args = vec![val.clone(), val.clone()]; // Set iterator yields value as key
+                                crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                                let mapped = evaluate_statements(&func_env, &body)?;
+                                result.push(mapped);
+                            } else {
+                                return Err(raise_eval_error!("Array.from map function must be a function"));
+                            }
+                        } else {
+                            result.push(val.clone());
+                        }
+                    }
+                }
                 Value::Object(obj_map) => {
-                    // If it's an array-like object
-                    if let Some(len) = get_array_length(&obj_map) {
+                    let maybe_set = {
+                        let borrow = obj_map.borrow();
+                        borrow.get(&PropertyKey::String("__set__".to_string()))
+                    };
+
+                    let maybe_map = if maybe_set.is_none() {
+                        let borrow = obj_map.borrow();
+                        borrow.get(&PropertyKey::String("__map__".to_string()))
+                    } else {
+                        None
+                    };
+
+                    if let Some(set_val) = maybe_set {
+                        if let Value::Set(set) = &*set_val.borrow() {
+                            for (i, val) in set.borrow().values.iter().enumerate() {
+                                if let Some(ref fn_val) = map_fn {
+                                    if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
+                                        let func_env = new_js_object_data();
+                                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                        let args = vec![val.clone(), Value::Number(i as f64)];
+                                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                                        let mapped = evaluate_statements(&func_env, &body)?;
+                                        result.push(mapped);
+                                    } else {
+                                        return Err(raise_eval_error!("Array.from map function must be a function"));
+                                    }
+                                } else {
+                                    result.push(val.clone());
+                                }
+                            }
+                        }
+                    } else if let Some(map_val) = maybe_map {
+                        if let Value::Map(map) = &*map_val.borrow() {
+                            for (i, (key, val)) in map.borrow().entries.iter().enumerate() {
+                                let entry_obj = create_array(env)?;
+                                set_array_length(&entry_obj, 2)?;
+                                obj_set_key_value(&entry_obj, &"0".into(), key.clone())?;
+                                obj_set_key_value(&entry_obj, &"1".into(), val.clone())?;
+                                let entry_val = Value::Object(entry_obj);
+
+                                if let Some(ref fn_val) = map_fn {
+                                    if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
+                                        let func_env = new_js_object_data();
+                                        func_env.borrow_mut().prototype = Some(captured_env.clone());
+                                        let args = vec![entry_val.clone(), Value::Number(i as f64)];
+                                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                                        let mapped = evaluate_statements(&func_env, &body)?;
+                                        result.push(mapped);
+                                    } else {
+                                        return Err(raise_eval_error!("Array.from map function must be a function"));
+                                    }
+                                } else {
+                                    result.push(entry_val);
+                                }
+                            }
+                        }
+                    } else if let Some(len) = get_array_length(&obj_map) {
                         for i in 0..len {
                             let val_opt = obj_get_key_value(&obj_map, &i.to_string().into())?;
                             let element = if let Some(val) = val_opt {

@@ -46,6 +46,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "import" => dynamic_import_function(args, env),
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
         "Object.prototype.valueOf" => object_prototype_value_of(args, env),
+        "Object.prototype.toString" => object_prototype_to_string(args, env),
         "String" => crate::js_string::string_constructor(args, env),
         "Function" => function_constructor(args, env),
         "parseInt" => parse_int_function(args, env),
@@ -308,6 +309,14 @@ fn object_prototype_value_of(args: &[Expr], env: &JSObjectDataPtr) -> Result<Val
         return crate::js_object::handle_value_of_method(&this_val, args, env);
     }
     Err(raise_eval_error!("Object.prototype.valueOf called without this"))
+}
+
+fn object_prototype_to_string(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if let Some(this_rc) = crate::core::env_get(env, "this") {
+        let this_val = this_rc.borrow().clone();
+        return crate::js_object::handle_to_string_method(&this_val, args, env);
+    }
+    Err(raise_eval_error!("Object.prototype.toString called without this"))
 }
 
 fn parse_int_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {

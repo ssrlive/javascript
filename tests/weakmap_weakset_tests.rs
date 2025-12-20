@@ -1,3 +1,4 @@
+use javascript::PropertyKey;
 use javascript::Value;
 use javascript::evaluate_script;
 
@@ -68,8 +69,10 @@ fn test_weakmap_set_get_has_delete() {
 
     // Should return an array-like object with [true, false]
     if let Value::Object(obj) = result {
-        let deleted_val = obj.borrow().properties.get(&"0".into()).unwrap().borrow().clone();
-        let has_after_val = obj.borrow().properties.get(&"1".into()).unwrap().borrow().clone();
+        let key0 = PropertyKey::from("0");
+        let deleted_val = obj.borrow().properties.get(&key0).unwrap().borrow().clone();
+        let key1 = PropertyKey::from("1");
+        let has_after_val = obj.borrow().properties.get(&key1).unwrap().borrow().clone();
 
         assert!(matches!(deleted_val, Value::Boolean(true)));
         assert!(matches!(has_after_val, Value::Boolean(false)));
@@ -144,8 +147,10 @@ fn test_weakset_add_has_delete() {
 
     // Should return an array-like object with [true, false]
     if let Value::Object(obj) = result {
-        let deleted_val = obj.borrow().properties.get(&"0".into()).unwrap().borrow().clone();
-        let has_after_val = obj.borrow().properties.get(&"1".into()).unwrap().borrow().clone();
+        let key0 = PropertyKey::from("0");
+        let deleted_val = obj.borrow().properties.get(&key0).unwrap().borrow().clone();
+        let key1 = PropertyKey::from("1");
+        let has_after_val = obj.borrow().properties.get(&key1).unwrap().borrow().clone();
 
         assert!(matches!(deleted_val, Value::Boolean(true)));
         assert!(matches!(has_after_val, Value::Boolean(false)));

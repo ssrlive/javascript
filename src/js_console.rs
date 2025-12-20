@@ -40,9 +40,9 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                             Value::Number(n) => s.push_str(&n.to_string()),
                             Value::BigInt(h) => s.push_str(&h.to_string()),
                             Value::String(str_val) => {
-                                s.push('\'');
+                                s.push('\"');
                                 s.push_str(&String::from_utf16_lossy(str_val));
-                                s.push('\'');
+                                s.push('\"');
                             }
                             Value::Boolean(b) => s.push_str(&b.to_string()),
                             Value::Undefined => s.push_str("undefined"),
@@ -74,14 +74,9 @@ fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JS
                     }
                 }
 
-                let obj_ref = obj.borrow();
                 let mut s = String::from("{");
-                let mut keys: Vec<_> = obj_ref.properties.keys().collect();
-                keys.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
-
                 let mut first = true;
-                for key in keys {
-                    let val_rc = obj_ref.properties.get(key).unwrap();
+                for (key, val_rc) in obj.borrow().properties.iter() {
                     if !first {
                         s.push_str(", ");
                     }

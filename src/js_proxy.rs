@@ -221,7 +221,7 @@ pub(crate) fn proxy_delete_property(proxy: &Rc<RefCell<JSProxy>>, key: &Property
                 Value::Object(obj) => {
                     let mut obj_borrow = obj.borrow_mut();
                     let existed = obj_borrow.properties.contains_key(key);
-                    obj_borrow.properties.remove(key);
+                    obj_borrow.properties.shift_remove(key);
                     Ok(Value::Boolean(existed))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects don't have properties

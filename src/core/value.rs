@@ -485,7 +485,7 @@ pub fn new_js_object_data() -> JSObjectDataPtr {
 
 #[derive(Clone, Default)]
 pub struct JSObjectData {
-    pub properties: std::collections::HashMap<PropertyKey, Rc<RefCell<Value>>>,
+    pub properties: indexmap::IndexMap<PropertyKey, Rc<RefCell<Value>>>,
     pub constants: std::collections::HashSet<String>,
     /// Tracks keys that should not be enumerated by `Object.keys` / `Object.values`.
     pub non_enumerable: std::collections::HashSet<PropertyKey>,
@@ -558,10 +558,10 @@ impl JSObjectData {
     }
 
     pub fn remove(&mut self, key: &PropertyKey) -> Option<Rc<RefCell<Value>>> {
-        self.properties.remove(key)
+        self.properties.shift_remove(key)
     }
 
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, PropertyKey, Rc<RefCell<Value>>> {
+    pub fn keys(&self) -> indexmap::map::Keys<'_, PropertyKey, Rc<RefCell<Value>>> {
         self.properties.keys()
     }
 

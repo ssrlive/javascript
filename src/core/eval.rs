@@ -3005,6 +3005,53 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
         let v = Value::Function("testWithIntlConstructors".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
+    } else if name == "Array" {
+        let ctor = super::ensure_constructor_object(env, "Array", "__is_array_constructor")?;
+        if let Some(proto_val) = obj_get_key_value(&ctor, &"prototype".into())? {
+            if let Value::Object(proto) = &*proto_val.borrow() {
+                let methods = [
+                    "at",
+                    "push",
+                    "pop",
+                    "join",
+                    "slice",
+                    "forEach",
+                    "map",
+                    "filter",
+                    "reduce",
+                    "reduceRight",
+                    "find",
+                    "findIndex",
+                    "some",
+                    "every",
+                    "concat",
+                    "indexOf",
+                    "includes",
+                    "sort",
+                    "reverse",
+                    "splice",
+                    "shift",
+                    "unshift",
+                    "fill",
+                    "lastIndexOf",
+                    "toString",
+                    "flat",
+                    "flatMap",
+                    "copyWithin",
+                    "entries",
+                    "findLast",
+                    "findLastIndex",
+                ];
+                for m in methods.iter() {
+                    if get_own_property(proto, &m.to_string().into()).is_none() {
+                        obj_set_key_value(proto, &m.to_string().into(), Value::Function(format!("Array.prototype.{}", m)))?;
+                    }
+                }
+            }
+        }
+        let v = Value::Object(ctor);
+        log::trace!("evaluate_var - {} -> {:?}", name, v);
+        Ok(v)
     } else if name == "Date" {
         let ctor = super::ensure_constructor_object(env, "Date", "__is_date_constructor")?;
         if let Some(proto_val) = obj_get_key_value(&ctor, &"prototype".into())? {
@@ -3159,10 +3206,6 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
         Ok(v)
     } else if name == "decodeURI" {
         let v = Value::Function("decodeURI".to_string());
-        log::trace!("evaluate_var - {} -> {:?}", name, v);
-        Ok(v)
-    } else if name == "Array" {
-        let v = Value::Function("Array".to_string());
         log::trace!("evaluate_var - {} -> {:?}", name, v);
         Ok(v)
     } else if name == "Number" {
@@ -5230,7 +5273,9 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 return Ok(Value::Function("Function.prototype.apply".to_string()));
             }
 
-            Err(raise_eval_error!(format!("Property not found for prop={prop}")))
+            Err(raise_eval_error!(format!(
+                "Property not found for prop={prop} on function={func_name}",
+            )))
         }
         // For boolean and other primitive types, property access should usually
         // coerce to a primitive wrapper or return undefined if not found. To
@@ -5920,91 +5965,20 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             }
             // Allow function values to support `.call` and `.apply` forwarding
             (Value::Function(func_name), "call") => {
-                // Forward Object.prototype.* builtins when called via .call
-                if func_name.starts_with("Object.prototype.") {
-                    if args.is_empty() {
-                        return Err(raise_eval_error!("call requires a receiver"));
-                    }
-                    let method = func_name.trim_start_matches("Object.prototype.").to_string();
-                    // Special-case hasOwnProperty: call should invoke the builtin
-                    // implementation using the provided receiver (args[0]) and
-                    // property argument (args[1]) without requiring the receiver
-                    // to have the method as an own property.
-                    if method == "hasOwnProperty" {
-                        if args.len() < 2 {
-                            return Err(raise_eval_error!(
-                                "Object.prototype.hasOwnProperty.call requires a receiver and a property name"
-                            ));
-                        }
-                        // receiver
-                        let receiver_val = evaluate_expr(env, &args[0])?;
-                        // property name arg
-                        let key_val = evaluate_expr(env, &args[1])?;
-                        let exists = match receiver_val {
-                            Value::Object(obj_map) => match key_val {
-                                Value::String(s) => get_own_property(&obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
-                                Value::Number(n) => get_own_property(&obj_map, &n.to_string().into()).is_some(),
-                                Value::Boolean(b) => get_own_property(&obj_map, &b.to_string().into()).is_some(),
-                                Value::Undefined => get_own_property(&obj_map, &"undefined".into()).is_some(),
-                                Value::Symbol(sd) => {
-                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                                    get_own_property(&obj_map, &sym_key).is_some()
-                                }
-                                other => get_own_property(&obj_map, &value_to_string(&other).into()).is_some(),
-                            },
-                            _ => false,
-                        };
-                        return Ok(Value::Boolean(exists));
-                    }
-                    if method == "toString" {
-                        let receiver_val = evaluate_expr(env, &args[0])?;
-                        return crate::js_object::handle_to_string_method(&receiver_val, &[], env);
-                    }
-                    if method == "valueOf" {
-                        let receiver_val = evaluate_expr(env, &args[0])?;
-                        return crate::js_object::handle_value_of_method(&receiver_val, &[], env);
-                    }
-                    let receiver_expr = args[0].clone();
-                    let forwarded = &args[1..];
-                    let prop_expr = Expr::Property(Box::new(receiver_expr), method);
-                    let call_expr = Expr::Call(Box::new(prop_expr), forwarded.to_vec());
-                    return evaluate_expr(env, &call_expr);
-                }
-                Err(raise_eval_error!(format!("{} has no static method 'call'", func_name)))
+                // Delegate to Function.prototype.call
+                let call_env = new_js_object_data();
+                call_env.borrow_mut().prototype = Some(env.clone());
+                // Bind 'this' to the function being called (e.g. Array.prototype.forEach)
+                obj_set_key_value(&call_env, &"this".into(), Value::Function(func_name.clone()))?;
+                crate::js_function::handle_global_function("Function.prototype.call", args, &call_env)
             }
             (Value::Function(func_name), "apply") => {
-                if func_name.starts_with("Object.prototype.") {
-                    if args.is_empty() {
-                        return Err(raise_eval_error!("apply requires a receiver"));
-                    }
-                    // receiver
-                    let receiver_val = evaluate_expr(env, &args[0])?;
-                    // array arg
-                    let mut forwarded_exprs: Vec<Expr> = Vec::new();
-                    if args.len() >= 2 {
-                        match evaluate_expr(env, &args[1])? {
-                            Value::Object(arr_obj) if crate::js_array::is_array(&arr_obj) => {
-                                let mut i = 0usize;
-                                loop {
-                                    let key = i.to_string();
-                                    if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
-                                        forwarded_exprs.push(Expr::Value(val_rc.borrow().clone()));
-                                    } else {
-                                        break;
-                                    }
-                                    i += 1;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    let method = func_name.trim_start_matches("Object.prototype.").to_string();
-                    let receiver_expr = Expr::Value(receiver_val);
-                    let prop_expr = Expr::Property(Box::new(receiver_expr), method);
-                    let call_expr = Expr::Call(Box::new(prop_expr), forwarded_exprs);
-                    return evaluate_expr(env, &call_expr);
-                }
-                Err(raise_eval_error!(format!("{} has no static method 'apply'", func_name)))
+                // Delegate to Function.prototype.apply
+                let call_env = new_js_object_data();
+                call_env.borrow_mut().prototype = Some(env.clone());
+                // Bind 'this' to the function being called
+                obj_set_key_value(&call_env, &"this".into(), Value::Function(func_name.clone()))?;
+                crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
             }
             (Value::Function(func_name), method) => {
                 // Handle constructor static methods
@@ -6304,6 +6278,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     crate::js_function::handle_global_function("BigInt", args, env)
                 } else if get_own_property(&obj_map, &"__is_function_constructor".into()).is_some() {
                     crate::js_function::handle_global_function("Function", args, env)
+                } else if get_own_property(&obj_map, &"__is_array_constructor".into()).is_some() {
+                    crate::js_function::handle_global_function("Array", args, env)
                 } else {
                     // Log diagnostic context before returning a generic evaluation error
                     log::error!("evaluate_call - unexpected object method dispatch: obj_map={:?}", obj_map);

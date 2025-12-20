@@ -148,6 +148,12 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     return Ok(Value::Object(instance));
                 }
             }
+
+            // Check if this is Array constructor
+            if get_own_property(&class_obj, &"__is_array_constructor".into()).is_some() {
+                return crate::js_array::handle_array_constructor(args, env);
+            }
+
             // Check if this is a TypedArray constructor
             if get_own_property(&class_obj, &"__kind".into()).is_some() {
                 return crate::js_typedarray::handle_typedarray_constructor(&class_obj, args, env);

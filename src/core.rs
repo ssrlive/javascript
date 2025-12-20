@@ -600,12 +600,6 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     // Boolean and String constructors are created lazily by `evaluate_var`
     // to allow creation of singleton constructor objects with prototypes.
 
-    // Array constructor (already handled by js_array module)
-    env_borrow.insert(
-        PropertyKey::String("Array".to_string()),
-        Rc::new(RefCell::new(Value::Function("Array".to_string()))),
-    );
-
     // Date constructor - handled by evaluate_var
     // env_borrow.insert(
     //     PropertyKey::String("Date".to_string()),

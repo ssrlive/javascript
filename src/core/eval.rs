@@ -6254,6 +6254,23 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 Ok(promise_obj)
             }
             Value::Object(obj_map) => {
+                // Check if this is a class constructor being called without 'new'
+                if get_own_property(&obj_map, &"__class_def__".into()).is_some() {
+                    let name = if let Ok(Some(n)) = obj_get_key_value(&obj_map, &"name".into()) {
+                        if let Value::String(s) = &*n.borrow() {
+                            String::from_utf16_lossy(s)
+                        } else {
+                            "Unknown".to_string()
+                        }
+                    } else {
+                        "Unknown".to_string()
+                    };
+                    return Err(raise_type_error!(format!(
+                        "Class constructor {} cannot be invoked without 'new'",
+                        name
+                    )));
+                }
+
                 // If this object wraps a closure under the internal `__closure__` key,
                 // call that closure. This lets script-defined functions be stored
                 // as objects (so they have assignable `prototype`), while still

@@ -742,6 +742,11 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             }
             expr
         }
+        Token::PrivateIdentifier(name) => {
+            // Represent a standalone private name as a string like "#name" so
+            // it can be used in contexts like `#name in obj`.
+            Expr::Value(Value::String(crate::unicode::utf8_to_utf16(&format!("#{}", name))))
+        }
         Token::Import => Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column)),
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
@@ -1682,7 +1687,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);
                 } else if let Token::PrivateIdentifier(prop) = &tokens[0].token {
-                    let prop = prop.clone();
+                    let prop = format!("#{}", prop);
                     tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);
                 } else {

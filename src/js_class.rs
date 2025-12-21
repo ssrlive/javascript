@@ -205,8 +205,9 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                         let value = evaluate_expr(env, value_expr)?;
                         obj_set_key_value(&instance, &prop_name.into(), value)?;
                     } else if let ClassMember::PrivateProperty(prop_name, value_expr) = member {
+                        // Store instance private fields under a key prefixed with '#'
                         let value = evaluate_expr(env, value_expr)?;
-                        obj_set_key_value(&instance, &prop_name.into(), value)?;
+                        obj_set_key_value(&instance, &format!("#{}", prop_name).into(), value)?;
                     }
                 }
 
@@ -604,21 +605,21 @@ pub(crate) fn create_class_object(
                 // Instance private properties handled during instantiation
             }
             ClassMember::PrivateMethod(method_name, params, body) => {
-                // Hack: Add private method to prototype with # name
+                // Add private method to prototype using the '#name' key
                 let closure_data = ClosureData::new(params, body, env, Some(&prototype_obj));
                 let method_closure = Value::Closure(Rc::new(closure_data));
-                obj_set_key_value(&prototype_obj, &method_name.into(), method_closure)?;
+                obj_set_key_value(&prototype_obj, &format!("#{}", method_name).into(), method_closure)?;
             }
             ClassMember::PrivateStaticProperty(prop_name, value_expr) => {
-                // Hack: Add private static property to class object with # name
+                // Add private static property to class object using the '#name' key
                 let value = evaluate_expr(env, value_expr)?;
-                obj_set_key_value(&class_obj, &prop_name.into(), value)?;
+                obj_set_key_value(&class_obj, &format!("#{}", prop_name).into(), value)?;
             }
             ClassMember::PrivateStaticMethod(method_name, params, body) => {
-                // Hack: Add private static method to class object with # name
+                // Add private static method to class object using the '#name' key
                 let closure_data = ClosureData::new(params, body, env, Some(&class_obj));
                 let method_closure = Value::Closure(Rc::new(closure_data));
-                obj_set_key_value(&class_obj, &method_name.into(), method_closure)?;
+                obj_set_key_value(&class_obj, &format!("#{}", method_name).into(), method_closure)?;
             }
             ClassMember::StaticBlock(body) => {
                 let block_env = new_js_object_data();

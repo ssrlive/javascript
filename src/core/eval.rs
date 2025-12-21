@@ -4804,9 +4804,35 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
             }
         }
         BinaryOp::In => {
-            // Check if property exists in object
+            // Check if property exists in object. Support private-name `#name in obj` checks.
             if let Value::Object(obj) = r {
                 let prim = to_primitive(&l, "string", env)?;
+                // If left side is a string starting with '#', treat it as a private name check
+                if let Value::String(s) = &prim {
+                    let key_utf8 = String::from_utf16_lossy(s);
+                    if let Some(private_name) = key_utf8.strip_prefix('#') {
+                        // Look for class definition on object/prototype chain
+                        if let Some(class_def_val) = obj_get_key_value(&obj, &"__class_def__".into())? {
+                            if let Value::ClassDefinition(class_def) = &*class_def_val.borrow() {
+                                for member in &class_def.members {
+                                    match member {
+                                        ClassMember::PrivateProperty(name, _)
+                                        | ClassMember::PrivateMethod(name, _, _)
+                                        | ClassMember::PrivateStaticProperty(name, _)
+                                        | ClassMember::PrivateStaticMethod(name, _, _) => {
+                                            if name == private_name {
+                                                return Ok(Value::Boolean(true));
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+
                 let key = match prim {
                     Value::Symbol(s) => PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(s)))),
                     Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
@@ -5283,7 +5309,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                                             | ClassMember::PrivateMethod(name, _, _)
                                             | ClassMember::PrivateStaticProperty(name, _)
                                             | ClassMember::PrivateStaticMethod(name, _, _) => {
-                                                if name == prop {
+                                                if name == &prop[1..] {
                                                     allowed = true;
                                                     break;
                                                 }

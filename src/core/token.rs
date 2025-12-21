@@ -1139,72 +1139,76 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1; // skip closing backtick
                 column += 1;
             }
-            'a'..='z' | 'A'..='Z' | '_' | '$' => {
+            'a'..='z' | 'A'..='Z' | '_' | '$' | '#' => {
                 let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$' || chars[i] == '#') {
                     i += 1;
                     column += 1;
                 }
                 let ident: String = chars[start..i].iter().collect();
-                let token = match ident.as_str() {
-                    "let" => Token::Let,
-                    "var" => Token::Var,
-                    "const" => Token::Const,
-                    "class" => Token::Class,
-                    "extends" => Token::Extends,
-                    "super" => Token::Super,
-                    "this" => Token::This,
-                    "static" => Token::Static,
-                    "new" => Token::New,
-                    "instanceof" => Token::InstanceOf,
-                    "typeof" => Token::TypeOf,
-                    "delete" => Token::Delete,
-                    "void" => Token::Void,
-                    "in" => Token::In,
-                    "as" => Token::As,
-                    "import" => Token::Import,
-                    "export" => Token::Export,
-                    "try" => Token::Try,
-                    "catch" => Token::Catch,
-                    "finally" => Token::Finally,
-                    "throw" => Token::Throw,
-                    "function" => {
-                        // Check if followed by '*'
-                        if i < chars.len() && chars[i] == '*' {
-                            i += 1; // consume '*'
-                            column += 1;
-                            Token::FunctionStar
-                        } else {
-                            Token::Function
+                let token = if let Some(stripped) = ident.strip_prefix('#') {
+                    Token::PrivateIdentifier(stripped.to_string())
+                } else {
+                    match ident.as_str() {
+                        "let" => Token::Let,
+                        "var" => Token::Var,
+                        "const" => Token::Const,
+                        "class" => Token::Class,
+                        "extends" => Token::Extends,
+                        "super" => Token::Super,
+                        "this" => Token::This,
+                        "static" => Token::Static,
+                        "new" => Token::New,
+                        "instanceof" => Token::InstanceOf,
+                        "typeof" => Token::TypeOf,
+                        "delete" => Token::Delete,
+                        "void" => Token::Void,
+                        "in" => Token::In,
+                        "as" => Token::As,
+                        "import" => Token::Import,
+                        "export" => Token::Export,
+                        "try" => Token::Try,
+                        "catch" => Token::Catch,
+                        "finally" => Token::Finally,
+                        "throw" => Token::Throw,
+                        "function" => {
+                            // Check if followed by '*'
+                            if i < chars.len() && chars[i] == '*' {
+                                i += 1; // consume '*'
+                                column += 1;
+                                Token::FunctionStar
+                            } else {
+                                Token::Function
+                            }
                         }
-                    }
-                    "return" => Token::Return,
-                    "if" => Token::If,
-                    "else" => Token::Else,
-                    "for" => Token::For,
-                    "while" => Token::While,
-                    "do" => Token::Do,
-                    "switch" => Token::Switch,
-                    "case" => Token::Case,
-                    "default" => Token::Default,
-                    "break" => Token::Break,
-                    "continue" => Token::Continue,
-                    "true" => Token::True,
-                    "false" => Token::False,
-                    "null" => Token::Null,
-                    "async" => Token::Async,
-                    "await" => Token::Await,
-                    "yield" => {
-                        // Check if followed by '*'
-                        if i < chars.len() && chars[i] == '*' {
-                            i += 1; // consume '*'
-                            column += 1;
-                            Token::YieldStar
-                        } else {
-                            Token::Yield
+                        "return" => Token::Return,
+                        "if" => Token::If,
+                        "else" => Token::Else,
+                        "for" => Token::For,
+                        "while" => Token::While,
+                        "do" => Token::Do,
+                        "switch" => Token::Switch,
+                        "case" => Token::Case,
+                        "default" => Token::Default,
+                        "break" => Token::Break,
+                        "continue" => Token::Continue,
+                        "true" => Token::True,
+                        "false" => Token::False,
+                        "null" => Token::Null,
+                        "async" => Token::Async,
+                        "await" => Token::Await,
+                        "yield" => {
+                            // Check if followed by '*'
+                            if i < chars.len() && chars[i] == '*' {
+                                i += 1; // consume '*'
+                                column += 1;
+                                Token::YieldStar
+                            } else {
+                                Token::Yield
+                            }
                         }
+                        _ => Token::Identifier(ident),
                     }
-                    _ => Token::Identifier(ident),
                 };
                 tokens.push(TokenData {
                     token,
@@ -1230,24 +1234,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1;
                 column += 1;
             }
-            '#' => {
-                let start = i;
-                i += 1;
-                column += 1;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
-                    i += 1;
-                    column += 1;
-                }
-                if i == start + 1 {
-                    return Err(raise_tokenize_error!("Invalid private identifier", line, column));
-                }
-                let ident: String = chars[start..i].iter().collect();
-                tokens.push(TokenData {
-                    token: Token::PrivateIdentifier(ident),
-                    line,
-                    column: start_col,
-                });
-            }
+
             _ => return Err(raise_tokenize_error!(format!("Unexpected character '{}'", chars[i]), line, column)),
         }
     }

@@ -10,15 +10,20 @@ use std::rc::Rc;
 
 #[derive(Debug, Clone)]
 pub enum ClassMember {
-    Constructor(Vec<DestructuringElement>, Vec<Statement>),          // parameters, body
-    Method(String, Vec<DestructuringElement>, Vec<Statement>),       // name, parameters, body
-    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
-    Property(String, Expr),                                          // name, value
-    StaticProperty(String, Expr),                                    // name, value
-    Getter(String, Vec<Statement>),                                  // name, body
-    Setter(String, Vec<DestructuringElement>, Vec<Statement>),       // name, parameter, body
-    StaticGetter(String, Vec<Statement>),                            // name, body
-    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
+    Constructor(Vec<DestructuringElement>, Vec<Statement>),           // parameters, body
+    Method(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameters, body
+    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameters, body
+    Property(String, Expr),                                           // name, value
+    StaticProperty(String, Expr),                                     // name, value
+    PrivateProperty(String, Expr),                                    // name, value
+    PrivateStaticProperty(String, Expr),                              // name, value
+    PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    StaticBlock(Vec<Statement>),                                      // body
+    Getter(String, Vec<Statement>),                                   // name, body
+    Setter(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameter, body
+    StaticGetter(String, Vec<Statement>),                             // name, body
+    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameter, body
 }
 
 #[derive(Debug, Clone)]
@@ -190,6 +195,9 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // Set instance properties
                 for member in &class_def.members {
                     if let ClassMember::Property(prop_name, value_expr) = member {
+                        let value = evaluate_expr(env, value_expr)?;
+                        obj_set_key_value(&instance, &prop_name.into(), value)?;
+                    } else if let ClassMember::PrivateProperty(prop_name, value_expr) = member {
                         let value = evaluate_expr(env, value_expr)?;
                         obj_set_key_value(&instance, &prop_name.into(), value)?;
                     }
@@ -571,6 +579,30 @@ pub(crate) fn create_class_object(
                 // Create a static setter for the class object
                 let setter = Value::Setter(param.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
                 obj_set_key_value(&class_obj, &setter_name.into(), setter)?;
+            }
+            ClassMember::PrivateProperty(_, _) => {
+                // Instance private properties handled during instantiation
+            }
+            ClassMember::PrivateMethod(method_name, params, body) => {
+                // Hack: Add private method to prototype with # name
+                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
+                obj_set_key_value(&prototype_obj, &method_name.into(), method_closure)?;
+            }
+            ClassMember::PrivateStaticProperty(prop_name, value_expr) => {
+                // Hack: Add private static property to class object with # name
+                let value = evaluate_expr(env, value_expr)?;
+                obj_set_key_value(&class_obj, &prop_name.into(), value)?;
+            }
+            ClassMember::PrivateStaticMethod(method_name, params, body) => {
+                // Hack: Add private static method to class object with # name
+                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
+                obj_set_key_value(&class_obj, &method_name.into(), method_closure)?;
+            }
+            ClassMember::StaticBlock(body) => {
+                let block_env = new_js_object_data();
+                block_env.borrow_mut().prototype = Some(env.clone());
+                obj_set_key_value(&block_env, &"this".into(), Value::Object(class_obj.clone()))?;
+                evaluate_statements(&block_env, body)?;
             }
         }
     }

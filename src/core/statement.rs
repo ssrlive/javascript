@@ -1269,6 +1269,13 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                     false
                 };
 
+                if is_static && !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
+                    tokens.remove(0); // consume {
+                    let body = parse_statement_block(tokens)?;
+                    members.push(ClassMember::StaticBlock(body));
+                    continue;
+                }
+
                 if let Some(Token::Identifier(method_name)) = tokens.first().map(|t| &t.token) {
                     let method_name = method_name.clone();
                     if method_name == "constructor" {
@@ -1363,6 +1370,39 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                         } else {
                             return Err(raise_parse_error_at(tokens));
                         }
+                    }
+                } else if let Some(Token::PrivateIdentifier(name)) = tokens.first().map(|t| &t.token) {
+                    let name = name.clone();
+                    tokens.remove(0);
+                    if matches!(tokens[0].token, Token::LParen) {
+                        // Private method
+                        tokens.remove(0); // consume (
+                        let params = parse_parameters(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                            return Err(raise_parse_error_at(tokens));
+                        }
+                        tokens.remove(0); // consume {
+                        let body = parse_statement_block(tokens)?;
+                        if is_static {
+                            members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                        } else {
+                            members.push(ClassMember::PrivateMethod(name, params, body));
+                        }
+                    } else if matches!(tokens[0].token, Token::Assign) {
+                        // Private property
+                        tokens.remove(0); // consume =
+                        let value = parse_expression(tokens)?;
+                        if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                            return Err(raise_parse_error_at(tokens));
+                        }
+                        tokens.remove(0); // consume ;
+                        if is_static {
+                            members.push(ClassMember::PrivateStaticProperty(name, value));
+                        } else {
+                            members.push(ClassMember::PrivateProperty(name, value));
+                        }
+                    } else {
+                        return Err(raise_parse_error_at(tokens));
                     }
                 } else {
                     return Err(raise_parse_error_at(tokens));

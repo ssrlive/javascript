@@ -1468,6 +1468,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 if let Some(prop) = tokens[0].token.as_identifier_string() {
                     tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);
+                } else if let Token::PrivateIdentifier(prop) = &tokens[0].token {
+                    let prop = prop.clone();
+                    tokens.remove(0);
+                    expr = Expr::Property(Box::new(expr), prop);
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }

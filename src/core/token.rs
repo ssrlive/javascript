@@ -10,6 +10,7 @@ pub enum Token {
     StringLit(Vec<u16>),
     TemplateString(Vec<TemplatePart>),
     Identifier(String),
+    PrivateIdentifier(String),
     Plus,
     Minus,
     Multiply,
@@ -1228,6 +1229,24 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 });
                 i += 1;
                 column += 1;
+            }
+            '#' => {
+                i += 1;
+                column += 1;
+                let start = i;
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
+                    i += 1;
+                    column += 1;
+                }
+                if i == start {
+                    return Err(raise_tokenize_error!("Invalid private identifier", line, column));
+                }
+                let ident: String = chars[start..i].iter().collect();
+                tokens.push(TokenData {
+                    token: Token::PrivateIdentifier(ident),
+                    line,
+                    column: start_col,
+                });
             }
             _ => return Err(raise_tokenize_error!(format!("Unexpected character '{}'", chars[i]), line, column)),
         }

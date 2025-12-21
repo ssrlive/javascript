@@ -556,6 +556,16 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
         &"getPrototypeOf".into(),
         Value::Function("Object.getPrototypeOf".to_string()),
     )?;
+    obj_set_key_value(
+        &object_obj,
+        &"defineProperty".into(),
+        Value::Function("Object.defineProperty".to_string()),
+    )?;
+    obj_set_key_value(
+        &object_obj,
+        &"defineProperties".into(),
+        Value::Function("Object.defineProperties".to_string()),
+    )?;
 
     // Create Object.prototype and add prototype-level helpers
     let object_prototype = new_js_object_data();

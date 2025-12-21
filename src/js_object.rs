@@ -9,6 +9,112 @@ use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
 use crate::unicode::utf8_to_utf16;
 
+fn define_property_internal(target_obj: &JSObjectDataPtr, prop_key: PropertyKey, desc_obj: &JSObjectDataPtr) -> Result<(), JSError> {
+    // Extract descriptor fields
+    let value_rc_opt = obj_get_key_value(desc_obj, &"value".into())?;
+
+    // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
+    if let Some(existing_rc) = obj_get_key_value(target_obj, &prop_key)? {
+        if !target_obj.borrow().is_configurable(&prop_key) {
+            // If descriptor explicitly sets configurable true -> throw
+            if let Some(cfg_rc) = obj_get_key_value(desc_obj, &"configurable".into())? {
+                if let Value::Boolean(true) = &*cfg_rc.borrow() {
+                    return Err(raise_type_error!("Cannot make non-configurable property configurable"));
+                }
+            }
+
+            // If descriptor explicitly sets enumerable and it's different -> throw
+            if let Some(enum_rc) = obj_get_key_value(desc_obj, &"enumerable".into())? {
+                if let Value::Boolean(new_enum) = &*enum_rc.borrow() {
+                    let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
+                    if *new_enum != existing_enum {
+                        return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
+                    }
+                }
+            }
+
+            // Determine whether existing property is a data property or accessor
+            let existing_is_accessor = match &*existing_rc.borrow() {
+                Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
+                Value::Getter(..) | Value::Setter(..) => true,
+                _ => false,
+            };
+
+            // If existing is data property
+            if !existing_is_accessor {
+                // Disallow converting to accessor
+                if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+                    return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
+                }
+
+                // If writable is being set from false -> true, disallow
+                if let Some(wrc) = obj_get_key_value(desc_obj, &"writable".into())? {
+                    if let Value::Boolean(new_writable) = &*wrc.borrow() {
+                        if *new_writable && !target_obj.borrow().is_writable(&prop_key) {
+                            return Err(raise_type_error!("Cannot make non-writable property writable"));
+                        }
+                    }
+                }
+
+                // If attempting to change value while not writable and values differ -> throw
+                if let Some(new_val_rc) = value_rc_opt.as_ref() {
+                    if !target_obj.borrow().is_writable(&prop_key) {
+                        // get existing value for comparison
+                        let existing_val = match &*existing_rc.borrow() {
+                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                            other => other.clone(),
+                        };
+                        if !crate::core::values_equal(&existing_val, &new_val_rc.borrow().clone()) {
+                            return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
+                        }
+                    }
+                }
+            } else {
+                // existing is accessor
+                // Disallow converting to data property
+                if value_rc_opt.is_some() || obj_get_key_value(desc_obj, &"writable".into())?.is_some() {
+                    return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
+                }
+
+                // Disallow changing getter/setter functions on non-configurable accessor
+                if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+                    return Err(raise_type_error!(
+                        "Cannot change getter/setter of non-configurable accessor property"
+                    ));
+                }
+            }
+        }
+    }
+
+    let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
+    if let Some(get_rc) = obj_get_key_value(desc_obj, &"get".into())? {
+        let get_val = get_rc.borrow();
+        if let Some((_params, body, env)) = crate::core::extract_closure_from_value(&get_val) {
+            getter_opt = Some((body, env, None));
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    let mut setter_opt: Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
+    if let Some(set_rc) = obj_get_key_value(desc_obj, &"set".into())? {
+        let set_val = set_rc.borrow();
+        if let Some((params, body, env)) = crate::core::extract_closure_from_value(&set_val) {
+            setter_opt = Some((params, body, env, None));
+        }
+    }
+
+    // Create property descriptor value
+    let prop_descriptor = Value::Property {
+        value: value_rc_opt.clone(),
+        getter: getter_opt,
+        setter: setter_opt,
+    };
+
+    // Install property on target object
+    obj_set_key_value(target_obj, &prop_key, prop_descriptor)?;
+    Ok(())
+}
+
 pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "keys" => {
@@ -486,120 +592,44 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 _ => return Err(raise_type_error!("Property descriptor must be an object")),
             };
 
-            // Extract descriptor fields
-            let value_rc_opt = obj_get_key_value(&desc_obj, &"value".into())?;
-
-            // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
-            if let Some(existing_rc) = obj_get_key_value(&target_obj, &prop_key)? {
-                if !target_obj.borrow().is_configurable(&prop_key) {
-                    // If descriptor explicitly sets configurable true -> throw
-                    if let Some(cfg_rc) = obj_get_key_value(&desc_obj, &"configurable".into())? {
-                        if let Value::Boolean(true) = &*cfg_rc.borrow() {
-                            return Err(raise_type_error!("Cannot make non-configurable property configurable"));
-                        }
-                    }
-
-                    // If descriptor explicitly sets enumerable and it's different -> throw
-                    if let Some(enum_rc) = obj_get_key_value(&desc_obj, &"enumerable".into())? {
-                        if let Value::Boolean(new_enum) = &*enum_rc.borrow() {
-                            let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
-                            if *new_enum != existing_enum {
-                                return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
-                            }
-                        }
-                    }
-
-                    // Determine whether existing property is a data property or accessor
-                    let existing_is_accessor = match &*existing_rc.borrow() {
-                        Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
-                        Value::Getter(..) | Value::Setter(..) => true,
-                        _ => false,
-                    };
-
-                    // If existing is data property
-                    if !existing_is_accessor {
-                        // Disallow converting to accessor
-                        if obj_get_key_value(&desc_obj, &"get".into())?.is_some() || obj_get_key_value(&desc_obj, &"set".into())?.is_some()
-                        {
-                            return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
-                        }
-
-                        // If writable is being set from false -> true, disallow
-                        if let Some(wrc) = obj_get_key_value(&desc_obj, &"writable".into())? {
-                            if let Value::Boolean(new_writable) = &*wrc.borrow() {
-                                if *new_writable && !target_obj.borrow().is_writable(&prop_key) {
-                                    return Err(raise_type_error!("Cannot make non-writable property writable"));
-                                }
-                            }
-                        }
-
-                        // If attempting to change value while not writable and values differ -> throw
-                        if let Some(new_val_rc) = value_rc_opt.as_ref() {
-                            if !target_obj.borrow().is_writable(&prop_key) {
-                                // get existing value for comparison
-                                let existing_val = match &*existing_rc.borrow() {
-                                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                                    other => other.clone(),
-                                };
-                                if !crate::core::values_equal(&existing_val, &new_val_rc.borrow().clone()) {
-                                    return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
-                                }
-                            }
-                        }
-                    } else {
-                        // existing is accessor
-                        // Disallow converting to data property
-                        if value_rc_opt.is_some() || obj_get_key_value(&desc_obj, &"writable".into())?.is_some() {
-                            return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
-                        }
-
-                        // Disallow changing getter/setter functions on non-configurable accessor
-                        if obj_get_key_value(&desc_obj, &"get".into())?.is_some() || obj_get_key_value(&desc_obj, &"set".into())?.is_some()
-                        {
-                            return Err(raise_type_error!(
-                                "Cannot change getter/setter of non-configurable accessor property"
-                            ));
-                        }
-                    }
-                }
+            define_property_internal(&target_obj, prop_key, &desc_obj)?;
+            Ok(Value::Object(target_obj))
+        }
+        "defineProperties" => {
+            if args.len() < 2 {
+                return Err(raise_type_error!("Object.defineProperties requires two arguments"));
             }
-
-            let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
-            if let Some(get_rc) = obj_get_key_value(&desc_obj, &"get".into())? {
-                match &*get_rc.borrow() {
-                    Value::Closure(_params, body, genv, _) => {
-                        getter_opt = Some((body.clone(), genv.clone(), None));
-                    }
-                    Value::Getter(body, genv, _) => {
-                        getter_opt = Some((body.clone(), genv.clone(), None));
-                    }
-                    _ => {}
-                }
-            }
-
-            #[allow(clippy::type_complexity)]
-            let mut setter_opt: Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
-            if let Some(set_rc) = obj_get_key_value(&desc_obj, &"set".into())? {
-                match &*set_rc.borrow() {
-                    Value::Closure(params, body, senv, _) => {
-                        setter_opt = Some((params.clone(), body.clone(), senv.clone(), None));
-                    }
-                    Value::Setter(params, body, senv, _) => {
-                        setter_opt = Some((params.clone(), body.clone(), senv.clone(), None));
-                    }
-                    _ => {}
-                }
-            }
-
-            // Create property descriptor value
-            let prop_descriptor = Value::Property {
-                value: value_rc_opt.clone(),
-                getter: getter_opt,
-                setter: setter_opt,
+            let target_val = evaluate_expr(env, &args[0])?;
+            let target_obj = match target_val {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Object.defineProperties called on non-object")),
             };
 
-            // Install property on target object
-            obj_set_key_value(&target_obj, &prop_key, prop_descriptor)?;
+            let props_val = evaluate_expr(env, &args[1])?;
+            let props_obj = match props_val {
+                Value::Object(o) => o,
+                _ => return Err(raise_type_error!("Object.defineProperties requires an object as second argument")),
+            };
+
+            // Iterate over own properties of props_obj
+            for (key, val_rc) in props_obj.borrow().properties.iter() {
+                // Only process own properties (already handled by properties map)
+                // In JS, it also checks enumerability, but for now we iterate all.
+                // Actually, Object.defineProperties only uses own enumerable properties.
+                // Let's check enumerability.
+                if !props_obj.borrow().is_enumerable(key) {
+                    continue;
+                }
+
+                let desc_val = val_rc.borrow().clone();
+                let desc_obj = match desc_val {
+                    Value::Object(o) => o,
+                    _ => return Err(raise_type_error!("Property descriptor must be an object")),
+                };
+
+                define_property_internal(&target_obj, key.clone(), &desc_obj)?;
+            }
+
             Ok(Value::Object(target_obj))
         }
         _ => Err(raise_eval_error!(format!("Object.{method} is not implemented"))),

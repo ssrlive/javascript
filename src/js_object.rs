@@ -666,6 +666,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
                 Value::ArrayBuffer(_) => "ArrayBuffer",
                 Value::DataView(_) => "DataView",
                 Value::TypedArray(_) => "TypedArray",
+                Value::Uninitialized => "undefined",
             },
             args.len()
         )));
@@ -677,6 +678,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Undefined => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
         Value::Null => Ok(Value::String(utf8_to_utf16("[object Null]"))),
+        Value::Uninitialized => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
         Value::Object(obj_map) => {
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {
@@ -821,6 +823,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                 &Value::ArrayBuffer(_) => "ArrayBuffer",
                 &Value::DataView(_) => "DataView",
                 &Value::TypedArray(_) => "TypedArray",
+                Value::Uninitialized => "undefined",
             },
             args.len()
         )));
@@ -936,5 +939,6 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
         Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(array_buffer.clone())),
         Value::DataView(data_view) => Ok(Value::DataView(data_view.clone())),
         Value::TypedArray(typed_array) => Ok(Value::TypedArray(typed_array.clone())),
+        Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object")),
     }
 }

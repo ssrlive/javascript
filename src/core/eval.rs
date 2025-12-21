@@ -19,7 +19,8 @@ use crate::{
     js_reflect::make_reflect_object,
     js_regexp::is_regex_object,
     js_testintl::make_testintl_object,
-    obj_get_key_value, raise_eval_error, raise_syntax_error, raise_throw_error, raise_type_error, raise_variable_not_found_error,
+    obj_get_key_value, raise_eval_error, raise_reference_error, raise_syntax_error, raise_throw_error, raise_type_error,
+    raise_variable_not_found_error,
     sprintf::handle_sprintf_call,
     tmpfile::{create_tmpfile, handle_file_method},
     unicode::{utf8_to_utf16, utf16_char_at, utf16_len, utf16_slice, utf16_to_utf8},
@@ -565,6 +566,10 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
             if !env.borrow().is_function_scope {
                 env_set_var(env, name, func_val)?;
             }
+        } else if let StatementKind::Class(name, _, _) = &stmt.kind {
+            // Hoist class declarations as uninitialized (TDZ)
+            env_set(env, name, Value::Uninitialized)?;
+            env.borrow_mut().set_non_configurable(PropertyKey::String(name.clone()));
         }
     }
     Ok(())
@@ -609,9 +614,11 @@ fn evaluate_stmt_class(
     extends: &Option<Expr>,
     members: &[crate::js_class::ClassMember],
 ) -> Result<(), JSError> {
-    if get_own_property(env, &name.into()).is_some() {
-        return Err(raise_syntax_error!(format!("Identifier '{name}' has already been declared")));
-    }
+    // Note: Duplicate declaration checks are handled by validate_declarations.
+    // We expect the binding to exist (as Uninitialized) due to hoisting,
+    // or not exist if we are in a context where hoisting didn't happen (though currently it always does for blocks).
+    // We just overwrite it with the actual class object.
+
     let class_obj = create_class_object(name, extends, members, env)?;
     env_set(env, name, class_obj)?;
     Ok(())
@@ -1461,6 +1468,7 @@ fn create_catch_value(env: &JSObjectDataPtr, err: &JSError) -> Result<Value, JSE
         JSErrorKind::TypeError { .. } => create_js_error_instance(env, "TypeError", err),
         JSErrorKind::RangeError { .. } => create_js_error_instance(env, "RangeError", err),
         JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", err),
+        JSErrorKind::ReferenceError { .. } => create_js_error_instance(env, "ReferenceError", err),
         JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", err),
         _ => create_js_error_instance(env, "Error", err),
     }
@@ -3007,6 +3015,13 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
     while let Some(current_env) = current_opt {
         if let Some(val_rc) = obj_get_key_value(&current_env, &name.into())? {
             let resolved = val_rc.borrow().clone();
+            if let Value::Uninitialized = resolved {
+                let mut err = raise_reference_error!(format!("Cannot access '{name}' before initialization"));
+                if let (Some(l), Some(c)) = (line, column) {
+                    err.set_js_location(l, c);
+                }
+                return Err(err);
+            }
             log::trace!("evaluate_var - {} (found in env) -> {:?}", name, resolved);
             return Ok(resolved);
         }
@@ -4167,6 +4182,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
         Value::ArrayBuffer(_) => "object",
         Value::DataView(_) => "object",
         Value::TypedArray(_) => "object",
+        Value::Uninitialized => "undefined",
     };
     Ok(Value::String(utf8_to_utf16(type_str)))
 }

@@ -24,6 +24,9 @@ pub enum JSErrorKind {
     #[error("Syntax error: {message}")]
     SyntaxError { message: String },
 
+    #[error("Reference error: {message}")]
+    ReferenceError { message: String },
+
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
 
@@ -113,6 +116,7 @@ impl JSError {
             JSErrorKind::TypeError { message } => format!("TypeError: {}", message),
             JSErrorKind::RangeError { message } => format!("RangeError: {}", message),
             JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
+            JSErrorKind::ReferenceError { message } => format!("ReferenceError: {}", message),
             JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
             JSErrorKind::Throw { value } => {
                 // If the thrown value is an object, prefer a human-friendly
@@ -307,6 +311,14 @@ macro_rules! raise_range_error {
 macro_rules! raise_syntax_error {
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::SyntaxError { message: $msg.to_string() })
+    };
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_reference_error {
+    ($msg:expr) => {
+        $crate::make_js_error!($crate::JSErrorKind::ReferenceError { message: $msg.to_string() })
     };
 }
 

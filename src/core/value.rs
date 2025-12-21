@@ -625,6 +625,7 @@ pub enum Value {
     ArrayBuffer(Rc<RefCell<JSArrayBuffer>>), // ArrayBuffer object
     DataView(Rc<RefCell<JSDataView>>),       // DataView object
     TypedArray(Rc<RefCell<JSTypedArray>>),   // TypedArray object
+    Uninitialized,                           // TDZ (Temporal Dead Zone) marker
 }
 
 impl std::fmt::Display for Value {
@@ -641,6 +642,7 @@ pub fn is_truthy(val: &Value) -> bool {
         Value::Boolean(b) => *b,
         Value::Undefined => false,
         Value::Null => false,
+        Value::Uninitialized => false,
         Value::Object(_) => true,
         Value::Function(_) => true,
         Value::Closure(..) => true,
@@ -673,6 +675,7 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
         (Value::Undefined, Value::Undefined) => true,
         (Value::Null, Value::Null) => true,
+        (Value::Uninitialized, Value::Uninitialized) => true,
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b), // Objects equal only if same reference
         (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
         (Value::Function(sa), Value::Function(sb)) => sa == sb,
@@ -689,6 +692,7 @@ pub fn value_to_string(val: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
+        Value::Uninitialized => "uninitialized".to_string(),
         Value::Object(obj) => {
             // Handle RegExp objects specially so they display as /pattern/flags
             if crate::js_regexp::is_regex_object(obj) {
@@ -864,6 +868,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
+        Value::Uninitialized => "undefined".to_string(),
         Value::Object(_) => "[object Object]".to_string(),
         Value::Function(name) => format!("[function {}]", name),
         Value::Closure(..) | Value::AsyncClosure(..) | Value::GeneratorFunction(..) => "[function]".to_string(),

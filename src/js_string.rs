@@ -55,6 +55,7 @@ pub(crate) fn string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
             Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
             Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
             Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
+            Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
         }
     } else {
         Ok(Value::String(Vec::new())) // String() with no args returns empty string

@@ -172,6 +172,7 @@ fn format_value_pretty(
         Value::ArrayBuffer(_) => Ok("[object ArrayBuffer]".to_string()),
         Value::DataView(_) => Ok("[object DataView]".to_string()),
         Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
+        Value::Uninitialized => Ok("undefined".to_string()),
     }
 }
 

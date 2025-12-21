@@ -220,7 +220,14 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                         crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                         // Execute constructor body
-                        evaluate_statements(&func_env, body)?;
+                        let result = crate::core::evaluate_statements_with_context(&func_env, body)?;
+
+                        // Check for explicit return
+                        if let crate::core::ControlFlow::Return(ret_val) = result {
+                            if let Value::Object(_) = ret_val {
+                                return Ok(ret_val);
+                            }
+                        }
 
                         // Retrieve 'this' from env, as it might have been changed by super()
                         if let Some(final_this) = obj_get_key_value(&func_env, &"this".into())? {

@@ -966,7 +966,7 @@ fn evaluate_stmt_for_of_destructuring_array(
     Ok(None)
 }
 
-fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
+pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
     validate_declarations(statements)?;
     hoist_declarations(env, statements)?;
 

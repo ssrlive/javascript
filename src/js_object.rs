@@ -103,8 +103,10 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             }
 
             let key = match prop_val {
-                Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(prop_val))),
-                _ => PropertyKey::String(value_to_string(&prop_val)),
+                Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                Value::BigInt(b) => PropertyKey::String(b.to_string()),
+                val @ Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(val))),
+                val => PropertyKey::String(value_to_string(&val)),
             };
 
             let has_own = match obj_val {
@@ -126,6 +128,27 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             };
 
             Ok(Value::Boolean(has_own))
+        }
+        "getPrototypeOf" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.getPrototypeOf requires exactly one argument"));
+            }
+            let obj_val = evaluate_expr(env, &args[0])?;
+            match obj_val {
+                Value::Object(obj) => {
+                    if let Some(proto) = &obj.borrow().prototype {
+                        Ok(Value::Object(proto.clone()))
+                    } else {
+                        Ok(Value::Null)
+                    }
+                }
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                _ => {
+                    // For primitives, we should ideally return the prototype of the wrapper.
+                    // For now, returning Null is a safe fallback if wrappers aren't fully supported.
+                    Ok(Value::Null)
+                }
+            }
         }
         "groupBy" => {
             if args.len() != 2 {

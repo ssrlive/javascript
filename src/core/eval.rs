@@ -1469,6 +1469,7 @@ fn create_catch_value(env: &JSObjectDataPtr, err: &JSError) -> Result<Value, JSE
         JSErrorKind::RangeError { .. } => create_js_error_instance(env, "RangeError", err),
         JSErrorKind::SyntaxError { .. } => create_js_error_instance(env, "SyntaxError", err),
         JSErrorKind::ReferenceError { .. } => create_js_error_instance(env, "ReferenceError", err),
+        JSErrorKind::VariableNotFound { .. } => create_js_error_instance(env, "ReferenceError", err),
         JSErrorKind::RuntimeError { .. } | JSErrorKind::EvaluationError { .. } => create_js_error_instance(env, "Error", err),
         _ => create_js_error_instance(env, "Error", err),
     }
@@ -2808,6 +2809,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::TaggedTemplate(tag, strings, exprs) => evaluate_tagged_template(env, tag, strings, exprs),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
+        Expr::Class(class_def) => create_class_object(&class_def.name, &class_def.extends, &class_def.members, env),
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
             Ok(v) => Ok(v),
             Err(e) => {

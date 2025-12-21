@@ -4,6 +4,7 @@ use crate::{
         BinaryOp, DestructuringElement, Expr, ObjectDestructuringElement, Statement, StatementKind, TemplatePart, Token, TokenData, Value,
         parse_statements,
     },
+    js_class::ClassMember,
     raise_parse_error, raise_parse_error_with_token,
 };
 
@@ -352,6 +353,175 @@ fn parse_exponentiation(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     }
 }
 
+pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>, JSError> {
+    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+        return Err(raise_parse_error_at(tokens));
+    }
+    tokens.remove(0); // consume {
+
+    let mut members = Vec::new();
+    while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
+        // Skip blank lines or stray semicolons in class body
+        while !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            tokens.remove(0);
+        }
+        if tokens.is_empty() || matches!(tokens[0].token, Token::RBrace) {
+            break;
+        }
+        let is_static = if !tokens.is_empty() && matches!(tokens[0].token, Token::Static) {
+            tokens.remove(0);
+            true
+        } else {
+            false
+        };
+
+        if is_static && !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
+            tokens.remove(0); // consume {
+            let body = parse_statement_block(tokens)?;
+            members.push(ClassMember::StaticBlock(body));
+            continue;
+        }
+
+        if let Some(Token::Identifier(method_name)) = tokens.first().map(|t| &t.token) {
+            let method_name = method_name.clone();
+            if method_name == "constructor" {
+                tokens.remove(0);
+                // Parse constructor
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume (
+                let params = parse_parameters(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statement_block(tokens)?;
+                members.push(ClassMember::Constructor(params, body));
+            } else {
+                tokens.remove(0);
+                if tokens.is_empty() {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                // Check for getter/setter
+                let is_getter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "get");
+                let is_setter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "set");
+                if is_getter || is_setter {
+                    tokens.remove(0); // consume get/set
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                        return Err(raise_parse_error_at(tokens));
+                    }
+                    let prop_name = if let Token::Identifier(name) = &tokens.remove(0).token {
+                        name.clone()
+                    } else {
+                        return Err(raise_parse_error_at(tokens));
+                    };
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                        return Err(raise_parse_error_at(tokens));
+                    }
+                    tokens.remove(0); // consume (
+                    let params = parse_parameters(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        return Err(raise_parse_error_at(tokens));
+                    }
+                    tokens.remove(0); // consume {
+                    let body = parse_statement_block(tokens)?;
+                    if is_getter {
+                        if !params.is_empty() {
+                            return Err(raise_parse_error_at(tokens)); // getters should have no parameters
+                        }
+                        if is_static {
+                            members.push(ClassMember::StaticGetter(prop_name, body));
+                        } else {
+                            members.push(ClassMember::Getter(prop_name, body));
+                        }
+                    } else {
+                        // setter
+                        if params.len() != 1 {
+                            return Err(raise_parse_error_at(tokens)); // setters should have exactly one parameter
+                        }
+                        if is_static {
+                            members.push(ClassMember::StaticSetter(prop_name, params, body));
+                        } else {
+                            members.push(ClassMember::Setter(prop_name, params, body));
+                        }
+                    }
+                } else if matches!(tokens[0].token, Token::LParen) {
+                    // This is a method
+                    tokens.remove(0); // consume (
+                    let params = parse_parameters(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        return Err(raise_parse_error_at(tokens));
+                    }
+                    tokens.remove(0); // consume {
+                    let body = parse_statement_block(tokens)?;
+                    if is_static {
+                        members.push(ClassMember::StaticMethod(method_name, params, body));
+                    } else {
+                        members.push(ClassMember::Method(method_name, params, body));
+                    }
+                } else if matches!(tokens[0].token, Token::Assign) {
+                    // This is a property
+                    tokens.remove(0); // consume =
+                    let value = parse_expression(tokens)?;
+                    if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                        return Err(raise_parse_error_at(tokens));
+                    }
+                    tokens.remove(0); // consume ;
+                    if is_static {
+                        members.push(ClassMember::StaticProperty(method_name, value));
+                    } else {
+                        members.push(ClassMember::Property(method_name, value));
+                    }
+                } else {
+                    return Err(raise_parse_error_at(tokens));
+                }
+            }
+        } else if let Some(Token::PrivateIdentifier(name)) = tokens.first().map(|t| &t.token) {
+            let name = name.clone();
+            tokens.remove(0);
+            if matches!(tokens[0].token, Token::LParen) {
+                // Private method
+                tokens.remove(0); // consume (
+                let params = parse_parameters(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statement_block(tokens)?;
+                if is_static {
+                    members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                } else {
+                    members.push(ClassMember::PrivateMethod(name, params, body));
+                }
+            } else if matches!(tokens[0].token, Token::Assign) {
+                // Private property
+                tokens.remove(0); // consume =
+                let value = parse_expression(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume ;
+                if is_static {
+                    members.push(ClassMember::PrivateStaticProperty(name, value));
+                } else {
+                    members.push(ClassMember::PrivateProperty(name, value));
+                }
+            } else {
+                return Err(raise_parse_error_at(tokens));
+            }
+        } else {
+            return Err(raise_parse_error_at(tokens));
+        }
+    }
+
+    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+        return Err(raise_parse_error_at(tokens));
+    }
+    tokens.remove(0); // consume }
+    Ok(members)
+}
+
 fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, JSError> {
     // Skip any leading line terminators inside expressions so multi-line
     // expression continuations like `a +\n b` parse correctly.
@@ -407,6 +577,33 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
         Token::LogicalNot => {
             let inner = parse_primary(tokens, true)?;
             Expr::LogicalNot(Box::new(inner))
+        }
+        Token::Class => {
+            // Class Expression
+            // class [Identifier] [extends Expression] { ClassBody }
+            let name = if !tokens.is_empty() {
+                if let Token::Identifier(n) = &tokens[0].token {
+                    let n = n.clone();
+                    tokens.remove(0);
+                    n
+                } else {
+                    "".to_string() // Anonymous class expression
+                }
+            } else {
+                "".to_string()
+            };
+
+            let extends = if !tokens.is_empty() && matches!(tokens[0].token, Token::Extends) {
+                tokens.remove(0); // consume extends
+                Some(parse_expression(tokens)?)
+            } else {
+                None
+            };
+
+            let members = parse_class_body(tokens)?;
+
+            let class_def = crate::js_class::ClassDefinition { name, extends, members };
+            Expr::Class(std::rc::Rc::new(class_def))
         }
         Token::New => {
             let constructor = parse_primary(tokens, false)?;

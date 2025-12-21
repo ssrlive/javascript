@@ -444,6 +444,7 @@ pub enum Expr {
     Comma(Box<Expr>, Box<Expr>),                         // comma operator: expr1, expr2
     TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>), // tag, strings, expressions
     Value(Value),                                        // literal value
+    Class(Rc<crate::js_class::ClassDefinition>),         // class expression
 }
 
 #[derive(Debug, Clone)]

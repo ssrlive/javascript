@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+
 use crate::core::{
     DestructuringElement, Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value,
 };
@@ -91,15 +93,50 @@ fn format_value_pretty(
                 }
                 seen.insert(Rc::as_ptr(obj));
 
-                let mut s = String::from("{");
+                // Try to get class name
+                let mut class_name = String::new();
+                if let Some(proto_rc) = &obj.borrow().prototype {
+                    if let Some(ctor_val_rc) = proto_rc
+                        .borrow()
+                        .properties
+                        .get(&crate::core::PropertyKey::String("constructor".to_string()))
+                    {
+                        let ctor_val = ctor_val_rc.borrow();
+                        if let Value::Object(ctor_obj) = &*ctor_val {
+                            if let Some(name_val_rc) = ctor_obj
+                                .borrow()
+                                .properties
+                                .get(&crate::core::PropertyKey::String("name".to_string()))
+                            {
+                                if let Value::String(name_u16) = &*name_val_rc.borrow() {
+                                    let name = String::from_utf16_lossy(name_u16);
+                                    if name != "Object" && !name.is_empty() {
+                                        class_name = name;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut s = String::new();
+                if !class_name.is_empty() {
+                    s.push_str(&class_name);
+                    s.push(' ');
+                }
+                s.push('{');
                 let mut first = true;
                 for (key, val_rc) in obj.borrow().properties.iter() {
+                    let key_str = key.as_ref();
+                    if key_str == "__proto__" || key_str == "constructor" || key_str == "__class_def__" || key_str == "__closure__" {
+                        continue;
+                    }
+
                     if !first {
                         s.push_str(", ");
                     }
                     first = false;
 
-                    let key_str = key.as_ref();
                     // Check if key needs quotes
                     let needs_quotes = key_str.is_empty()
                         || key_str.chars().any(|c| c.is_whitespace())

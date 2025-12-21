@@ -521,6 +521,7 @@ pub(crate) fn create_class_object(
     }
 
     obj_set_key_value(&class_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
+    obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(class_obj.clone()))?;
 
     // Store class definition for later use
     let class_def = ClassDefinition {

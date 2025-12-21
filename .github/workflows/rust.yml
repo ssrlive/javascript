@@ -62,6 +62,7 @@ jobs:
         cargo run --example js -- js-scripts/numbers_n_strings.js
         cargo run --example js -- js-scripts/object_super_method_stack_overflow.js
         cargo run --example js -- js-scripts/object_teats.js
+        cargo run --example js -- js-scripts/object_test_2.js
         cargo run --example js -- js-scripts/parameter_rest.js
         cargo run --example js -- js-scripts/proper_dataview_test.js
         cargo run --example js -- js-scripts/regex_test_2.js

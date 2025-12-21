@@ -55,7 +55,7 @@ lines.";
         Err(err) => {
             let msg = err.user_message();
             assert!(
-                msg.contains("SyntaxError: Failed to parse input at line 4:30"),
+                msg.contains("SyntaxError: Unterminated string literal (newline in string) at line 4:30"),
                 "Unexpected error message: {msg}",
             );
         }

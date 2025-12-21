@@ -1,7 +1,7 @@
 #[derive(thiserror::Error, Debug)]
 pub enum JSErrorKind {
-    #[error("Tokenization failed")]
-    TokenizationError,
+    #[error("Tokenization failed: {message}")]
+    TokenizationError { message: String },
 
     #[error("Parsing failed: {message}")]
     ParseError { message: String },
@@ -95,7 +95,7 @@ impl JSError {
     /// Get the error message without location information
     pub fn message(&self) -> String {
         match &self.inner.kind {
-            JSErrorKind::TokenizationError => "SyntaxError: Failed to parse input".to_string(),
+            JSErrorKind::TokenizationError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::ParseError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::EvaluationError { message } => {
                 if message == "error" {
@@ -220,9 +220,11 @@ macro_rules! make_js_error {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! raise_tokenize_error {
-    () => {
-        $crate::make_js_error!($crate::JSErrorKind::TokenizationError)
-    };
+    ($msg:expr, $line:expr, $col:expr) => {{
+        let mut err = $crate::make_js_error!($crate::JSErrorKind::TokenizationError { message: $msg.to_string() });
+        err.set_js_location($line, $col);
+        err
+    }};
 }
 
 #[macro_export]
@@ -233,6 +235,11 @@ macro_rules! raise_parse_error {
             message: "parse error".to_string()
         })
     };
+    ($msg:expr, $line:expr, $col:expr) => {{
+        let mut err = $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() });
+        err.set_js_location($line, $col);
+        err
+    }};
     ($msg:expr) => {
         $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() })
     };

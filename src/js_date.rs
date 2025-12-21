@@ -17,10 +17,10 @@ fn get_time_stamp_value(date_obj: &JSObjectDataPtr) -> Result<f64, JSError> {
         if let Value::Number(timestamp) = *timestamp_val.borrow() {
             return Ok(timestamp);
         } else {
-            return Err(raise_parse_error!("Timestamp value is not a number"));
+            return Err(raise_type_error!("Timestamp value is not a number"));
         }
     }
-    Err(raise_parse_error!("Invalid Date object"))
+    Err(raise_type_error!("Invalid Date object"))
 }
 
 fn set_time_stamp_value(date_obj: &JSObjectDataPtr, timestamp: f64) -> Result<(), JSError> {

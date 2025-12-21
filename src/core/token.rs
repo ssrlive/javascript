@@ -331,7 +331,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         i += 1;
                     }
                     if !terminated {
-                        return Err(raise_tokenize_error!()); // Unterminated comment
+                        return Err(raise_tokenize_error!("Unterminated comment", line, column)); // Unterminated comment
                     }
                 } else {
                     // Heuristic: when '/' occurs in a position that cannot end an
@@ -395,7 +395,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             col_j += 1;
                         }
                         if j >= chars.len() || chars[j] != '/' {
-                            return Err(raise_tokenize_error!()); // unterminated regex
+                            return Err(raise_tokenize_error!("Unterminated regex literal", line, column)); // unterminated regex
                         }
                         // pattern is between i+1 and j-1
                         let pattern: String = chars[i + 1..j].iter().collect();
@@ -900,7 +900,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     let mut num_str: String = chars[start + 2..i].iter().collect();
                     num_str.retain(|c| c != '_');
                     if num_str.is_empty() {
-                        return Err(raise_tokenize_error!());
+                        return Err(raise_tokenize_error!("Invalid binary/octal/hex literal", line, column));
                     }
 
                     match BigInt::from_str_radix(&num_str, radix) {
@@ -912,7 +912,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                                 column: start_col,
                             });
                         }
-                        Err(_) => return Err(raise_tokenize_error!()),
+                        Err(_) => return Err(raise_tokenize_error!("Invalid BigInt literal", line, column)),
                     }
                     continue;
                 }
@@ -928,7 +928,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     let mut num_str: String = chars[start..i].iter().collect();
                     num_str.retain(|c| c != '_');
                     if num_str.is_empty() || !num_str.chars().all(|c| c.is_ascii_digit()) {
-                        return Err(raise_tokenize_error!());
+                        return Err(raise_tokenize_error!("Invalid BigInt literal", line, column));
                     }
                     tokens.push(TokenData {
                         token: Token::BigInt(num_str),
@@ -961,7 +961,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
                     // require at least one digit in exponent (underscores allowed inside digits)
                     if j >= chars.len() || !(chars[j].is_ascii_digit()) {
-                        return Err(raise_tokenize_error!());
+                        return Err(raise_tokenize_error!("Invalid exponent in number literal", line, column));
                     }
                     while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '_') {
                         j += 1;
@@ -981,7 +981,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         line,
                         column: start_col,
                     }),
-                    Err(_) => return Err(raise_tokenize_error!()),
+                    Err(_) => return Err(raise_tokenize_error!("Invalid number literal", line, column)),
                 }
             }
             '"' => {
@@ -1074,7 +1074,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             i += 1;
                         }
                         if brace_count != 0 {
-                            return Err(raise_tokenize_error!());
+                            return Err(raise_tokenize_error!("Unterminated template literal expression", line, column));
                         }
                         let expr_str: String = chars[expr_start..i - 1].iter().collect();
                         // Tokenize the expression inside ${}
@@ -1114,7 +1114,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
                 }
                 if i >= chars.len() {
-                    return Err(raise_tokenize_error!());
+                    return Err(raise_tokenize_error!("Unterminated template literal", line, column));
                 }
                 // Add remaining string part
                 if current_start < i {
@@ -1229,7 +1229,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1;
                 column += 1;
             }
-            _ => return Err(raise_tokenize_error!()),
+            _ => return Err(raise_tokenize_error!(format!("Unexpected character '{}'", chars[i]), line, column)),
         }
     }
     Ok(tokens)
@@ -1251,9 +1251,7 @@ fn parse_string_literal(
             *start += 1;
             current_col += 1;
             if *start >= chars.len() {
-                let mut err = raise_tokenize_error!();
-                err.set_js_location(current_line, current_col);
-                return Err(err);
+                return Err(raise_tokenize_error!("Unexpected end of string literal", current_line, current_col));
             }
             match chars[*start] {
                 'n' => {
@@ -1319,9 +1317,7 @@ fn parse_string_literal(
                     *start += 1;
                     current_col += 1;
                     if *start >= chars.len() {
-                        let mut err = raise_tokenize_error!();
-                        err.set_js_location(current_line, current_col);
-                        return Err(err);
+                        return Err(raise_tokenize_error!("Unexpected end of string literal", current_line, current_col));
                     }
                     if chars[*start] == '{' {
                         // \u{HEX...}
@@ -1334,9 +1330,11 @@ fn parse_string_literal(
                             current_col += 1;
                         }
                         if *start >= chars.len() || chars[*start] != '}' {
-                            let mut err = raise_tokenize_error!();
-                            err.set_js_location(current_line, current_col);
-                            return Err(err); // no closing brace
+                            return Err(raise_tokenize_error!(
+                                "Unterminated unicode escape sequence",
+                                current_line,
+                                current_col
+                            )); // no closing brace
                         }
                         // parse hex as codepoint
                         match u32::from_str_radix(&hex_str, 16) {
@@ -1353,9 +1351,7 @@ fn parse_string_literal(
                                 }
                             }
                             _ => {
-                                let mut err = raise_tokenize_error!();
-                                err.set_js_location(current_line, current_col);
-                                return Err(err);
+                                return Err(raise_tokenize_error!("Invalid unicode escape sequence", current_line, current_col));
                             }
                         }
                         // `start` currently at closing '}', the outer loop will increment it further
@@ -1363,9 +1359,11 @@ fn parse_string_literal(
                     } else {
                         // Unicode escape sequence \uXXXX
                         if *start + 4 > chars.len() {
-                            let mut err = raise_tokenize_error!();
-                            err.set_js_location(current_line, current_col);
-                            return Err(err);
+                            return Err(raise_tokenize_error!(
+                                "Unexpected end of unicode escape sequence",
+                                current_line,
+                                current_col
+                            ));
                         }
                         let hex_str: String = chars[*start..*start + 4].iter().collect();
                         *start += 3; // will be incremented by 1 at the end
@@ -1375,9 +1373,7 @@ fn parse_string_literal(
                                 result.push(code);
                             }
                             Err(_) => {
-                                let mut err = raise_tokenize_error!();
-                                err.set_js_location(current_line, current_col);
-                                return Err(err); // Invalid hex
+                                return Err(raise_tokenize_error!("Invalid unicode escape sequence", current_line, current_col)); // Invalid hex
                             }
                         }
                         current_col += 1;
@@ -1388,9 +1384,11 @@ fn parse_string_literal(
                     *start += 1;
                     current_col += 1;
                     if *start + 2 > chars.len() {
-                        let mut err = raise_tokenize_error!();
-                        err.set_js_location(current_line, current_col);
-                        return Err(err);
+                        return Err(raise_tokenize_error!(
+                            "Unexpected end of hex escape sequence",
+                            current_line,
+                            current_col
+                        ));
                     }
                     let hex_str: String = chars[*start..*start + 2].iter().collect();
                     *start += 1; // will be incremented by 1 at the end
@@ -1400,9 +1398,7 @@ fn parse_string_literal(
                             result.push(code as u16);
                         }
                         Err(_) => {
-                            let mut err = raise_tokenize_error!();
-                            err.set_js_location(current_line, current_col);
-                            return Err(err);
+                            return Err(raise_tokenize_error!("Invalid hex escape sequence", current_line, current_col));
                         }
                     }
                     current_col += 1;
@@ -1416,9 +1412,11 @@ fn parse_string_literal(
         } else {
             // Check for unescaped line terminators in string literals (but not template literals)
             if (end_char == '"' || end_char == '\'') && (chars[*start] == '\n' || chars[*start] == '\r') {
-                let mut err = raise_tokenize_error!();
-                err.set_js_location(current_line, current_col);
-                return Err(err);
+                return Err(raise_tokenize_error!(
+                    "Unterminated string literal (newline in string)",
+                    current_line,
+                    current_col
+                ));
             }
             // Properly encode Unicode scalar values into UTF-16 code units
             let ch = chars[*start];
@@ -1435,9 +1433,7 @@ fn parse_string_literal(
         *start += 1;
     }
     if *start >= chars.len() {
-        let mut err = raise_tokenize_error!();
-        err.set_js_location(current_line, current_col);
-        return Err(err); // Unterminated string literal
+        return Err(raise_tokenize_error!("Unterminated string literal", current_line, current_col)); // Unterminated string literal
     }
     Ok(result)
 }

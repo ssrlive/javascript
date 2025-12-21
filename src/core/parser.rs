@@ -70,11 +70,14 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
                     }
                     // Rest parameter must be the last one
                     if !matches!(tokens[0].token, Token::RParen) {
-                        return Err(raise_parse_error!("Rest parameter must be last formal parameter"));
+                        return Err(raise_parse_error_with_token!(
+                            tokens[0],
+                            "Rest parameter must be last formal parameter"
+                        ));
                     }
                     break;
                 } else {
-                    return Err(raise_parse_error!("Expected identifier after spread operator in parameter list"));
+                    return Err(raise_parse_error_at(tokens));
                 }
             } else if matches!(tokens[0].token, Token::LBrace) {
                 let pattern = parse_object_destructuring_pattern(tokens)?;
@@ -93,10 +96,7 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
             } else {
-                return Err(raise_parse_error!(format!(
-                    "Expected identifier or pattern in parameter list; next tokens: {:?}",
-                    tokens.iter().take(8).collect::<Vec<_>>()
-                )));
+                return Err(raise_parse_error_at(tokens));
             }
 
             if tokens.is_empty() {
@@ -106,16 +106,13 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
                 break;
             }
             if !matches!(tokens[0].token, Token::Comma) {
-                return Err(raise_parse_error!("Expected ',' in parameter list"));
+                return Err(raise_parse_error_with_token!(tokens[0], "Expected ',' in parameter list"));
             }
             tokens.remove(0); // consume ,
         }
     }
     if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
-        return Err(raise_parse_error!(format!(
-            "Unterminated parameter list or missing ')'; next tokens: {:?}",
-            tokens.iter().take(8).collect::<Vec<_>>()
-        )));
+        return Err(raise_parse_error_at(tokens));
     }
     tokens.remove(0); // consume )
     log::trace!(
@@ -128,10 +125,7 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
 pub fn parse_statement_block(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, JSError> {
     let body = parse_statements(tokens)?;
     if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
-        return Err(raise_parse_error!(format!(
-            "Expected '}}' to close block; next tokens: {:?}",
-            tokens.iter().take(8).collect::<Vec<_>>()
-        )));
+        return Err(raise_parse_error_at(tokens));
     }
     tokens.remove(0); // consume }
     Ok(body)
@@ -167,10 +161,7 @@ pub fn parse_conditional(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
         tokens.remove(0); // consume ?
         let true_expr = parse_conditional(tokens)?; // Allow nesting
         if tokens.is_empty() || !matches!(tokens[0].token, Token::Colon) {
-            return Err(raise_parse_error!(format!(
-                "Expected ':' in conditional expression; next tokens: {:?}",
-                tokens.iter().take(8).collect::<Vec<_>>()
-            )));
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0); // consume :
         let false_expr = parse_conditional(tokens)?; // Allow nesting
@@ -221,10 +212,7 @@ pub fn parse_assignment(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
 
     if let Some(ctor) = get_assignment_ctor(&tokens[0].token) {
         if contains_optional_chain(&left) {
-            return Err(raise_parse_error!(format!(
-                "Invalid assignment target containing optional chaining; next tokens: {:?}",
-                tokens.iter().take(8).collect::<Vec<_>>()
-            )));
+            return Err(raise_parse_error_at(tokens));
         }
         tokens.remove(0);
         let right = parse_assignment(tokens)?;
@@ -883,7 +871,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         tokens.remove(0); // consume (
                         let params = parse_parameters(tokens)?;
                         if params.len() != 1 {
-                            return Err(raise_parse_error!(format!("Setter must have exactly one parameter")));
+                            return Err(raise_parse_error_at(tokens));
                         }
                         if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
                             return Err(raise_parse_error_at(tokens));
@@ -908,10 +896,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                                     let name = String::from_utf16_lossy(s);
                                     properties.push((key_expr, Expr::Var(name, None, None), false));
                                 } else {
-                                    return Err(raise_parse_error!(format!("Invalid shorthand property")));
+                                    return Err(raise_parse_error_at(tokens));
                                 }
                             } else {
-                                return Err(raise_parse_error!(format!("Expected ':' after property key")));
+                                return Err(raise_parse_error_at(tokens));
                             }
                         }
                     }

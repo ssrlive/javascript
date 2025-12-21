@@ -1,7 +1,8 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property, new_js_object_data,
+    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property,
+    new_js_object_data,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
@@ -106,9 +107,15 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             // as objects to be used with `new` while still exposing
             // assignable `prototype` properties.
             if let Some(cl_val_rc) = obj_get_key_value(&class_obj, &"__closure__".into())? {
-                if let Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) =
-                    &*cl_val_rc.borrow()
-                {
+                let closure_data = match &*cl_val_rc.borrow() {
+                    Value::Closure(data) | Value::AsyncClosure(data) => Some(data.clone()),
+                    _ => None,
+                };
+
+                if let Some(data) = closure_data {
+                    let params = &data.params;
+                    let body = &data.body;
+                    let captured_env = &data.env;
                     // Create the instance object
                     let instance = new_js_object_data();
 
@@ -404,7 +411,10 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 return Ok(Value::Object(instance));
             }
         }
-        Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => {
+        Value::Closure(data) | Value::AsyncClosure(data) => {
+            let params = &data.params;
+            let body = &data.body;
+            let captured_env = &data.env;
             // Handle function constructors
             let instance = new_js_object_data();
             let func_env = new_js_object_data();
@@ -418,10 +428,10 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
             // Bind parameters
-            crate::core::bind_function_parameters(&func_env, &params, &evaluated_args)?;
+            crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
             // Execute function body
-            evaluate_statements(&func_env, &body)?;
+            evaluate_statements(&func_env, body)?;
 
             return Ok(Value::Object(instance));
         }
@@ -549,7 +559,8 @@ pub(crate) fn create_class_object(
         match member {
             ClassMember::Method(method_name, params, body) => {
                 // Create a closure for the method
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
+                let closure_data = ClosureData::new(params, body, env, Some(&prototype_obj));
+                let method_closure = Value::Closure(Rc::new(closure_data));
                 obj_set_key_value(&prototype_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::Constructor(_, _) => {
@@ -570,7 +581,8 @@ pub(crate) fn create_class_object(
             }
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Add static method to class object
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
+                let closure_data = ClosureData::new(params, body, env, Some(&class_obj));
+                let method_closure = Value::Closure(Rc::new(closure_data));
                 obj_set_key_value(&class_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::StaticProperty(prop_name, value_expr) => {
@@ -593,7 +605,8 @@ pub(crate) fn create_class_object(
             }
             ClassMember::PrivateMethod(method_name, params, body) => {
                 // Hack: Add private method to prototype with # name
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
+                let closure_data = ClosureData::new(params, body, env, Some(&prototype_obj));
+                let method_closure = Value::Closure(Rc::new(closure_data));
                 obj_set_key_value(&prototype_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::PrivateStaticProperty(prop_name, value_expr) => {
@@ -603,7 +616,8 @@ pub(crate) fn create_class_object(
             }
             ClassMember::PrivateStaticMethod(method_name, params, body) => {
                 // Hack: Add private static method to class object with # name
-                let method_closure = Value::Closure(params.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
+                let closure_data = ClosureData::new(params, body, env, Some(&class_obj));
+                let method_closure = Value::Closure(Rc::new(closure_data));
                 obj_set_key_value(&class_obj, &method_name.into(), method_closure)?;
             }
             ClassMember::StaticBlock(body) => {
@@ -627,7 +641,10 @@ pub(crate) fn call_static_method(
     // Look for static method directly on the class object
     if let Some(method_val) = obj_get_key_value(class_obj, &method.into())? {
         match &*method_val.borrow() {
-            Value::Closure(params, body, _captured_env, _) | Value::AsyncClosure(params, body, _captured_env, _) => {
+            Value::Closure(data) | Value::AsyncClosure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let _captured_env = &data.env;
                 // Create function environment
                 let func_env = new_js_object_data();
 
@@ -659,7 +676,11 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
     if let Some(method_val) = obj_get_key_value(&proto_obj, &method.into())? {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
-            Value::Closure(params, body, captured_env, home_obj) | Value::AsyncClosure(params, body, captured_env, home_obj) => {
+            Value::Closure(data) | Value::AsyncClosure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let captured_env = &data.env;
+                let home_obj = data.home_object.borrow().clone();
                 log::trace!("Method is a closure with {} params", params.len());
                 // Use the closure's captured environment as the base for the
                 // function environment so outer-scope lookups work as expected.
@@ -862,8 +883,11 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                     // We need to call this method with the current 'this'
                     if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
                         match &*method_val.borrow() {
-                            Value::Closure(params, body, captured_env, home_obj)
-                            | Value::AsyncClosure(params, body, captured_env, home_obj) => {
+                            Value::Closure(data) | Value::AsyncClosure(data) => {
+                                let params = &data.params;
+                                let body = &data.body;
+                                let captured_env = &data.env;
+                                let home_obj = data.home_object.borrow().clone();
                                 // Create function environment with 'this' bound to instance
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -896,8 +920,11 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                             Value::Object(func_obj) => {
                                 if let Some(cl_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {
                                     match &*cl_rc.borrow() {
-                                        Value::Closure(params, body, captured_env, home_obj)
-                                        | Value::AsyncClosure(params, body, captured_env, home_obj) => {
+                                        Value::Closure(data) | Value::AsyncClosure(data) => {
+                                            let params = &data.params;
+                                            let body = &data.body;
+                                            let captured_env = &data.env;
+                                            let home_obj = data.home_object.borrow().clone();
                                             // Create function environment with 'this' bound to instance
                                             let func_env = new_js_object_data();
                                             func_env.borrow_mut().prototype = Some(captured_env.clone());
@@ -944,7 +971,10 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
             // Look for method in parent prototype
             if let Some(method_val) = obj_get_key_value(parent_proto_obj, &method.into())? {
                 match &*method_val.borrow() {
-                    Value::Closure(params, body, _captured_env, _) | Value::AsyncClosure(params, body, _captured_env, _) => {
+                    Value::Closure(data) | Value::AsyncClosure(data) => {
+                        let params = &data.params;
+                        let body = &data.body;
+                        let _captured_env = &data.env;
                         // Create function environment with 'this' bound to instance
                         let func_env = new_js_object_data();
 

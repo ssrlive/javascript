@@ -81,10 +81,12 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             // Evaluate the second arg (the function) and execute its body.
             let func_val = evaluate_expr(env, &args[1])?;
             match func_val {
-                Value::Closure(_params, body, captured_env, _) => {
+                Value::Closure(data) => {
+                    let body = &data.body;
+                    let captured_env = &data.env;
                     let func_env = new_js_object_data();
                     func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    match evaluate_statements(&func_env, &body) {
+                    match evaluate_statements(&func_env, body) {
                         Ok(_) => Err(raise_eval_error!("assert.throws expected function to throw a value")),
                         Err(_) => Ok(Value::Undefined),
                     }

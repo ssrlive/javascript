@@ -585,6 +585,25 @@ pub struct SymbolData {
 
 pub type ValuePtr = Rc<RefCell<Value>>;
 
+#[derive(Clone, Debug)]
+pub struct ClosureData {
+    pub params: Vec<DestructuringElement>,
+    pub body: Vec<Statement>,
+    pub env: JSObjectDataPtr,
+    pub home_object: RefCell<Option<JSObjectDataPtr>>,
+}
+
+impl ClosureData {
+    pub fn new(params: &[DestructuringElement], body: &[Statement], env: &JSObjectDataPtr, home_object: Option<&JSObjectDataPtr>) -> Self {
+        ClosureData {
+            params: params.to_vec(),
+            body: body.to_vec(),
+            env: env.clone(),
+            home_object: RefCell::new(home_object.cloned()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
@@ -593,18 +612,12 @@ pub enum Value {
     Boolean(bool),
     Undefined,
     Null,
-    Object(JSObjectDataPtr), // Object with properties
-    Function(String),        // Function name
-    Closure(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // parameters, body, captured environment, home object
-    AsyncClosure(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // parameters, body, captured environment, home object
-    GeneratorFunction(
-        Option<String>,
-        Vec<DestructuringElement>,
-        Vec<Statement>,
-        JSObjectDataPtr,
-        Option<JSObjectDataPtr>,
-    ), // optional name, parameters, body, captured environment, home object
-    ClassDefinition(Rc<ClassDefinition>),                                                              // Class definition
+    Object(JSObjectDataPtr),                                          // Object with properties
+    Function(String),                                                 // Function name
+    Closure(Rc<ClosureData>),                                         // parameters, body, captured environment, home object
+    AsyncClosure(Rc<ClosureData>),                                    // parameters, body, captured environment, home object
+    GeneratorFunction(Option<String>, Rc<ClosureData>),               // optional name, parameters, body, captured environment, home object
+    ClassDefinition(Rc<ClassDefinition>),                             // Class definition
     Getter(Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // getter body, captured environment, home object
     Setter(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>), // setter parameter, body, captured environment, home object
     Property {
@@ -679,6 +692,9 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b), // Objects equal only if same reference
         (Value::Symbol(sa), Value::Symbol(sb)) => Rc::ptr_eq(sa, sb), // Symbols are equal if same reference
         (Value::Function(sa), Value::Function(sb)) => sa == sb,
+        (Value::Closure(a), Value::Closure(b)) => Rc::ptr_eq(a, b),
+        (Value::AsyncClosure(a), Value::AsyncClosure(b)) => Rc::ptr_eq(a, b),
+        (Value::GeneratorFunction(_, a), Value::GeneratorFunction(_, b)) => Rc::ptr_eq(a, b),
         _ => false, // Different types are not equal
     }
 }
@@ -767,15 +783,15 @@ pub fn value_to_string(val: &Value) -> String {
 #[allow(clippy::type_complexity)]
 pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr)> {
     match val {
-        Value::Closure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
-        Value::AsyncClosure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
-        Value::GeneratorFunction(_, params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+        Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+        Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+        Value::GeneratorFunction(_, data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
         Value::Object(obj_map) => {
             if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
-                    Value::Closure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
-                    Value::AsyncClosure(params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
-                    Value::GeneratorFunction(_, params, body, env, _) => Some((params.clone(), body.clone(), env.clone())),
+                    Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+                    Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+                    Value::GeneratorFunction(_, data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
                     _ => None,
                 }
             } else {
@@ -974,7 +990,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                 false,
             )])))),
         ];
-        Value::Closure(Vec::new(), iter_body, captured_env, None)
+        Value::Closure(Rc::new(ClosureData::new(&[], &iter_body, &captured_env, None)))
     }
 
     // Provide default well-known symbol fallbacks (non-own) for some built-ins.
@@ -1383,7 +1399,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         Rc::new(RefCell::new(Value::Object(Rc::new(RefCell::new(values_obj))))),
                     );
 
-                    let closure = Value::Closure(Vec::new(), set_iter_body, captured_env.clone(), None);
+                    let closure = Value::Closure(Rc::new(ClosureData::new(&[], &set_iter_body, &captured_env.clone(), None)));
                     return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
             }
@@ -1457,7 +1473,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         PropertyKey::String("__s".to_string()),
                         Rc::new(RefCell::new(wrapped.borrow().clone())),
                     );
-                    let closure = Value::Closure(Vec::new(), str_iter_body, captured_env.clone(), None);
+                    let closure = Value::Closure(Rc::new(ClosureData::new(&[], &str_iter_body, &captured_env.clone(), None)));
                     return Ok(Some(Rc::new(RefCell::new(closure))));
                 }
             }

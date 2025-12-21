@@ -1308,7 +1308,10 @@ pub(crate) fn handle_array_instance_method(
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
                 match callback {
-                    Value::Closure(params, body, captured_env, _) => {
+                    Value::Closure(data) => {
+                        let params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         // Search from the end
@@ -1321,9 +1324,9 @@ pub(crate) fn handle_array_instance_method(
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
-                                crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                                crate::core::bind_function_parameters(&func_env, params, &args)?;
 
-                                let res = evaluate_statements(&func_env, &body)?;
+                                let res = evaluate_statements(&func_env, body)?;
                                 // truthy check
                                 let is_truthy = match res {
                                     Value::Boolean(b) => b,
@@ -1350,7 +1353,10 @@ pub(crate) fn handle_array_instance_method(
             if !args.is_empty() {
                 let callback = evaluate_expr(env, &args[0])?;
                 match callback {
-                    Value::Closure(params, body, captured_env, _) => {
+                    Value::Closure(data) => {
+                        let params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
                         let current_len = get_array_length(obj_map).unwrap_or(0);
 
                         // Search from the end
@@ -1363,9 +1369,9 @@ pub(crate) fn handle_array_instance_method(
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 let args = vec![element.clone(), index_val, Value::Object(obj_map.clone())];
-                                crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                                crate::core::bind_function_parameters(&func_env, params, &args)?;
 
-                                let res = evaluate_statements(&func_env, &body)?;
+                                let res = evaluate_statements(&func_env, body)?;
                                 // truthy check
                                 let is_truthy = match res {
                                     Value::Boolean(b) => b,

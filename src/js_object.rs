@@ -1,13 +1,14 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
+    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
     new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
 use crate::unicode::utf8_to_utf16;
+use std::rc::Rc;
 
 fn define_property_internal(target_obj: &JSObjectDataPtr, prop_key: PropertyKey, desc_obj: &JSObjectDataPtr) -> Result<(), JSError> {
     // Extract descriptor fields
@@ -434,19 +435,13 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                                 // Accessor
                                 if let Some((gbody, genv, _)) = getter {
                                     // expose getter as function (Closure) on descriptor
-                                    obj_set_key_value(
-                                        &desc_obj,
-                                        &"get".into(),
-                                        Value::Closure(Vec::new(), gbody.clone(), genv.clone(), None),
-                                    )?;
+                                    let closure_data = ClosureData::new(&Vec::new(), gbody, genv, None);
+                                    obj_set_key_value(&desc_obj, &"get".into(), Value::Closure(Rc::new(closure_data)))?;
                                 }
                                 if let Some((sparams, sbody, senv, _)) = setter {
                                     // expose setter as function (Closure) on descriptor
-                                    obj_set_key_value(
-                                        &desc_obj,
-                                        &"set".into(),
-                                        Value::Closure(sparams.clone(), sbody.clone(), senv.clone(), None),
-                                    )?;
+                                    let closure_data = ClosureData::new(sparams, sbody, senv, None);
+                                    obj_set_key_value(&desc_obj, &"set".into(), Value::Closure(Rc::new(closure_data)))?;
                                 }
                                 // flags: enumerable depends on object's non-enumerable set
                                 let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
@@ -845,13 +840,16 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
             if let Some(method_rc) = obj_get_key_value(obj_map, &"valueOf".into())? {
                 let method_val = method_rc.borrow().clone();
                 match method_val {
-                    Value::Closure(_params, body, captured_env, _) | Value::AsyncClosure(_params, body, captured_env, _) => {
+                    Value::Closure(data) | Value::AsyncClosure(data) => {
+                        let _params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
                         let func_env = new_js_object_data();
                         func_env.borrow_mut().prototype = Some(captured_env.clone());
                         func_env.borrow_mut().is_function_scope = true;
                         // bind `this` to the object
                         crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
-                        let result = crate::core::evaluate_statements(&func_env, &body)?;
+                        let result = crate::core::evaluate_statements(&func_env, body)?;
                         if matches!(
                             result,
                             Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
@@ -888,7 +886,10 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                 if let Value::Object(func_obj_map) = &*method_rc.borrow() {
                     if let Some(cl_rc) = obj_get_key_value(func_obj_map, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
-                            Value::Closure(_params, body, captured_env, _) | Value::AsyncClosure(_params, body, captured_env, _) => {
+                            Value::Closure(data) | Value::AsyncClosure(data) => {
+                                let _params = &data.params;
+                                let body = &data.body;
+                                let captured_env = &data.env;
                                 let func_env = new_js_object_data();
                                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                                 func_env.borrow_mut().is_function_scope = true;
@@ -914,8 +915,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
             Ok(Value::Object(obj_map.clone()))
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
-        Value::Closure(params, body, env, _) | Value::AsyncClosure(params, body, env, _) => {
-            Ok(Value::Closure(params.clone(), body.clone(), env.clone(), None))
+        Value::Closure(data) | Value::AsyncClosure(data) => {
+            let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
+            Ok(Value::Closure(Rc::new(closure_data)))
         }
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
         Value::Getter(body, env, _) => Ok(Value::Getter(body.clone(), env.clone(), None)),
@@ -931,8 +933,9 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
         Value::Set(set) => Ok(Value::Set(set.clone())),
         Value::WeakMap(weakmap) => Ok(Value::WeakMap(weakmap.clone())),
         Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
-        Value::GeneratorFunction(_, params, body, env, _) => {
-            Ok(Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone(), None))
+        Value::GeneratorFunction(_, data) => {
+            let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
+            Ok(Value::GeneratorFunction(None, Rc::new(closure_data)))
         }
         Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
         Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),

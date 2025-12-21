@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr};
+use crate::core::{ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr};
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
@@ -630,13 +630,13 @@ fn function_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, J
 
     let stmts = crate::core::parse_statements(&mut tokens)?;
 
-    if let Some(crate::core::Statement {
-        kind: crate::core::StatementKind::FunctionDeclaration(_name, params, body, _is_generator),
+    if let Some(Statement {
+        kind: StatementKind::FunctionDeclaration(_n, params, body, _i),
         ..
     }) = stmts.first()
     {
         // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
-        Ok(Value::Closure(params.clone(), body.clone(), env.clone(), None))
+        Ok(Value::Closure(Rc::new(ClosureData::new(params, body, env, None))))
     } else {
         Err(raise_type_error!("Failed to parse function body"))
     }
@@ -1034,7 +1034,7 @@ fn test_with_intl_constructors(args: &[Expr], env: &JSObjectDataPtr) -> Result<V
     }
     let callback = evaluate_expr(env, &args[0])?;
     let callback_func = match callback {
-        Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => (params, body, captured_env),
+        Value::Closure(data) | Value::AsyncClosure(data) => (data.params.clone(), data.body.clone(), data.env.clone()),
         _ => {
             return Err(raise_type_error!("testWithIntlConstructors requires a function as argument"));
         }

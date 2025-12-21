@@ -1,8 +1,8 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind, SwitchCase,
-        SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
+        BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind,
+        SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
         extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
         to_primitive, value_to_sort_string, value_to_string, values_equal,
     },
@@ -544,7 +544,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 // For generator functions, create a function object wrapper
                 let func_obj = new_js_object_data();
                 let prototype_obj = new_js_object_data();
-                let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone(), None);
+                let generator_val = Value::GeneratorFunction(None, Rc::new(ClosureData::new(params, body, env, None)));
                 obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                 obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -553,7 +553,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 // For regular functions, create a function object wrapper
                 let func_obj = new_js_object_data();
                 let prototype_obj = new_js_object_data();
-                let closure_val = Value::Closure(params.clone(), body.clone(), env.clone(), None);
+                let closure_val = Value::Closure(Rc::new(ClosureData::new(params, body, env, None)));
                 obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                 obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -695,7 +695,7 @@ fn evaluate_stmt_export(
                 let func_val = if *is_generator {
                     let func_obj = new_js_object_data();
                     let prototype_obj = new_js_object_data();
-                    let generator_val = Value::GeneratorFunction(None, params.clone(), body.clone(), env.clone(), None);
+                    let generator_val = Value::GeneratorFunction(None, Rc::new(ClosureData::new(params, body, env, None)));
                     obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
                     obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                     obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -703,7 +703,7 @@ fn evaluate_stmt_export(
                 } else {
                     let func_obj = new_js_object_data();
                     let prototype_obj = new_js_object_data();
-                    let closure_val = Value::Closure(params.clone(), body.clone(), env.clone(), None);
+                    let closure_val = Value::Closure(Rc::new(ClosureData::new(params, body, env, None)));
                     obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
                     obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                     obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
@@ -2822,7 +2822,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // Create a callable function object wrapper for generator expressions
             let func_obj = new_js_object_data();
             let prototype_obj = new_js_object_data();
-            let generator_val = Value::GeneratorFunction(name.clone(), params.clone(), body.clone(), env.clone(), None);
+            let generator_val = Value::GeneratorFunction(name.clone(), Rc::new(ClosureData::new(params, body, env, None)));
             obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
             // If this is a named generator expression, expose the `name` property
             if let Some(n) = name.clone() {
@@ -2832,8 +2832,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
             Ok(Value::Object(func_obj))
         }
-        Expr::ArrowFunction(params, body) => Ok(Value::Closure(params.clone(), body.clone(), env.clone(), None)),
-        Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(params.clone(), body.clone(), env.clone(), None)),
+        Expr::ArrowFunction(params, body) => Ok(Value::Closure(Rc::new(ClosureData::new(params, body, env, None)))),
+        Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(Rc::new(ClosureData::new(params, body, env, None)))),
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
@@ -2859,7 +2859,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // Create a callable function object wrapper for async function expressions
             let func_obj = new_js_object_data();
             let prototype_obj = new_js_object_data();
-            let closure_val = Value::AsyncClosure(params.clone(), body.clone(), env.clone(), None);
+            let closure_val = Value::AsyncClosure(Rc::new(ClosureData::new(params, body, env, None)));
             obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
             // If this is a named async function expression, expose the `name` property
             if let Some(n) = name.clone() {
@@ -2973,7 +2973,7 @@ fn evaluate_function_expression(
     };
 
     // Store the closure under an internal key
-    let closure_val = Value::Closure(params.to_vec(), body.to_vec(), closure_env, None);
+    let closure_val = Value::Closure(Rc::new(ClosureData::new(params, body, &closure_env, None)));
     obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
 
     // If this is a named function expression, expose the `name` property
@@ -5060,6 +5060,9 @@ fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
         (Value::Null, Value::Null) => Ok(Value::Boolean(true)),
         (Value::Object(a), Value::Object(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
         (Value::Function(sa), Value::Function(sb)) => Ok(Value::Boolean(sa == sb)),
+        (Value::Closure(a), Value::Closure(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
+        (Value::AsyncClosure(a), Value::AsyncClosure(b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
+        (Value::GeneratorFunction(_, a), Value::GeneratorFunction(_, b)) => Ok(Value::Boolean(Rc::ptr_eq(a, b))),
         _ => Ok(Value::Boolean(false)),
     }
 }
@@ -5285,14 +5288,14 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             Some(d) => Ok(Value::String(utf8_to_utf16(d))),
             None => Ok(Value::Undefined),
         },
-        Value::GeneratorFunction(name_opt, params, _body, _env, _) if prop == "name" => {
+        Value::GeneratorFunction(name_opt, _) if prop == "name" => {
             if let Some(n) = name_opt {
                 Ok(Value::String(utf8_to_utf16(&n)))
             } else {
                 Ok(Value::Undefined)
             }
         }
-        Value::GeneratorFunction(_name_opt, params, _body, _env, _) if prop == "length" => Ok(Value::Number(params.len() as f64)),
+        Value::GeneratorFunction(_name_opt, data) if prop == "length" => Ok(Value::Number(data.params.len() as f64)),
         Value::Function(func_name) => {
             // Special-case static properties on constructors like Symbol.iterator
             if func_name == "Symbol" {
@@ -5766,8 +5769,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     // Check for user-defined method
                     if let Some(prop_val) = obj_get_key_value(&obj_map, &method.into())? {
                         match prop_val.borrow().clone() {
-                            Value::Closure(params, body, captured_env, home_obj)
-                            | Value::AsyncClosure(params, body, captured_env, home_obj) => {
+                            Value::Closure(data) | Value::AsyncClosure(data) => {
+                                let params = &data.params;
+                                let body = &data.body;
+                                let captured_env = &data.env;
+                                let home_obj = data.home_object.borrow().clone();
                                 // Function call
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
@@ -5783,13 +5789,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     log::trace!("DEBUG: home_obj is None in evaluate_call (generic method)");
                                 }
                                 // Bind parameters: assign provided args, set missing params to undefined
-                                bind_function_parameters(&func_env, &params, &evaluated_args)?;
+                                bind_function_parameters(&func_env, params, &evaluated_args)?;
                                 // Attach frame/caller information for stack traces
                                 let frame = build_frame_name(env, method);
                                 let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                                 let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                 // Execute function body
-                                evaluate_statements(&func_env, &body)
+                                evaluate_statements(&func_env, body)
                             }
                             Value::Function(func_name) => {
                                 // Special-case Object.prototype.* built-ins so they can
@@ -5905,7 +5911,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // to be callable as methods.
                                 if let Some(cl_rc) = obj_get_key_value(&func_obj_map, &"__closure__".into())? {
                                     match &*cl_rc.borrow() {
-                                        Value::Closure(params, body, captured_env, home_obj) => {
+                                        Value::Closure(data) => {
+                                            let params = &data.params;
+                                            let body = &data.body;
+                                            let captured_env = &data.env;
+                                            let home_obj = data.home_object.borrow().clone();
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -5942,13 +5952,17 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
                                             }
                                         }
-                                        Value::GeneratorFunction(_, params, body, captured_env, home_obj) => {
+                                        Value::GeneratorFunction(_, data) => {
                                             // Generator method-style call - return a generator object
+                                            let params = &data.params;
+                                            let body = &data.body;
+                                            let captured_env = &data.env;
+                                            let home_obj = &data.home_object;
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                             let func_env = new_js_object_data();
                                             func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                            if let Some(home) = home_obj {
+                                            if let Some(home) = &*home_obj.borrow() {
                                                 obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                                             }
                                             func_env.borrow_mut().is_function_scope = true;
@@ -5960,7 +5974,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                                             crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
                                         }
-                                        Value::AsyncClosure(params, body, captured_env, home_obj) => {
+                                        Value::AsyncClosure(data) => {
+                                            let params = &data.params;
+                                            let body = &data.body;
+                                            let captured_env = &data.env;
+                                            let home_obj = data.home_object.borrow().clone();
                                             // Async method-style call: returns a Promise object
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6082,15 +6100,18 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 Ok(Value::Undefined)
             }
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-            Value::GeneratorFunction(_, params, body, captured_env, _) => {
+            Value::GeneratorFunction(_, data) => {
                 // Generator function call - return a generator object
-                crate::js_generator::handle_generator_function_call(&params, &body, args, &captured_env)
+                crate::js_generator::handle_generator_function_call(&data.params, &data.body, args, &data.env)
             }
             Value::Object(obj_map) if get_own_property(&obj_map, &"__closure__".into()).is_some() => {
                 // Function object call - extract the closure and call it
                 if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                     match &*cl_rc.borrow() {
-                        Value::AsyncClosure(params, body, captured_env, _) => {
+                        Value::AsyncClosure(data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
                             // Async function call (direct call on a function-object): returns a Promise
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6124,7 +6145,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             }
                             Ok(promise_obj)
                         }
-                        Value::Closure(params, body, captured_env, _) => {
+                        Value::Closure(data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
                             // Function call
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
@@ -6169,9 +6193,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             }
                         }
 
-                        Value::GeneratorFunction(_, params, body, captured_env, _) => {
+                        Value::GeneratorFunction(_, data) => {
                             // Generator function call - return a generator object
-                            crate::js_generator::handle_generator_function_call(params, body, args, captured_env)
+                            crate::js_generator::handle_generator_function_call(&data.params, &data.body, args, &data.env)
                         }
                         _ => Err(raise_eval_error!("Object is not callable")),
                     }
@@ -6187,7 +6211,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             {
                 crate::js_class::evaluate_new(env, func_expr, args)
             }
-            Value::Closure(params, body, captured_env, _) => {
+            Value::Closure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let captured_env = &data.env;
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
@@ -6198,7 +6225,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // ensure this env is a proper function scope
                 func_env.borrow_mut().is_function_scope = true;
                 // Attach minimal frame info (try to derive a name from captured_env, else anonymous)
-                let frame_name = if let Ok(Some(name_rc)) = obj_get_key_value(&captured_env, &"name".into()) {
+                let frame_name = if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
                     if let Value::String(s) = &*name_rc.borrow() {
                         String::from_utf16_lossy(s)
                     } else {
@@ -6211,16 +6238,19 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(&frame)));
                 let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(env.clone()));
                 // Bind parameters: provide provided args, set missing params to undefined
-                bind_function_parameters(&func_env, &params, &evaluated_args)?;
+                bind_function_parameters(&func_env, params, &evaluated_args)?;
                 // Execute function body
-                match evaluate_statements_with_context(&func_env, &body)? {
+                match evaluate_statements_with_context(&func_env, body)? {
                     ControlFlow::Normal(_) => Ok(Value::Undefined),
                     ControlFlow::Return(val) => Ok(val),
                     ControlFlow::Break(_) => Err(raise_eval_error!("break statement not in loop or switch")),
                     ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
                 }
             }
-            Value::AsyncClosure(params, body, captured_env, _) => {
+            Value::AsyncClosure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let captured_env = &data.env;
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
@@ -6237,9 +6267,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 func_env.borrow_mut().is_function_scope = true;
                 // Bind parameters
-                bind_function_parameters(&func_env, &params, &evaluated_args)?;
+                bind_function_parameters(&func_env, params, &evaluated_args)?;
                 // Execute function body synchronously (for now)
-                let result = evaluate_statements(&func_env, &body);
+                let result = evaluate_statements(&func_env, body);
                 match result {
                     Ok(val) => {
                         crate::js_promise::resolve_promise(&promise, val);
@@ -6279,8 +6309,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // being callable.
                 if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
                     match &*cl_rc.borrow() {
-                        Value::Closure(params, body, captured_env, home_obj)
-                        | Value::AsyncClosure(params, body, captured_env, home_obj) => {
+                        Value::Closure(data) | Value::AsyncClosure(data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let home_obj = data.home_object.borrow().clone();
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6494,7 +6527,10 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
         match func_val {
             Value::Undefined => Ok(Value::Undefined),
             Value::Function(func_name) => crate::js_function::handle_global_function(&func_name, args, env),
-            Value::Closure(params, body, captured_env, _) | Value::AsyncClosure(params, body, captured_env, _) => {
+            Value::Closure(data) | Value::AsyncClosure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let captured_env = &data.env;
                 // Function call
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
@@ -6503,9 +6539,9 @@ fn evaluate_optional_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]
                 let func_env = new_js_object_data();
                 func_env.borrow_mut().prototype = Some(captured_env.clone());
                 // Bind parameters: provide provided args, set missing params to undefined
-                bind_function_parameters(&func_env, &params, &evaluated_args)?;
+                bind_function_parameters(&func_env, params, &evaluated_args)?;
                 // Execute function body
-                evaluate_statements(&func_env, &body)
+                evaluate_statements(&func_env, body)
             }
             _ => Err(raise_eval_error!("error")),
         }
@@ -6639,16 +6675,16 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
                     let mut value = evaluate_expr(env, value_expr)?;
                     if *is_method {
                         match &mut value {
-                            Value::Closure(.., home_obj) => *home_obj = Some(obj.clone()),
-                            Value::AsyncClosure(.., home_obj) => *home_obj = Some(obj.clone()),
-                            Value::GeneratorFunction(.., home_obj) => *home_obj = Some(obj.clone()),
+                            Value::Closure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                            Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                            Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(obj.clone()),
                             Value::Object(func_obj) => {
                                 if let Some(closure_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {
                                     let mut closure_val = closure_rc.borrow_mut();
                                     match &mut *closure_val {
-                                        Value::Closure(.., home_obj) => *home_obj = Some(obj.clone()),
-                                        Value::AsyncClosure(.., home_obj) => *home_obj = Some(obj.clone()),
-                                        Value::GeneratorFunction(.., home_obj) => *home_obj = Some(obj.clone()),
+                                        Value::Closure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                                        Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                                        Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(obj.clone()),
                                         _ => {}
                                     }
                                 }

@@ -1,6 +1,6 @@
 use crate::{
     JSError, Value,
-    core::{DestructuringElement, obj_get_key_value, obj_set_key_value},
+    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, obj_get_key_value, obj_set_key_value},
 };
 use std::cell::RefCell;
 use std::path::Path;
@@ -20,16 +20,16 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         obj_set_key_value(&module_exports, &"E".into(), e)?;
 
         // Add a simple function (just return the input for now)
-        let identity_func = Value::Closure(
-            vec![DestructuringElement::Variable("x".to_string(), None)],
-            vec![crate::core::Statement {
-                kind: crate::core::StatementKind::Return(Some(crate::core::Expr::Var("x".to_string(), None, None))),
+        let identity_func = Value::Closure(Rc::new(ClosureData::new(
+            &[DestructuringElement::Variable("x".to_string(), None)],
+            &[Statement {
+                kind: StatementKind::Return(Some(Expr::Var("x".to_string(), None, None))),
                 line: 0,
                 column: 0,
             }],
-            module_exports.clone(),
+            &module_exports,
             None,
-        );
+        )));
         obj_set_key_value(&module_exports, &"identity".into(), identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function

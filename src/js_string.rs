@@ -34,7 +34,7 @@ pub(crate) fn string_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
                 }
             }
             Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
-            Value::Closure(..) | Value::AsyncClosure(..) => Ok(Value::String(utf8_to_utf16("[Function]"))),
+            Value::Closure(_) | Value::AsyncClosure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
             Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
             Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
             Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),

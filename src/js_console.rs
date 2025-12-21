@@ -160,7 +160,8 @@ fn format_value_pretty(
             }
         }
         Value::Function(name) => Ok(format!("function {}() {{ [native code] }}", name)),
-        Value::Closure(params, ..) | Value::AsyncClosure(params, _, _, _) => {
+        Value::Closure(data) | Value::AsyncClosure(data) => {
+            let params = &data.params;
             let mut s = String::from("function(");
             for (i, param) in params.iter().enumerate() {
                 if i > 0 {

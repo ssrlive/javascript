@@ -73,7 +73,7 @@ pub(crate) fn handle_proxy_revocable(args: &[Expr], env: &JSObjectDataPtr) -> Re
         .borrow_mut()
         .insert("__revoke_proxy".into(), Rc::new(RefCell::new(Value::Proxy(revoke_proxy_ref))));
 
-    let revoke_func = Value::Closure(Vec::new(), revoke_body, revoke_env, None);
+    let revoke_func = Value::Closure(Rc::new(crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data();

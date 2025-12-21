@@ -8,7 +8,7 @@ use crate::{
     },
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
-        call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
+        ClassMember, call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
         evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
     },
     js_console::{handle_console_method, make_console_object},
@@ -5268,6 +5268,46 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             }
         }
         Value::Object(obj_map) => {
+            // Check for private field access
+            if prop.starts_with('#') {
+                let mut allowed = false;
+                let mut current_env = Some(env.clone());
+                while let Some(e) = current_env {
+                    if let Some(home_obj_val) = get_own_property(&e, &"__home_object__".into()) {
+                        if let Value::Object(home_obj) = &*home_obj_val.borrow() {
+                            if let Some(class_def_val) = get_own_property(home_obj, &"__class_def__".into()) {
+                                if let Value::ClassDefinition(class_def) = &*class_def_val.borrow() {
+                                    for member in &class_def.members {
+                                        match member {
+                                            ClassMember::PrivateProperty(name, _)
+                                            | ClassMember::PrivateMethod(name, _, _)
+                                            | ClassMember::PrivateStaticProperty(name, _)
+                                            | ClassMember::PrivateStaticMethod(name, _, _) => {
+                                                if name == prop {
+                                                    allowed = true;
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if allowed {
+                        break;
+                    }
+                    current_env = e.borrow().prototype.clone();
+                }
+
+                if !allowed {
+                    return Err(raise_syntax_error!(format!(
+                        "Private field '{prop}' must be declared in an enclosing class",
+                    )));
+                }
+            }
+
             // Special-case the `__proto__` accessor so property reads return the
             // object's current prototype object when present.
             if prop == "__proto__" {

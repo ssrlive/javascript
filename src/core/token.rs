@@ -1231,14 +1231,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 column += 1;
             }
             '#' => {
+                let start = i;
                 i += 1;
                 column += 1;
-                let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$') {
                     i += 1;
                     column += 1;
                 }
-                if i == start {
+                if i == start + 1 {
                     return Err(raise_tokenize_error!("Invalid private identifier", line, column));
                 }
                 let ident: String = chars[start..i].iter().collect();

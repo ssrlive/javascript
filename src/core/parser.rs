@@ -473,6 +473,14 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                     } else {
                         members.push(ClassMember::Property(method_name, value));
                     }
+                } else if matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                    // Property without initializer
+                    tokens.remove(0); // consume ;
+                    if is_static {
+                        members.push(ClassMember::StaticProperty(method_name, Expr::Value(Value::Undefined)));
+                    } else {
+                        members.push(ClassMember::Property(method_name, Expr::Value(Value::Undefined)));
+                    }
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
@@ -506,6 +514,14 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                     members.push(ClassMember::PrivateStaticProperty(name, value));
                 } else {
                     members.push(ClassMember::PrivateProperty(name, value));
+                }
+            } else if matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                // Private property without initializer
+                tokens.remove(0); // consume ;
+                if is_static {
+                    members.push(ClassMember::PrivateStaticProperty(name, Expr::Value(Value::Undefined)));
+                } else {
+                    members.push(ClassMember::PrivateProperty(name, Expr::Value(Value::Undefined)));
                 }
             } else {
                 return Err(raise_parse_error_at(tokens));

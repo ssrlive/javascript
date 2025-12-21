@@ -812,7 +812,21 @@ fn evalute_eval_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, 
         match arg_val {
             Value::String(s) => {
                 let code = String::from_utf16_lossy(&s);
-                crate::core::evaluate_script(&code, None::<&std::path::Path>) // Evaluate in global context
+                match crate::core::evaluate_script(&code, None::<&std::path::Path>) {
+                    Ok(v) => Ok(v),
+                    Err(err) => {
+                        // Convert parse/eval errors into a thrown JS Error object so that
+                        // `try { eval(...) } catch (e) { e instanceof SyntaxError }` works
+                        let msg = err.message();
+                        let msg_expr = Expr::StringLit(crate::unicode::utf8_to_utf16(&msg));
+                        let constructor = Expr::Var("SyntaxError".to_string(), None, None);
+                        match crate::js_class::evaluate_new(env, &constructor, &[msg_expr]) {
+                            Ok(Value::Object(obj)) => Err(raise_throw_error!(Value::Object(obj))),
+                            Ok(other) => Err(raise_throw_error!(other)),
+                            Err(_) => Err(err),
+                        }
+                    }
+                }
             }
             _ => Ok(arg_val),
         }

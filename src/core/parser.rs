@@ -360,6 +360,9 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
     tokens.remove(0); // consume {
 
     let mut members = Vec::new();
+    // Track declared private names to detect duplicate private declarations.
+    let mut declared_private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
         // Skip blank lines or stray semicolons in class body
         while !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
@@ -487,6 +490,14 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             }
         } else if let Some(Token::PrivateIdentifier(name)) = tokens.first().map(|t| &t.token) {
             let name = name.clone();
+            // Duplicate private names are a syntax error
+            if declared_private_names.contains(&name) {
+                let msg = format!("Identifier '#{name}' has already been declared");
+                return Err(raise_parse_error_with_token!(tokens[0], msg));
+            }
+            // Record declaration
+            declared_private_names.insert(name.clone());
+
             tokens.remove(0);
             if matches!(tokens[0].token, Token::LParen) {
                 // Private method
@@ -562,6 +573,13 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
         }
         Token::Delete => {
             let inner = parse_primary(tokens, true)?;
+            // Deleting a private field is a SyntaxError (e.g., `delete this.#priv`)
+            if let Expr::Property(_, prop_name) = &inner {
+                if prop_name.starts_with('#') {
+                    let msg = format!("Private field '{prop_name}' cannot be deleted");
+                    return Err(raise_parse_error_with_token!(token_data, msg));
+                }
+            }
             Expr::Delete(Box::new(inner))
         }
         Token::Void => {

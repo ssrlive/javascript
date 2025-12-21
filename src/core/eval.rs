@@ -1153,8 +1153,12 @@ fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Stateme
                 }
 
                 let frames = capture_frames_from_env(Some(env.clone()));
-                set_last_stack(frames);
-                return Err(e);
+                set_last_stack(frames.clone());
+                let mut err = e;
+                if err.stack().is_empty() {
+                    err.set_stack(frames);
+                }
+                return Err(err);
             }
         }
     }
@@ -6113,7 +6117,9 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             // ensure this env is a proper function scope
                             func_env.borrow_mut().is_function_scope = true;
                             // Attach minimal frame info (try to derive a name from captured_env, else anonymous)
-                            let frame_name = if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
+                            let frame_name = if let Expr::Var(name, _, _) = func_expr {
+                                name.clone()
+                            } else if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
                                 if let Value::String(s) = &*name_rc.borrow() {
                                     String::from_utf16_lossy(s)
                                 } else {

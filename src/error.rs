@@ -42,6 +42,7 @@ pub struct JSErrorData {
     pub method: String,
     pub js_line: Option<usize>,
     pub js_column: Option<usize>,
+    pub stack: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -60,6 +61,7 @@ impl JSError {
                 method,
                 js_line: None,
                 js_column: None,
+                stack: Vec::new(),
             }),
         }
     }
@@ -77,14 +79,22 @@ impl JSError {
         self.inner.js_column
     }
 
+    pub fn set_stack(&mut self, stack: Vec<String>) {
+        self.inner.stack = stack;
+    }
+
+    pub fn stack(&self) -> &Vec<String> {
+        &self.inner.stack
+    }
+
     // convenience method to access the kind
     pub fn kind(&self) -> &JSErrorKind {
         &self.inner.kind
     }
 
-    /// Get a user-friendly error message without internal Rust debugging details
-    pub fn user_message(&self) -> String {
-        let msg = match &self.inner.kind {
+    /// Get the error message without location information
+    pub fn message(&self) -> String {
+        match &self.inner.kind {
             JSErrorKind::TokenizationError => "SyntaxError: Failed to parse input".to_string(),
             JSErrorKind::ParseError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::EvaluationError { message } => {
@@ -139,7 +149,12 @@ impl JSError {
                 result.unwrap_or_else(|| format!("Uncaught {}", crate::core::value_to_string(value)))
             }
             JSErrorKind::IoError(e) => format!("IOError: {}", e),
-        };
+        }
+    }
+
+    /// Get a user-friendly error message without internal Rust debugging details
+    pub fn user_message(&self) -> String {
+        let msg = self.message();
 
         if let Some(line) = self.inner.js_line {
             if let Some(col) = self.inner.js_column {

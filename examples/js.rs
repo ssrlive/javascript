@@ -51,12 +51,21 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     match evaluate_script(script_content, cli.file.as_ref()) {
         Ok(result) => println!("{result}"),
         Err(err) => {
-            eprintln!("{}", err.user_message());
             if let Some(file_path) = cli.file.as_ref() {
+                let msg = err.message();
                 if let (Some(line), Some(col)) = (err.js_line(), err.js_column()) {
-                    eprintln!("  in file: {}:{}:{}", file_path.display(), line, col);
+                    eprintln!("{} at file: {}:{}:{}", msg, file_path.display(), line, col);
                 } else {
-                    eprintln!("  in file: {}", file_path.display());
+                    eprintln!("{} at file: {}", msg, file_path.display());
+                }
+            } else {
+                eprintln!("{}", err.user_message());
+            }
+            let stack = err.stack();
+            if !stack.is_empty() {
+                eprintln!("Stack trace:");
+                for frame in stack {
+                    eprintln!("    at {}", frame);
                 }
             }
             std::process::exit(1);
@@ -134,13 +143,11 @@ fn run_persistent_repl() -> Result<(), Box<dyn std::error::Error + Send + Sync +
                     Ok(val) => println!("{val}"),
                     Err(e) => {
                         eprintln!("{}", e.user_message());
-                        // Show the code that caused the error for better debugging context
-                        if buffer.lines().count() == 1 {
-                            eprintln!("  at: {}", buffer.trim());
-                        } else {
-                            eprintln!("  in:");
-                            for line in buffer.lines() {
-                                eprintln!("    {line}");
+                        let stack = e.stack();
+                        if !stack.is_empty() {
+                            eprintln!("Stack trace:");
+                            for frame in stack {
+                                eprintln!("    at {}", frame);
                             }
                         }
                     }

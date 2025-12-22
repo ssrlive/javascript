@@ -7,6 +7,7 @@ use crate::core::{
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
 use crate::{error::JSError, unicode::utf8_to_utf16};
+use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
@@ -584,7 +585,7 @@ pub(crate) fn create_class_object(
                                 getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
                                 setter: setter.clone(),
                             };
-                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &getter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                         Value::Setter(params, body_set, set_env, home) => {
                             // Convert to property descriptor with both getter and setter
@@ -593,7 +594,7 @@ pub(crate) fn create_class_object(
                                 getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
                                 setter: Some((params.clone(), body_set.clone(), set_env.clone(), home.clone())),
                             };
-                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &getter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                         // If there's an existing raw value or getter, overwrite with a Property descriptor bearing the getter
                         _ => {
@@ -602,7 +603,7 @@ pub(crate) fn create_class_object(
                                 getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
                                 setter: None,
                             };
-                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &getter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                     }
                 } else {
@@ -628,7 +629,7 @@ pub(crate) fn create_class_object(
                                 getter: getter.clone(),
                                 setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
                             };
-                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &setter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                         Value::Getter(get_body, get_env, home) => {
                             // Convert to property descriptor with both getter and setter
@@ -637,7 +638,7 @@ pub(crate) fn create_class_object(
                                 getter: Some((get_body.clone(), get_env.clone(), home.clone())),
                                 setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
                             };
-                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &setter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -645,7 +646,7 @@ pub(crate) fn create_class_object(
                                 getter: None,
                                 setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
                             };
-                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                            crate::core::obj_set_rc(&prototype_obj, &setter_name.into(), Rc::new(RefCell::new(new_prop)));
                         }
                     }
                 } else {

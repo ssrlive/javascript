@@ -927,7 +927,7 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             // the original object (`js_obj`) as per JS semantics.
             let val_clone = val.borrow().clone();
             match val_clone {
-                Value::Property { value, getter, .. } => {
+                Value::Property { value, getter, setter } => {
                     log::trace!("obj_get_key_value - property descriptor found for key {}", key);
                     if let Some((body, env, _)) = getter {
                         // Create a new environment with this bound to the original object
@@ -946,6 +946,10 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                             log::trace!("obj_get_key_value - returning object ptr={:p} for key {}", Rc::as_ptr(obj_ptr), key);
                         }
                         return Ok(Some(val_rc));
+                    } else if setter.is_some() {
+                        // Accessor exists but no getter — write-only accessor
+                        // Per ECMAScript spec, reading a write-only accessor returns undefined.
+                        return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
                     } else {
                         return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
                     }
@@ -961,6 +965,13 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                         log::trace!("obj_get_key_value - getter returned object ptr={:p} for key {}", ptr, key);
                     }
                     return Ok(Some(Rc::new(RefCell::new(result))));
+                }
+                // If we found a raw Setter value (not yet converted to a Property descriptor)
+                // reading it should behave like a write-only accessor: throw a TypeError.
+                Value::Setter(..) => {
+                    // Raw Setter found (not normalized into a Property descriptor).
+                    // Reading a setter-only property should return undefined per spec.
+                    return Ok(Some(Rc::new(RefCell::new(Value::Undefined))));
                 }
                 _ => {
                     log::trace!("obj_get_key_value - raw value found for key {}", key);
@@ -1578,7 +1589,48 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
             _ => {}
         }
     }
-    // No setter, just set the value normally
+    // No setter on the *own* property; check prototype chain for accessors.
+    // If a setter exists on a prototype, call it; if the prototype has a getter
+    // with no setter (read-only accessor), throw a TypeError (strict mode behavior).
+    {
+        let mut proto_opt = js_obj.borrow().prototype.clone();
+        while let Some(proto) = proto_opt {
+            if let Some(proto_prop_rc) = get_own_property(&proto, key) {
+                match &*proto_prop_rc.borrow() {
+                    Value::Property {
+                        setter: Some((param, body, env, _)),
+                        ..
+                    } => {
+                        let setter_env = new_js_object_data();
+                        setter_env.borrow_mut().prototype = Some(env.clone());
+                        env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
+                        let args = vec![val.clone()];
+                        crate::core::bind_function_parameters(&setter_env, param, &args)?;
+                        let _v = evaluate_statements(&setter_env, body)?;
+                        return Ok(());
+                    }
+                    Value::Setter(param, body, env, _) => {
+                        let setter_env = new_js_object_data();
+                        setter_env.borrow_mut().prototype = Some(env.clone());
+                        env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
+                        let args = vec![val.clone()];
+                        crate::core::bind_function_parameters(&setter_env, param, &args)?;
+                        evaluate_statements(&setter_env, body)?;
+                        return Ok(());
+                    }
+                    Value::Property {
+                        getter: Some(_),
+                        setter: None,
+                        ..
+                    } => {
+                        return Err(raise_type_error!(format!("Cannot assign to read-only property '{}'", key)));
+                    }
+                    _ => {}
+                }
+            }
+            proto_opt = proto.borrow().prototype.clone();
+        }
+    }
 
     // Special handling for Array length property
     if let PropertyKey::String(s) = key {

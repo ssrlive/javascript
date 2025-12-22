@@ -47,6 +47,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),
         "Object.prototype.valueOf" => object_prototype_value_of(args, env),
         "Object.prototype.toString" => object_prototype_to_string(args, env),
+        "Object.prototype.hasOwnProperty" => handle_object_has_own_property(args, env),
         "String" => crate::js_string::string_constructor(args, env),
         "Function" => function_constructor(args, env),
         "parseInt" => parse_int_function(args, env),
@@ -1067,4 +1068,52 @@ fn test_with_intl_constructors(args: &[Expr], env: &JSObjectDataPtr) -> Result<V
     crate::core::evaluate_statements(&func_env, &callback_func.1)?;
 
     Ok(Value::Undefined)
+}
+
+fn handle_object_has_own_property(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    // hasOwnProperty should inspect the bound `this` and take one argument
+    if args.len() != 1 {
+        return Err(raise_eval_error!("hasOwnProperty requires one argument"));
+    }
+    let key_val = evaluate_expr(env, &args[0])?;
+    if let Some(this_rc) = crate::core::env_get(env, "this") {
+        let this_val = this_rc.borrow().clone();
+        match this_val {
+            Value::Object(obj) => {
+                let exists = match key_val {
+                    Value::String(s) => crate::core::get_own_property(&obj, &String::from_utf16_lossy(&s).into()).is_some(),
+                    Value::Number(n) => crate::core::get_own_property(&obj, &n.to_string().into()).is_some(),
+                    Value::Boolean(b) => crate::core::get_own_property(&obj, &b.to_string().into()).is_some(),
+                    Value::Undefined => crate::core::get_own_property(&obj, &"undefined".into()).is_some(),
+                    Value::Symbol(sd) => {
+                        let sym_key = crate::core::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                        crate::core::get_own_property(&obj, &sym_key).is_some()
+                    }
+                    other => crate::core::get_own_property(&obj, &crate::core::value_to_string(&other).into()).is_some(),
+                };
+                Ok(Value::Boolean(exists))
+            }
+            Value::String(s) => {
+                // boxed string has 'length' and indexed properties
+                let key_str = match key_val {
+                    Value::String(ss) => String::from_utf16_lossy(&ss),
+                    Value::Number(n) => n.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    Value::Undefined => "undefined".to_string(),
+                    Value::Symbol(_) => return Ok(Value::Boolean(false)),
+                    other => crate::core::value_to_string(&other),
+                };
+                if key_str == "length" {
+                    return Ok(Value::Boolean(true));
+                }
+                if let Ok(idx) = key_str.parse::<usize>() {
+                    return Ok(Value::Boolean(idx < crate::unicode::utf16_len(&s)));
+                }
+                Ok(Value::Boolean(false))
+            }
+            _ => Ok(Value::Boolean(false)),
+        }
+    } else {
+        Err(raise_eval_error!("hasOwnProperty called without this"))
+    }
 }

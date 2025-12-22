@@ -813,6 +813,39 @@ pub fn value_to_property_key(val: &Value) -> PropertyKey {
     }
 }
 
+/// Helper: create a function call environment for invoking a closure
+/// stored in `captured_env`, bind parameters (if provided), set `this`,
+/// and optionally attach `__frame` and `__caller` for stack traces.
+pub fn prepare_function_call_env(
+    captured_env_opt: Option<&JSObjectDataPtr>,
+    this_val_opt: Option<Value>,
+    params_opt: Option<&[DestructuringElement]>,
+    args: &[Value],
+    frame_opt: Option<&str>,
+    caller_env_opt: Option<&JSObjectDataPtr>,
+) -> Result<JSObjectDataPtr, JSError> {
+    let func_env = new_js_object_data();
+    if let Some(captured_env) = captured_env_opt {
+        func_env.borrow_mut().prototype = Some(captured_env.clone());
+    }
+    // mark this as a function scope so var-hoisting and env_set_var bind into this frame
+    func_env.borrow_mut().is_function_scope = true;
+    if let Some(this_val) = this_val_opt {
+        obj_set_key_value(&func_env, &"this".into(), this_val)?;
+    }
+    if let Some(params) = params_opt {
+        // bind params to provided args
+        crate::core::bind_function_parameters(&func_env, params, args)?;
+    }
+    if let Some(frame) = frame_opt {
+        let _ = obj_set_key_value(&func_env, &"__frame".into(), Value::String(utf8_to_utf16(frame)));
+    }
+    if let Some(caller) = caller_env_opt {
+        let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(caller.clone()));
+    }
+    Ok(func_env)
+}
+
 // Helper: extract a closure (params, body, env) from a Value. This accepts
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.
@@ -850,13 +883,16 @@ pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Va
                     let method_val = method_rc.borrow().clone();
                     // Accept direct closures or function-objects that wrap a closure
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
-                        // Create a new execution env and bind this
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                         // Pass hint as first param if the function declares params
                         let args = vec![Value::String(utf8_to_utf16(hint))];
-                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                        let func_env = prepare_function_call_env(
+                            Some(&captured_env),
+                            Some(Value::Object(obj_map.clone())),
+                            Some(&params),
+                            &args,
+                            None,
+                            None,
+                        )?;
                         let result = evaluate_statements(&func_env, &body)?;
                         match result {
                             Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {

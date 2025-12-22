@@ -2,7 +2,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
-    new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
+    new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_function_call_env, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
@@ -280,10 +280,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     let val = val_rc.borrow().clone();
 
                     let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().prototype = Some(captured_env.clone());
                         let args = vec![val.clone(), Value::Number(i as f64)];
-                        crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                        let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
                         crate::core::evaluate_statements(&func_env, &body)?
                     } else {
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
@@ -830,25 +828,22 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
         Value::Boolean(b) => Ok(Value::Boolean(*b)),
         Value::Undefined => Err(raise_type_error!("Cannot convert undefined to object")),
         Value::Null => Err(raise_type_error!("Cannot convert null to object")),
-        Value::Object(obj_map) => {
+        Value::Object(obj) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {
+            if let Some(wrapped_val) = obj_get_key_value(obj, &"__value__".into())? {
                 return Ok(wrapped_val.borrow().clone());
             }
             // If object defines a user valueOf function, call it and use its
             // primitive result if it returns a primitive.
-            if let Some(method_rc) = obj_get_key_value(obj_map, &"valueOf".into())? {
+            if let Some(method_rc) = obj_get_key_value(obj, &"valueOf".into())? {
                 let method_val = method_rc.borrow().clone();
                 match method_val {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let _params = &data.params;
                         let body = &data.body;
                         let captured_env = &data.env;
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().prototype = Some(captured_env.clone());
-                        func_env.borrow_mut().is_function_scope = true;
-                        // bind `this` to the object
-                        crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                        let func_env =
+                            prepare_function_call_env(Some(captured_env), Some(Value::Object(obj.clone())), None, &[], None, None)?;
                         let result = crate::core::evaluate_statements(&func_env, body)?;
                         if matches!(
                             result,
@@ -862,16 +857,13 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                         // handle it directly here to avoid recursion back into
                         // `handle_global_function` which would call us again.
                         if func_name == "Object.prototype.valueOf" {
-                            return Ok(Value::Object(obj_map.clone()));
+                            return Ok(Value::Object(obj.clone()));
                         }
                         if func_name == "Object.prototype.toString" {
-                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
+                            return crate::js_object::handle_to_string_method(&Value::Object(obj.clone()), args, env);
                         }
 
-                        let func_env = new_js_object_data();
-                        func_env.borrow_mut().is_function_scope = true;
-                        // bind `this` to the object
-                        crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                        let func_env = prepare_function_call_env(None, Some(Value::Object(obj.clone())), None, &[], None, None)?;
                         let res = crate::js_function::handle_global_function(&func_name, &[], &func_env)?;
                         if matches!(
                             res,
@@ -890,10 +882,8 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                                 let _params = &data.params;
                                 let body = &data.body;
                                 let captured_env = &data.env;
-                                let func_env = new_js_object_data();
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                func_env.borrow_mut().is_function_scope = true;
-                                crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                let func_env =
+                                    prepare_function_call_env(Some(captured_env), Some(Value::Object(obj.clone())), None, &[], None, None)?;
                                 let result = crate::core::evaluate_statements(&func_env, body)?;
                                 if matches!(
                                     result,
@@ -908,11 +898,11 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                 }
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
-            if is_date_object(obj_map) {
-                return crate::js_date::handle_date_method(obj_map, "valueOf", args, env);
+            if is_date_object(obj) {
+                return crate::js_date::handle_date_method(obj, "valueOf", args, env);
             }
             // For regular objects, return the object itself
-            Ok(Value::Object(obj_map.clone()))
+            Ok(Value::Object(obj.clone()))
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
         Value::Closure(data) | Value::AsyncClosure(data) => {

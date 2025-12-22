@@ -1,5 +1,6 @@
 use crate::core::{
     Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_key_value, obj_set_key_value,
+    prepare_function_call_env,
 };
 use crate::error::JSError;
 use crate::js_array::set_array_length;
@@ -103,18 +104,19 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     let params = &data.params;
                     let body = &data.body;
                     let captured_env = &data.env;
-                    // Create function environment and bind 'this'
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    func_env.borrow_mut().is_function_scope = true;
-                    obj_set_key_value(&func_env, &"this".into(), this_arg)?;
-
                     // Collect all arguments, expanding spreads
                     let mut evaluated_args = Vec::new();
                     crate::core::expand_spread_in_call_args(env, &arg_exprs, &mut evaluated_args)?;
 
-                    // Bind parameters
-                    crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                    // Create function environment and bind 'this'
+                    let func_env = prepare_function_call_env(
+                        Some(captured_env),
+                        Some(this_arg.clone()),
+                        Some(params),
+                        &evaluated_args,
+                        None,
+                        None,
+                    )?;
 
                     // Execute function body
                     crate::core::evaluate_statements(&func_env, body)
@@ -135,12 +137,9 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                             .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                     }
 
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    func_env.borrow_mut().is_function_scope = true;
-                    obj_set_key_value(&func_env, &"this".into(), this_arg)?;
-                    // Bind parameters
-                    crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                    let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
+                    crate::core::env_set(&func_env, "this", this_arg)?;
+                    // Execute function body
                     let result = crate::core::evaluate_statements(&func_env, body);
                     match result {
                         Ok(val) => {
@@ -180,15 +179,11 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                     evaluated_args.push(evaluate_expr(env, ae)?);
                                 }
 
-                                // Prepare function environment and bind `this`
-                                let func_env = new_js_object_data();
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                func_env.borrow_mut().is_function_scope = true;
-                                // Use env_set so function scope semantics apply
+                                // Prepare function environment and bind parameters
+                                let func_env =
+                                    prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
+                                // Use env_set so function scope semantics apply for `this`
                                 crate::core::env_set(&func_env, "this", this_arg)?;
-
-                                // Bind parameters
-                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                 // Execute function body
                                 return crate::core::evaluate_statements(&func_env, body);
@@ -211,15 +206,10 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                         .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                                 }
 
-                                // Prepare function environment and bind `this`
-                                let func_env = new_js_object_data();
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-                                func_env.borrow_mut().is_function_scope = true;
+                                // Prepare function environment and bind parameters
+                                let func_env =
+                                    prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
                                 crate::core::env_set(&func_env, "this", this_arg)?;
-
-                                // Bind parameters
-                                // Bind parameters
-                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                                 // Execute function body and resolve/reject promise
                                 let result = crate::core::evaluate_statements(&func_env, body);

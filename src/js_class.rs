@@ -2,7 +2,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property,
-    new_js_object_data,
+    new_js_object_data, prepare_function_call_env,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
@@ -141,16 +141,16 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     }
 
                     // Prepare function environment with 'this' bound to the instance
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
-                    obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
-
-                    // Collect all arguments, expanding spreads
                     let mut evaluated_args = Vec::new();
                     crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-
-                    // Bind parameters
-                    crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                    let func_env = prepare_function_call_env(
+                        Some(captured_env),
+                        Some(Value::Object(instance.clone())),
+                        Some(params),
+                        &evaluated_args,
+                        None,
+                        None,
+                    )?;
 
                     // Execute constructor body
                     evaluate_statements(&func_env, body)?;
@@ -215,18 +215,18 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // Call constructor if it exists
                 for member in &class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
-                        // Create function environment with 'this' bound to instance
-                        let func_env = new_js_object_data();
-
-                        // Bind 'this' to the instance
-                        obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
-
                         // Collect all arguments, expanding spreads
                         let mut evaluated_args = Vec::new();
                         crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                        // Bind parameters
-                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                        let func_env = prepare_function_call_env(
+                            None,
+                            Some(Value::Object(instance.clone())),
+                            Some(params),
+                            &evaluated_args,
+                            None,
+                            None,
+                        )?;
 
                         // Execute constructor body
                         let result = crate::core::evaluate_statements_with_context(&func_env, body)?;
@@ -419,18 +419,18 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
             let captured_env = &data.env;
             // Handle function constructors
             let instance = new_js_object_data();
-            let func_env = new_js_object_data();
-            func_env.borrow_mut().prototype = Some(captured_env.clone());
-
-            // Bind 'this' to the instance
-            obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
-
             // Collect all arguments, expanding spreads
             let mut evaluated_args = Vec::new();
             crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-            // Bind parameters
-            crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+            let func_env = prepare_function_call_env(
+                Some(captured_env),
+                Some(Value::Object(instance.clone())),
+                Some(params),
+                &evaluated_args,
+                None,
+                None,
+            )?;
 
             // Execute function body
             evaluate_statements(&func_env, body)?;
@@ -773,10 +773,12 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 let captured_env = &data.env;
                 let home_obj = data.home_object.borrow().clone();
                 log::trace!("Method is a closure with {} params", params.len());
-                // Use the closure's captured environment as the base for the
-                // function environment so outer-scope lookups work as expected.
-                let func_env = new_js_object_data();
-                func_env.borrow_mut().prototype = Some(captured_env.clone());
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+
+                // Create function environment based on the closure's captured env and bind params
+                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
 
                 if let Some(home) = home_obj {
                     crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
@@ -785,13 +787,6 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 // Bind 'this' to the instance (use env_set to avoid invoking setters)
                 crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                 log::trace!("Bound 'this' to instance");
-
-                // Collect all arguments, expanding spreads
-                let mut evaluated_args = Vec::new();
-                crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-
-                // Bind parameters
-                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
 
                 // Execute method body
                 log::trace!("Executing method body");
@@ -886,18 +881,18 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                 // Call parent constructor
                 for member in &parent_class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
-                        // Create function environment with 'this' bound to instance
-                        let func_env = new_js_object_data();
-
-                        // Bind 'this' to the instance
-                        obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
-
                         // Collect all arguments, expanding spreads
                         let mut evaluated_args = Vec::new();
                         crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                        // Bind parameters
-                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                        let func_env = prepare_function_call_env(
+                            None,
+                            Some(Value::Object(instance.clone())),
+                            Some(params),
+                            &evaluated_args,
+                            None,
+                            None,
+                        )?;
 
                         // Execute parent constructor body
                         return evaluate_statements(&func_env, body);
@@ -998,23 +993,24 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                 let body = &data.body;
                                 let captured_env = &data.env;
                                 let home_obj = data.home_object.borrow().clone();
-                                // Create function environment with 'this' bound to instance
-                                let func_env = new_js_object_data();
-                                func_env.borrow_mut().prototype = Some(captured_env.clone());
-
-                                if let Some(home) = home_obj {
-                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
-                                }
-
-                                // Bind 'this' to the instance
-                                obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;
 
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
                                 crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                                // Bind parameters
-                                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                                // Create function environment and bind params/this
+                                let func_env = prepare_function_call_env(
+                                    Some(captured_env),
+                                    Some(this_val.borrow().clone()),
+                                    Some(params),
+                                    &evaluated_args,
+                                    None,
+                                    None,
+                                )?;
+
+                                if let Some(home) = home_obj {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                }
 
                                 // Execute method body
                                 return evaluate_statements(&func_env, body);
@@ -1035,23 +1031,24 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                             let body = &data.body;
                                             let captured_env = &data.env;
                                             let home_obj = data.home_object.borrow().clone();
-                                            // Create function environment with 'this' bound to instance
-                                            let func_env = new_js_object_data();
-                                            func_env.borrow_mut().prototype = Some(captured_env.clone());
-
-                                            if let Some(home) = home_obj {
-                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
-                                            }
-
-                                            // Bind 'this' to the instance
-                                            obj_set_key_value(&func_env, &"this".into(), this_val.borrow().clone())?;
 
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
                                             crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                                            // Bind parameters
-                                            crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                                            // Create function environment and bind params/this
+                                            let func_env = prepare_function_call_env(
+                                                Some(captured_env),
+                                                Some(this_val.borrow().clone()),
+                                                Some(params),
+                                                &evaluated_args,
+                                                None,
+                                                None,
+                                            )?;
+
+                                            if let Some(home) = home_obj {
+                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            }
 
                                             // Execute method body
                                             return evaluate_statements(&func_env, body);

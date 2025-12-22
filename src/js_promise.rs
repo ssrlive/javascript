@@ -25,7 +25,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, StatementKind, Value, env_set, evaluate_expr, evaluate_statements,
-    extract_closure_from_value, value_to_string,
+    extract_closure_from_value, prepare_function_call_env, value_to_string,
 };
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
@@ -195,10 +195,8 @@ fn process_task(task: Task) -> Result<(), JSError> {
             for (callback, new_promise) in callbacks {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                    let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             log::trace!("Callback executed successfully, resolving promise");
@@ -228,10 +226,8 @@ fn process_task(task: Task) -> Result<(), JSError> {
             for (callback, new_promise) in callbacks {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                    let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             resolve_promise(&new_promise, result);
@@ -254,20 +250,19 @@ fn process_task(task: Task) -> Result<(), JSError> {
             log::trace!("Processing Timeout task");
             // Call the callback with the provided args
             if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                let func_env = new_js_object_data();
-                func_env.borrow_mut().prototype = Some(captured_env.clone());
-
                 // If callback is a standard function (Value::Object), bind `this` to global.
                 // Arrow functions (Value::Closure) should inherit `this` from captured_env.
-                if let Value::Object(_) = callback {
+                let this_val_opt = if let Value::Object(_) = callback {
                     let mut global_env = captured_env.clone();
                     while let Some(proto) = global_env.clone().borrow().prototype.clone() {
                         global_env = proto;
                     }
-                    env_set(&func_env, "this", Value::Object(global_env))?;
-                }
+                    Some(Value::Object(global_env))
+                } else {
+                    None
+                };
 
-                crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                let func_env = prepare_function_call_env(Some(&captured_env), this_val_opt, Some(&params), &args, None, None)?;
                 let _ = evaluate_statements(&func_env, &body)?;
             }
         }
@@ -281,20 +276,17 @@ fn process_task(task: Task) -> Result<(), JSError> {
             log::trace!("Processing Interval task");
             // Call the callback with the provided args
             if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                let func_env = new_js_object_data();
-                func_env.borrow_mut().prototype = Some(captured_env.clone());
-
-                // If callback is a standard function (Value::Object), bind `this` to global.
-                // Arrow functions (Value::Closure) should inherit `this` from captured_env.
-                if let Value::Object(_) = callback {
+                let this_val_opt = if let Value::Object(_) = callback {
                     let mut global_env = captured_env.clone();
                     while let Some(proto) = global_env.clone().borrow().prototype.clone() {
                         global_env = proto;
                     }
-                    env_set(&func_env, "this", Value::Object(global_env))?;
-                }
+                    Some(Value::Object(global_env))
+                } else {
+                    None
+                };
 
-                crate::core::bind_function_parameters(&func_env, &params, &args)?;
+                let func_env = prepare_function_call_env(Some(&captured_env), this_val_opt, Some(&params), &args, None, None)?;
                 let _ = evaluate_statements(&func_env, &body)?;
 
                 // Re-queue the interval task

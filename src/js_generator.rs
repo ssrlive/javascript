@@ -1,5 +1,7 @@
 use crate::{
-    core::{DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr},
+    core::{
+        DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr, prepare_function_call_env,
+    },
     error::JSError,
 };
 
@@ -462,9 +464,7 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 // If the yield has an inner expression, evaluate it in a fresh
                 // function-like frame whose prototype is the captured env.
                 if let Some(inner_expr_box) = yield_inner {
-                    let func_env = crate::core::new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(gen_obj.env.clone());
-                    func_env.borrow_mut().is_function_scope = true;
+                    let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
                     match crate::core::evaluate_expr(&func_env, &inner_expr_box) {
                         Ok(val) => return Ok(create_iterator_result(val, false)),
                         Err(_) => return Ok(create_iterator_result(Value::Undefined, false)),
@@ -495,9 +495,7 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
             }
 
-            let func_env = crate::core::new_js_object_data();
-            func_env.borrow_mut().prototype = Some(gen_obj.env.clone());
-            func_env.borrow_mut().is_function_scope = true;
+            let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
             // Execute the (possibly modified) tail
             let result = crate::core::evaluate_statements(&func_env, &tail);
             gen_obj.state = crate::core::GeneratorState::Completed;
@@ -548,9 +546,7 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
                 tail[0] = StatementKind::Throw(Expr::Value(throw_value.clone())).into();
             }
 
-            let func_env = crate::core::new_js_object_data();
-            func_env.borrow_mut().prototype = Some(gen_obj.env.clone());
-            func_env.borrow_mut().is_function_scope = true;
+            let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.

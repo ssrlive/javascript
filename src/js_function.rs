@@ -1,4 +1,6 @@
-use crate::core::{ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value};
+use crate::core::{
+    ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value, prepare_function_call_env,
+};
 
 // Centralize dispatching small builtins that are represented as Value::Function
 // names and need to be applied to an object receiver (e.g., "BigInt_toString",
@@ -194,25 +196,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             let forwarded_args = args[1..].to_vec();
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = crate::core::new_js_object_data();
-                            call_env.borrow_mut().prototype = Some(env.clone());
-
-                            // Bind 'this'
-                            match receiver_val {
-                                Value::Object(obj) => {
-                                    crate::core::obj_set_key_value(&call_env, &"this".into(), Value::Object(obj))?;
-                                }
-                                val => {
-                                    // Primitive values as 'this'
-                                    // For strict mode, they are passed as is. For non-strict, they are boxed.
-                                    // Assuming non-strict for now or just passing as is and letting handler deal with it.
-                                    // Our Array.prototype handler handles String specifically.
-                                    // But we need to box it if we want to store it in env as "this" which expects Value?
-                                    // env_get returns Rc<RefCell<Value>>, so we can store any Value.
-                                    // But obj_set_key_value expects Value.
-                                    crate::core::obj_set_key_value(&call_env, &"this".into(), val)?;
-                                }
-                            }
+                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, None)?;
 
                             return handle_global_function(&func_name, &forwarded_args, &call_env);
                         }
@@ -264,18 +248,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             }
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = crate::core::new_js_object_data();
-                            call_env.borrow_mut().prototype = Some(env.clone());
-
-                            // Bind 'this'
-                            match receiver_val {
-                                Value::Object(obj) => {
-                                    crate::core::obj_set_key_value(&call_env, &"this".into(), Value::Object(obj))?;
-                                }
-                                val => {
-                                    crate::core::obj_set_key_value(&call_env, &"this".into(), val)?;
-                                }
-                            }
+                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, None)?;
 
                             return handle_global_function(&func_name, &forwarded_exprs, &call_env);
                         }

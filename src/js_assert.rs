@@ -1,4 +1,5 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value};
+use crate::core::{Expr, JSObjectDataPtr, Value};
+use crate::core::{evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value, prepare_function_call_env};
 use crate::error::JSError;
 
 /// Handle assert object method calls
@@ -84,8 +85,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Closure(data) => {
                     let body = &data.body;
                     let captured_env = &data.env;
-                    let func_env = new_js_object_data();
-                    func_env.borrow_mut().prototype = Some(captured_env.clone());
+                    let func_env = prepare_function_call_env(Some(captured_env), None, None, &[], None, None)?;
                     match evaluate_statements(&func_env, body) {
                         Ok(_) => Err(raise_eval_error!("assert.throws expected function to throw a value")),
                         Err(_) => Ok(Value::Undefined),

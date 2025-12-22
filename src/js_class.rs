@@ -511,9 +511,16 @@ pub(crate) fn create_class_object(
     extends: &Option<Expr>,
     members: &[ClassMember],
     env: &JSObjectDataPtr,
+    bind_name_during_creation: bool,
 ) -> Result<Value, JSError> {
     // Create a class object (function) that can be instantiated with 'new'
     let class_obj = new_js_object_data();
+
+    // If requested (class declaration), bind the class name into the surrounding environment
+    // early so that static blocks can reference it during class evaluation.
+    if bind_name_during_creation && !name.is_empty() {
+        crate::core::env_set(env, name, Value::Object(class_obj.clone()))?;
+    }
 
     // Set class name
     obj_set_key_value(&class_obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;

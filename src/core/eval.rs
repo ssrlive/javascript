@@ -615,11 +615,11 @@ fn evaluate_stmt_class(
     members: &[crate::js_class::ClassMember],
 ) -> Result<(), JSError> {
     // Note: Duplicate declaration checks are handled by validate_declarations.
-    // We expect the binding to exist (as Uninitialized) due to hoisting,
-    // or not exist if we are in a context where hoisting didn't happen (though currently it always does for blocks).
-    // We just overwrite it with the actual class object.
+    // For class declarations we need the class name binding to be available during class evaluation
+    // (so static blocks can reference the class), so request that the name be bound early.
 
-    let class_obj = create_class_object(name, extends, members, env)?;
+    let class_obj = create_class_object(name, extends, members, env, true)?;
+    // Ensure the binding is set to the final class object (overwrite if necessary)
     env_set(env, name, class_obj)?;
     Ok(())
 }
@@ -2795,7 +2795,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::TaggedTemplate(tag, strings, exprs) => evaluate_tagged_template(env, tag, strings, exprs),
         Expr::Index(obj, idx) => evaluate_index(env, obj, idx),
         Expr::Property(obj, prop) => evaluate_property(env, obj, prop),
-        Expr::Class(class_def) => create_class_object(&class_def.name, &class_def.extends, &class_def.members, env),
+        Expr::Class(class_def) => create_class_object(&class_def.name, &class_def.extends, &class_def.members, env, false),
         Expr::Call(func_expr, args) => match evaluate_call(env, func_expr, args) {
             Ok(v) => Ok(v),
             Err(e) => {

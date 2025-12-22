@@ -3,8 +3,8 @@ use crate::{
     core::{
         BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind,
         SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
-        extract_closure_from_value, get_own_property, has_own_property_value, is_truthy, new_js_object_data, obj_delete, obj_set_key_value,
-        parse_bigint_string, to_primitive, value_to_property_key, value_to_sort_string, value_to_string, values_equal,
+        extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
+        to_primitive, value_to_property_key, value_to_sort_string, value_to_string, values_equal,
     },
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
@@ -5912,65 +5912,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     return crate::js_date::handle_date_method(&obj_map, method_name, args, env);
                                 }
                                 if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
-                                    match func_name.as_str() {
-                                        "Object.prototype.hasOwnProperty" => {
-                                            // hasOwnProperty takes one argument; evaluate it in caller env
-                                            if args.len() != 1 {
-                                                return Err(raise_eval_error!("hasOwnProperty requires one argument"));
-                                            }
-                                            let key_val = evaluate_expr(env, &args[0])?;
-                                            let exists = has_own_property_value(&obj_map, &key_val);
-                                            Ok(Value::Boolean(exists))
-                                        }
-                                        "Object.prototype.isPrototypeOf" => {
-                                            if args.len() != 1 {
-                                                return Err(raise_eval_error!("isPrototypeOf requires one argument"));
-                                            }
-                                            let target_val = evaluate_expr(env, &args[0])?;
-                                            match target_val {
-                                                Value::Object(target_map) => {
-                                                    let mut current_opt = target_map.borrow().prototype.clone();
-                                                    let mut found = false;
-                                                    while let Some(parent) = current_opt {
-                                                        if Rc::ptr_eq(&parent, &obj_map) {
-                                                            found = true;
-                                                            break;
-                                                        }
-                                                        current_opt = parent.borrow().prototype.clone();
-                                                    }
-                                                    Ok(Value::Boolean(found))
-                                                }
-                                                _ => Ok(Value::Boolean(false)),
-                                            }
-                                        }
-                                        "Object.prototype.toLocaleString" => {
-                                            // Delegate Object.prototype.toLocaleString to the
-                                            // same handler as toString (defaults to toString)
-                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env)
-                                        }
-                                        "Error.prototype.toString" => {
-                                            crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args)
-                                        }
-                                        "Object.prototype.propertyIsEnumerable" => {
-                                            if args.len() != 1 {
-                                                return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
-                                            }
-                                            let key_val = evaluate_expr(env, &args[0])?;
-                                            let exists = has_own_property_value(&obj_map, &key_val);
-                                            Ok(Value::Boolean(exists))
-                                        }
-                                        "Object.prototype.toString" => {
-                                            // Delegate the built-in toString behavior to js_object::handle_to_string_method
-                                            // which handles wrapped primitives, arrays, and Symbol.toStringTag
-                                            // The function is invoked with `this` bound to obj_map (receiver)
-                                            crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env)
-                                        }
-                                        "Object.prototype.valueOf" => {
-                                            // Delegate to handle_value_of_method
-                                            crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args, env)
-                                        }
-                                        _ => crate::js_function::handle_global_function(&func_name, args, env),
+                                    if let Some(v) = crate::js_object::handle_object_prototype_builtin(&func_name, &obj_map, args, env)? {
+                                        return Ok(v);
                                     }
+                                    if func_name == "Error.prototype.toString" {
+                                        return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
+                                    }
+                                    // Fall back to global handler
+                                    crate::js_function::handle_global_function(&func_name, args, env)
                                 } else {
                                     crate::js_function::handle_global_function(&func_name, args, env)
                                 }

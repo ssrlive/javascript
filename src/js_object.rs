@@ -945,3 +945,69 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object")),
     }
 }
+
+/// Handle built-in Object.prototype.* functions in one place so callers don't
+/// have to duplicate matching logic. If `func_name` matches a supported
+/// Object.prototype builtin, the function will execute it (evaluating args
+/// where needed) and return `Ok(Some(Value))`. If it does not match, returns
+/// `Ok(None)` so callers can fall back to other dispatch logic.
+pub(crate) fn handle_object_prototype_builtin(
+    func_name: &str,
+    obj_map: &JSObjectDataPtr,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Option<Value>, JSError> {
+    match func_name {
+        "Object.prototype.hasOwnProperty" => {
+            if args.len() != 1 {
+                return Err(raise_eval_error!("hasOwnProperty requires one argument"));
+            }
+            let key_val = crate::core::evaluate_expr(env, &args[0])?;
+            let exists = crate::core::has_own_property_value(obj_map, &key_val);
+            Ok(Some(Value::Boolean(exists)))
+        }
+        "Object.prototype.isPrototypeOf" => {
+            if args.len() != 1 {
+                return Err(raise_eval_error!("isPrototypeOf requires one argument"));
+            }
+            let target_val = crate::core::evaluate_expr(env, &args[0])?;
+            match target_val {
+                Value::Object(target_map) => {
+                    let mut current_opt = target_map.borrow().prototype.clone();
+                    while let Some(parent) = current_opt {
+                        if Rc::ptr_eq(&parent, obj_map) {
+                            return Ok(Some(Value::Boolean(true)));
+                        }
+                        current_opt = parent.borrow().prototype.clone();
+                    }
+                    Ok(Some(Value::Boolean(false)))
+                }
+                _ => Ok(Some(Value::Boolean(false))),
+            }
+        }
+        "Object.prototype.propertyIsEnumerable" => {
+            if args.len() != 1 {
+                return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
+            }
+            let key_val = crate::core::evaluate_expr(env, &args[0])?;
+            let exists = crate::core::has_own_property_value(obj_map, &key_val);
+            Ok(Some(Value::Boolean(exists)))
+        }
+        "Object.prototype.toString" => Ok(Some(crate::js_object::handle_to_string_method(
+            &Value::Object(obj_map.clone()),
+            args,
+            env,
+        )?)),
+        "Object.prototype.valueOf" => Ok(Some(crate::js_object::handle_value_of_method(
+            &Value::Object(obj_map.clone()),
+            args,
+            env,
+        )?)),
+        "Object.prototype.toLocaleString" => Ok(Some(crate::js_object::handle_to_string_method(
+            &Value::Object(obj_map.clone()),
+            args,
+            env,
+        )?)),
+        _ => Ok(None),
+    }
+}

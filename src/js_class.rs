@@ -2,7 +2,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property,
-    has_own_property_value, new_js_object_data,
+    new_js_object_data,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
@@ -812,58 +812,13 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                     return crate::js_date::handle_date_method(obj_map, method_name, args, env);
                 }
                 if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
-                    match func_name.as_str() {
-                        "Object.prototype.hasOwnProperty" => {
-                            if args.len() != 1 {
-                                return Err(raise_eval_error!("hasOwnProperty requires one argument"));
-                            }
-                            let key_val = evaluate_expr(env, &args[0])?;
-                            let exists = has_own_property_value(obj_map, &key_val);
-                            return Ok(Value::Boolean(exists));
-                        }
-                        "Object.prototype.isPrototypeOf" => {
-                            if args.len() != 1 {
-                                return Err(raise_eval_error!("isPrototypeOf requires one argument"));
-                            }
-                            let target_val = evaluate_expr(env, &args[0])?;
-                            match target_val {
-                                Value::Object(target_map) => {
-                                    let mut current_opt = target_map.borrow().prototype.clone();
-                                    let mut found = false;
-                                    while let Some(parent) = current_opt {
-                                        if Rc::ptr_eq(&parent, obj_map) {
-                                            found = true;
-                                            break;
-                                        }
-                                        current_opt = parent.borrow().prototype.clone();
-                                    }
-                                    return Ok(Value::Boolean(found));
-                                }
-                                _ => return Ok(Value::Boolean(false)),
-                            }
-                        }
-                        "Object.prototype.toLocaleString" => {
-                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
-                        }
-                        "Error.prototype.toString" => {
-                            return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
-                        }
-                        "Object.prototype.propertyIsEnumerable" => {
-                            if args.len() != 1 {
-                                return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
-                            }
-                            let key_val = evaluate_expr(env, &args[0])?;
-                            let exists = has_own_property_value(obj_map, &key_val);
-                            return Ok(Value::Boolean(exists));
-                        }
-                        "Object.prototype.toString" => {
-                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
-                        }
-                        "Object.prototype.valueOf" => {
-                            return crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args, env);
-                        }
-                        _ => return crate::js_function::handle_global_function(func_name, args, env),
+                    if let Some(v) = crate::js_object::handle_object_prototype_builtin(func_name, obj_map, args, env)? {
+                        return Ok(v);
                     }
+                    if func_name == "Error.prototype.toString" {
+                        return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
+                    }
+                    return crate::js_function::handle_global_function(func_name, args, env);
                 }
 
                 return crate::js_function::handle_global_function(func_name, args, env);

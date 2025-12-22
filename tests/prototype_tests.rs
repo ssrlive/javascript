@@ -310,3 +310,26 @@ fn test_to_string_override_and_valueof() {
         _ => panic!("Expected array"),
     }
 }
+
+#[test]
+fn test_class_instance_to_string_inherits_object_prototype() {
+    let script = r#"
+        class C {}
+        [ (new C()).toString(), Object.prototype.toString.call(new C()) ]
+    "#;
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    match result {
+        Value::Object(arr) => {
+            let a = arr.borrow().get(&"0".into()).unwrap().borrow().clone();
+            let b = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
+            match (a, b) {
+                (Value::String(sa), Value::String(sb)) => {
+                    assert_eq!(String::from_utf16_lossy(&sa), "[object Object]");
+                    assert_eq!(String::from_utf16_lossy(&sb), "[object Object]");
+                }
+                _ => panic!("Expected strings from class instance toString tests"),
+            }
+        }
+        _ => panic!("Expected array"),
+    }
+}

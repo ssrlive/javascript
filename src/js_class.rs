@@ -544,6 +544,11 @@ pub(crate) fn create_class_object(
         } else {
             return Err(raise_eval_error!("Parent class expression did not evaluate to a class constructor"));
         }
+    } else {
+        // No `extends`: link prototype.__proto__ to `Object.prototype` if available so
+        // instance property lookups fall back to the standard Object.prototype methods
+        // (e.g., toString, valueOf, hasOwnProperty).
+        let _ = crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object");
     }
 
     obj_set_key_value(&class_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
@@ -791,6 +796,97 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 // Execute method body
                 log::trace!("Executing method body");
                 return evaluate_statements(&func_env, body);
+            }
+            Value::Function(func_name) => {
+                // Handle built-in functions on prototype (Object.prototype, Date.prototype, boxed primitives, etc.)
+                // Evaluate args when needed
+                // Note: handlers expect Expr args and env so pass them through
+                if func_name == "BigInt_toString" {
+                    return crate::js_bigint::handle_bigint_object_method(obj_map, "toString", args, env);
+                }
+                if func_name == "BigInt_valueOf" {
+                    return crate::js_bigint::handle_bigint_object_method(obj_map, "valueOf", args, env);
+                }
+                if func_name.starts_with("Date.prototype.") {
+                    let method_name = func_name.strip_prefix("Date.prototype.").unwrap();
+                    return crate::js_date::handle_date_method(obj_map, method_name, args, env);
+                }
+                if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
+                    match func_name.as_str() {
+                        "Object.prototype.hasOwnProperty" => {
+                            if args.len() != 1 {
+                                return Err(raise_eval_error!("hasOwnProperty requires one argument"));
+                            }
+                            let key_val = evaluate_expr(env, &args[0])?;
+                            let exists = match key_val {
+                                Value::String(s) => get_own_property(obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
+                                Value::Number(n) => get_own_property(obj_map, &n.to_string().into()).is_some(),
+                                Value::Boolean(b) => get_own_property(obj_map, &b.to_string().into()).is_some(),
+                                Value::Undefined => get_own_property(obj_map, &"undefined".into()).is_some(),
+                                Value::Symbol(sd) => {
+                                    let sym_key = crate::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                                    get_own_property(obj_map, &sym_key).is_some()
+                                }
+                                other => get_own_property(obj_map, &value_to_string(&other).into()).is_some(),
+                            };
+                            return Ok(Value::Boolean(exists));
+                        }
+                        "Object.prototype.isPrototypeOf" => {
+                            if args.len() != 1 {
+                                return Err(raise_eval_error!("isPrototypeOf requires one argument"));
+                            }
+                            let target_val = evaluate_expr(env, &args[0])?;
+                            match target_val {
+                                Value::Object(target_map) => {
+                                    let mut current_opt = target_map.borrow().prototype.clone();
+                                    let mut found = false;
+                                    while let Some(parent) = current_opt {
+                                        if Rc::ptr_eq(&parent, obj_map) {
+                                            found = true;
+                                            break;
+                                        }
+                                        current_opt = parent.borrow().prototype.clone();
+                                    }
+                                    return Ok(Value::Boolean(found));
+                                }
+                                _ => return Ok(Value::Boolean(false)),
+                            }
+                        }
+                        "Object.prototype.toLocaleString" => {
+                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
+                        }
+                        "Error.prototype.toString" => {
+                            return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
+                        }
+                        "Object.prototype.propertyIsEnumerable" => {
+                            if args.len() != 1 {
+                                return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
+                            }
+                            let key_val = evaluate_expr(env, &args[0])?;
+                            let exists = match key_val {
+                                Value::String(s) => get_own_property(obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
+                                Value::Number(n) => get_own_property(obj_map, &n.to_string().into()).is_some(),
+                                Value::Boolean(b) => get_own_property(obj_map, &b.to_string().into()).is_some(),
+                                Value::Undefined => get_own_property(obj_map, &"undefined".into()).is_some(),
+                                Value::Symbol(sd) => {
+                                    let sym_key = crate::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
+                                    get_own_property(obj_map, &sym_key).is_some()
+                                }
+                                other => get_own_property(obj_map, &value_to_string(&other).into()).is_some(),
+                            };
+                            return Ok(Value::Boolean(exists));
+                        }
+                        "Object.prototype.toString" => {
+                            return crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), args, env);
+                        }
+                        "Object.prototype.valueOf" => {
+                            return crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), args, env);
+                        }
+                        _ => return crate::js_function::handle_global_function(func_name, args, env),
+                    }
+                }
+
+                return crate::js_function::handle_global_function(func_name, args, env);
             }
             _ => {
                 log::warn!("Method is not a closure: {:?}", method_val.borrow());

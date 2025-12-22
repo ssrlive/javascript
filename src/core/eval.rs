@@ -2832,7 +2832,7 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
         Expr::OptionalIndex(obj, idx) => evaluate_optional_index(env, obj, idx),
         Expr::This => evaluate_this(env),
         Expr::New(constructor, args) => {
-            log::debug!("DBG Expr::New - constructor_expr={:?} args.len={}", constructor, args.len());
+            log::trace!("DBG Expr::New - constructor_expr={:?} args.len={}", constructor, args.len());
             evaluate_new(env, constructor, args)
         }
         Expr::Super => evaluate_super(env),
@@ -5329,8 +5329,53 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                     return Ok(Value::Undefined);
                 }
             }
-            if let Some(val) = obj_get_key_value(&obj_map, &prop.into())? {
-                Ok(val.borrow().clone())
+            if let Some(val_rc) = obj_get_key_value(&obj_map, &prop.into())? {
+                let val = val_rc.borrow();
+                match &*val {
+                    // If it's a getter stored directly on the object (class-created getter)
+                    Value::Getter(body, getter_env, home_opt) => {
+                        let func_env = crate::core::new_js_object_data();
+                        func_env.borrow_mut().prototype = Some(getter_env.clone());
+                        if let Some(home) = home_opt {
+                            crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                        }
+                        // Bind 'this' to the instance that owns the property
+                        crate::core::obj_set_key_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                        let result = crate::core::evaluate_statements_with_context(&func_env, body)?;
+                        // log::debug!("DBG getter raw result = {:?}", &result);
+                        if let crate::core::ControlFlow::Return(ret_val) = result {
+                            // log::debug!("DBG getter returned: {:?}", &ret_val);
+                            Ok(ret_val)
+                        } else {
+                            // log::debug!("DBG getter returned: undefined");
+                            Ok(Value::Undefined)
+                        }
+                    }
+                    // Property descriptor with getter/setter
+                    Value::Property {
+                        value: _value_opt,
+                        getter: Some((body, getter_env, home_opt)),
+                        ..
+                    } => {
+                        let func_env = crate::core::new_js_object_data();
+                        func_env.borrow_mut().prototype = Some(getter_env.clone());
+                        if let Some(home) = home_opt {
+                            crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                        }
+                        crate::core::obj_set_key_value(&func_env, &"this".into(), Value::Object(obj_map.clone()))?;
+                        let result = crate::core::evaluate_statements_with_context(&func_env, body)?;
+                        // log::debug!("DBG getter raw result = {:?}", &result);
+                        if let crate::core::ControlFlow::Return(ret_val) = result {
+                            // log::debug!("DBG getter returned: {:?}", &ret_val);
+                            Ok(ret_val)
+                        } else {
+                            // log::debug!("DBG getter returned: undefined");
+                            Ok(Value::Undefined)
+                        }
+                    }
+                    // Data property or other values
+                    _ => Ok(val.clone()),
+                }
             } else {
                 Ok(Value::Undefined)
             }

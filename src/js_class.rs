@@ -571,14 +571,91 @@ pub(crate) fn create_class_object(
                 // Instance properties not implemented yet
             }
             ClassMember::Getter(getter_name, body) => {
-                // Create a getter for the prototype
-                let getter = Value::Getter(body.clone(), env.clone(), Some(prototype_obj.clone()));
-                obj_set_key_value(&prototype_obj, &getter_name.into(), getter)?;
+                // Merge getter into existing property descriptor if present
+                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &getter_name.into()) {
+                    match &*existing_rc.borrow() {
+                        Value::Property {
+                            value,
+                            getter: _old_getter,
+                            setter,
+                        } => {
+                            let new_prop = Value::Property {
+                                value: value.clone(),
+                                getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                                setter: setter.clone(),
+                            };
+                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                        }
+                        Value::Setter(params, body_set, set_env, home) => {
+                            // Convert to property descriptor with both getter and setter
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                                setter: Some((params.clone(), body_set.clone(), set_env.clone(), home.clone())),
+                            };
+                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                        }
+                        // If there's an existing raw value or getter, overwrite with a Property descriptor bearing the getter
+                        _ => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                                setter: None,
+                            };
+                            obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                        }
+                    }
+                } else {
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                        setter: None,
+                    };
+                    obj_set_key_value(&prototype_obj, &getter_name.into(), new_prop)?;
+                }
             }
             ClassMember::Setter(setter_name, param, body) => {
-                // Create a setter for the prototype
-                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()));
-                obj_set_key_value(&prototype_obj, &setter_name.into(), setter)?;
+                // Merge setter into existing property descriptor if present
+                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &setter_name.into()) {
+                    match &*existing_rc.borrow() {
+                        Value::Property {
+                            value,
+                            getter,
+                            setter: _old_setter,
+                        } => {
+                            let new_prop = Value::Property {
+                                value: value.clone(),
+                                getter: getter.clone(),
+                                setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                            };
+                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                        }
+                        Value::Getter(get_body, get_env, home) => {
+                            // Convert to property descriptor with both getter and setter
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some((get_body.clone(), get_env.clone(), home.clone())),
+                                setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                            };
+                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                        }
+                        _ => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: None,
+                                setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                            };
+                            obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                        }
+                    }
+                } else {
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: None,
+                        setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                    };
+                    obj_set_key_value(&prototype_obj, &setter_name.into(), new_prop)?;
+                }
             }
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Add static method to class object

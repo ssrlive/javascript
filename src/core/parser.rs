@@ -385,6 +385,53 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             continue;
         }
 
+        // Support accessor-first syntax: `get prop() {}` or `set prop(v) {}`
+        if let Some(Token::Identifier(kw)) = tokens.first().map(|t| &t.token) {
+            if kw == "get" || kw == "set" {
+                let is_getter = kw == "get";
+                tokens.remove(0); // consume get/set keyword
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                let prop_name = if let Token::Identifier(name) = &tokens.remove(0).token {
+                    name.clone()
+                } else {
+                    return Err(raise_parse_error_at(tokens));
+                };
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume (
+                let params = parse_parameters(tokens)?;
+                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    return Err(raise_parse_error_at(tokens));
+                }
+                tokens.remove(0); // consume {
+                let body = parse_statement_block(tokens)?;
+                if is_getter {
+                    if !params.is_empty() {
+                        return Err(raise_parse_error_at(tokens)); // getters should have no parameters
+                    }
+                    if is_static {
+                        members.push(ClassMember::StaticGetter(prop_name, body));
+                    } else {
+                        members.push(ClassMember::Getter(prop_name, body));
+                    }
+                } else {
+                    // setter
+                    if params.len() != 1 {
+                        return Err(raise_parse_error_at(tokens)); // setters should have exactly one parameter
+                    }
+                    if is_static {
+                        members.push(ClassMember::StaticSetter(prop_name, params, body));
+                    } else {
+                        members.push(ClassMember::Setter(prop_name, params, body));
+                    }
+                }
+                continue;
+            }
+        }
+
         if let Some(Token::Identifier(method_name)) = tokens.first().map(|t| &t.token) {
             let method_name = method_name.clone();
             if method_name == "constructor" {

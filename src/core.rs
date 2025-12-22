@@ -494,6 +494,18 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     // Create Function constructor early
     let _function_ctor = ensure_constructor_object(env, "Function", "__is_function_constructor")?;
 
+    // Expose Function.prototype.call and Function.prototype.apply as properties on the
+    // Function.prototype object so function wrappers inherit these builtins via
+    // the prototype chain.
+    if let Some(func_proto) = get_constructor_prototype(env, "Function")? {
+        obj_set_key_value(&func_proto, &"call".into(), Value::Function("Function.prototype.call".to_string()))?;
+        obj_set_key_value(
+            &func_proto,
+            &"apply".into(),
+            Value::Function("Function.prototype.apply".to_string()),
+        )?;
+    }
+
     // Create Error constructor object early so its prototype exists.
     let error_ctor = ensure_constructor_object(env, "Error", "__is_error_constructor")?;
 

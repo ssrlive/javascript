@@ -557,6 +557,12 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                 obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                // Ensure wrapper function objects inherit from Function.prototype so
+                // `.call`/`.apply` are available via the prototype chain.
+                if let Some(func_proto) = crate::core::get_constructor_prototype(env, "Function")? {
+                    func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                    let _ = crate::core::obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
+                }
                 Value::Object(func_obj)
             };
             env_set(env, name, func_val.clone())?;
@@ -707,6 +713,12 @@ fn evaluate_stmt_export(
                     obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
                     obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
                     obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+                    // Ensure wrapper function objects inherit from Function.prototype so
+                    // `.call`/`.apply` are available via the prototype chain.
+                    if let Some(func_proto) = crate::core::get_constructor_prototype(env, "Function")? {
+                        func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                        let _ = crate::core::obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
+                    }
                     Value::Object(func_obj)
                 };
                 env_set(env, name, func_val)?;
@@ -2981,6 +2993,19 @@ fn evaluate_function_expression(
     // Wire up `prototype` and `prototype.constructor`
     obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
     obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
+
+    // Ensure function wrapper objects inherit from `Function.prototype` so
+    // methods like `.call` and `.apply` are available via the prototype chain.
+    if let Some(func_ctor_val) = obj_get_key_value(env, &"Function".into())? {
+        if let Value::Object(func_ctor) = &*func_ctor_val.borrow() {
+            if let Some(func_proto_val) = obj_get_key_value(func_ctor, &"prototype".into())? {
+                if let Value::Object(func_proto) = &*func_proto_val.borrow() {
+                    func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                    let _ = obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
+                }
+            }
+        }
+    }
 
     Ok(Value::Object(func_obj))
 }
@@ -5872,7 +5897,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // Create new environment starting with captured environment
                                 let func_env = prepare_function_call_env(
                                     Some(captured_env),
-                                    None,
+                                    Some(Value::Object(obj_map.clone())),
                                     Some(params),
                                     &evaluated_args,
                                     Some(&build_frame_name(env, method)),
@@ -5906,6 +5931,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     }
                                     // Fall back to global handler
                                     crate::js_function::handle_global_function(&func_name, args, env)
+                                } else if func_name.starts_with("Function.prototype.") {
+                                    // Call Function.prototype.* handlers with the receiver bound as `this`.
+                                    let call_env =
+                                        prepare_function_call_env(Some(env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                                    crate::js_function::handle_global_function(&func_name, args, &call_env)
                                 } else {
                                     crate::js_function::handle_global_function(&func_name, args, env)
                                 }
@@ -5968,7 +5998,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                             let func_env = prepare_function_call_env(
                                                 Some(captured_env),
-                                                None,
+                                                Some(Value::Object(obj_map.clone())),
                                                 None,
                                                 &evaluated_args,
                                                 Some(&build_frame_name(env, method)),
@@ -6049,7 +6079,17 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     }
                 }
             }
-            // Allow function values to support `.call` and `.apply` forwarding
+            // Allow function values and closures to support `.call` and `.apply` forwarding
+            (Value::Closure(data), "call") => {
+                // Delegate to Function.prototype.call with closure as the target
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, None)?;
+                crate::js_function::handle_global_function("Function.prototype.call", args, &call_env)
+            }
+            (Value::Closure(data), "apply") => {
+                // Delegate to Function.prototype.apply with closure as the target
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, None)?;
+                crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
+            }
             (Value::Function(func_name), "call") => {
                 // Delegate to Function.prototype.call
                 let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
@@ -6236,14 +6276,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "<anonymous>".to_string()
                 };
                 let frame = build_frame_name(env, &frame_name);
-                let func_env = prepare_function_call_env(
-                    Some(captured_env),
-                    Some(Value::Undefined),
-                    Some(params),
-                    &evaluated_args,
-                    Some(&frame),
-                    Some(env),
-                )?;
+                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, Some(&frame), Some(env))?;
                 // Execute function body
                 match evaluate_statements_with_context(&func_env, body)? {
                     ControlFlow::Normal(_) => Ok(Value::Undefined),
@@ -6267,15 +6300,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     obj.borrow_mut()
                         .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                 }
-                // Prepare function call environment for async closure invocation (this = undefined)
-                let func_env = prepare_function_call_env(
-                    Some(captured_env),
-                    Some(Value::Undefined),
-                    Some(params),
-                    &evaluated_args,
-                    None,
-                    None,
-                )?;
+                // Prepare function call environment for async closure invocation (arrow closures inherit `this` lexically)
+                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
                 // Execute function body synchronously (for now)
                 let result = evaluate_statements(&func_env, body);
                 match result {

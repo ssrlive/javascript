@@ -205,6 +205,72 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             func_name
                         )))
                     }
+                    Value::Closure(data) => {
+                        // Call the closure with `this` set to receiver (first arg)
+                        if args.is_empty() {
+                            return Err(raise_eval_error!("call requires a receiver"));
+                        }
+                        let receiver_val = evaluate_expr(env, &args[0])?;
+                        let forwarded = args[1..].to_vec();
+                        let mut evaluated_args: Vec<Value> = Vec::new();
+                        for ae in &forwarded {
+                            evaluated_args.push(evaluate_expr(env, ae)?);
+                        }
+                        let params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
+                        let func_env =
+                            prepare_function_call_env(Some(captured_env), Some(receiver_val), Some(params), &evaluated_args, None, None)?;
+
+                        // Create arguments object
+                        let arguments_obj = crate::js_array::create_array(&func_env)?;
+                        crate::js_array::set_array_length(&arguments_obj, evaluated_args.len())?;
+                        for (i, arg) in evaluated_args.iter().enumerate() {
+                            crate::core::obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                        }
+                        crate::core::obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
+                        crate::core::evaluate_statements(&func_env, body)
+                    }
+                    Value::Object(obj_map) => {
+                        // If this is an object wrapping a closure, extract and call it
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&obj_map, &"__closure__".into())?
+                            && let Value::Closure(data) = &*cl_rc.borrow()
+                        {
+                            if args.is_empty() {
+                                return Err(raise_eval_error!("call requires a receiver"));
+                            }
+                            let receiver_val = evaluate_expr(env, &args[0])?;
+                            let forwarded = args[1..].to_vec();
+                            let mut evaluated_args: Vec<Value> = Vec::new();
+                            for ae in &forwarded {
+                                evaluated_args.push(evaluate_expr(env, ae)?);
+                            }
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let func_env = prepare_function_call_env(
+                                Some(captured_env),
+                                Some(receiver_val),
+                                Some(params),
+                                &evaluated_args,
+                                None,
+                                None,
+                            )?;
+
+                            // Create arguments object
+                            let arguments_obj = crate::js_array::create_array(&func_env)?;
+                            crate::js_array::set_array_length(&arguments_obj, evaluated_args.len())?;
+                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                crate::core::obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                            }
+                            crate::core::obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
+                            return crate::core::evaluate_statements(&func_env, body);
+                        }
+
+                        Err(raise_eval_error!("Function.prototype.call called on non-callable"))
+                    }
                     _ => Err(raise_eval_error!("Function.prototype.call called on non-callable")),
                 }
             } else {
@@ -256,6 +322,99 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             "Function.prototype.apply target not supported: {}",
                             func_name
                         )))
+                    }
+                    Value::Closure(data) => {
+                        // apply to closure target
+                        if args.is_empty() {
+                            return Err(raise_eval_error!("apply requires a receiver"));
+                        }
+                        let receiver_val = evaluate_expr(env, &args[0])?;
+                        // Evaluate argument array (if provided)
+                        let mut evaluated_args: Vec<Value> = Vec::new();
+                        if args.len() >= 2 {
+                            match evaluate_expr(env, &args[1])? {
+                                Value::Object(arr_obj) if crate::js_array::is_array(&arr_obj) => {
+                                    let mut i = 0usize;
+                                    loop {
+                                        let key = i.to_string();
+                                        if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                            evaluated_args.push(val_rc.borrow().clone());
+                                        } else {
+                                            break;
+                                        }
+                                        i += 1;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        let params = &data.params;
+                        let body = &data.body;
+                        let captured_env = &data.env;
+                        let func_env =
+                            prepare_function_call_env(Some(captured_env), Some(receiver_val), Some(params), &evaluated_args, None, None)?;
+
+                        // Create arguments object
+                        let arguments_obj = crate::js_array::create_array(&func_env)?;
+                        crate::js_array::set_array_length(&arguments_obj, evaluated_args.len())?;
+                        for (i, arg) in evaluated_args.iter().enumerate() {
+                            crate::core::obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                        }
+                        crate::core::obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
+                        crate::core::evaluate_statements(&func_env, body)
+                    }
+                    Value::Object(obj_map) => {
+                        // object wrapping closure
+                        if args.is_empty() {
+                            return Err(raise_eval_error!("apply requires a receiver"));
+                        }
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&obj_map, &"__closure__".into())?
+                            && let Value::Closure(data) = &*cl_rc.borrow()
+                        {
+                            let receiver_val = evaluate_expr(env, &args[0])?;
+                            let mut evaluated_args: Vec<Value> = Vec::new();
+                            if args.len() >= 2 {
+                                match evaluate_expr(env, &args[1])? {
+                                    Value::Object(arr_obj) if crate::js_array::is_array(&arr_obj) => {
+                                        let mut i = 0usize;
+                                        loop {
+                                            let key = i.to_string();
+                                            if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
+                                                evaluated_args.push(val_rc.borrow().clone());
+                                            } else {
+                                                break;
+                                            }
+                                            i += 1;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let func_env = prepare_function_call_env(
+                                Some(captured_env),
+                                Some(receiver_val),
+                                Some(params),
+                                &evaluated_args,
+                                None,
+                                None,
+                            )?;
+
+                            // Create arguments object
+                            let arguments_obj = crate::js_array::create_array(&func_env)?;
+                            crate::js_array::set_array_length(&arguments_obj, evaluated_args.len())?;
+                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                crate::core::obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                            }
+                            crate::core::obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
+                            return crate::core::evaluate_statements(&func_env, body);
+                        }
+
+                        Err(raise_eval_error!("Function.prototype.apply called on non-callable"))
                     }
                     _ => Err(raise_eval_error!("Function.prototype.apply called on non-callable")),
                 }
@@ -313,7 +472,23 @@ fn object_prototype_value_of(args: &[Expr], env: &JSObjectDataPtr) -> Result<Val
 fn object_prototype_to_string(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
-        return crate::js_object::handle_to_string_method(&this_val, args, env);
+        match this_val {
+            Value::Object(_) => return crate::js_object::handle_to_string_method(&this_val, args, env),
+            Value::String(_s) => {
+                return Ok(Value::String(utf8_to_utf16("[object String]")));
+            }
+            Value::Number(_n) => {
+                return Ok(Value::String(utf8_to_utf16("[object Number]")));
+            }
+            Value::Boolean(_b) => {
+                return Ok(Value::String(utf8_to_utf16("[object Boolean]")));
+            }
+            Value::BigInt(_b) => {
+                return Ok(Value::String(utf8_to_utf16("[object BigInt]")));
+            }
+            // For null/undefined/symbol/others, delegate to handler directly
+            _ => return crate::js_object::handle_to_string_method(&this_val, args, env),
+        }
     }
     Err(raise_eval_error!("Object.prototype.toString called without this"))
 }

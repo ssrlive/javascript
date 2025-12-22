@@ -966,6 +966,87 @@ fn evaluate_stmt_for_of_destructuring_array(
     Ok(None)
 }
 
+// Evaluate the statement inside a closure so we can log the
+// statement index and AST if an error occurs while preserving
+// control-flow returns. The closure returns
+// Result<Option<ControlFlow>, JSError> where `Ok(None)` means
+// continue, `Ok(Some(cf))` means propagate control flow, and
+// `Err(e)` means an error that we log and then return.
+fn eval_res(stmt: &Statement, last_value: &mut Value, env: &JSObjectDataPtr) -> Result<Option<ControlFlow>, JSError> {
+    match &stmt.kind {
+        StatementKind::Let(decls) => {
+            for (name, expr_opt) in decls {
+                *last_value = evaluate_stmt_let(env, name, expr_opt)?;
+            }
+            Ok(None)
+        }
+        StatementKind::Var(decls) => {
+            for (name, expr_opt) in decls {
+                *last_value = evaluate_stmt_var(env, name, expr_opt)?;
+            }
+            Ok(None)
+        }
+        StatementKind::Const(decls) => {
+            for (name, expr) in decls {
+                *last_value = evaluate_stmt_const(env, name, expr)?;
+            }
+            Ok(None)
+        }
+        StatementKind::FunctionDeclaration(..) => {
+            // Skip function declarations as they are already hoisted
+            Ok(None)
+        }
+        StatementKind::Class(name, extends, members) => {
+            evaluate_stmt_class(env, name, extends, members)?;
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Block(stmts) => evaluate_stmt_block(env, stmts, last_value),
+        StatementKind::Assign(name, expr) => {
+            *last_value = evaluate_stmt_assign(env, name, expr)?;
+            Ok(None)
+        }
+        StatementKind::Expr(expr) => evaluate_stmt_expr(env, expr, last_value),
+        StatementKind::Return(expr_opt) => evaluate_stmt_return(env, expr_opt),
+        StatementKind::Throw(expr) => evaluate_stmt_throw(env, expr),
+        StatementKind::If(condition, then_body, else_body) => evaluate_stmt_if(env, condition, then_body, else_body, last_value),
+        StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
+            evaluate_stmt_for_of_destructuring_object(env, pattern, iterable, body, last_value)
+        }
+        StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
+            evaluate_stmt_for_of_destructuring_array(env, pattern, iterable, body, last_value)
+        }
+        StatementKind::Label(label_name, inner_stmt) => evaluate_stmt_label(env, label_name, inner_stmt, last_value),
+        StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body) => {
+            evaluate_stmt_try_catch(env, try_body, catch_param, catch_body, finally_body, last_value)
+        }
+        StatementKind::For(init, condition, increment, body) => evaluate_stmt_for(env, init, condition, increment, body, last_value),
+        StatementKind::ForOf(var, iterable, body) => evaluate_stmt_for_of(env, var, iterable, body, last_value),
+        StatementKind::ForIn(var, object, body) => evaluate_stmt_for_in(env, var, object, body, last_value),
+        StatementKind::While(condition, body) => evaluate_stmt_while(env, condition, body, last_value),
+        StatementKind::DoWhile(body, condition) => evaluate_stmt_do_while(env, body, condition, last_value),
+        StatementKind::Switch(expr, cases) => evaluate_stmt_switch(env, expr, cases, last_value),
+        StatementKind::Break(opt) => evaluate_stmt_break(opt),
+        StatementKind::Continue(opt) => evaluate_stmt_continue(opt),
+        StatementKind::LetDestructuringArray(pattern, expr) => evaluate_stmt_let_destructuring_array(env, pattern, expr, last_value),
+        StatementKind::VarDestructuringArray(pattern, expr) => evaluate_stmt_var_destructuring_array(env, pattern, expr, last_value),
+        StatementKind::ConstDestructuringArray(pattern, expr) => evaluate_stmt_const_destructuring_array(env, pattern, expr, last_value),
+        StatementKind::LetDestructuringObject(pattern, expr) => evaluate_stmt_let_destructuring_object(env, pattern, expr, last_value),
+        StatementKind::VarDestructuringObject(pattern, expr) => evaluate_stmt_var_destructuring_object(env, pattern, expr, last_value),
+        StatementKind::ConstDestructuringObject(pattern, expr) => evaluate_stmt_const_destructuring_object(env, pattern, expr, last_value),
+        StatementKind::Import(specifiers, module_name) => {
+            evaluate_stmt_import(env, specifiers, module_name)?;
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Export(specifiers, maybe_decl) => {
+            evaluate_stmt_export(env, specifiers, maybe_decl)?;
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+    }
+}
+
 pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Statement]) -> Result<ControlFlow, JSError> {
     validate_declarations(statements)?;
     hoist_declarations(env, statements)?;
@@ -981,103 +1062,8 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
         if let StatementKind::FunctionDeclaration(..) = &stmt.kind {
             continue;
         }
-        // Evaluate the statement inside a closure so we can log the
-        // statement index and AST if an error occurs while preserving
-        // control-flow returns. The closure returns
-        // Result<Option<ControlFlow>, JSError> where `Ok(None)` means
-        // continue, `Ok(Some(cf))` means propagate control flow, and
-        // `Err(e)` means an error that we log and then return.
-        let eval_res: Result<Option<ControlFlow>, JSError> = (|| -> Result<Option<ControlFlow>, JSError> {
-            match &stmt.kind {
-                StatementKind::Let(decls) => {
-                    for (name, expr_opt) in decls {
-                        last_value = evaluate_stmt_let(env, name, expr_opt)?;
-                    }
-                    Ok(None)
-                }
-                StatementKind::Var(decls) => {
-                    for (name, expr_opt) in decls {
-                        last_value = evaluate_stmt_var(env, name, expr_opt)?;
-                    }
-                    Ok(None)
-                }
-                StatementKind::Const(decls) => {
-                    for (name, expr) in decls {
-                        last_value = evaluate_stmt_const(env, name, expr)?;
-                    }
-                    Ok(None)
-                }
-                StatementKind::FunctionDeclaration(..) => {
-                    // Skip function declarations as they are already hoisted
-                    Ok(None)
-                }
-                StatementKind::Class(name, extends, members) => {
-                    evaluate_stmt_class(env, name, extends, members)?;
-                    last_value = Value::Undefined;
-                    Ok(None)
-                }
-                StatementKind::Block(stmts) => evaluate_stmt_block(env, stmts, &mut last_value),
-                StatementKind::Assign(name, expr) => {
-                    last_value = evaluate_stmt_assign(env, name, expr)?;
-                    Ok(None)
-                }
-                StatementKind::Expr(expr) => evaluate_stmt_expr(env, expr, &mut last_value),
-                StatementKind::Return(expr_opt) => evaluate_stmt_return(env, expr_opt),
-                StatementKind::Throw(expr) => evaluate_stmt_throw(env, expr),
-                StatementKind::If(condition, then_body, else_body) => {
-                    evaluate_stmt_if(env, condition, then_body, else_body, &mut last_value)
-                }
-                StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
-                    evaluate_stmt_for_of_destructuring_object(env, pattern, iterable, body, &mut last_value)
-                }
-                StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
-                    evaluate_stmt_for_of_destructuring_array(env, pattern, iterable, body, &mut last_value)
-                }
-                StatementKind::Label(label_name, inner_stmt) => evaluate_stmt_label(env, label_name, inner_stmt, &mut last_value),
-                StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body_opt) => {
-                    evaluate_stmt_try_catch(env, try_body, catch_param, catch_body, finally_body_opt, &mut last_value)
-                }
-                StatementKind::For(init, condition, increment, body) => {
-                    evaluate_stmt_for(env, init, condition, increment, body, &mut last_value)
-                }
-                StatementKind::ForOf(var, iterable, body) => evaluate_stmt_for_of(env, var, iterable, body, &mut last_value),
-                StatementKind::ForIn(var, object, body) => evaluate_stmt_for_in(env, var, object, body, &mut last_value),
-                StatementKind::While(condition, body) => evaluate_stmt_while(env, condition, body, &mut last_value),
-                StatementKind::DoWhile(body, condition) => evaluate_stmt_do_while(env, body, condition, &mut last_value),
-                StatementKind::Switch(expr, cases) => evaluate_stmt_switch(env, expr, cases, &mut last_value),
-                StatementKind::Break(opt) => evaluate_stmt_break(opt),
-                StatementKind::Continue(opt) => evaluate_stmt_continue(opt),
-                StatementKind::LetDestructuringArray(pattern, expr) => {
-                    evaluate_stmt_let_destructuring_array(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::VarDestructuringArray(pattern, expr) => {
-                    evaluate_stmt_var_destructuring_array(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::ConstDestructuringArray(pattern, expr) => {
-                    evaluate_stmt_const_destructuring_array(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::LetDestructuringObject(pattern, expr) => {
-                    evaluate_stmt_let_destructuring_object(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::VarDestructuringObject(pattern, expr) => {
-                    evaluate_stmt_var_destructuring_object(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::ConstDestructuringObject(pattern, expr) => {
-                    evaluate_stmt_const_destructuring_object(env, pattern, expr, &mut last_value)
-                }
-                StatementKind::Import(specifiers, module_name) => {
-                    evaluate_stmt_import(env, specifiers, module_name)?;
-                    last_value = Value::Undefined;
-                    Ok(None)
-                }
-                StatementKind::Export(specifiers, maybe_decl) => {
-                    evaluate_stmt_export(env, specifiers, maybe_decl)?;
-                    last_value = Value::Undefined;
-                    Ok(None)
-                }
-            }
-        })();
-        match eval_res {
+
+        match eval_res(stmt, &mut last_value, env) {
             Ok(Some(cf)) => return Ok(cf),
             Ok(None) => {}
             Err(mut e) => {

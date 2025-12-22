@@ -20,7 +20,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
         // Spawn a thread with larger stack size (8MB) to avoid stack overflow on Windows
         // where the default stack size is 1MB.
         let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
-        let handler = builder.spawn(|| run_main())?;
+        let handler = builder.spawn(run_main)?;
         handler.join().unwrap()
     }
 

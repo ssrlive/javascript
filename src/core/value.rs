@@ -929,10 +929,15 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
             match val_clone {
                 Value::Property { value, getter, setter } => {
                     log::trace!("obj_get_key_value - property descriptor found for key {}", key);
-                    if let Some((body, env, _)) = getter {
+                    if let Some((body, env, home_opt)) = getter {
                         // Create a new environment with this bound to the original object
                         let getter_env = new_js_object_data();
                         getter_env.borrow_mut().prototype = Some(env);
+                        // If the getter is associated with a home object (class prototype), expose it
+                        // on the getter environment so private field access (`this.#priv`) can be validated.
+                        if let Some(home_obj) = home_opt {
+                            crate::core::obj_set_key_value(&getter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
+                        }
                         env_set(&getter_env, "this", Value::Object(js_obj.clone()))?;
                         let result = evaluate_statements(&getter_env, &body)?;
                         if let Value::Object(ref obj_ptr) = result {
@@ -1537,10 +1542,15 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
 
         match existing.borrow().clone() {
             Value::Property { value: _, getter, setter } => {
-                if let Some((param, body, env, _)) = setter {
+                if let Some((param, body, env, home_opt)) = setter {
                     // Create a new environment with this bound to the object and the parameter
                     let setter_env = new_js_object_data();
                     setter_env.borrow_mut().prototype = Some(env);
+                    // If setter has an associated home object (class prototype), expose it
+                    // so private field writes inside the setter can be validated.
+                    if let Some(home_obj) = home_opt {
+                        crate::core::obj_set_key_value(&setter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
+                    }
                     env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                     let args = vec![val];
                     crate::core::bind_function_parameters(&setter_env, &param, &args)?;
@@ -1576,10 +1586,13 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                 }
                 return Ok(());
             }
-            Value::Setter(param, body, env, _) => {
+            Value::Setter(param, body, env, home_opt) => {
                 // Create a new environment with this bound to the object and the parameter
                 let setter_env = new_js_object_data();
                 setter_env.borrow_mut().prototype = Some(env);
+                if let Some(home_obj) = home_opt {
+                    crate::core::obj_set_key_value(&setter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
+                }
                 env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                 let args = vec![val];
                 crate::core::bind_function_parameters(&setter_env, &param, &args)?;
@@ -1598,20 +1611,26 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
             if let Some(proto_prop_rc) = get_own_property(&proto, key) {
                 match &*proto_prop_rc.borrow() {
                     Value::Property {
-                        setter: Some((param, body, env, _)),
+                        setter: Some((param, body, env, home_opt)),
                         ..
                     } => {
                         let setter_env = new_js_object_data();
                         setter_env.borrow_mut().prototype = Some(env.clone());
+                        if let Some(home_obj) = home_opt {
+                            crate::core::obj_set_key_value(&setter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
+                        }
                         env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                         let args = vec![val.clone()];
                         crate::core::bind_function_parameters(&setter_env, param, &args)?;
                         let _v = evaluate_statements(&setter_env, body)?;
                         return Ok(());
                     }
-                    Value::Setter(param, body, env, _) => {
+                    Value::Setter(param, body, env, home_opt) => {
                         let setter_env = new_js_object_data();
                         setter_env.borrow_mut().prototype = Some(env.clone());
+                        if let Some(home_obj) = home_opt {
+                            crate::core::obj_set_key_value(&setter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
+                        }
                         env_set(&setter_env, "this", Value::Object(js_obj.clone()))?;
                         let args = vec![val.clone()];
                         crate::core::bind_function_parameters(&setter_env, param, &args)?;

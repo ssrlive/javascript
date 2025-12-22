@@ -699,13 +699,13 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     let resolve_func = create_resolve_function_direct(promise.clone());
     let reject_func = create_reject_function_direct(promise.clone());
 
-    // Call the executor with resolve and reject functions
-    let executor_env = captured_env.clone();
-    // Set resolve function (always the first parameter)
-    if !params.is_empty() {
-        let args = vec![resolve_func.clone(), reject_func.clone()];
-        crate::core::bind_function_parameters(&executor_env, &params, &args)?;
-    }
+    // Create executor function environment and bind resolve/reject into params
+    let executor_args = vec![resolve_func.clone(), reject_func.clone()];
+    let executor_env = if params.is_empty() {
+        crate::core::prepare_function_call_env(Some(&captured_env), None, None, &[], None, None)?
+    } else {
+        crate::core::prepare_function_call_env(Some(&captured_env), None, Some(&params), &executor_args, None, None)?
+    };
 
     log::trace!("About to call executor function");
     // Execute the executor function by calling it

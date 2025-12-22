@@ -5957,10 +5957,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
-                                            // Create new environment starting with captured environment (fresh frame)
+                                            // Create new environment starting with captured environment (fresh frame) and bind `this` directly
                                             let func_env = prepare_function_call_env(
                                                 Some(captured_env),
-                                                None,
+                                                Some(Value::Object(obj_map.clone())),
                                                 Some(params),
                                                 &evaluated_args,
                                                 Some(&build_frame_name(env, method)),
@@ -5969,8 +5969,6 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             if let Some(home) = home_obj {
                                                 obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                                             }
-                                            // Bind `this` to the receiver object via env_set so function scope semantics apply
-                                            crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
 
                                             // Create arguments object
                                             let arguments_obj = create_array(&func_env)?;
@@ -6007,8 +6005,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             if let Some(home) = &*home_obj.borrow() {
                                                 obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                                             }
-                                            // Bind `this` to the receiver object
-                                            crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
+                                            // `this` is bound via prepare_function_call_env
                                             crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
                                         }
                                         Value::AsyncClosure(data) => {
@@ -6026,10 +6023,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 obj.borrow_mut()
                                                     .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                                             }
-                                            // Create new environment
+                                            // Create new environment and bind `this` directly
                                             let func_env = prepare_function_call_env(
                                                 Some(captured_env),
-                                                None,
+                                                Some(Value::Object(obj_map.clone())),
                                                 Some(params),
                                                 &evaluated_args,
                                                 Some(&build_frame_name(env, method)),
@@ -6039,8 +6036,6 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                                             }
                                             func_env.borrow_mut().is_function_scope = true;
-                                            // Bind `this` to the receiver object
-                                            env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
 
                                             // Execute function body synchronously (for now)
                                             let result = evaluate_statements(&func_env, body);

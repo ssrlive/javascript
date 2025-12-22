@@ -111,12 +111,8 @@ pub(crate) fn apply_proxy_trap(
         // Accept either a direct `Value::Closure` or a function-object that
         // stores the executable closure under the internal `__closure__` key.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
-            // Create execution environment for the trap
-            let trap_env = new_js_object_data();
-            trap_env.borrow_mut().prototype = Some(captured_env);
-
-            // Bind arguments to parameters
-            crate::core::bind_function_parameters(&trap_env, &params, &args)?;
+            // Create execution environment for the trap and bind parameters
+            let trap_env = crate::core::prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
 
             // Evaluate the body
             return evaluate_statements(&trap_env, &body);

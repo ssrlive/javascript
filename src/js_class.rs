@@ -736,19 +736,19 @@ pub(crate) fn call_static_method(
                 let params = &data.params;
                 let body = &data.body;
                 let _captured_env = &data.env;
-                // Create function environment
-                let func_env = new_js_object_data();
-
-                // Static methods don't have 'this' bound to an instance
-                // 'this' in static methods refers to the class itself
-                obj_set_key_value(&func_env, &"this".into(), Value::Object(class_obj.clone()))?;
-
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                // Bind parameters
-                crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                // Create function environment with 'this' bound to the class object and bind params
+                let func_env = prepare_function_call_env(
+                    None,
+                    Some(Value::Object(class_obj.clone())),
+                    Some(params),
+                    &evaluated_args,
+                    None,
+                    None,
+                )?;
 
                 // Execute method body
                 return evaluate_statements(&func_env, body);
@@ -777,15 +777,20 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 let mut evaluated_args = Vec::new();
                 crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                // Create function environment based on the closure's captured env and bind params
-                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, None, None)?;
+                // Create function environment based on the closure's captured env and bind params, binding `this` to the instance
+                let func_env = prepare_function_call_env(
+                    Some(captured_env),
+                    Some(Value::Object(obj_map.clone())),
+                    Some(params),
+                    &evaluated_args,
+                    None,
+                    None,
+                )?;
 
                 if let Some(home) = home_obj {
                     crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                 }
 
-                // Bind 'this' to the instance (use env_set to avoid invoking setters)
-                crate::core::env_set(&func_env, "this", Value::Object(obj_map.clone()))?;
                 log::trace!("Bound 'this' to instance");
 
                 // Execute method body
@@ -1081,19 +1086,21 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let params = &data.params;
                         let body = &data.body;
-                        let _captured_env = &data.env;
-                        // Create function environment with 'this' bound to instance
-                        let func_env = new_js_object_data();
-
-                        // Bind 'this' to the instance
-                        obj_set_key_value(&func_env, &"this".into(), Value::Object(instance.clone()))?;
+                        let captured_env = &data.env;
 
                         // Collect all arguments, expanding spreads
                         let mut evaluated_args = Vec::new();
                         crate::core::expand_spread_in_call_args(env, args, &mut evaluated_args)?;
 
-                        // Bind parameters
-                        crate::core::bind_function_parameters(&func_env, params, &evaluated_args)?;
+                        // Create function environment with 'this' bound to the instance and bind params
+                        let func_env = prepare_function_call_env(
+                            Some(captured_env),
+                            Some(Value::Object(instance.clone())),
+                            Some(params),
+                            &evaluated_args,
+                            None,
+                            None,
+                        )?;
 
                         // Execute method body
                         return evaluate_statements(&func_env, body);

@@ -1232,11 +1232,9 @@ fn test_with_intl_constructors(args: &[Expr], env: &JSObjectDataPtr) -> Result<V
     let mock_constructor = crate::js_testintl::create_mock_intl_constructor()?;
 
     // Call the callback function with the mock constructor as argument
-    // Create new environment starting with captured environment
-    let func_env = callback_func.2.clone();
-    // Bind the mock constructor to the first parameter
-    let args = vec![mock_constructor];
-    crate::core::bind_function_parameters(&func_env, &callback_func.0, &args)?;
+    // Create a fresh function environment and bind parameters
+    let args_vals = vec![mock_constructor];
+    let func_env = crate::core::prepare_function_call_env(Some(&callback_func.2), None, Some(&callback_func.0), &args_vals, None, None)?;
     // Execute function body
     crate::core::evaluate_statements(&func_env, &callback_func.1)?;
 

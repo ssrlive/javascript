@@ -777,6 +777,25 @@ pub fn value_to_string(val: &Value) -> String {
     }
 }
 
+// Helper: Check whether the given object has an own property corresponding to a
+// given JS `Value` (as passed to hasOwnProperty / propertyIsEnumerable). This
+// centralizes conversion from various `Value` variants (String/Number/Boolean/
+// Undefined/Symbol/other) to a `PropertyKey` and calls `get_own_property`.
+// Returns true if an own property exists.
+pub fn has_own_property_value(obj: &JSObjectDataPtr, key_val: &Value) -> bool {
+    match key_val {
+        Value::String(s) => get_own_property(obj, &String::from_utf16_lossy(s).into()).is_some(),
+        Value::Number(n) => get_own_property(obj, &n.to_string().into()).is_some(),
+        Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
+        Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
+        Value::Symbol(sd) => {
+            let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd.clone()))));
+            get_own_property(obj, &sym_key).is_some()
+        }
+        other => get_own_property(obj, &value_to_string(other).into()).is_some(),
+    }
+}
+
 // Helper: extract a closure (params, body, env) from a Value. This accepts
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.

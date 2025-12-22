@@ -1,4 +1,4 @@
-use crate::core::{ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr};
+use crate::core::{ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value};
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
@@ -1080,17 +1080,7 @@ fn handle_object_has_own_property(args: &[Expr], env: &JSObjectDataPtr) -> Resul
         let this_val = this_rc.borrow().clone();
         match this_val {
             Value::Object(obj) => {
-                let exists = match key_val {
-                    Value::String(s) => crate::core::get_own_property(&obj, &String::from_utf16_lossy(&s).into()).is_some(),
-                    Value::Number(n) => crate::core::get_own_property(&obj, &n.to_string().into()).is_some(),
-                    Value::Boolean(b) => crate::core::get_own_property(&obj, &b.to_string().into()).is_some(),
-                    Value::Undefined => crate::core::get_own_property(&obj, &"undefined".into()).is_some(),
-                    Value::Symbol(sd) => {
-                        let sym_key = crate::core::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                        crate::core::get_own_property(&obj, &sym_key).is_some()
-                    }
-                    other => crate::core::get_own_property(&obj, &crate::core::value_to_string(&other).into()).is_some(),
-                };
+                let exists = has_own_property_value(&obj, &key_val);
                 Ok(Value::Boolean(exists))
             }
             Value::String(s) => {

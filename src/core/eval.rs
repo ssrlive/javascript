@@ -3,8 +3,8 @@ use crate::{
     core::{
         BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind,
         SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
-        extract_closure_from_value, get_own_property, is_truthy, new_js_object_data, obj_delete, obj_set_key_value, parse_bigint_string,
-        to_primitive, value_to_sort_string, value_to_string, values_equal,
+        extract_closure_from_value, get_own_property, has_own_property_value, is_truthy, new_js_object_data, obj_delete, obj_set_key_value,
+        parse_bigint_string, to_primitive, value_to_sort_string, value_to_string, values_equal,
     },
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
@@ -5919,19 +5919,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 return Err(raise_eval_error!("hasOwnProperty requires one argument"));
                                             }
                                             let key_val = evaluate_expr(env, &args[0])?;
-                                            let exists = match key_val {
-                                                Value::String(s) => {
-                                                    get_own_property(&obj_map, &String::from_utf16_lossy(&s).into()).is_some()
-                                                }
-                                                Value::Number(n) => get_own_property(&obj_map, &n.to_string().into()).is_some(),
-                                                Value::Boolean(b) => get_own_property(&obj_map, &b.to_string().into()).is_some(),
-                                                Value::Undefined => get_own_property(&obj_map, &"undefined".into()).is_some(),
-                                                Value::Symbol(sd) => {
-                                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                                                    get_own_property(&obj_map, &sym_key).is_some()
-                                                }
-                                                other => get_own_property(&obj_map, &value_to_string(&other).into()).is_some(),
-                                            };
+                                            let exists = has_own_property_value(&obj_map, &key_val);
                                             Ok(Value::Boolean(exists))
                                         }
                                         "Object.prototype.isPrototypeOf" => {
@@ -5968,19 +5956,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
                                             }
                                             let key_val = evaluate_expr(env, &args[0])?;
-                                            let exists = match key_val {
-                                                Value::String(s) => {
-                                                    get_own_property(&obj_map, &String::from_utf16_lossy(&s).into()).is_some()
-                                                }
-                                                Value::Number(n) => get_own_property(&obj_map, &n.to_string().into()).is_some(),
-                                                Value::Boolean(b) => get_own_property(&obj_map, &b.to_string().into()).is_some(),
-                                                Value::Undefined => get_own_property(&obj_map, &"undefined".into()).is_some(),
-                                                Value::Symbol(sd) => {
-                                                    let sym_key = PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                                                    get_own_property(&obj_map, &sym_key).is_some()
-                                                }
-                                                other => get_own_property(&obj_map, &value_to_string(&other).into()).is_some(),
-                                            };
+                                            let exists = has_own_property_value(&obj_map, &key_val);
                                             Ok(Value::Boolean(exists))
                                         }
                                         "Object.prototype.toString" => {

@@ -2,7 +2,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property,
-    new_js_object_data,
+    has_own_property_value, new_js_object_data,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
@@ -818,17 +818,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                                 return Err(raise_eval_error!("hasOwnProperty requires one argument"));
                             }
                             let key_val = evaluate_expr(env, &args[0])?;
-                            let exists = match key_val {
-                                Value::String(s) => get_own_property(obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
-                                Value::Number(n) => get_own_property(obj_map, &n.to_string().into()).is_some(),
-                                Value::Boolean(b) => get_own_property(obj_map, &b.to_string().into()).is_some(),
-                                Value::Undefined => get_own_property(obj_map, &"undefined".into()).is_some(),
-                                Value::Symbol(sd) => {
-                                    let sym_key = crate::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                                    get_own_property(obj_map, &sym_key).is_some()
-                                }
-                                other => get_own_property(obj_map, &value_to_string(&other).into()).is_some(),
-                            };
+                            let exists = has_own_property_value(obj_map, &key_val);
                             return Ok(Value::Boolean(exists));
                         }
                         "Object.prototype.isPrototypeOf" => {
@@ -863,17 +853,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                                 return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
                             }
                             let key_val = evaluate_expr(env, &args[0])?;
-                            let exists = match key_val {
-                                Value::String(s) => get_own_property(obj_map, &String::from_utf16_lossy(&s).into()).is_some(),
-                                Value::Number(n) => get_own_property(obj_map, &n.to_string().into()).is_some(),
-                                Value::Boolean(b) => get_own_property(obj_map, &b.to_string().into()).is_some(),
-                                Value::Undefined => get_own_property(obj_map, &"undefined".into()).is_some(),
-                                Value::Symbol(sd) => {
-                                    let sym_key = crate::PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd))));
-                                    get_own_property(obj_map, &sym_key).is_some()
-                                }
-                                other => get_own_property(obj_map, &value_to_string(&other).into()).is_some(),
-                            };
+                            let exists = has_own_property_value(obj_map, &key_val);
                             return Ok(Value::Boolean(exists));
                         }
                         "Object.prototype.toString" => {

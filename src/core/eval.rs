@@ -4,7 +4,7 @@ use crate::{
         BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement, StatementKind,
         SwitchCase, SymbolData, TypedArrayKind, WELL_KNOWN_SYMBOLS, env_get, env_set, env_set_const, env_set_recursive, env_set_var,
         extract_closure_from_value, get_own_property, has_own_property_value, is_truthy, new_js_object_data, obj_delete, obj_set_key_value,
-        parse_bigint_string, to_primitive, value_to_sort_string, value_to_string, values_equal,
+        parse_bigint_string, to_primitive, value_to_property_key, value_to_sort_string, value_to_string, values_equal,
     },
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
@@ -6658,16 +6658,7 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
         } else {
             // Evaluate key expression
             let key_val = evaluate_expr(env, key_expr)?;
-            let pk = if let Value::Symbol(_) = key_val {
-                PropertyKey::Symbol(Rc::new(RefCell::new(key_val)))
-            } else {
-                let key_str = match &key_val {
-                    Value::String(s) => String::from_utf16_lossy(s),
-                    Value::BigInt(b) => b.to_string(),
-                    _ => key_val.to_string(),
-                };
-                PropertyKey::String(key_str)
-            };
+            let pk = value_to_property_key(&key_val);
 
             match value_expr {
                 Expr::Getter(func_expr) => {

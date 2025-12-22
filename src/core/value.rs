@@ -796,6 +796,23 @@ pub fn has_own_property_value(obj: &JSObjectDataPtr, key_val: &Value) -> bool {
     }
 }
 
+// Convert a Value into a PropertyKey suitable for use in property access
+// (used when evaluating object literal property keys, computed keys, etc.).
+// Symbols become Symbol keys; Strings/BigInts become String keys; other values
+// are converted to a string representation.
+pub fn value_to_property_key(val: &Value) -> PropertyKey {
+    match val {
+        Value::Symbol(sd) => PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd.clone())))),
+        Value::String(s) => PropertyKey::String(String::from_utf16_lossy(s)),
+        Value::BigInt(b) => PropertyKey::String(b.to_string()),
+        Value::Number(n) => PropertyKey::String(n.to_string()),
+        Value::Boolean(b) => PropertyKey::String(b.to_string()),
+        Value::Undefined => PropertyKey::String("undefined".to_string()),
+        Value::Null => PropertyKey::String("null".to_string()),
+        other => PropertyKey::String(value_to_string(other)),
+    }
+}
+
 // Helper: extract a closure (params, body, env) from a Value. This accepts
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.

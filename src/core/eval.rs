@@ -5901,15 +5901,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 // Also handle boxed-primitive built-ins that are
                                 // represented as `Value::Function("BigInt_toString")`,
                                 // etc., so they can access the receiver's `__value__`.
-                                if func_name == "BigInt_toString" {
-                                    return crate::js_bigint::handle_bigint_object_method(&obj_map, "toString", args, env);
-                                }
-                                if func_name == "BigInt_valueOf" {
-                                    return crate::js_bigint::handle_bigint_object_method(&obj_map, "valueOf", args, env);
-                                }
-                                if func_name.starts_with("Date.prototype.") {
-                                    let method_name = func_name.strip_prefix("Date.prototype.").unwrap();
-                                    return crate::js_date::handle_date_method(&obj_map, method_name, args, env);
+                                if let Some(v) = crate::js_function::handle_receiver_builtin(&func_name, &obj_map, args, env)? {
+                                    return Ok(v);
                                 }
                                 if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
                                     if let Some(v) = crate::js_object::handle_object_prototype_builtin(&func_name, &obj_map, args, env)? {

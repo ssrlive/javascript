@@ -1,4 +1,29 @@
 use crate::core::{ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value};
+
+// Centralize dispatching small builtins that are represented as Value::Function
+// names and need to be applied to an object receiver (e.g., "BigInt_toString",
+// "BigInt_valueOf", "Date.prototype.*"). Returns Ok(Some(Value)) if handled,
+// Ok(None) if not recognized, Err on error.
+pub(crate) fn handle_receiver_builtin(
+    func_name: &str,
+    obj_map: &JSObjectDataPtr,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Option<Value>, crate::error::JSError> {
+    // BigInt builtins
+    if func_name == "BigInt_toString" {
+        return Ok(Some(crate::js_bigint::handle_bigint_object_method(obj_map, "toString", args, env)?));
+    }
+    if func_name == "BigInt_valueOf" {
+        return Ok(Some(crate::js_bigint::handle_bigint_object_method(obj_map, "valueOf", args, env)?));
+    }
+    // Date prototype methods
+    if func_name.starts_with("Date.prototype.") {
+        let method_name = func_name.strip_prefix("Date.prototype.").unwrap();
+        return Ok(Some(crate::js_date::handle_date_method(obj_map, method_name, args, env)?));
+    }
+    Ok(None)
+}
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;

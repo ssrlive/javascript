@@ -449,6 +449,42 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
             set_time_stamp_value(obj, time)?;
             Ok(Value::Number(time))
         }
+        "setDate" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Date.setDate() takes exactly 1 argument"));
+            }
+            // Evaluate the day argument
+            let day_val = evaluate_expr(env, &args[0])?;
+            let Value::Number(day_n) = day_val else {
+                return Err(raise_type_error!("Date.setDate() argument must be a number"));
+            };
+
+            let current_timestamp = get_time_stamp_value(obj)?;
+            if let Some(current_dt) = Utc.timestamp_millis_opt(current_timestamp as i64).single() {
+                let year = current_dt.year();
+                let month = current_dt.month(); // 1-based
+                // Build midnight of the first day of current month
+                if let Some(base_midnight) = Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0).single() {
+                    let base_ms = base_midnight.timestamp_millis();
+                    // Time of day in milliseconds
+                    let time_ms = (current_dt.hour() as i64) * 3_600_000
+                        + (current_dt.minute() as i64) * 60_000
+                        + (current_dt.second() as i64) * 1_000
+                        + (current_dt.timestamp_subsec_millis() as i64);
+                    // day_n is 1-based; offset is (day - 1) days
+                    let offset_days_ms = ((day_n - 1.0) * 86_400_000.0) as i64;
+                    let new_timestamp = (base_ms + offset_days_ms + time_ms) as f64;
+                    set_time_stamp_value(obj, new_timestamp)?;
+                    Ok(Value::Number(new_timestamp))
+                } else {
+                    set_time_stamp_value(obj, f64::NAN)?;
+                    Ok(Value::Number(f64::NAN))
+                }
+            } else {
+                set_time_stamp_value(obj, f64::NAN)?;
+                Ok(Value::Number(f64::NAN))
+            }
+        }
         "toDateString" => {
             if !args.is_empty() {
                 return Err(raise_type_error!("Date.toDateString() takes no arguments"));

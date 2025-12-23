@@ -1046,14 +1046,6 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                             let str_part = parse_string_literal(&chars, &mut start_idx, '$', part_start_line, part_start_col)?;
                             parts.push(TemplatePart::String(str_part));
 
-                            for &chars_k in chars[current_start..start_idx].iter() {
-                                if chars_k == '\n' {
-                                    line += 1;
-                                    column = 1;
-                                } else {
-                                    column += 1;
-                                }
-                            }
                             i = start_idx; // Update i to after the parsed string
                         }
                         i += 2; // skip ${
@@ -1079,7 +1071,22 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         }
                         let expr_str: String = chars[expr_start..i - 1].iter().collect();
                         // Tokenize the expression inside ${}
-                        let expr_tokens = tokenize(&expr_str)?;
+                        let mut expr_tokens = tokenize(&expr_str)?;
+                        // Adjust token locations so they map into the original script
+                        // (expr_str is a slice starting at part_start_line:part_start_col)
+                        if part_start_line > 1 || part_start_col > 1 {
+                            let line_offset = part_start_line - 1;
+                            let col_offset = part_start_col - 1;
+                            for t in expr_tokens.iter_mut() {
+                                // Shift lines by line_offset
+                                t.line += line_offset;
+                                // For tokens that remain on the first line of the expression,
+                                // apply a column offset so the first line's columns are correct
+                                if t.line == part_start_line {
+                                    t.column += col_offset;
+                                }
+                            }
+                        }
                         parts.push(TemplatePart::Expr(expr_tokens));
                         current_start = i;
                         part_start_line = line;
@@ -1122,14 +1129,6 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     let mut start_idx = current_start;
                     let str_part = parse_string_literal(&chars, &mut start_idx, '`', part_start_line, part_start_col)?;
                     parts.push(TemplatePart::String(str_part));
-                    for &chars_k in chars[current_start..start_idx].iter() {
-                        if chars_k == '\n' {
-                            line += 1;
-                            column = 1;
-                        } else {
-                            column += 1;
-                        }
-                    }
                 }
                 tokens.push(TokenData {
                     token: Token::TemplateString(parts),

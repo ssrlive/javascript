@@ -9,6 +9,11 @@ use crate::{
     js_class::ClassMember,
     raise_parse_error, raise_parse_error_with_token,
 };
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    rc::Rc,
+};
 
 pub fn raise_parse_error_at(tokens: &[TokenData]) -> JSError {
     if let Some(t) = tokens.first() {
@@ -355,7 +360,58 @@ fn parse_exponentiation(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     }
 }
 
+thread_local! {
+    // Track a per-thread depth so parallel test runs do not interfere with each
+    // other. The parser will increment this while parsing a class body and
+    // decrement it when leaving so that checks for private identifier usage
+    // (`obj.#x`) can be enforced per-parse without global races.
+    static PARSING_CLASS_DEPTH: Cell<usize> = const { Cell::new(0) };
+
+    // Stack of declared private-name sets for nested class parsing contexts.
+    // Each entry is an `Rc<RefCell<HashSet<String>>>` containing the names
+    // declared in that class. We push when entering a class body and pop
+    // when leaving so that inner parsing (e.g. method bodies) can validate
+    // private name usage against the current class's declarations.
+    static PRIVATE_NAME_STACK: RefCell<Vec<Rc<RefCell<HashSet<String>>>>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ClassContextGuard;
+impl ClassContextGuard {
+    fn new() -> ClassContextGuard {
+        PARSING_CLASS_DEPTH.with(|c| c.set(c.get() + 1));
+        ClassContextGuard
+    }
+}
+impl Drop for ClassContextGuard {
+    fn drop(&mut self) {
+        PARSING_CLASS_DEPTH.with(|c| c.set(c.get() - 1));
+    }
+}
+
+struct ClassPrivateNamesGuard {
+    _marker: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>,
+}
+impl ClassPrivateNamesGuard {
+    fn new(set: std::rc::Rc<std::cell::RefCell<std::collections::HashSet<String>>>) -> ClassPrivateNamesGuard {
+        PRIVATE_NAME_STACK.with(|s| s.borrow_mut().push(set.clone()));
+        ClassPrivateNamesGuard { _marker: set }
+    }
+}
+impl Drop for ClassPrivateNamesGuard {
+    fn drop(&mut self) {
+        PRIVATE_NAME_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+    }
+}
+
 pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>, JSError> {
+    // Mark that we're parsing inside a class body so that private identifier
+    // property access (like `obj.#x`) can be validated syntactically only
+    // when parsing class element bodies. Use thread-local depth to avoid
+    // cross-thread races while running tests in parallel.
+    let _guard = ClassContextGuard::new();
+
     if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
         return Err(raise_parse_error_at(tokens));
     }
@@ -364,6 +420,192 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
     let mut members = Vec::new();
     // Track declared private names to detect duplicate private declarations.
     let mut declared_private_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Create an Rc-backed set we can push into a thread-local stack so inner
+    // parsing of method bodies can validate private name usage against the
+    // current class's declared private names.
+    let current_private_names = std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashSet::new()));
+    let _private_guard = ClassPrivateNamesGuard::new(current_private_names.clone());
+
+    // Pre-scan the class body (without consuming tokens) to collect all declared
+    // private names. This ensures that uses of private names inside earlier
+    // members (e.g. constructor referencing a private method declared later)
+    // are considered valid during parsing of those members. The scan is
+    // conservative and only looks at top-level class members.
+    {
+        let mut pos: usize = 0;
+        while pos < tokens.len() {
+            if matches!(tokens[pos].token, Token::RBrace) {
+                break;
+            }
+            // skip separators
+            if matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                pos += 1;
+                continue;
+            }
+            // optional 'static' prefix
+            if matches!(tokens[pos].token, Token::Static) {
+                pos += 1;
+                // static block: '{' ... '}'
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::LBrace) {
+                    // skip balanced braces
+                    let mut depth: usize = 1;
+                    pos += 1;
+                    while pos < tokens.len() && depth > 0 {
+                        if matches!(tokens[pos].token, Token::LBrace) {
+                            depth += 1;
+                        } else if matches!(tokens[pos].token, Token::RBrace) {
+                            depth -= 1;
+                        }
+                        pos += 1;
+                    }
+                    continue;
+                }
+            }
+
+            // Accessor `get`/`set` followed by a private identifier
+            if let Some(Token::Identifier(id)) = tokens.get(pos).map(|t| &t.token) {
+                if id == "get" || id == "set" {
+                    if let Some(Token::PrivateIdentifier(name)) = tokens.get(pos + 1).map(|t| &t.token) {
+                        current_private_names.borrow_mut().insert(name.clone());
+                    }
+                    // Advance past 'get'/'set' and the following name (if any)
+                    pos += 1;
+                    if pos < tokens.len()
+                        && (matches!(tokens[pos].token, Token::Identifier(_)) || matches!(tokens[pos].token, Token::PrivateIdentifier(_)))
+                    {
+                        pos += 1;
+                    }
+                    // Skip params (balanced parentheses)
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::LParen) {
+                        let mut depth = 1usize;
+                        pos += 1;
+                        while pos < tokens.len() && depth > 0 {
+                            if matches!(tokens[pos].token, Token::LParen) {
+                                depth += 1;
+                            } else if matches!(tokens[pos].token, Token::RParen) {
+                                depth -= 1;
+                            }
+                            pos += 1;
+                        }
+                    }
+                    // Skip the function body if present (balanced braces)
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::LBrace) {
+                        let mut depth = 1usize;
+                        pos += 1;
+                        while pos < tokens.len() && depth > 0 {
+                            if matches!(tokens[pos].token, Token::LBrace) {
+                                depth += 1;
+                            } else if matches!(tokens[pos].token, Token::RBrace) {
+                                depth -= 1;
+                            }
+                            pos += 1;
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            // Private identifier starting a member (private method/property)
+            if let Some(Token::PrivateIdentifier(name)) = tokens.get(pos).map(|t| &t.token) {
+                current_private_names.borrow_mut().insert(name.clone());
+                pos += 1;
+                // If this is a method, skip params and body
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::LParen) {
+                    let mut depth = 1usize;
+                    pos += 1;
+                    while pos < tokens.len() && depth > 0 {
+                        if matches!(tokens[pos].token, Token::LParen) {
+                            depth += 1;
+                        } else if matches!(tokens[pos].token, Token::RParen) {
+                            depth -= 1;
+                        }
+                        pos += 1;
+                    }
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::LBrace) {
+                        let mut depth = 1usize;
+                        pos += 1;
+                        while pos < tokens.len() && depth > 0 {
+                            if matches!(tokens[pos].token, Token::LBrace) {
+                                depth += 1;
+                            } else if matches!(tokens[pos].token, Token::RBrace) {
+                                depth -= 1;
+                            }
+                            pos += 1;
+                        }
+                    }
+                    continue;
+                }
+                // If this is a property with initializer, skip until semicolon
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::Assign) {
+                    pos += 1;
+                    while pos < tokens.len() && !matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                        // For safety, advance by one. We don't need to parse the expression fully.
+                        pos += 1;
+                    }
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                        pos += 1;
+                    }
+                    continue;
+                }
+                // property without initializer
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                    pos += 1;
+                    continue;
+                }
+            }
+
+            // Regular identifier member: skip to end of member
+            if let Some(Token::Identifier(_)) = tokens.get(pos).map(|t| &t.token) {
+                // Advance past name
+                pos += 1;
+                // Method
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::LParen) {
+                    let mut depth = 1usize;
+                    pos += 1;
+                    while pos < tokens.len() && depth > 0 {
+                        if matches!(tokens[pos].token, Token::LParen) {
+                            depth += 1;
+                        } else if matches!(tokens[pos].token, Token::RParen) {
+                            depth -= 1;
+                        }
+                        pos += 1;
+                    }
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::LBrace) {
+                        let mut depth = 1usize;
+                        pos += 1;
+                        while pos < tokens.len() && depth > 0 {
+                            if matches!(tokens[pos].token, Token::LBrace) {
+                                depth += 1;
+                            } else if matches!(tokens[pos].token, Token::RBrace) {
+                                depth -= 1;
+                            }
+                            pos += 1;
+                        }
+                    }
+                    continue;
+                }
+                // Property with initializer
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::Assign) {
+                    pos += 1;
+                    while pos < tokens.len() && !matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                        pos += 1;
+                    }
+                    if pos < tokens.len() && matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                        pos += 1;
+                    }
+                    continue;
+                }
+                // Property without initializer
+                if pos < tokens.len() && matches!(tokens[pos].token, Token::Semicolon | Token::LineTerminator) {
+                    pos += 1;
+                    continue;
+                }
+            }
+
+            // Fallback: advance one token to avoid infinite loop
+            pos += 1;
+        }
+    }
 
     while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
         // Skip blank lines or stray semicolons in class body
@@ -583,6 +825,9 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             }
             // Record declaration
             declared_private_names.insert(name.clone());
+            // Also record in the current private-name set for validation inside
+            // method bodies parsed subsequently.
+            current_private_names.borrow_mut().insert(name.clone());
 
             tokens.remove(0);
             if matches!(tokens[0].token, Token::LParen) {
@@ -1622,7 +1867,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                                     valid = false;
                                 }
                                 break;
-                            } else if matches!(tokens[0].token, Token::Comma) {
+                            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
                                 let t = tokens.remove(0);
                                 local_consumed.push(t);
                             } else {
@@ -1668,7 +1913,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             valid = false;
                             break;
                         }
-                    } else if matches!(tokens[0].token, Token::Spread) {
+                    } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Spread) {
                         // Handle rest parameter: ...args
                         let t_spread = tokens.remove(0);
                         local_consumed.push(t_spread);
@@ -1791,6 +2036,15 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);
                 } else if let Token::PrivateIdentifier(prop) = &tokens[0].token {
+                    // Private identifiers (e.g. `obj.#x`) are only syntactically
+                    // valid inside class bodies and furthermore the referenced
+                    // private name must have been *declared* in the *enclosing*
+                    // class. Check the top-most declared private-name set.
+                    let invalid = PRIVATE_NAME_STACK.with(|s| s.borrow().last().map(|rc| !rc.borrow().contains(prop)).unwrap_or(true));
+                    if invalid {
+                        let msg = format!("Private field '#{}' must be declared in an enclosing class", prop);
+                        return Err(raise_parse_error_with_token!(tokens[0], msg));
+                    }
                     let prop = format!("#{}", prop);
                     tokens.remove(0);
                     expr = Expr::Property(Box::new(expr), prop);

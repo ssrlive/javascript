@@ -1196,6 +1196,17 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
                 };
 
                 let init = if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
+                    // If the initializer is a *static* string literal or a non-expressive
+                    // template string, validate the string as JS source now so that
+                    // syntax errors inside an `eval`-style script literal are reported
+                    // at declaration/parse time instead of waiting until runtime
+                    // when `eval` executes the code.
+
+                    // Do not attempt to parse/validate static string initializers at
+                    // declaration time; treat them as plain strings and defer any
+                    // parsing errors to runtime `eval` when (and if) the string
+                    // is executed. This avoids surprising behavior where simply
+                    // binding a string would cause a parse-time SyntaxError.
                     tokens.remove(0); // consume '='
                     Some(parse_assignment(tokens)?)
                 } else {

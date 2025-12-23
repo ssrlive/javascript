@@ -93,3 +93,53 @@ fn exponentiation_and_numeric_separators_supported() {
         _ => panic!("expected bigint result for 1_000n ** 2n"),
     }
 }
+
+#[test]
+fn parse_accepts_eval_literal_at_declaration() {
+    let script = r#"
+        // script variable is a static template string that will be eval'd later
+        let script = `
+            class Test { #values; }
+            console.log(red.#values);
+        `;
+        // The parser should accept the declaration and defer parsing of the
+        // string literal contents until eval/runtime.
+    "#;
+    let res = parse_statements(&mut tokenize(script).expect("tokenize outer"));
+    assert!(
+        res.is_ok(),
+        "Expected parser to accept static string initializer (parsing deferred until eval)"
+    );
+}
+
+#[test]
+fn eval_throws_at_runtime_and_is_catchable() {
+    let script = r#"
+    try {
+        let s = "class Test { #values; } console.log(red.#values);";
+        eval(s);
+        throw new Error('No error thrown');
+    } catch (e) {
+        if (!(e instanceof SyntaxError)) {
+            throw new Error('Caught error is not a SyntaxError');
+        }
+    }
+    "#;
+    let res = evaluate_script(script, None::<&std::path::Path>);
+    assert!(
+        res.is_ok(),
+        "Expected script to run and catch SyntaxError at runtime, got: {:?}",
+        res.err()
+    );
+}
+
+#[test]
+fn parse_rejects_outside_private_access() {
+    let script = r#"
+    class Color { #values; }
+    console.log((new Color()).#values);
+    "#;
+    let tokens = tokenize(script).expect("tokenize failed");
+    let res = parse_statements(&mut tokens.clone());
+    assert!(res.is_err(), "Expected parse to fail for outside private access");
+}

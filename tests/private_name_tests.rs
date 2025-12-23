@@ -44,6 +44,47 @@ fn delete_private_field_is_syntax_error() {
         "Expected delete error to include js line and column"
     );
 }
+
+#[test]
+fn private_field_access_within_class_succeeds() {
+    let script = r#"
+    class Color {
+        #values;
+        constructor(r,g,b) { this.#values = [r,g,b]; }
+        log() {
+            console.log(this.#values);
+        }
+    }
+    let tmp = new Color(1,2,3);
+    tmp.log();
+    "#;
+    let res = evaluate_script(script, None::<&std::path::Path>);
+    assert!(res.is_ok(), "Expected script to run without a syntax error");
+}
+
+#[test]
+fn private_field_access_outside_class_reports_location() {
+    let script = r#"
+    class Color {
+        #values;
+    }
+    // Accessing a private field outside the declaring class must be a SyntaxError
+    console.log((new Color()).#values);
+    "#;
+    let res = evaluate_script(script, None::<&std::path::Path>);
+    assert!(
+        res.is_err(),
+        "Expected script to fail with a syntax error when accessing private field outside class"
+    );
+    let err = res.unwrap_err();
+    let msg = err.message();
+    assert!(msg.starts_with("SyntaxError"), "Expected a SyntaxError, got: {}", msg);
+    assert!(
+        err.js_line().is_some() && err.js_column().is_some(),
+        "Expected error to include js line and column"
+    );
+}
+
 #[test]
 fn eval_produces_throwable_syntax_error_instanceof() {
     let script = r#"

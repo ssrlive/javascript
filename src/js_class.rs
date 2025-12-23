@@ -21,6 +21,10 @@ pub enum ClassMember {
     PrivateStaticProperty(String, Expr),                              // name, value
     PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
     PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    PrivateGetter(String, Vec<Statement>),                            // name, body
+    PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
+    PrivateStaticGetter(String, Vec<Statement>),                      // name, body
+    PrivateStaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
     StaticBlock(Vec<Statement>),                                      // body
     Getter(String, Vec<Statement>),                                   // name, body
     Setter(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameter, body
@@ -58,6 +62,37 @@ pub(crate) fn get_class_proto_obj(class_obj: &JSObjectDataPtr) -> Result<JSObjec
         return Ok(proto_obj.clone());
     }
     Err(raise_type_error!("Prototype object not found"))
+}
+
+pub(crate) fn is_private_member_declared(class_def: &ClassDefinition, name: &str) -> bool {
+    // Accept either '#name' or 'name' as input; normalize to the raw identifier
+    let key = if let Some(stripped) = name.strip_prefix('#') {
+        stripped
+    } else {
+        name
+    };
+    for member in &class_def.members {
+        match member {
+            ClassMember::PrivateProperty(n, _)
+            | ClassMember::PrivateMethod(n, _, _)
+            | ClassMember::PrivateStaticProperty(n, _)
+            | ClassMember::PrivateStaticMethod(n, _, _) => {
+                if n == key {
+                    return true;
+                }
+            }
+            ClassMember::PrivateGetter(n, _)
+            | ClassMember::PrivateSetter(n, _, _)
+            | ClassMember::PrivateStaticGetter(n, _)
+            | ClassMember::PrivateStaticSetter(n, _, _) => {
+                if n == key {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -696,14 +731,93 @@ pub(crate) fn create_class_object(
             }
             ClassMember::PrivateMethod(method_name, params, body) => {
                 // Add private method to prototype using the '#name' key
-                let closure_data = ClosureData::new(params, body, env, Some(&prototype_obj));
+                let closure_data = ClosureData::new(params, body, env, None);
                 let method_closure = Value::Closure(Rc::new(closure_data));
                 obj_set_key_value(&prototype_obj, &format!("#{}", method_name).into(), method_closure)?;
+            }
+            ClassMember::PrivateGetter(getter_name, body) => {
+                let key = format!("#{}", getter_name);
+                // Merge into existing property descriptor if present
+                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &key.clone().into()) {
+                    match &*existing_rc.borrow() {
+                        Value::Property {
+                            value,
+                            getter: _old_getter,
+                            setter,
+                        } => {
+                            let new_prop = Value::Property {
+                                value: value.clone(),
+                                getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                                setter: setter.clone(),
+                            };
+                            crate::core::obj_set_rc(&prototype_obj, &key.clone().into(), Rc::new(RefCell::new(new_prop)));
+                        }
+                        _ => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                                setter: None,
+                            };
+                            crate::core::obj_set_rc(&prototype_obj, &key.into(), Rc::new(RefCell::new(new_prop)));
+                        }
+                    }
+                } else {
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: Some((body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                        setter: None,
+                    };
+                    obj_set_key_value(&prototype_obj, &key.into(), new_prop)?;
+                }
+            }
+            ClassMember::PrivateSetter(setter_name, param, body) => {
+                let key = format!("#{}", setter_name);
+                if let Some(existing_rc) = crate::core::get_own_property(&prototype_obj, &key.clone().into()) {
+                    match &*existing_rc.borrow() {
+                        Value::Property {
+                            value,
+                            getter,
+                            setter: _old_setter,
+                        } => {
+                            let new_prop = Value::Property {
+                                value: value.clone(),
+                                getter: getter.clone(),
+                                setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                            };
+                            crate::core::obj_set_rc(&prototype_obj, &key.clone().into(), Rc::new(RefCell::new(new_prop)));
+                        }
+                        _ => {
+                            let new_prop = Value::Property {
+                                value: None,
+                                getter: None,
+                                setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                            };
+                            crate::core::obj_set_rc(&prototype_obj, &key.into(), Rc::new(RefCell::new(new_prop)));
+                        }
+                    }
+                } else {
+                    let new_prop = Value::Property {
+                        value: None,
+                        getter: None,
+                        setter: Some((param.clone(), body.clone(), env.clone(), Some(prototype_obj.clone()))),
+                    };
+                    obj_set_key_value(&prototype_obj, &key.into(), new_prop)?;
+                }
             }
             ClassMember::PrivateStaticProperty(prop_name, value_expr) => {
                 // Add private static property to class object using the '#name' key
                 let value = evaluate_expr(env, value_expr)?;
                 obj_set_key_value(&class_obj, &format!("#{}", prop_name).into(), value)?;
+            }
+            ClassMember::PrivateStaticGetter(getter_name, body) => {
+                let key = format!("#{}", getter_name);
+                let getter = Value::Getter(body.clone(), env.clone(), Some(class_obj.clone()));
+                obj_set_key_value(&class_obj, &key.into(), getter)?;
+            }
+            ClassMember::PrivateStaticSetter(setter_name, param, body) => {
+                let key = format!("#{}", setter_name);
+                let setter = Value::Setter(param.clone(), body.clone(), env.clone(), Some(class_obj.clone()));
+                obj_set_key_value(&class_obj, &key.into(), setter)?;
             }
             ClassMember::PrivateStaticMethod(method_name, params, body) => {
                 // Add private static method to class object using the '#name' key

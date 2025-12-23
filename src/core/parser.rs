@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if, clippy::collapsible_match, clippy::collapsible_else_if)]
+
 use crate::{
     JSError,
     core::{
@@ -385,18 +387,21 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             continue;
         }
 
-        // Support accessor-first syntax: `get prop() {}` or `set prop(v) {}`
+        // Support accessor-first syntax: `get prop() {}` or `set prop(v) {}` or `get #prop() {}` etc.
         if let Some(Token::Identifier(kw)) = tokens.first().map(|t| &t.token) {
             if kw == "get" || kw == "set" {
                 let is_getter = kw == "get";
                 tokens.remove(0); // consume get/set keyword
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                if tokens.is_empty()
+                    || (!matches!(tokens[0].token, Token::Identifier(_)) && !matches!(tokens[0].token, Token::PrivateIdentifier(_)))
+                {
                     return Err(raise_parse_error_at(tokens));
                 }
-                let prop_name = if let Token::Identifier(name) = &tokens.remove(0).token {
-                    name.clone()
-                } else {
-                    return Err(raise_parse_error_at(tokens));
+                // Capture whether this accessor uses a private identifier
+                let (prop_name, is_private) = match &tokens.remove(0).token {
+                    Token::Identifier(name) => (name.clone(), false),
+                    Token::PrivateIdentifier(name) => (name.clone(), true),
+                    _ => return Err(raise_parse_error_at(tokens)),
                 };
                 if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
                     return Err(raise_parse_error_at(tokens));
@@ -413,9 +418,17 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                         return Err(raise_parse_error_at(tokens)); // getters should have no parameters
                     }
                     if is_static {
-                        members.push(ClassMember::StaticGetter(prop_name, body));
+                        if is_private {
+                            members.push(ClassMember::PrivateStaticGetter(prop_name, body));
+                        } else {
+                            members.push(ClassMember::StaticGetter(prop_name, body));
+                        }
                     } else {
-                        members.push(ClassMember::Getter(prop_name, body));
+                        if is_private {
+                            members.push(ClassMember::PrivateGetter(prop_name, body));
+                        } else {
+                            members.push(ClassMember::Getter(prop_name, body));
+                        }
                     }
                 } else {
                     // setter
@@ -423,9 +436,17 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                         return Err(raise_parse_error_at(tokens)); // setters should have exactly one parameter
                     }
                     if is_static {
-                        members.push(ClassMember::StaticSetter(prop_name, params, body));
+                        if is_private {
+                            members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
+                        } else {
+                            members.push(ClassMember::StaticSetter(prop_name, params, body));
+                        }
                     } else {
-                        members.push(ClassMember::Setter(prop_name, params, body));
+                        if is_private {
+                            members.push(ClassMember::PrivateSetter(prop_name, params, body));
+                        } else {
+                            members.push(ClassMember::Setter(prop_name, params, body));
+                        }
                     }
                 }
                 continue;
@@ -458,13 +479,15 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                 let is_setter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "set");
                 if is_getter || is_setter {
                     tokens.remove(0); // consume get/set
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+                    if tokens.is_empty()
+                        || (!matches!(tokens[0].token, Token::Identifier(_)) && !matches!(tokens[0].token, Token::PrivateIdentifier(_)))
+                    {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    let prop_name = if let Token::Identifier(name) = &tokens.remove(0).token {
-                        name.clone()
-                    } else {
-                        return Err(raise_parse_error_at(tokens));
+                    let (prop_name, is_private) = match &tokens.remove(0).token {
+                        Token::Identifier(name) => (name.clone(), false),
+                        Token::PrivateIdentifier(name) => (name.clone(), true),
+                        _ => return Err(raise_parse_error_at(tokens)),
                     };
                     if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
                         return Err(raise_parse_error_at(tokens));
@@ -481,9 +504,17 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                             return Err(raise_parse_error_at(tokens)); // getters should have no parameters
                         }
                         if is_static {
-                            members.push(ClassMember::StaticGetter(prop_name, body));
+                            if is_private {
+                                members.push(ClassMember::PrivateStaticGetter(prop_name, body));
+                            } else {
+                                members.push(ClassMember::StaticGetter(prop_name, body));
+                            }
                         } else {
-                            members.push(ClassMember::Getter(prop_name, body));
+                            if is_private {
+                                members.push(ClassMember::PrivateGetter(prop_name, body));
+                            } else {
+                                members.push(ClassMember::Getter(prop_name, body));
+                            }
                         }
                     } else {
                         // setter
@@ -491,9 +522,17 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                             return Err(raise_parse_error_at(tokens)); // setters should have exactly one parameter
                         }
                         if is_static {
-                            members.push(ClassMember::StaticSetter(prop_name, params, body));
+                            if is_private {
+                                members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
+                            } else {
+                                members.push(ClassMember::StaticSetter(prop_name, params, body));
+                            }
                         } else {
-                            members.push(ClassMember::Setter(prop_name, params, body));
+                            if is_private {
+                                members.push(ClassMember::PrivateSetter(prop_name, params, body));
+                            } else {
+                                members.push(ClassMember::Setter(prop_name, params, body));
+                            }
                         }
                     }
                 } else if matches!(tokens[0].token, Token::LParen) {

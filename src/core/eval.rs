@@ -9,7 +9,7 @@ use crate::{
     js_array::{create_array, get_array_length, is_array, set_array_length},
     js_class::{
         ClassMember, call_class_method, call_static_method, create_class_object, evaluate_new, evaluate_super, evaluate_super_call,
-        evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of,
+        evaluate_super_method, evaluate_super_property, evaluate_this, is_class_instance, is_instance_of, is_private_member_declared,
     },
     js_console::{handle_console_method, make_console_object},
     js_date::is_date_object,
@@ -2832,8 +2832,18 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             obj_set_key_value(&prototype_obj, &"constructor".into(), Value::Object(func_obj.clone()))?;
             Ok(Value::Object(func_obj))
         }
-        Expr::ArrowFunction(params, body) => Ok(Value::Closure(Rc::new(ClosureData::new(params, body, env, None)))),
-        Expr::AsyncArrowFunction(params, body) => Ok(Value::AsyncClosure(Rc::new(ClosureData::new(params, body, env, None)))),
+        Expr::ArrowFunction(params, body) => {
+            // Arrow functions use lexical `this` from the surrounding environment
+            let mut closure_data = ClosureData::new(params, body, env, None);
+            closure_data.bound_this = Some(evaluate_this(env)?);
+            Ok(Value::Closure(Rc::new(closure_data)))
+        }
+        Expr::AsyncArrowFunction(params, body) => {
+            let mut closure_data = ClosureData::new(params, body, env, None);
+            closure_data.bound_this = Some(evaluate_this(env)?);
+            Ok(Value::AsyncClosure(Rc::new(closure_data)))
+        }
+
         Expr::Object(properties) => evaluate_object(env, properties),
         Expr::Array(elements) => evaluate_array(env, elements),
         Expr::Getter(func_expr) => evaluate_expr(env, func_expr),
@@ -5312,34 +5322,43 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                 let mut allowed = false;
                 let mut current_env = Some(env.clone());
                 while let Some(e) = current_env {
-                    if let Some(home_obj_val) = get_own_property(&e, &"__home_object__".into()) {
+                    // First check if this environment has a __home_object__ pointing to the class prototype
+                    if let Some(home_obj_val) = crate::core::get_own_property(&e, &"__home_object__".into()) {
                         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
-                            if let Some(class_def_val) = get_own_property(home_obj, &"__class_def__".into()) {
+                            if let Some(class_def_val) = crate::core::get_own_property(home_obj, &"__class_def__".into()) {
                                 if let Value::ClassDefinition(class_def) = &*class_def_val.borrow() {
-                                    for member in &class_def.members {
-                                        match member {
-                                            ClassMember::PrivateProperty(name, _)
-                                            | ClassMember::PrivateMethod(name, _, _)
-                                            | ClassMember::PrivateStaticProperty(name, _)
-                                            | ClassMember::PrivateStaticMethod(name, _, _) => {
-                                                if name == &prop[1..] {
-                                                    allowed = true;
-                                                    break;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
+                                    if is_private_member_declared(class_def, prop) {
+                                        allowed = true;
+                                        break;
                                     }
                                 }
                             }
                         }
                     }
-                    if allowed {
-                        break;
+                    // In some cases the environment itself may carry the class definition (e.g., constructor scope)
+                    if let Some(class_def_val) = crate::core::get_own_property(&e, &"__class_def__".into()) {
+                        if let Value::ClassDefinition(class_def) = &*class_def_val.borrow() {
+                            if is_private_member_declared(class_def, prop) {
+                                allowed = true;
+                                break;
+                            }
+                        }
                     }
                     current_env = e.borrow().prototype.clone();
                 }
-
+                if !allowed {
+                    if let Some(ctor_val) = obj_get_key_value(&obj_map, &"constructor".into())? {
+                        if let Value::Object(ctor_obj) = &*ctor_val.borrow() {
+                            if let Some(class_def_val) = obj_get_key_value(ctor_obj, &"__class_def__".into())? {
+                                if let Value::ClassDefinition(cd) = &*class_def_val.borrow() {
+                                    if is_private_member_declared(cd, prop) {
+                                        allowed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 if !allowed {
                     return Err(raise_syntax_error!(format!(
                         "Private field '{prop}' must be declared in an enclosing class",
@@ -5866,16 +5885,20 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else if get_own_property(&obj_map, &"__dataview".into()).is_some() {
                     // DataView instance methods
                     crate::js_typedarray::handle_dataview_method(&obj_map, method, args, env)
-                } else if get_own_property(&obj_map, &"__class_def__".into()).is_some() {
-                    // Class static methods
-                    call_static_method(&obj_map, method, args, env)
-                } else if get_own_property(&obj_map, &"sameValue".into()).is_some() {
-                    crate::js_assert::handle_assert_method(method, args, env)
                 } else if get_own_property(&obj_map, &"testWithIntlConstructors".into()).is_some() {
                     crate::js_testintl::handle_testintl_method(method, args, env)
                 } else if get_own_property(&obj_map, &"__locale".into()).is_some() && method == "resolvedOptions" {
                     // Handle resolvedOptions method on mock Intl instances
                     crate::js_testintl::handle_resolved_options(&obj_map)
+                }
+                // If object has a user-defined property that's a callable, delegate to helper
+                else if (obj_get_key_value(&obj_map, &method.into())?).is_some() {
+                    handle_user_defined_method_on_instance(&obj_map, method, args, env)
+                } else if get_own_property(&obj_map, &"__class_def__".into()).is_some() {
+                    // Class static methods
+                    call_static_method(&obj_map, method, args, env)
+                } else if get_own_property(&obj_map, &"sameValue".into()).is_some() {
+                    crate::js_assert::handle_assert_method(method, args, env)
                 } else if is_array(&obj_map) {
                     // Class static methods
                     call_static_method(&obj_map, method, args, env)
@@ -5895,9 +5918,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 let mut evaluated_args = Vec::new();
                                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                                 // Create new environment starting with captured environment
+                                let this_val = data.bound_this.clone().unwrap_or(Value::Object(obj_map.clone()));
                                 let func_env = prepare_function_call_env(
                                     Some(captured_env),
-                                    Some(Value::Object(obj_map.clone())),
+                                    Some(this_val),
                                     Some(params),
                                     &evaluated_args,
                                     Some(&build_frame_name(env, method)),
@@ -6085,6 +6109,20 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, None)?;
                 crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
             }
+            (Value::Closure(data), "bind") => {
+                if args.is_empty() {
+                    return Err(raise_eval_error!("bind requires at least one argument"));
+                }
+                let bound_this = evaluate_expr(env, &args[0])?;
+                let new_data = ClosureData {
+                    params: data.params.clone(),
+                    body: data.body.clone(),
+                    env: data.env.clone(),
+                    home_object: data.home_object.clone(),
+                    bound_this: Some(bound_this),
+                };
+                Ok(Value::Closure(Rc::new(new_data)))
+            }
             (Value::Function(func_name), "call") => {
                 // Delegate to Function.prototype.call
                 let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
@@ -6094,6 +6132,11 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Delegate to Function.prototype.apply
                 let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
                 crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
+            }
+            (Value::Function(func_name), "bind") => {
+                // Delegate to Function.prototype.bind
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
+                crate::js_function::handle_global_function("Function.prototype.bind", args, &call_env)
             }
             (Value::Function(func_name), method) => {
                 // Handle constructor static methods
@@ -6271,7 +6314,15 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     "<anonymous>".to_string()
                 };
                 let frame = build_frame_name(env, &frame_name);
-                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &evaluated_args, Some(&frame), Some(env))?;
+                let this_val = data.bound_this.clone().unwrap_or(Value::Undefined);
+                let func_env = prepare_function_call_env(
+                    Some(captured_env),
+                    Some(this_val),
+                    Some(params),
+                    &evaluated_args,
+                    Some(&frame),
+                    Some(env),
+                )?;
                 // Execute function body
                 match evaluate_statements_with_context(&func_env, body)? {
                     ControlFlow::Normal(_) => Ok(Value::Undefined),
@@ -7284,4 +7335,166 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
     }
 
     Ok(())
+}
+
+pub(crate) fn handle_user_defined_method_on_instance(
+    obj_map: &JSObjectDataPtr,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
+    // Fetch the property value (own or inherited)
+    if let Some(prop_val) = obj_get_key_value(obj_map, &method.into())? {
+        match prop_val.borrow().clone() {
+            Value::Closure(data) | Value::AsyncClosure(data) => {
+                let params = &data.params;
+                let body = &data.body;
+                let captured_env = &data.env;
+                let home_obj = data.home_object.borrow().clone();
+                // Collect all arguments, expanding spreads
+                let mut evaluated_args = Vec::new();
+                expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                // Use bound `this` if present, otherwise the receiver instance
+                let this_val = data.bound_this.clone().unwrap_or(Value::Object(obj_map.clone()));
+                let func_env = prepare_function_call_env(
+                    Some(captured_env),
+                    Some(this_val),
+                    Some(params),
+                    &evaluated_args,
+                    Some(&build_frame_name(env, method)),
+                    Some(env),
+                )?;
+                if let Some(home) = home_obj {
+                    log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
+                    obj_set_key_value(&func_env, &"__home_object".into(), Value::Object(home.clone()))?;
+                }
+                evaluate_statements(&func_env, body)
+            }
+            Value::Function(func_name) => {
+                if let Some(v) = crate::js_function::handle_receiver_builtin(&func_name, obj_map, args, env)? {
+                    return Ok(v);
+                }
+                if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
+                    if let Some(v) = crate::js_object::handle_object_prototype_builtin(&func_name, obj_map, args, env)? {
+                        return Ok(v);
+                    }
+                    if func_name == "Error.prototype.toString" {
+                        return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
+                    }
+                    crate::js_function::handle_global_function(&func_name, args, env)
+                } else if func_name.starts_with("Function.prototype.") {
+                    let call_env = prepare_function_call_env(Some(env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                    crate::js_function::handle_global_function(&func_name, args, &call_env)
+                } else {
+                    crate::js_function::handle_global_function(&func_name, args, env)
+                }
+            }
+            Value::Object(func_obj_map) => {
+                if let Some(cl_rc) = obj_get_key_value(&func_obj_map, &"__closure__".into())? {
+                    match &*cl_rc.borrow() {
+                        Value::Closure(data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let home_obj = data.home_object.borrow().clone();
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            let func_env = prepare_function_call_env(
+                                Some(captured_env),
+                                Some(Value::Object(obj_map.clone())),
+                                Some(params),
+                                &evaluated_args,
+                                Some(&build_frame_name(env, method)),
+                                Some(env),
+                            )?;
+                            if let Some(home) = home_obj {
+                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            }
+
+                            // Create arguments object
+                            let arguments_obj = create_array(&func_env)?;
+                            set_array_length(&arguments_obj, evaluated_args.len())?;
+                            for (i, arg) in evaluated_args.iter().enumerate() {
+                                obj_set_key_value(&arguments_obj, &i.to_string().into(), arg.clone())?;
+                            }
+                            obj_set_key_value(&func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+
+                            match evaluate_statements_with_context(&func_env, body)? {
+                                ControlFlow::Normal(_) => Ok(Value::Undefined),
+                                ControlFlow::Return(val) => Ok(val),
+                                ControlFlow::Break(_) => Err(raise_eval_error!("break statement not in loop or switch")),
+                                ControlFlow::Continue(_) => Err(raise_eval_error!("continue statement not in loop")),
+                            }
+                        }
+                        Value::GeneratorFunction(_, data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let home_obj = &data.home_object;
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            let func_env = prepare_function_call_env(
+                                Some(captured_env),
+                                Some(Value::Object(obj_map.clone())),
+                                None,
+                                &evaluated_args,
+                                Some(&build_frame_name(env, method)),
+                                Some(env),
+                            )?;
+                            if let Some(home) = &*home_obj.borrow() {
+                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            }
+                            crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
+                        }
+                        Value::AsyncClosure(data) => {
+                            let params = &data.params;
+                            let body = &data.body;
+                            let captured_env = &data.env;
+                            let home_obj = data.home_object.borrow().clone();
+                            let mut evaluated_args = Vec::new();
+                            expand_spread_in_call_args(env, args, &mut evaluated_args)?;
+                            let promise = Rc::new(RefCell::new(JSPromise::default()));
+                            let promise_obj = Value::Object(new_js_object_data());
+                            if let Value::Object(obj) = &promise_obj {
+                                obj.borrow_mut()
+                                    .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                            }
+                            let func_env = prepare_function_call_env(
+                                Some(captured_env),
+                                Some(Value::Object(obj_map.clone())),
+                                Some(params),
+                                &evaluated_args,
+                                Some(&build_frame_name(env, method)),
+                                Some(env),
+                            )?;
+                            if let Some(home) = home_obj {
+                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            }
+                            func_env.borrow_mut().is_function_scope = true;
+
+                            let result = evaluate_statements(&func_env, body);
+                            match result {
+                                Ok(val) => crate::js_promise::resolve_promise(&promise, val),
+                                Err(e) => match e.kind() {
+                                    crate::JSErrorKind::Throw { value } => {
+                                        crate::js_promise::reject_promise(&promise, value.clone());
+                                    }
+                                    _ => {
+                                        crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{}", e))));
+                                    }
+                                },
+                            }
+                            Ok(promise_obj)
+                        }
+                        _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
+                    }
+                } else {
+                    Err(raise_eval_error!(format!("Property '{method}' is not a function")))
+                }
+            }
+            _ => Err(raise_eval_error!(format!("Property '{method}' is not a function"))),
+        }
+    } else {
+        Err(raise_eval_error!(format!("Property '{method}' is not a function")))
+    }
 }

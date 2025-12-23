@@ -591,6 +591,7 @@ pub struct ClosureData {
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr,
     pub home_object: RefCell<Option<JSObjectDataPtr>>,
+    pub bound_this: Option<Value>,
 }
 
 impl ClosureData {
@@ -600,6 +601,7 @@ impl ClosureData {
             body: body.to_vec(),
             env: env.clone(),
             home_object: RefCell::new(home_object.cloned()),
+            bound_this: None,
         }
     }
 }

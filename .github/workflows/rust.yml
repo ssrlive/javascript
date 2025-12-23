@@ -46,6 +46,7 @@ jobs:
         cargo run --example js -- js-scripts/atomics_wait_notify_test.js
         cargo run --example js -- js-scripts/boxed_types_tests.js
         cargo run --example js -- js-scripts/check_dataview_global.js
+        cargo run --example js -- js-scripts/classes_usage.js
         cargo run --example js -- js-scripts/comprehensive_dataview_test.js
         cargo run --example js -- js-scripts/dataview_properties_test.js
         cargo run --example js -- js-scripts/date_tests.js

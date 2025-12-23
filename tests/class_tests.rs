@@ -276,4 +276,87 @@ mod class_tests {
         }
         assert!(result.is_ok(), "Static property, method access and instance properties should work");
     }
+
+    #[test]
+    fn test_super_missing_method_throws() {
+        let script = r#"
+            class P {}
+            class C extends P {
+                m() { return super.foo(); }
+            }
+            let c = new C();
+            c.m();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        assert!(result.is_err(), "Calling missing super method should throw an error");
+    }
+
+    #[test]
+    fn test_super_non_function_property_throws() {
+        let script = r#"
+            class P {}
+            P.prototype.foo = 5;
+            class C extends P { m() { return super.foo(); } }
+            let c = new C();
+            c.m();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        assert!(result.is_err(), "Calling a non-function super property should throw a TypeError");
+    }
+
+    #[test]
+    fn test_super_getter_property() {
+        let script = r#"
+            class P { get value() { return "parent"; } }
+            class C extends P { m() { return super.value; } }
+            new C().m();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match &result {
+            Ok(Value::String(s)) => {
+                let s = String::from_utf16_lossy(s);
+                assert_eq!(s, "parent");
+            }
+            Ok(v) => panic!("Unexpected result: {:?}", v),
+            Err(e) => panic!("Error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_super_deep_chain() {
+        let script = r#"
+            class A { toString() { return "A"; } }
+            class B extends A { toString() { return "B " + super.toString(); } }
+            class C extends B { toString() { return "C " + super.toString(); } }
+            let x = new C();
+            x.toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match &result {
+            Ok(Value::String(s)) => {
+                let s = String::from_utf16_lossy(s);
+                assert_eq!(s, "C B A");
+            }
+            Ok(v) => panic!("Unexpected result: {:?}", v),
+            Err(e) => panic!("Error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_super_in_arrow() {
+        let script = r#"
+            class P { m() { return "P"; } }
+            class C extends P { m() { let f = () => super.m(); return f(); } }
+            new C().m();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        match &result {
+            Ok(Value::String(s)) => {
+                let s = String::from_utf16_lossy(s);
+                assert_eq!(s, "P");
+            }
+            Ok(v) => panic!("Unexpected result: {:?}", v),
+            Err(e) => panic!("Error: {:?}", e),
+        }
+    }
 }

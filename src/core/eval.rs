@@ -5929,7 +5929,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 )?;
                                 if let Some(home) = home_obj {
                                     log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
-                                    obj_set_key_value(&func_env, &"__home_object".into(), Value::Object(home.clone()))?;
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                                 } else {
                                     log::trace!("DEBUG: home_obj is None in evaluate_call (generic method)");
                                 }
@@ -7366,7 +7366,7 @@ pub(crate) fn handle_user_defined_method_on_instance(
                 )?;
                 if let Some(home) = home_obj {
                     log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
-                    obj_set_key_value(&func_env, &"__home_object".into(), Value::Object(home.clone()))?;
+                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                 }
                 evaluate_statements(&func_env, body)
             }

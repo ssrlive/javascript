@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use num_bigint::BigInt;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
@@ -992,9 +993,16 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
     }
 
     // Search own properties and then walk the prototype chain until we find
-    // a matching property or run out of prototypes.
+    // a matching property or run out of prototypes. Use a visited set to detect prototype cycles.
+    let mut visited: HashSet<*const RefCell<JSObjectData>> = HashSet::new();
     let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
     while let Some(cur) = current {
+        let ptr = Rc::as_ptr(&cur);
+        if visited.contains(&ptr) {
+            log::error!("Prototype chain cycle detected at ptr={:p}, breaking traversal", ptr);
+            break;
+        }
+        visited.insert(ptr);
         let val_opt = get_own_property(&cur, key);
         if let Some(val) = val_opt {
             // Found an own/inherited value on `cur`. For getters we bind `this` to
@@ -1885,4 +1893,19 @@ pub fn env_set_const(env: &JSObjectDataPtr, key: &str, val: Value) {
     env_mut.insert(PropertyKey::String(key.to_string()), Rc::new(RefCell::new(val)));
     env_mut.set_const(key.to_string());
     env_mut.set_non_configurable(PropertyKey::String(key.to_string()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prototype_cycle_detection() {
+        let a = new_js_object_data();
+        let b = new_js_object_data();
+        a.borrow_mut().prototype = Some(b.clone());
+        b.borrow_mut().prototype = Some(a.clone());
+        let res = obj_get_key_value(&a, &"nope".into()).unwrap();
+        assert!(res.is_none());
+    }
 }

@@ -1102,8 +1102,24 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
             // Super is the prototype of HomeObject
             if let Some(super_obj) = &home_obj.borrow().prototype {
+                // Log a concise debug line for super resolution (reduced verbosity)
+                log::trace!(
+                    "evaluate_super_method - home_ptr={:p} super_ptr={:p} method={}",
+                    Rc::as_ptr(home_obj),
+                    Rc::as_ptr(super_obj),
+                    method
+                );
                 // Look up method on super object
                 if let Some(method_val) = obj_get_key_value(super_obj, &method.into())? {
+                    // Reduce verbosity: only log a short method type rather than full Value debug
+                    let method_type = match &*method_val.borrow() {
+                        Value::Closure(..) => "Closure",
+                        Value::AsyncClosure(..) => "AsyncClosure",
+                        Value::Function(_) => "Function",
+                        Value::Object(_) => "Object",
+                        _ => "Other",
+                    };
+                    log::trace!("evaluate_super_method - found method on super: method={method} type={method_type}");
                     // We need to call this method with the current 'this'
                     if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
                         match &*method_val.borrow() {

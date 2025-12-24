@@ -1,5 +1,6 @@
 use crate::core::{
-    ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value, prepare_function_call_env,
+    ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value, prepare_call_env_with_this,
+    prepare_function_call_env,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
@@ -196,7 +197,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             let forwarded_args = args[1..].to_vec();
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, Some(env))?;
+                            let call_env = prepare_call_env_with_this(Some(env), receiver_val, None, &[], Some(env))?;
 
                             return handle_global_function(&func_name, &forwarded_args, &call_env);
                         }
@@ -320,7 +321,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             }
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, Some(env))?;
+                            let call_env = prepare_call_env_with_this(Some(env), receiver_val, None, &[], Some(env))?;
 
                             return handle_global_function(&func_name, &forwarded_exprs, &call_env);
                         }

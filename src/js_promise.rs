@@ -25,7 +25,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, StatementKind, Value, env_set, evaluate_expr, evaluate_statements,
-    extract_closure_from_value, prepare_function_call_env, value_to_string,
+    extract_closure_from_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
@@ -196,8 +196,7 @@ fn process_task(task: Task) -> Result<(), JSError> {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    let func_env =
-                        prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, caller_env_opt.as_ref())?;
+                    let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             log::trace!("Callback executed successfully, resolving promise");
@@ -228,8 +227,7 @@ fn process_task(task: Task) -> Result<(), JSError> {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    let func_env =
-                        prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, caller_env_opt.as_ref())?;
+                    let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             resolve_promise(&new_promise, result);
@@ -704,9 +702,9 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     // Create executor function environment and bind resolve/reject into params
     let executor_args = vec![resolve_func.clone(), reject_func.clone()];
     let executor_env = if params.is_empty() {
-        crate::core::prepare_function_call_env(Some(&captured_env), None, None, &[], None, None)?
+        crate::core::prepare_closure_call_env(&captured_env, None, &[], None)?
     } else {
-        crate::core::prepare_function_call_env(Some(&captured_env), None, Some(&params), &executor_args, None, None)?
+        crate::core::prepare_closure_call_env(&captured_env, Some(&params), &executor_args, None)?
     };
 
     log::trace!("About to call executor function");

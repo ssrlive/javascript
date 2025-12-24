@@ -1,5 +1,7 @@
 use crate::{
-    core::{JSObjectDataPtr, PropertyKey, extract_closure_from_value, new_js_object_data, prepare_function_call_env},
+    core::{
+        JSObjectDataPtr, PropertyKey, extract_closure_from_value, new_js_object_data, prepare_closure_call_env, prepare_function_call_env,
+    },
     error::JSError,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
@@ -49,7 +51,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                         if let Some(ref fn_val) = map_fn {
                             if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                 let args = vec![val.clone(), val.clone()]; // Set iterator yields value as key
-                                let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                                let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                                 let mapped = evaluate_statements(&func_env, &body)?;
                                 result.push(mapped);
                             } else {
@@ -79,8 +81,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 if let Some(ref fn_val) = map_fn {
                                     if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                         let args = vec![val.clone(), Value::Number(i as f64)];
-                                        let func_env =
-                                            prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                                        let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                                         let mapped = evaluate_statements(&func_env, &body)?;
                                         result.push(mapped);
                                     } else {
@@ -103,8 +104,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 if let Some(ref fn_val) = map_fn {
                                     if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                         let args = vec![entry_val.clone(), Value::Number(i as f64)];
-                                        let func_env =
-                                            prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                                        let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                                         let mapped = evaluate_statements(&func_env, &body)?;
                                         result.push(mapped);
                                     } else {
@@ -127,8 +127,7 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                             if let Some(ref fn_val) = map_fn {
                                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                     let args = vec![element, Value::Number(i as f64)];
-                                    let func_env =
-                                        prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                                    let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                                     let mapped = evaluate_statements(&func_env, &body)?;
                                     result.push(mapped);
                                 } else {
@@ -368,7 +367,7 @@ pub(crate) fn handle_array_instance_method(
                         if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                             // Map params: (element, index, array)
                             let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                             evaluate_statements(&func_env, &body)?;
                         } else {
                             return Err(raise_eval_error!("Array.forEach expects a function"));
@@ -392,7 +391,7 @@ pub(crate) fn handle_array_instance_method(
                     if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                             let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             obj_set_key_value(&new_array, &i.to_string().into(), res)?;
@@ -417,7 +416,7 @@ pub(crate) fn handle_array_instance_method(
                     if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                             let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -478,7 +477,7 @@ pub(crate) fn handle_array_instance_method(
                                 Value::Number(i as f64),
                                 Value::Object(object.clone()),
                             ];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                             let res = evaluate_statements(&func_env, &body)?;
                             accumulator = res;
                         } else {
@@ -550,7 +549,7 @@ pub(crate) fn handle_array_instance_method(
                                 Value::Number(i as f64),
                                 Value::Object(object.clone()),
                             ];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                             let res = evaluate_statements(&func_env, &body)?;
                             accumulator = res;
                         } else {
@@ -576,7 +575,7 @@ pub(crate) fn handle_array_instance_method(
 
                             // Create new environment for callback
                             let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -613,7 +612,7 @@ pub(crate) fn handle_array_instance_method(
                             let index_val = Value::Number(i as f64);
 
                             let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -650,7 +649,7 @@ pub(crate) fn handle_array_instance_method(
                             let index_val = Value::Number(i as f64);
 
                             let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -687,7 +686,7 @@ pub(crate) fn handle_array_instance_method(
                             let index_val = Value::Number(i as f64);
 
                             let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                            let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                            let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
                             let res = evaluate_statements(&func_env, &body)?;
                             // truthy check
@@ -847,7 +846,7 @@ pub(crate) fn handle_array_instance_method(
                     elements.sort_by(|a, b| {
                         // Create function environment for comparison (fresh frame whose prototype is captured_env)
                         let args = vec![a.1.clone(), b.1.clone()];
-                        let func_env = match prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env)) {
+                        let func_env = match prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env)) {
                             Ok(e) => e,
                             Err(_) => return std::cmp::Ordering::Equal,
                         };
@@ -1172,7 +1171,7 @@ pub(crate) fn handle_array_instance_method(
                 if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                        let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                        let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                         let mapped_val = evaluate_statements(&func_env, &body)?;
                         flatten_single_value(mapped_val, &mut result, 1)?;
                     } else {
@@ -1290,7 +1289,7 @@ pub(crate) fn handle_array_instance_method(
                                 let index_val = Value::Number(i as f64);
 
                                 let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                                let func_env = prepare_function_call_env(Some(captured_env), None, Some(params), &args, None, Some(env))?;
+                                let func_env = prepare_closure_call_env(captured_env, Some(params), &args, Some(env))?;
 
                                 let res = evaluate_statements(&func_env, body)?;
                                 // truthy check

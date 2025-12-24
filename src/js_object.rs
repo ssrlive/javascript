@@ -2,7 +2,7 @@
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
-    new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_function_call_env, value_to_string,
+    new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
@@ -281,7 +281,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
                     let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
                         let args = vec![val.clone(), Value::Number(i as f64)];
-                        let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
+                        let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                         crate::core::evaluate_statements(&func_env, &body)?
                     } else {
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));

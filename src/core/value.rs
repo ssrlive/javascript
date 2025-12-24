@@ -870,6 +870,29 @@ pub fn prepare_function_call_env(
     Ok(func_env)
 }
 
+/// Convenience wrapper for creating call environments that bind a `this` value.
+pub fn prepare_call_env_with_this(
+    captured_env_opt: Option<&JSObjectDataPtr>,
+    this_val: Value,
+    params_opt: Option<&[DestructuringElement]>,
+    args: &[Value],
+    caller_env_opt: Option<&JSObjectDataPtr>,
+) -> Result<JSObjectDataPtr, JSError> {
+    prepare_function_call_env(captured_env_opt, Some(this_val), params_opt, args, None, caller_env_opt)
+}
+
+/// Convenience wrapper for invoking closures captured with an environment.
+/// This wraps `prepare_function_call_env(Some(captured_env), None, ...)` to
+/// reduce repetition at call sites where `this` is not bound.
+pub fn prepare_closure_call_env(
+    captured_env: &JSObjectDataPtr,
+    params_opt: Option<&[DestructuringElement]>,
+    args: &[Value],
+    caller_env_opt: Option<&JSObjectDataPtr>,
+) -> Result<JSObjectDataPtr, JSError> {
+    prepare_function_call_env(Some(captured_env), None, params_opt, args, None, caller_env_opt)
+}
+
 // Helper: extract a closure (params, body, env) from a Value. This accepts
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.

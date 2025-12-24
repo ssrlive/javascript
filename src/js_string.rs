@@ -319,10 +319,10 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
         let search_val = evaluate_expr(env, &args[0])?;
         let replace_val = evaluate_expr(env, &args[1])?;
         // If search is a RegExp object, process accordingly
-        if let Value::Object(obj_map) = search_val {
-            if is_regex_object(&obj_map) {
+        if let Value::Object(object) = search_val {
+            if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&obj_map, &"__flags".into()) {
+                let flags = match get_own_property(&object, &"__flags".into()) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
@@ -332,7 +332,7 @@ fn string_replace_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Res
                 let global = flags.contains('g');
 
                 // Extract pattern
-                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
+                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&object)?;
 
                 let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
                     .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;
@@ -535,11 +535,11 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
             }
             set_array_length(&arr, parts.len())?;
             Ok(Value::Object(arr))
-        } else if let Value::Object(obj_map) = sep_val {
+        } else if let Value::Object(object) = sep_val {
             // Separator is a RegExp-like object
-            let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
+            let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&object)?;
 
-            let flags_opt = get_own_property(&obj_map, &"__flags".into());
+            let flags_opt = get_own_property(&object, &"__flags".into());
             let flags = match flags_opt {
                 Some(val_rc) => match &*val_rc.borrow() {
                     Value::String(s) => String::from_utf16_lossy(s),
@@ -627,9 +627,9 @@ fn string_match_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
     };
 
     // Build a RegExp object to work with (either existing object or new one)
-    let regexp_obj = if let Value::Object(obj_map) = &search_val {
-        if is_regex_object(obj_map) {
-            obj_map.clone()
+    let regexp_obj = if let Value::Object(object) = &search_val {
+        if is_regex_object(object) {
+            object.clone()
         } else {
             // Not a regex object; create new RegExp from string coercion
             let pattern = match &search_val {
@@ -1253,10 +1253,10 @@ fn string_replace_all_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) ->
         let search_val = evaluate_expr(env, &args[0])?;
         let replace_val = evaluate_expr(env, &args[1])?;
 
-        if let Value::Object(obj_map) = search_val {
-            if is_regex_object(&obj_map) {
+        if let Value::Object(object) = search_val {
+            if is_regex_object(&object) {
                 // get flags
-                let flags = match get_own_property(&obj_map, &"__flags".into()) {
+                let flags = match get_own_property(&object, &"__flags".into()) {
                     Some(val) => match &*val.borrow() {
                         Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
@@ -1270,7 +1270,7 @@ fn string_replace_all_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) ->
                 }
 
                 // Extract pattern
-                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&obj_map)?;
+                let pattern_u16 = crate::js_regexp::internal_get_regex_pattern(&object)?;
 
                 let re = crate::js_regexp::create_regex_from_utf16(&pattern_u16, &flags)
                     .map_err(|e| raise_syntax_error!(format!("Invalid RegExp: {}", e)))?;

@@ -49,13 +49,8 @@ pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
 }
 
 /// Handle boxed BigInt object methods (toString, valueOf)
-pub fn handle_bigint_object_method(
-    obj_map: &JSObjectDataPtr,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
-    if let Some(value_val) = obj_get_key_value(obj_map, &"__value__".into())? {
+pub fn handle_bigint_object_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    if let Some(value_val) = obj_get_key_value(object, &"__value__".into())? {
         if let Value::BigInt(h) = &*value_val.borrow() {
             match method {
                 "toString" => {

@@ -198,12 +198,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 }
 
 /// Handle RegExp instance method calls
-pub(crate) fn handle_regexp_method(
-    obj_map: &JSObjectDataPtr,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
         "exec" => {
             if args.is_empty() {
@@ -230,8 +225,8 @@ pub(crate) fn handle_regexp_method(
             };
 
             // Get regex pattern and flags
-            let pattern_u16 = internal_get_regex_pattern(obj_map)?;
-            let flags = match get_own_property(obj_map, &"__flags".into()) {
+            let pattern_u16 = internal_get_regex_pattern(object)?;
+            let flags = match get_own_property(object, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -278,7 +273,7 @@ pub(crate) fn handle_regexp_method(
 
             let mut last_index = 0;
             if use_last
-                && let Some(last_index_val) = get_own_property(obj_map, &"lastIndex".into())
+                && let Some(last_index_val) = get_own_property(object, &"lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 last_index = (*n as isize).max(0) as usize;
@@ -354,14 +349,14 @@ pub(crate) fn handle_regexp_method(
                     }
 
                     if use_last {
-                        obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(orig_end as f64))?;
+                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
                     }
 
                     Ok(Value::Object(result_array))
                 }
                 None => {
                     if global {
-                        obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(0.0))?;
+                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(0.0))?;
                     }
                     Ok(Value::Null)
                 }
@@ -388,8 +383,8 @@ pub(crate) fn handle_regexp_method(
                 }
             };
 
-            let pattern_u16 = internal_get_regex_pattern(obj_map)?;
-            let flags = match get_own_property(obj_map, &"__flags".into()) {
+            let pattern_u16 = internal_get_regex_pattern(object)?;
+            let flags = match get_own_property(object, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),
@@ -423,7 +418,7 @@ pub(crate) fn handle_regexp_method(
 
             let mut last_index = 0;
             if use_last
-                && let Some(last_index_val) = get_own_property(obj_map, &"lastIndex".into())
+                && let Some(last_index_val) = get_own_property(object, &"lastIndex".into())
                 && let Value::Number(n) = &*last_index_val.borrow()
             {
                 last_index = (*n as isize).max(0) as usize;
@@ -436,13 +431,13 @@ pub(crate) fn handle_regexp_method(
                     if use_last {
                         let end = m.range.end;
                         let orig_end = if mapping { map_index_back(&input_u16, end) } else { end };
-                        obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(orig_end as f64))?;
+                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
                     }
                     Ok(Value::Boolean(true))
                 }
                 None => {
                     if global {
-                        obj_set_key_value(obj_map, &"lastIndex".into(), Value::Number(0.0))?;
+                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(0.0))?;
                     }
                     Ok(Value::Boolean(false))
                 }
@@ -450,9 +445,9 @@ pub(crate) fn handle_regexp_method(
         }
         "toString" => {
             // Get pattern and flags (two-step get to avoid long-lived borrows)
-            let pattern = utf16_to_utf8(&internal_get_regex_pattern(obj_map).unwrap_or_default());
+            let pattern = utf16_to_utf8(&internal_get_regex_pattern(object).unwrap_or_default());
 
-            let flags = match get_own_property(obj_map, &"__flags".into()) {
+            let flags = match get_own_property(object, &"__flags".into()) {
                 Some(val) => match &*val.borrow() {
                     Value::String(s) => utf16_to_utf8(s),
                     _ => "".to_string(),

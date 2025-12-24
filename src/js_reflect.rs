@@ -167,13 +167,13 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     let expr_args: Vec<Expr> = arg_exprs.into_iter().collect();
                     crate::js_function::handle_global_function(&func_name, &expr_args, env)
                 }
-                Value::Object(obj_map) => {
+                Value::Object(object) => {
                     // If this object wraps an internal closure (function-object),
                     // invoke that closure with `this` bound to `this_arg` and
                     // the provided argument list. This preserves the correct
                     // `this` binding for `Reflect.apply` when the target is a
                     // script-defined function stored as an object.
-                    if let Some(cl_rc) = obj_get_key_value(&obj_map, &"__closure__".into())? {
+                    if let Some(cl_rc) = obj_get_key_value(&object, &"__closure__".into())? {
                         match &*cl_rc.borrow() {
                             Value::Closure(data) => {
                                 let params = &data.params;
@@ -251,7 +251,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                     }
 
                     // If not an internal closure, fall back to building a call expression
-                    let call_expr = Expr::Call(Box::new(Expr::Value(Value::Object(obj_map.clone()))), arg_exprs);
+                    let call_expr = Expr::Call(Box::new(Expr::Value(Value::Object(object.clone()))), arg_exprs);
                     crate::core::evaluate_expr(env, &call_expr)
                 }
                 _ => Err(raise_type_error!("Reflect.apply target is not callable")),

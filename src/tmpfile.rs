@@ -58,10 +58,10 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 }
 
 /// Handle file object method calls
-pub(crate) fn handle_file_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_file_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
-    if get_own_property(obj_map, &"__file_id".into()).is_some() {
-        let file_id_val = get_own_property(obj_map, &"__file_id".into())
+    if get_own_property(object, &"__file_id".into()).is_some() {
+        let file_id_val = get_own_property(object, &"__file_id".into())
             .ok_or(raise_eval_error!("Invalid file object"))?
             .borrow()
             .clone();

@@ -672,9 +672,9 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
         Value::Undefined => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
         Value::Null => Ok(Value::String(utf8_to_utf16("[object Null]"))),
         Value::Uninitialized => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
-        Value::Object(obj_map) => {
+        Value::Object(object) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get_key_value(obj_map, &"__value__".into())? {
+            if let Some(wrapped_val) = obj_get_key_value(object, &"__value__".into())? {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                     Value::BigInt(h) => return Ok(Value::String(utf8_to_utf16(&h.to_string()))),
@@ -685,16 +685,16 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
             }
 
             // If this object looks like a Date (has __timestamp), call Date.toString()
-            if is_date_object(obj_map) {
-                return crate::js_date::handle_date_method(obj_map, "toString", args, env);
+            if is_date_object(object) {
+                return crate::js_date::handle_date_method(object, "toString", args, env);
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
-            if is_array(obj_map) {
-                let current_len = get_array_length(obj_map).unwrap_or(0);
+            if is_array(object) {
+                let current_len = get_array_length(object).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get_key_value(obj_map, &i.to_string().into())? {
+                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
                         match &*val_rc.borrow() {
                             Value::Undefined | Value::Null => parts.push("".to_string()), // push empty string for null and undefined
                             Value::String(s) => parts.push(String::from_utf16_lossy(s)),
@@ -713,7 +713,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
             // If this object contains a Symbol.toStringTag property, honor it
             if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
                 let key = PropertyKey::Symbol(tag_sym_rc.clone());
-                if let Some(tag_val_rc) = obj_get_key_value(obj_map, &key)?
+                if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
                     && let Value::String(s) = &*tag_val_rc.borrow()
                 {
                     return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", String::from_utf16_lossy(s)))));
@@ -753,9 +753,9 @@ pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> R
     }
 
     // Expect an object receiver
-    if let Value::Object(obj_map) = obj_val {
+    if let Value::Object(object) = obj_val {
         // name default to "Error"
-        let name = if let Some(n_rc) = obj_get_key_value(obj_map, &"name".into())? {
+        let name = if let Some(n_rc) = obj_get_key_value(object, &"name".into())? {
             if let Value::String(s) = &*n_rc.borrow() {
                 String::from_utf16_lossy(s)
             } else {
@@ -766,7 +766,7 @@ pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> R
         };
 
         // message default to empty
-        let message = if let Some(m_rc) = obj_get_key_value(obj_map, &"message".into())? {
+        let message = if let Some(m_rc) = obj_get_key_value(object, &"message".into())? {
             if let Value::String(s) = &*m_rc.borrow() {
                 String::from_utf16_lossy(s)
             } else {
@@ -949,7 +949,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
 /// `Ok(None)` so callers can fall back to other dispatch logic.
 pub(crate) fn handle_object_prototype_builtin(
     func_name: &str,
-    obj_map: &JSObjectDataPtr,
+    object: &JSObjectDataPtr,
     args: &[Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Option<Value>, JSError> {
@@ -959,7 +959,7 @@ pub(crate) fn handle_object_prototype_builtin(
                 return Err(raise_eval_error!("hasOwnProperty requires one argument"));
             }
             let key_val = crate::core::evaluate_expr(env, &args[0])?;
-            let exists = crate::core::has_own_property_value(obj_map, &key_val);
+            let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }
         "Object.prototype.isPrototypeOf" => {
@@ -971,7 +971,7 @@ pub(crate) fn handle_object_prototype_builtin(
                 Value::Object(target_map) => {
                     let mut current_opt = target_map.borrow().prototype.clone();
                     while let Some(parent) = current_opt {
-                        if Rc::ptr_eq(&parent, obj_map) {
+                        if Rc::ptr_eq(&parent, object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
                         current_opt = parent.borrow().prototype.clone();
@@ -986,21 +986,21 @@ pub(crate) fn handle_object_prototype_builtin(
                 return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
             }
             let key_val = crate::core::evaluate_expr(env, &args[0])?;
-            let exists = crate::core::has_own_property_value(obj_map, &key_val);
+            let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }
         "Object.prototype.toString" => Ok(Some(crate::js_object::handle_to_string_method(
-            &Value::Object(obj_map.clone()),
+            &Value::Object(object.clone()),
             args,
             env,
         )?)),
         "Object.prototype.valueOf" => Ok(Some(crate::js_object::handle_value_of_method(
-            &Value::Object(obj_map.clone()),
+            &Value::Object(object.clone()),
             args,
             env,
         )?)),
         "Object.prototype.toLocaleString" => Ok(Some(crate::js_object::handle_to_string_method(
-            &Value::Object(obj_map.clone()),
+            &Value::Object(object.clone()),
             args,
             env,
         )?)),

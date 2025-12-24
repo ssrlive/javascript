@@ -2008,11 +2008,11 @@ pub fn handle_promise_static_method(method: &str, args: &[crate::core::Expr], en
 }
 
 /// Handle Promise instance method calls
-pub fn handle_promise_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_promise_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
-        "then" => crate::js_promise::handle_promise_then(obj_map, args, env),
-        "catch" => crate::js_promise::handle_promise_catch(obj_map, args, env),
-        "finally" => crate::js_promise::handle_promise_finally(obj_map, args, env),
+        "then" => crate::js_promise::handle_promise_then(object, args, env),
+        "catch" => crate::js_promise::handle_promise_catch(object, args, env),
+        "finally" => crate::js_promise::handle_promise_finally(object, args, env),
         _ => Err(raise_eval_error!(format!("Promise has no method '{method}'"))),
     }
 }

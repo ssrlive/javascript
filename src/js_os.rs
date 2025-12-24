@@ -56,9 +56,9 @@ fn get_parent_pid_windows() -> u32 {
 }
 
 /// Handle OS module method calls
-pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
-    if get_own_property(obj_map, &"open".into()).is_some() {
+    if get_own_property(object, &"open".into()).is_some() {
         match method {
             "open" => {
                 if !args.is_empty() {
@@ -315,7 +315,7 @@ pub(crate) fn handle_os_method(obj_map: &JSObjectDataPtr, method: &str, args: &[
     }
 
     // If this object looks like the `os.path` module
-    if get_own_property(obj_map, &"join".into()).is_some() {
+    if get_own_property(object, &"join".into()).is_some() {
         match method {
             "join" => {
                 let mut result = String::new();

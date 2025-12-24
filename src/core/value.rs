@@ -878,8 +878,8 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringEleme
         Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
         Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
         Value::GeneratorFunction(_, data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
-        Value::Object(obj_map) => {
-            if let Ok(Some(cl_rc)) = obj_get_key_value(obj_map, &"__closure__".into()) {
+        Value::Object(object) => {
+            if let Ok(Some(cl_rc)) = obj_get_key_value(object, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
                     Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
                     Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
@@ -898,11 +898,11 @@ pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringEleme
 pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match val {
         Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => Ok(val.clone()),
-        Value::Object(obj_map) => {
+        Value::Object(object) => {
             // Prefer explicit [Symbol.toPrimitive] if present and callable
             if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
                 let key = PropertyKey::Symbol(tp_sym.clone());
-                if let Some(method_rc) = obj_get_key_value(obj_map, &key)? {
+                if let Some(method_rc) = obj_get_key_value(object, &key)? {
                     let method_val = method_rc.borrow().clone();
                     // Accept direct closures or function-objects that wrap a closure
                     if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
@@ -910,7 +910,7 @@ pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Va
                         let args = vec![Value::String(utf8_to_utf16(hint))];
                         let func_env = prepare_function_call_env(
                             Some(&captured_env),
-                            Some(Value::Object(obj_map.clone())),
+                            Some(Value::Object(object.clone())),
                             Some(&params),
                             &args,
                             None,
@@ -934,21 +934,21 @@ pub fn to_primitive(val: &Value, hint: &str, env: &JSObjectDataPtr) -> Result<Va
             // Default algorithm: order depends on hint
             if hint == "string" {
                 // toString -> valueOf
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[], env)?;
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
                 if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[], env)?;
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
                 if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
             } else {
                 // number or default: valueOf -> toString
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(obj_map.clone()), &[], env)?;
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
                 if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(val_of);
                 }
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(obj_map.clone()), &[], env)?;
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
                 if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
                     return Ok(to_s);
                 }

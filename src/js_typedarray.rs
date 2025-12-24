@@ -83,8 +83,8 @@ pub fn handle_atomics_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
         return Ok(Value::Boolean(res));
     }
     let ta_val = evaluate_expr(env, &args[0])?;
-    let ta_obj = if let Value::Object(obj_map) = ta_val {
-        if let Some(ta_rc) = obj_get_key_value(&obj_map, &"__typedarray".into())? {
+    let ta_obj = if let Value::Object(object) = ta_val {
+        if let Some(ta_rc) = obj_get_key_value(&object, &"__typedarray".into())? {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 ta.clone()
             } else {
@@ -871,9 +871,9 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 }
 
 /// Handle DataView instance method calls
-pub fn handle_dataview_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_dataview_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Get the DataView from the object
-    let dv_val = obj_get_key_value(obj_map, &"__dataview".into())?;
+    let dv_val = obj_get_key_value(object, &"__dataview".into())?;
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
             dv.clone()

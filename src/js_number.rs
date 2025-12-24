@@ -353,14 +353,9 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
 }
 
 /// Handle Number object method calls (for boxed Number objects)
-pub fn handle_number_object_method(
-    obj_map: &JSObjectDataPtr,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+pub fn handle_number_object_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Handle Number instance methods
-    if let Some(value_val) = obj_get_key_value(obj_map, &"__value__".into())? {
+    if let Some(value_val) = obj_get_key_value(object, &"__value__".into())? {
         if let Value::Number(n) = *value_val.borrow() {
             handle_number_instance_method(&n, method, args, env)
         } else {

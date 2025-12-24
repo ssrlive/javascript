@@ -875,8 +875,8 @@ pub(crate) fn call_static_method(
     Err(raise_eval_error!(format!("Static method '{method}' not found on class")))
 }
 
-pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
-    let proto_obj = get_class_proto_obj(obj_map)?;
+pub(crate) fn call_class_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+    let proto_obj = get_class_proto_obj(object)?;
     // Look for method in prototype
     if let Some(method_val) = obj_get_key_value(&proto_obj, &method.into())? {
         log::trace!("Found method {method} in prototype");
@@ -894,7 +894,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 // Create function environment based on the closure's captured env and bind params, binding `this` to the instance
                 let func_env = prepare_function_call_env(
                     Some(captured_env),
-                    Some(Value::Object(obj_map.clone())),
+                    Some(Value::Object(object.clone())),
                     Some(params),
                     &evaluated_args,
                     None,
@@ -915,15 +915,15 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                 // Handle built-in functions on prototype (Object.prototype, Date.prototype, boxed primitives, etc.)
                 // Evaluate args when needed
                 // Note: handlers expect Expr args and env so pass them through
-                if let Some(v) = crate::js_function::handle_receiver_builtin(func_name, obj_map, args, env)? {
+                if let Some(v) = crate::js_function::handle_receiver_builtin(func_name, object, args, env)? {
                     return Ok(v);
                 }
                 if func_name.starts_with("Object.prototype.") || func_name == "Error.prototype.toString" {
-                    if let Some(v) = crate::js_object::handle_object_prototype_builtin(func_name, obj_map, args, env)? {
+                    if let Some(v) = crate::js_object::handle_object_prototype_builtin(func_name, object, args, env)? {
                         return Ok(v);
                     }
                     if func_name == "Error.prototype.toString" {
-                        return crate::js_object::handle_error_to_string_method(&Value::Object(obj_map.clone()), args);
+                        return crate::js_object::handle_error_to_string_method(&Value::Object(object.clone()), args);
                     }
                     return crate::js_function::handle_global_function(func_name, args, env);
                 }

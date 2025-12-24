@@ -8,21 +8,21 @@ use crate::core::{
 // Ok(None) if not recognized, Err on error.
 pub(crate) fn handle_receiver_builtin(
     func_name: &str,
-    obj_map: &JSObjectDataPtr,
+    object: &JSObjectDataPtr,
     args: &[Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Option<Value>, crate::error::JSError> {
     // BigInt builtins
     if func_name == "BigInt_toString" {
-        return Ok(Some(crate::js_bigint::handle_bigint_object_method(obj_map, "toString", args, env)?));
+        return Ok(Some(crate::js_bigint::handle_bigint_object_method(object, "toString", args, env)?));
     }
     if func_name == "BigInt_valueOf" {
-        return Ok(Some(crate::js_bigint::handle_bigint_object_method(obj_map, "valueOf", args, env)?));
+        return Ok(Some(crate::js_bigint::handle_bigint_object_method(object, "valueOf", args, env)?));
     }
     // Date prototype methods
     if func_name.starts_with("Date.prototype.") {
         let method_name = func_name.strip_prefix("Date.prototype.").unwrap();
-        return Ok(Some(crate::js_date::handle_date_method(obj_map, method_name, args, env)?));
+        return Ok(Some(crate::js_date::handle_date_method(object, method_name, args, env)?));
     }
     Ok(None)
 }
@@ -238,9 +238,9 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
                         crate::core::evaluate_statements(&func_env, body)
                     }
-                    Value::Object(obj_map) => {
+                    Value::Object(object) => {
                         // If this is an object wrapping a closure, extract and call it
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(&obj_map, &"__closure__".into())?
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
@@ -376,12 +376,12 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
 
                         crate::core::evaluate_statements(&func_env, body)
                     }
-                    Value::Object(obj_map) => {
+                    Value::Object(object) => {
                         // object wrapping closure
                         if args.is_empty() {
                             return Err(raise_eval_error!("apply requires a receiver"));
                         }
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(&obj_map, &"__closure__".into())?
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             let receiver_val = evaluate_expr(env, &args[0])?;

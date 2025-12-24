@@ -80,6 +80,32 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
     }
 }
 
+// Derive a succinct frame base (function name) and the script name for an
+// environment. This collapses the repeated logic used throughout the file
+// to prefer an explicit `__frame` value and to read `__script_name`.
+fn derive_frame_base_and_script(env: &JSObjectDataPtr) -> (String, String) {
+    let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(env, &"__frame".into()) {
+        if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
+            utf16_to_utf8(s_utf16)
+        } else {
+            build_frame_name(env, "<anonymous>")
+        }
+    } else {
+        build_frame_name(env, "<anonymous>")
+    };
+    let base = match frame_name.find(" (") {
+        Some(idx) => frame_name[..idx].to_string(),
+        None => frame_name,
+    };
+    let mut script_name = "<script>".to_string();
+    if let Ok(Some(sn_rc)) = obj_get_key_value(env, &"__script_name".into()) {
+        if let Value::String(s) = &*sn_rc.borrow() {
+            script_name = utf16_to_utf8(s);
+        }
+    }
+    (base, script_name)
+}
+
 thread_local! {
     static SYMBOL_REGISTRY: RefCell<HashMap<String, Rc<RefCell<Value>>>> = RefCell::new(HashMap::new());
 }
@@ -861,27 +887,8 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
         let _ = obj_set_key_value(object, &"__thrown_line".into(), Value::Number(line as f64));
         let _ = obj_set_key_value(object, &"__thrown_column".into(), Value::Number(column as f64));
 
-        // Derive frame base name from current env's __frame if present
-        let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(env, &"__frame".into()) {
-            if let Value::String(s) = &*frame_val_rc.borrow() {
-                String::from_utf16_lossy(s)
-            } else {
-                build_frame_name(env, "<anonymous>")
-            }
-        } else {
-            build_frame_name(env, "<anonymous>")
-        };
-        let base = match frame_name.find(" (") {
-            Some(idx) => frame_name[..idx].to_string(),
-            None => frame_name,
-        };
-        // script name
-        let mut script_name = "<script>".to_string();
-        if let Ok(Some(sn_rc)) = obj_get_key_value(env, &"__script_name".into()) {
-            if let Value::String(s) = &*sn_rc.borrow() {
-                script_name = String::from_utf16_lossy(s);
-            }
-        }
+        // Derive base and script name for the current environment
+        let (base, script_name) = derive_frame_base_and_script(env);
 
         // Build full frame list by walking __frame / __caller links so we
         // include the full call path (innermost first). Replace the innermost
@@ -894,19 +901,7 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
         let mut env_opt = Some(env.clone());
         while let Some(env_ptr) = env_opt {
             // derive base name
-            let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
-                if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
-                    String::from_utf16_lossy(s_utf16)
-                } else {
-                    build_frame_name(&env_ptr, "<anonymous>")
-                }
-            } else {
-                build_frame_name(&env_ptr, "<anonymous>")
-            };
-            let base = match frame_name.find(" (") {
-                Some(idx) => frame_name[..idx].to_string(),
-                None => frame_name,
-            };
+            let (base, _) = derive_frame_base_and_script(&env_ptr);
 
             // prefer __call_* on the function env, then caller env's __line/__column,
             // then fall back to env's own __line/__column

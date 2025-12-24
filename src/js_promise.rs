@@ -351,14 +351,29 @@ pub fn poll_event_loop() -> Result<PollResult, JSError> {
             return (None, None);
         }
 
-        let mut ready_index = None;
+        // Prefer Resolution/Rejection tasks (microtasks) over timers.
+        // First scan for any Resolution or Rejection tasks and pick the
+        // first such task found. If none, fall back to finding the
+        // earliest ready timer (Timeout/Interval).
         let mut min_wait_time: Option<Duration> = None;
 
+        // 1) look for microtasks
+        for (i, task) in queue_borrow.iter().enumerate() {
+            match task {
+                Task::Resolution { .. } | Task::Rejection { .. } => {
+                    return (Some(queue_borrow.remove(i)), None);
+                }
+                _ => {}
+            }
+        }
+
+        // 2) no immediate microtasks — find ready timers or compute min wait
+        let mut ready_timer_index: Option<usize> = None;
         for (i, task) in queue_borrow.iter().enumerate() {
             match task {
                 Task::Timeout { target_time, .. } | Task::Interval { target_time, .. } => {
                     if *target_time <= now {
-                        ready_index = Some(i);
+                        ready_timer_index = Some(i);
                         break;
                     } else {
                         let wait = *target_time - now;
@@ -366,13 +381,14 @@ pub fn poll_event_loop() -> Result<PollResult, JSError> {
                     }
                 }
                 _ => {
-                    ready_index = Some(i);
+                    // other tasks (UnhandledCheck etc.) are treated as ready
+                    ready_timer_index = Some(i);
                     break;
                 }
             }
         }
 
-        if let Some(index) = ready_index {
+        if let Some(index) = ready_timer_index {
             (Some(queue_borrow.remove(index)), None)
         } else {
             (None, min_wait_time)

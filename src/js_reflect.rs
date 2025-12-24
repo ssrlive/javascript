@@ -416,8 +416,8 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
             match target {
                 Value::Object(obj) => {
-                    if let Some(proto) = &obj.borrow().prototype {
-                        Ok(Value::Object(proto.clone()))
+                    if let Some(proto_rc) = obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                        Ok(Value::Object(proto_rc))
                     } else {
                         Ok(Value::Undefined)
                     }
@@ -536,7 +536,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             match target {
                 Value::Object(obj) => match prototype {
                     Value::Object(proto_obj) => {
-                        obj.borrow_mut().prototype = Some(proto_obj);
+                        obj.borrow_mut().prototype = Some(Rc::downgrade(&proto_obj));
                         Ok(Value::Boolean(true))
                     }
                     Value::Undefined => {

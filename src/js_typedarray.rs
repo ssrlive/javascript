@@ -601,7 +601,7 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
 
     // Set prototype
     let proto = make_arraybuffer_prototype()?;
-    obj.borrow_mut().prototype = Some(proto);
+    obj.borrow_mut().prototype = Some(Rc::downgrade(&proto));
 
     Ok(Value::Object(obj))
 }
@@ -632,7 +632,7 @@ pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr
 
     // Set prototype to ArrayBuffer.prototype
     let proto = make_arraybuffer_prototype()?;
-    obj.borrow_mut().prototype = Some(proto);
+    obj.borrow_mut().prototype = Some(Rc::downgrade(&proto));
 
     Ok(Value::Object(obj))
 }
@@ -698,7 +698,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
 
     // Set prototype
     let proto = make_dataview_prototype()?;
-    obj.borrow_mut().prototype = Some(proto);
+    obj.borrow_mut().prototype = Some(Rc::downgrade(&proto));
 
     Ok(Value::Object(obj))
 }
@@ -855,7 +855,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 
     // Set prototype first
     let proto = make_typedarray_prototype(kind.clone())?;
-    obj.borrow_mut().prototype = Some(proto);
+    obj.borrow_mut().prototype = Some(Rc::downgrade(&proto));
 
     // Create TypedArray instance
     let typed_array = Rc::new(RefCell::new(JSTypedArray {

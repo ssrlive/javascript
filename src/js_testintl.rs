@@ -41,7 +41,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         // can find top-level helpers like `isCanonicalizedStructurallyValidLanguageTag`.
         let mut global_env = env.clone();
         loop {
-            let next = { global_env.borrow().prototype.clone() };
+            let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
             if let Some(parent) = next {
                 global_env = parent;
             } else {
@@ -64,7 +64,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                 // Use the global environment for the canonicalize helper as well
                 let mut global_env = env.clone();
                 loop {
-                    let next = { global_env.borrow().prototype.clone() };
+                    let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
                     if let Some(parent) = next {
                         global_env = parent;
                     } else {
@@ -116,7 +116,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                                 Rc::as_ptr(&cur),
                                 keys_vec.join(",")
                             );
-                            cur_env = cur.borrow().prototype.clone();
+                            cur_env = cur.borrow().prototype.clone().and_then(|w| w.upgrade());
                             depth += 1;
                         }
                     }
@@ -156,7 +156,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         // functions are visible when invoked from host code.
         let mut global_env = env.clone();
         loop {
-            let next = { global_env.borrow().prototype.clone() };
+            let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
             if let Some(parent) = next {
                 global_env = parent;
             } else {
@@ -185,7 +185,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                         // Evaluate the fallback lookup in the global environment too
                         let mut global_env = env.clone();
                         loop {
-                            let next = { global_env.borrow().prototype.clone() };
+                            let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
                             if let Some(parent) = next {
                                 global_env = parent;
                             } else {
@@ -230,7 +230,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                         Rc::as_ptr(&cur),
                         keys_vec.join(",")
                     );
-                    cur_env = cur.borrow().prototype.clone();
+                    cur_env = cur.borrow().prototype.clone().and_then(|w| w.upgrade());
                     depth += 1;
                 }
                 use crate::core::Expr;
@@ -241,7 +241,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                 // Evaluate the fallback lookup in the global environment too
                 let mut global_env = env.clone();
                 loop {
-                    let next = { global_env.borrow().prototype.clone() };
+                    let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
                     if let Some(parent) = next {
                         global_env = parent;
                     } else {
@@ -361,7 +361,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                             // the top-level where test helper functions are defined.
                             let mut global_env = env.clone();
                             loop {
-                                let next = { global_env.borrow().prototype.clone() };
+                                let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
                                 if let Some(parent) = next {
                                     global_env = parent;
                                 } else {
@@ -431,7 +431,7 @@ pub fn handle_mock_intl_static_method(method: &str, args: &[Expr], env: &JSObjec
                                             Rc::as_ptr(&cur),
                                             keys_vec.join(",")
                                         );
-                                        cur_env = cur.borrow().prototype.clone();
+                                        cur_env = cur.borrow().prototype.clone().and_then(|w| w.upgrade());
                                         depth += 1;
                                     }
 

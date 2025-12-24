@@ -17,7 +17,7 @@ fn test_prototype_assignment() {
             // Check if prototype was set
             assert!(obj.prototype.is_some());
             // Check if we can access the prototype's properties
-            if let Some(proto_rc) = &obj.prototype {
+            if let Some(proto_rc) = obj.prototype.clone().and_then(|w| w.upgrade()) {
                 let proto = proto_rc.borrow();
                 assert!(proto.contains_key(&"inheritedProp".into()));
             }

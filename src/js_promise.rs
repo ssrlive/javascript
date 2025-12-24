@@ -195,6 +195,12 @@ fn process_task(task: Task) -> Result<(), JSError> {
             for (callback, new_promise, caller_env_opt) in callbacks {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
+                    // Debug: show callback param count and captured_env pointer for diagnosis
+                    log::trace!(
+                        "[promise] invoking callback - params_len={} captured_env_ptr={:p}",
+                        params.len(),
+                        Rc::as_ptr(&captured_env)
+                    );
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
                     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(&func_env, &body) {
@@ -254,8 +260,13 @@ fn process_task(task: Task) -> Result<(), JSError> {
                 // Arrow functions (Value::Closure) should inherit `this` from captured_env.
                 let this_val_opt = if let Value::Object(_) = callback {
                     let mut global_env = captured_env.clone();
-                    while let Some(proto) = global_env.clone().borrow().prototype.clone() {
-                        global_env = proto;
+                    loop {
+                        let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
+                        if let Some(parent) = next {
+                            global_env = parent;
+                        } else {
+                            break;
+                        }
                     }
                     Some(Value::Object(global_env))
                 } else {
@@ -278,8 +289,13 @@ fn process_task(task: Task) -> Result<(), JSError> {
             if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                 let this_val_opt = if let Value::Object(_) = callback {
                     let mut global_env = captured_env.clone();
-                    while let Some(proto) = global_env.clone().borrow().prototype.clone() {
-                        global_env = proto;
+                    loop {
+                        let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
+                        if let Some(parent) = next {
+                            global_env = parent;
+                        } else {
+                            break;
+                        }
                     }
                     Some(Value::Object(global_env))
                 } else {

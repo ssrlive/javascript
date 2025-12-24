@@ -3,7 +3,10 @@
 use num_bigint::BigInt;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::{Rc, Weak},
+};
 
 use crate::js_array::{get_array_length, set_array_length};
 use crate::js_date::is_date_object;
@@ -483,6 +486,7 @@ pub enum GeneratorState {
 }
 
 pub type JSObjectDataPtr = Rc<RefCell<JSObjectData>>;
+pub type JSObjectDataWeakPtr = Weak<RefCell<JSObjectData>>;
 
 #[inline]
 pub fn new_js_object_data() -> JSObjectDataPtr {
@@ -499,7 +503,7 @@ pub struct JSObjectData {
     pub non_writable: std::collections::HashSet<PropertyKey>,
     /// Tracks keys that are non-configurable
     pub non_configurable: std::collections::HashSet<PropertyKey>,
-    pub prototype: Option<Rc<RefCell<JSObjectData>>>,
+    pub prototype: Option<JSObjectDataWeakPtr>,
     pub is_function_scope: bool,
 }
 
@@ -592,17 +596,485 @@ pub struct ClosureData {
     pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr,
-    pub home_object: RefCell<Option<JSObjectDataPtr>>,
+    pub home_object: RefCell<Option<JSObjectDataWeakPtr>>,
+    /// Strong references to environments captured along the prototype
+    /// chain at closure creation time. These ensure that transient
+    /// activation objects (function frames) remain alive while the
+    /// closure exists, avoiding lookups failing due to dropped parents.
+    pub captured_envs: Vec<JSObjectDataPtr>,
     pub bound_this: Option<Value>,
 }
 
 impl ClosureData {
     pub fn new(params: &[DestructuringElement], body: &[Statement], env: &JSObjectDataPtr, home_object: Option<&JSObjectDataPtr>) -> Self {
+        if cfg!(debug_assertions) {
+            let has_array = get_own_property(env, &"__array".into()).is_some();
+            let has_str = get_own_property(env, &"__str".into()).is_some();
+            log::trace!(
+                "ClosureData::new - env_ptr={:p} has__array={} has__str={} home_obj_ptr={:?}",
+                Rc::as_ptr(env),
+                has_array,
+                has_str,
+                home_object.map(Rc::as_ptr)
+            );
+        }
+
+        // Name-based capture: collect free variable names referenced by
+        // the closure (including parameter default expressions) and
+        // capture only those prototype-chain environments which actually
+        // define those names. This minimizes retained lifetimes.
+        use std::collections::HashSet;
+
+        // Helpers to collect referenced names from expressions and statements.
+        fn collect_refs_expr(expr: &Expr, out: &mut HashSet<String>) {
+            match expr {
+                Expr::Var(name, _, _) => {
+                    out.insert(name.clone());
+                }
+                Expr::Binary(a, _, b) | Expr::LogicalAnd(a, b) | Expr::LogicalOr(a, b) | Expr::Comma(a, b) => {
+                    collect_refs_expr(a, out);
+                    collect_refs_expr(b, out);
+                }
+                Expr::UnaryNeg(inner) => collect_refs_expr(inner, out),
+                Expr::UnaryPlus(inner) => collect_refs_expr(inner, out),
+                Expr::BitNot(inner) => collect_refs_expr(inner, out),
+                Expr::LogicalNot(inner) => collect_refs_expr(inner, out),
+                Expr::TypeOf(inner) => collect_refs_expr(inner, out),
+                Expr::Delete(inner) => collect_refs_expr(inner, out),
+                Expr::Void(inner) => collect_refs_expr(inner, out),
+                Expr::Increment(inner) => collect_refs_expr(inner, out),
+                Expr::Decrement(inner) => collect_refs_expr(inner, out),
+                Expr::PostIncrement(inner) => collect_refs_expr(inner, out),
+                Expr::PostDecrement(inner) => collect_refs_expr(inner, out),
+                Expr::Await(inner) => collect_refs_expr(inner, out),
+                Expr::Getter(inner) => collect_refs_expr(inner, out),
+                Expr::Setter(inner) => collect_refs_expr(inner, out),
+                Expr::Spread(inner) => collect_refs_expr(inner, out),
+                Expr::YieldStar(inner) => collect_refs_expr(inner, out),
+                Expr::Index(lhs, rhs) => {
+                    collect_refs_expr(lhs, out);
+                    collect_refs_expr(rhs, out);
+                }
+                Expr::Property(obj, _) => collect_refs_expr(obj, out),
+                Expr::Call(func, args) | Expr::OptionalCall(func, args) => {
+                    collect_refs_expr(func, out);
+                    for a in args {
+                        collect_refs_expr(a, out);
+                    }
+                }
+                Expr::New(ctor, args) => {
+                    collect_refs_expr(ctor, out);
+                    for a in args {
+                        collect_refs_expr(a, out);
+                    }
+                }
+                Expr::AddAssign(a, b)
+                | Expr::Assign(a, b)
+                | Expr::LogicalAndAssign(a, b)
+                | Expr::LogicalOrAssign(a, b)
+                | Expr::NullishAssign(a, b)
+                | Expr::MulAssign(a, b)
+                | Expr::DivAssign(a, b)
+                | Expr::ModAssign(a, b)
+                | Expr::BitXorAssign(a, b)
+                | Expr::BitAndAssign(a, b)
+                | Expr::BitOrAssign(a, b)
+                | Expr::LeftShiftAssign(a, b)
+                | Expr::RightShiftAssign(a, b)
+                | Expr::UnsignedRightShiftAssign(a, b)
+                | Expr::PowAssign(a, b) => {
+                    collect_refs_expr(a, out);
+                    collect_refs_expr(b, out);
+                }
+                Expr::Array(elems) => {
+                    for e in elems.iter().flatten() {
+                        collect_refs_expr(e, out);
+                    }
+                }
+                Expr::Object(entries) => {
+                    for (k, v, _) in entries {
+                        collect_refs_expr(k, out);
+                        collect_refs_expr(v, out);
+                    }
+                }
+                Expr::Conditional(c, t, f) => {
+                    collect_refs_expr(c, out);
+                    collect_refs_expr(t, out);
+                    collect_refs_expr(f, out);
+                }
+                Expr::TaggedTemplate(tag, _strings, exprs) => {
+                    collect_refs_expr(tag, out);
+                    for e in exprs {
+                        collect_refs_expr(e, out);
+                    }
+                }
+                Expr::ArrayDestructuring(pattern) => {
+                    for el in pattern {
+                        if let DestructuringElement::Variable(_, Some(default)) = el {
+                            collect_refs_expr(default, out);
+                        }
+                    }
+                }
+                Expr::ObjectDestructuring(pattern) => {
+                    for el in pattern {
+                        match el {
+                            crate::core::ObjectDestructuringElement::Property { key: _, value } => match value {
+                                DestructuringElement::Variable(_, Some(default)) => collect_refs_expr(default, out),
+                                DestructuringElement::NestedArray(nested) => {
+                                    for ne in nested {
+                                        if let DestructuringElement::Variable(_, Some(d)) = ne {
+                                            collect_refs_expr(d, out);
+                                        }
+                                    }
+                                }
+                                DestructuringElement::NestedObject(nested) => {
+                                    for ne in nested {
+                                        if let crate::core::ObjectDestructuringElement::Property { value, .. } = ne {
+                                            if let DestructuringElement::Variable(_, Some(d)) = value {
+                                                collect_refs_expr(d, out);
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            },
+                            crate::core::ObjectDestructuringElement::Rest(_) => {}
+                        }
+                    }
+                }
+                Expr::Function(..) => {}
+                Expr::AsyncFunction(..) => {}
+                Expr::GeneratorFunction(..) => {}
+                Expr::ArrowFunction(..) => {}
+                Expr::AsyncArrowFunction(..) => {}
+                Expr::Class(_) => {}
+                Expr::Value(_) => {}
+                Expr::This => {}
+                Expr::Super => {}
+                Expr::SuperCall(_) => {}
+                Expr::SuperProperty(_) => {}
+                Expr::SuperMethod(_, _) => {}
+                Expr::Regex(_, _) => {}
+                Expr::BigInt(_) => {}
+                _ => {}
+            }
+        }
+
+        fn collect_refs_statements(stmts: &[Statement], out: &mut HashSet<String>) {
+            for s in stmts {
+                match &s.kind {
+                    StatementKind::Expr(e) => collect_refs_expr(e, out),
+                    StatementKind::Return(Some(e)) => collect_refs_expr(e, out),
+                    StatementKind::Return(None) => {}
+                    StatementKind::If(cond, then_body, else_body) => {
+                        collect_refs_expr(cond, out);
+                        collect_refs_statements(then_body, out);
+                        if let Some(else_b) = else_body {
+                            collect_refs_statements(else_b, out);
+                        }
+                    }
+                    StatementKind::For(init_opt, cond_opt, incr_opt, body) => {
+                        if let Some(init) = init_opt {
+                            collect_refs_statements(&[*init.clone()], out);
+                        }
+                        if let Some(cond) = cond_opt {
+                            collect_refs_expr(cond, out);
+                        }
+                        if let Some(incr) = incr_opt {
+                            collect_refs_statements(&[*incr.clone()], out);
+                        }
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::ForOf(_var, iterable, body) => {
+                        collect_refs_expr(iterable, out);
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::ForIn(_, object, body) => {
+                        collect_refs_expr(object, out);
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::ForOfDestructuringObject(_, iterable, body) => {
+                        collect_refs_expr(iterable, out);
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::ForOfDestructuringArray(_, iterable, body) => {
+                        collect_refs_expr(iterable, out);
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::While(cond, body) => {
+                        collect_refs_expr(cond, out);
+                        collect_refs_statements(body, out);
+                    }
+                    StatementKind::DoWhile(body, cond) => {
+                        collect_refs_statements(body, out);
+                        collect_refs_expr(cond, out);
+                    }
+                    StatementKind::Switch(expr, cases) => {
+                        collect_refs_expr(expr, out);
+                        for case in cases {
+                            match case {
+                                crate::core::SwitchCase::Case(_, stmts) | crate::core::SwitchCase::Default(stmts) => {
+                                    collect_refs_statements(stmts, out)
+                                }
+                            }
+                        }
+                    }
+                    StatementKind::Let(decls) | StatementKind::Var(decls) => {
+                        for (_n, expr_opt) in decls {
+                            if let Some(e) = expr_opt {
+                                collect_refs_expr(e, out);
+                            }
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (_n, e) in decls {
+                            collect_refs_expr(e, out);
+                        }
+                    }
+                    StatementKind::LetDestructuringArray(_, expr)
+                    | StatementKind::VarDestructuringArray(_, expr)
+                    | StatementKind::ConstDestructuringArray(_, expr) => collect_refs_expr(expr, out),
+                    StatementKind::LetDestructuringObject(_, expr)
+                    | StatementKind::VarDestructuringObject(_, expr)
+                    | StatementKind::ConstDestructuringObject(_, expr) => collect_refs_expr(expr, out),
+                    StatementKind::Assign(_, expr) => collect_refs_expr(expr, out),
+                    StatementKind::Block(stmts) => collect_refs_statements(stmts, out),
+                    StatementKind::TryCatch(try_body, _param, catch_body, finally_body) => {
+                        collect_refs_statements(try_body, out);
+                        collect_refs_statements(catch_body, out);
+                        if let Some(f) = finally_body {
+                            collect_refs_statements(f, out);
+                        }
+                    }
+                    StatementKind::Throw(expr) => collect_refs_expr(expr, out),
+                    StatementKind::Label(_, _)
+                    | StatementKind::Break(_)
+                    | StatementKind::Continue(_)
+                    | StatementKind::Import(_, _)
+                    | StatementKind::Export(_, _)
+                    | StatementKind::Class(_, _, _)
+                    | StatementKind::FunctionDeclaration(_, _, _, _) => { /* handled above or irrelevant */ }
+                }
+            }
+        }
+
+        // Helpers to collect declared/local names within the closure body and params
+        fn collect_declared_names_from_destructuring(pattern: &Vec<DestructuringElement>, out: &mut HashSet<String>) {
+            for el in pattern {
+                match el {
+                    DestructuringElement::Variable(name, _) => {
+                        out.insert(name.clone());
+                    }
+                    DestructuringElement::NestedArray(nested) => collect_declared_names_from_destructuring(nested, out),
+                    DestructuringElement::NestedObject(nested) => {
+                        for ne in nested {
+                            match ne {
+                                crate::core::ObjectDestructuringElement::Property { key: _, value } => {
+                                    match value {
+                                        DestructuringElement::Variable(n, _) => {
+                                            out.insert(n.clone());
+                                        }
+                                        DestructuringElement::NestedArray(nn) => collect_declared_names_from_destructuring(nn, out),
+                                        DestructuringElement::NestedObject(_nn) => { /* nested object - skip deeper recursion for simplicity */
+                                        }
+                                        DestructuringElement::Rest(n) => {
+                                            out.insert(n.clone());
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                crate::core::ObjectDestructuringElement::Rest(n) => {
+                                    out.insert(n.clone());
+                                }
+                            }
+                        }
+                    }
+                    DestructuringElement::Rest(name) => {
+                        out.insert(name.clone());
+                    }
+                    DestructuringElement::Empty => {}
+                }
+            }
+        }
+
+        fn collect_declared_names_from_statements(stmts: &[Statement], out: &mut HashSet<String>) {
+            for s in stmts {
+                match &s.kind {
+                    StatementKind::Let(decls) | StatementKind::Var(decls) => {
+                        for (n, _) in decls {
+                            out.insert(n.clone());
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (n, _) in decls {
+                            out.insert(n.clone());
+                        }
+                    }
+                    StatementKind::FunctionDeclaration(name, _params, _body, _is_gen) => {
+                        out.insert(name.clone()); /* params are local to function */
+                    }
+                    StatementKind::LetDestructuringArray(pattern, _)
+                    | StatementKind::VarDestructuringArray(pattern, _)
+                    | StatementKind::ConstDestructuringArray(pattern, _) => collect_declared_names_from_destructuring(pattern, out),
+                    StatementKind::LetDestructuringObject(pattern, _)
+                    | StatementKind::VarDestructuringObject(pattern, _)
+                    | StatementKind::ConstDestructuringObject(pattern, _) => {
+                        for el in pattern {
+                            match el {
+                                crate::core::ObjectDestructuringElement::Property { key: _, value } => match value {
+                                    DestructuringElement::Variable(n, _) => {
+                                        out.insert(n.clone());
+                                    }
+                                    DestructuringElement::NestedArray(nested) => collect_declared_names_from_destructuring(nested, out),
+                                    DestructuringElement::NestedObject(_) => {}
+                                    DestructuringElement::Rest(n) => {
+                                        out.insert(n.clone());
+                                    }
+                                    DestructuringElement::Empty => {}
+                                },
+                                crate::core::ObjectDestructuringElement::Rest(n) => {
+                                    out.insert(n.clone());
+                                }
+                            }
+                        }
+                    }
+                    StatementKind::Block(inner) => collect_declared_names_from_statements(inner, out),
+                    StatementKind::If(_, then_body, else_body) => {
+                        collect_declared_names_from_statements(then_body, out);
+                        if let Some(e) = else_body {
+                            collect_declared_names_from_statements(e, out);
+                        }
+                    }
+                    StatementKind::For(_, _, _, body) => collect_declared_names_from_statements(body, out),
+                    StatementKind::ForOf(_, _, body)
+                    | StatementKind::ForIn(_, _, body)
+                    | StatementKind::ForOfDestructuringObject(_, _, body)
+                    | StatementKind::ForOfDestructuringArray(_, _, body) => collect_declared_names_from_statements(body, out),
+                    StatementKind::While(_, body) => collect_declared_names_from_statements(body, out),
+                    StatementKind::DoWhile(body, _) => collect_declared_names_from_statements(body, out),
+                    StatementKind::Switch(_, cases) => {
+                        for case in cases {
+                            match case {
+                                crate::core::SwitchCase::Case(_, stmts) | crate::core::SwitchCase::Default(stmts) => {
+                                    collect_declared_names_from_statements(stmts, out)
+                                }
+                            }
+                        }
+                    }
+                    StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body) => {
+                        collect_declared_names_from_statements(try_body, out);
+                        out.insert(catch_param.clone());
+                        collect_declared_names_from_statements(catch_body, out);
+                        if let Some(f) = finally_body {
+                            collect_declared_names_from_statements(f, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Collect referenced and declared names
+        let mut referenced: HashSet<String> = HashSet::new();
+        collect_refs_statements(body, &mut referenced);
+        // include defaults in params
+        fn collect_refs_from_param(p: &DestructuringElement, out: &mut HashSet<String>) {
+            match p {
+                DestructuringElement::Variable(_, Some(default)) => collect_refs_expr(default, out),
+                DestructuringElement::NestedArray(nested) => {
+                    for el in nested {
+                        collect_refs_from_param(el, out);
+                    }
+                }
+                DestructuringElement::NestedObject(nested) => {
+                    for ne in nested {
+                        match ne {
+                            crate::core::ObjectDestructuringElement::Property { value, .. } => match value {
+                                DestructuringElement::Variable(_, Some(d)) => collect_refs_expr(d, out),
+                                DestructuringElement::NestedArray(nested2) => {
+                                    for el in nested2 {
+                                        collect_refs_from_param(el, out);
+                                    }
+                                }
+                                _ => {}
+                            },
+                            crate::core::ObjectDestructuringElement::Rest(_) => {}
+                        }
+                    }
+                }
+                DestructuringElement::Rest(_) | DestructuringElement::Variable(_, None) | DestructuringElement::Empty => {}
+            }
+        }
+        for p in params {
+            collect_refs_from_param(p, &mut referenced);
+        }
+
+        let mut declared: HashSet<String> = HashSet::new();
+        collect_declared_names_from_statements(body, &mut declared);
+        // params are also declared locals
+        fn collect_param_names(pattern: &Vec<DestructuringElement>, out: &mut HashSet<String>) {
+            for p in pattern {
+                match p {
+                    DestructuringElement::Variable(n, _) => {
+                        out.insert(n.clone());
+                    }
+                    DestructuringElement::NestedArray(nested) => collect_param_names(nested, out),
+                    DestructuringElement::NestedObject(nested) => {
+                        for ne in nested {
+                            match ne {
+                                crate::core::ObjectDestructuringElement::Property { value, .. } => match value {
+                                    DestructuringElement::Variable(n, _) => {
+                                        out.insert(n.clone());
+                                    }
+                                    DestructuringElement::NestedArray(nested2) => collect_param_names(nested2, out),
+                                    _ => {}
+                                },
+                                crate::core::ObjectDestructuringElement::Rest(n) => {
+                                    out.insert(n.clone());
+                                }
+                            }
+                        }
+                    }
+                    DestructuringElement::Rest(n) => {
+                        out.insert(n.clone());
+                    }
+                    DestructuringElement::Empty => {}
+                }
+            }
+        }
+        collect_param_names(&params.to_vec(), &mut declared);
+
+        // free names are referenced minus declared
+        let mut free_names: HashSet<String> = referenced.difference(&declared).cloned().collect();
+
+        let mut captured_envs: Vec<JSObjectDataPtr> = Vec::new();
+        let mut cur_opt = env.borrow().prototype.clone().and_then(|w| w.upgrade());
+        while let Some(cur_rc) = cur_opt {
+            if free_names.is_empty() {
+                break;
+            }
+            // find which free names are present as own properties on this env
+            let mut matched: Vec<String> = Vec::new();
+            for name in free_names.iter() {
+                if get_own_property(&cur_rc, &name.clone().into()).is_some() {
+                    matched.push(name.clone());
+                }
+            }
+            if !matched.is_empty() {
+                captured_envs.push(cur_rc.clone());
+                for m in matched {
+                    free_names.remove(&m);
+                }
+            }
+            cur_opt = cur_rc.borrow().prototype.clone().and_then(|w| w.upgrade());
+        }
+
         ClosureData {
             params: params.to_vec(),
             body: body.to_vec(),
             env: env.clone(),
-            home_object: RefCell::new(home_object.cloned()),
+            home_object: RefCell::new(home_object.map(Rc::downgrade)),
+            captured_envs,
             bound_this: None,
         }
     }
@@ -829,8 +1301,55 @@ pub fn prepare_function_call_env(
     caller_env_opt: Option<&JSObjectDataPtr>,
 ) -> Result<JSObjectDataPtr, JSError> {
     let func_env = new_js_object_data();
+    log::trace!("prepare_function_call_env - created func_env_ptr={:p}", Rc::as_ptr(&func_env));
     if let Some(captured_env) = captured_env_opt {
-        func_env.borrow_mut().prototype = Some(captured_env.clone());
+        func_env.borrow_mut().prototype = Some(Rc::downgrade(captured_env));
+        // If the captured environment contains iterator sentinel keys
+        // like `__array` or `__str`, keep a hidden strong reference on
+        // the activation to ensure the sentinel object remains alive
+        // while this activation is active. This narrows the lifetime
+        // extension to iterator-like closures only (avoids general leaks).
+        let has_array = get_own_property(captured_env, &"__array".into()).is_some();
+        let has_str = get_own_property(captured_env, &"__str".into()).is_some();
+        if has_array || has_str {
+            func_env.borrow_mut().insert(
+                PropertyKey::String("__captured_env_ref".to_string()),
+                Rc::new(RefCell::new(Value::Object(captured_env.clone()))),
+            );
+        }
+        if cfg!(debug_assertions) {
+            let func_proto_ptr = func_env
+                .borrow()
+                .prototype
+                .clone()
+                .and_then(|w| w.upgrade())
+                .map(|p| Rc::as_ptr(&p));
+            log::trace!(
+                "[prepare_fn_env] func_env_ptr={:p} .prototype-> {:?}",
+                Rc::as_ptr(&func_env),
+                func_proto_ptr
+            );
+        }
+        // Debug: record prototype linkage and presence of iterator sentinel keys
+        if cfg!(debug_assertions) {
+            let has_array = get_own_property(captured_env, &"__array".into()).is_some();
+            let has_str = get_own_property(captured_env, &"__str".into()).is_some();
+            let captured_proto_ptr = captured_env
+                .borrow()
+                .prototype
+                .clone()
+                .and_then(|w| w.upgrade())
+                .map(|p| Rc::as_ptr(&p));
+            log::trace!(
+                "prepare_function_call_env - linked prototype captured_env_ptr={:p} captured_env.prototype={:?} caller_ptr={:?} frame={:?} has__array={} has__str={}",
+                Rc::as_ptr(captured_env),
+                captured_proto_ptr,
+                caller_env_opt.map(Rc::as_ptr),
+                frame_opt,
+                has_array,
+                has_str
+            );
+        }
     }
     // mark this as a function scope so var-hoisting and env_set_var bind into this frame
     func_env.borrow_mut().is_function_scope = true;
@@ -1042,6 +1561,11 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
     let mut current: Option<JSObjectDataPtr> = Some(js_obj.clone());
     while let Some(cur) = current {
         let ptr = Rc::as_ptr(&cur);
+        if cfg!(debug_assertions) {
+            let has_key = cur.borrow().contains_key(key);
+            let proto_ptr = cur.borrow().prototype.clone().and_then(|w| w.upgrade()).map(|p| Rc::as_ptr(&p));
+            log::trace!("obj_get_key_value - visiting ptr={ptr:p} key={key} has_key={has_key} proto-> {proto_ptr:?}");
+        }
         if visited.contains(&ptr) {
             log::error!("Prototype chain cycle detected at ptr={:p}, breaking traversal", ptr);
             break;
@@ -1109,8 +1633,13 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                 }
             }
         }
-        // Not found on this object; continue with prototype.
-        current = cur.borrow().prototype.clone();
+        // Not found on this object; continue with prototype (upgrade Weak).
+        let parent_opt = cur.borrow().prototype.clone().and_then(|w| w.upgrade());
+        if let Some(parent_rc) = parent_opt {
+            current = Some(parent_rc);
+        } else {
+            break;
+        }
     }
 
     // No own or inherited property found, fall back to special-case handling
@@ -1128,7 +1657,19 @@ pub fn obj_get_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey) -> Result<
                 false,
             )])))),
         ];
-        Value::Closure(Rc::new(ClosureData::new(&[], &iter_body, &captured_env, None)))
+        if cfg!(debug_assertions) {
+            let has_array = get_own_property(&captured_env, &"__array".into()).is_some();
+            let has_str = get_own_property(&captured_env, &"__str".into()).is_some();
+            log::trace!(
+                "make_iterator_closure - created captured_env_ptr={:p} has__array={} has__str={}",
+                Rc::as_ptr(&captured_env),
+                has_array,
+                has_str
+            );
+        }
+        let cl = Rc::new(ClosureData::new(&[], &iter_body, &captured_env, None));
+        log::trace!("make_iterator_closure - closure_ptr={:p}", Rc::as_ptr(&cl));
+        Value::Closure(cl)
     }
 
     // Provide default well-known symbol fallbacks (non-own) for some built-ins.
@@ -1715,7 +2256,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
             Value::Setter(param, body, env, home_opt) => {
                 // Create a new environment with this bound to the object and the parameter
                 let setter_env = new_js_object_data();
-                setter_env.borrow_mut().prototype = Some(env);
+                setter_env.borrow_mut().prototype = Some(Rc::downgrade(&env));
                 if let Some(home_obj) = home_opt {
                     crate::core::obj_set_key_value(&setter_env, &"__home_object__".into(), Value::Object(home_obj.clone()))?;
                 }
@@ -1732,7 +2273,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
     // If a setter exists on a prototype, call it; if the prototype has a getter
     // with no setter (read-only accessor), throw a TypeError (strict mode behavior).
     {
-        let mut proto_opt = js_obj.borrow().prototype.clone();
+        let mut proto_opt = js_obj.borrow().prototype.clone().and_then(|w| w.upgrade());
         while let Some(proto) = proto_opt {
             if let Some(proto_prop_rc) = get_own_property(&proto, key) {
                 match &*proto_prop_rc.borrow() {
@@ -1781,7 +2322,7 @@ pub fn obj_set_key_value(js_obj: &JSObjectDataPtr, key: &PropertyKey, val: Value
                     _ => {}
                 }
             }
-            proto_opt = proto.borrow().prototype.clone();
+            proto_opt = proto.borrow().prototype.clone().and_then(|w| w.upgrade());
         }
     }
 
@@ -1902,9 +2443,9 @@ pub fn env_set_recursive<T: AsRef<str>>(env: &JSObjectDataPtr, key: T, val: Valu
         if get_own_property(&current, &key_str.into()).is_some() {
             return env_set(&current, key_str, val);
         }
-        let parent_opt = current.borrow().prototype.clone();
-        if let Some(parent) = parent_opt {
-            current = parent;
+        let parent_opt = current.borrow().prototype.clone().and_then(|w| w.upgrade());
+        if let Some(parent_rc) = parent_opt {
+            current = parent_rc;
         } else {
             // if not found, set in current env
             return env_set(env, key_str, val);
@@ -1920,9 +2461,9 @@ pub fn env_set_var(env: &JSObjectDataPtr, key: &str, val: Value) -> Result<(), J
             current.borrow_mut().set_non_configurable(PropertyKey::String(key.to_string()));
             return Ok(());
         }
-        let parent_opt = current.borrow().prototype.clone();
-        if let Some(parent) = parent_opt {
-            current = parent;
+        let parent_opt = current.borrow().prototype.clone().and_then(|w| w.upgrade());
+        if let Some(parent_rc) = parent_opt {
+            current = parent_rc;
         } else {
             // If no function scope found, set in current env (global)
             env_set(env, key, val)?;
@@ -1947,8 +2488,8 @@ mod tests {
     fn prototype_cycle_detection() {
         let a = new_js_object_data();
         let b = new_js_object_data();
-        a.borrow_mut().prototype = Some(b.clone());
-        b.borrow_mut().prototype = Some(a.clone());
+        a.borrow_mut().prototype = Some(Rc::downgrade(&b));
+        b.borrow_mut().prototype = Some(Rc::downgrade(&a));
         let res = obj_get_key_value(&a, &"nope".into()).unwrap();
         assert!(res.is_none());
     }

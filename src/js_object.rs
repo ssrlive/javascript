@@ -243,8 +243,8 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let obj_val = evaluate_expr(env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    if let Some(proto) = &obj.borrow().prototype {
-                        Ok(Value::Object(proto.clone()))
+                    if let Some(proto_rc) = obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                        Ok(Value::Object(proto_rc))
                     } else {
                         Ok(Value::Null)
                     }
@@ -332,7 +332,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
             // Set prototype
             if let Some(proto) = proto_obj {
-                new_obj.borrow_mut().prototype = Some(proto);
+                new_obj.borrow_mut().prototype = Some(Rc::downgrade(&proto));
             }
 
             // If properties descriptor is provided, add properties
@@ -969,12 +969,12 @@ pub(crate) fn handle_object_prototype_builtin(
             let target_val = crate::core::evaluate_expr(env, &args[0])?;
             match target_val {
                 Value::Object(target_map) => {
-                    let mut current_opt = target_map.borrow().prototype.clone();
+                    let mut current_opt = target_map.borrow().prototype.clone().and_then(|w| w.upgrade());
                     while let Some(parent) = current_opt {
                         if Rc::ptr_eq(&parent, object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
-                        current_opt = parent.borrow().prototype.clone();
+                        current_opt = parent.borrow().prototype.clone().and_then(|w| w.upgrade());
                     }
                     Ok(Some(Value::Boolean(false)))
                 }

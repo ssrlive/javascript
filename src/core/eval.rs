@@ -69,8 +69,8 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
                 }
             }
         }
-        // follow prototype/caller chain to find root script name if needed
-        env_opt = env_ptr.borrow().prototype.clone();
+        // follow prototype/caller chain to find root script name if needed (upgrade Weak)
+        env_opt = env_ptr.borrow().prototype.clone().and_then(|w| w.upgrade());
     }
     if let Some(ln) = line {
         let col = column.unwrap_or(0);
@@ -590,7 +590,7 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 // Ensure wrapper function objects inherit from Function.prototype so
                 // `.call`/`.apply` are available via the prototype chain.
                 if let Some(func_proto) = crate::core::get_constructor_prototype(env, "Function")? {
-                    func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                    func_obj.borrow_mut().prototype = Some(Rc::downgrade(&func_proto));
                     let _ = crate::core::obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
                 }
                 Value::Object(func_obj)
@@ -662,7 +662,7 @@ fn evaluate_stmt_class(
 
 fn evaluate_stmt_block(env: &JSObjectDataPtr, stmts: &[Statement], last_value: &mut Value) -> Result<Option<ControlFlow>, JSError> {
     let block_env = new_js_object_data();
-    block_env.borrow_mut().prototype = Some(env.clone());
+    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
     block_env.borrow_mut().is_function_scope = false;
     match evaluate_statements_with_context(&block_env, stmts)? {
         ControlFlow::Normal(val) => *last_value = val,
@@ -747,7 +747,7 @@ fn evaluate_stmt_export(
                     // Ensure wrapper function objects inherit from Function.prototype so
                     // `.call`/`.apply` are available via the prototype chain.
                     if let Some(func_proto) = crate::core::get_constructor_prototype(env, "Function")? {
-                        func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                        func_obj.borrow_mut().prototype = Some(Rc::downgrade(&func_proto));
                         let _ = crate::core::obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
                     }
                     Value::Object(func_obj)
@@ -981,7 +981,7 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
                     continue;
                 }
             }
-            env_opt = env_ptr.borrow().prototype.clone();
+            env_opt = env_ptr.borrow().prototype.clone().and_then(|w| w.upgrade());
         }
 
         // Create thrown-site frame and place it at the front
@@ -1484,7 +1484,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                                 continue;
                             }
                         }
-                        env_opt = env_ptr.borrow().prototype.clone();
+                        env_opt = env_ptr.borrow().prototype.clone().and_then(|w| w.upgrade());
                     }
                     frames
                 }
@@ -1512,7 +1512,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                                 }
                             }
                         }
-                        probe_env = pe.borrow().prototype.clone();
+                        probe_env = pe.borrow().prototype.clone().and_then(|w| w.upgrade());
                     }
 
                     let target_env = matched_env_opt.unwrap_or_else(|| env.clone());
@@ -1574,7 +1574,7 @@ fn statement_while_condition_body(
 
         // Execute body
         let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(env.clone());
+        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
             ControlFlow::Normal(val) => *last_value = val,
@@ -1596,7 +1596,7 @@ fn statement_do_body_while_condition(
     loop {
         // Execute body first
         let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(env.clone());
+        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
             ControlFlow::Normal(val) => *last_value = val,
@@ -1625,7 +1625,7 @@ fn statement_for_init_condition_increment(
     label_name: Option<&str>,
 ) -> Result<Option<ControlFlow>, JSError> {
     let for_env = new_js_object_data();
-    for_env.borrow_mut().prototype = Some(env.clone());
+    for_env.borrow_mut().prototype = Some(Rc::downgrade(env));
     for_env.borrow_mut().is_function_scope = false;
     // Execute initialization in for_env
     if let Some(init_stmt) = init {
@@ -1670,7 +1670,7 @@ fn statement_for_init_condition_increment(
 
         // Execute body in block_env
         let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(for_env.clone());
+        block_env.borrow_mut().prototype = Some(Rc::downgrade(&for_env));
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, body)? {
             ControlFlow::Normal(val) => *last_value = val,
@@ -1732,7 +1732,7 @@ fn perform_statement_if_then_else(
     if is_truthy(&cond_val) {
         // create new block scope
         let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(env.clone());
+        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, then_body)? {
             ControlFlow::Normal(val) => *last_value = val,
@@ -1740,7 +1740,7 @@ fn perform_statement_if_then_else(
         }
     } else if let Some(else_stmts) = else_body {
         let block_env = new_js_object_data();
-        block_env.borrow_mut().prototype = Some(env.clone());
+        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
         block_env.borrow_mut().is_function_scope = false;
         match evaluate_statements_with_context(&block_env, else_stmts)? {
             ControlFlow::Normal(val) => *last_value = val,
@@ -1759,7 +1759,7 @@ fn create_js_error_instance(env: &JSObjectDataPtr, ctor_name: &str, err: &JSErro
             // Link prototype
             if let Ok(Some(proto_val)) = obj_get_key_value(ctor_obj, &"prototype".into()) {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
-                    instance.borrow_mut().prototype = Some(proto_obj.clone());
+                    instance.borrow_mut().prototype = Some(Rc::downgrade(proto_obj));
                     let _ = obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()));
                 }
             }
@@ -1820,7 +1820,7 @@ fn execute_finally(
     last_value: &mut Value,
 ) -> Result<Option<ControlFlow>, JSError> {
     let block_env = new_js_object_data();
-    block_env.borrow_mut().prototype = Some(env.clone());
+    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
     block_env.borrow_mut().is_function_scope = false;
     match evaluate_statements_with_context(&block_env, finally_body)? {
         ControlFlow::Normal(val) => {
@@ -1842,8 +1842,8 @@ fn create_catch_value(env: &JSObjectDataPtr, err: &JSError) -> Result<Value, JSE
             if let Value::Object(obj_ptr) = &cloned {
                 let has_ctor = get_own_property(obj_ptr, &"constructor".into()).is_some();
                 if !has_ctor {
-                    if let Some(proto_ptr) = &obj_ptr.borrow().prototype {
-                        if let Some(proto_ctor_rc) = get_own_property(proto_ptr, &"constructor".into()) {
+                    if let Some(proto_ptr_rc) = obj_ptr.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                        if let Some(proto_ctor_rc) = get_own_property(&proto_ptr_rc, &"constructor".into()) {
                             let ctor_val = proto_ctor_rc.borrow().clone();
                             let _ = obj_set_key_value(obj_ptr, &"constructor".into(), ctor_val);
                         }
@@ -1893,7 +1893,7 @@ fn statement_try_catch(
             if catch_param.is_empty() {
                 if let Some(finally_body) = finally_body_opt {
                     let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, finally_body)? {
                         ControlFlow::Normal(_) => return Err(err),
@@ -1903,7 +1903,7 @@ fn statement_try_catch(
                 Err(err)
             } else {
                 let catch_env = new_js_object_data();
-                catch_env.borrow_mut().prototype = Some(env.clone());
+                catch_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                 catch_env.borrow_mut().is_function_scope = false;
 
                 let catch_value = create_catch_value(env, &err)?;
@@ -1927,7 +1927,7 @@ fn statement_try_catch(
                     Err(e) => {
                         if let Some(finally_body) = finally_body_opt {
                             let block_env = new_js_object_data();
-                            block_env.borrow_mut().prototype = Some(env.clone());
+                            block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                             block_env.borrow_mut().is_function_scope = false;
                             match evaluate_statements_with_context(&block_env, finally_body) {
                                 Ok(ControlFlow::Normal(_)) => Err(e),
@@ -1969,7 +1969,7 @@ fn perform_statement_label(
                                 let element = element_rc.borrow().clone();
                                 env_set_recursive(env, var.as_str(), element)?;
                                 let block_env = new_js_object_data();
-                                block_env.borrow_mut().prototype = Some(env.clone());
+                                block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                                 block_env.borrow_mut().is_function_scope = false;
                                 match evaluate_statements_with_context(&block_env, body)? {
                                     ControlFlow::Normal(val) => *last_value = val,
@@ -2119,7 +2119,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                     if let Value::Object(obj) = obj_val {
                         if key == "__proto__" {
                             if let Value::Object(proto_map) = &value {
-                                obj.borrow_mut().prototype = Some(proto_map.clone());
+                                obj.borrow_mut().prototype = Some(Rc::downgrade(proto_map));
                             } else {
                                 obj.borrow_mut().prototype = None;
                             }
@@ -2136,7 +2136,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                     if let Value::Object(obj) = obj_val {
                         if key == "__proto__" {
                             if let Value::Object(proto_map) = &value {
-                                obj.borrow_mut().prototype = Some(proto_map.clone());
+                                obj.borrow_mut().prototype = Some(Rc::downgrade(proto_map));
                             } else {
                                 obj.borrow_mut().prototype = None;
                             }
@@ -2162,7 +2162,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                     if let Value::Object(obj) = obj_val {
                         if key == "__proto__" {
                             if let Value::Object(proto_map) = &value {
-                                obj.borrow_mut().prototype = Some(proto_map.clone());
+                                obj.borrow_mut().prototype = Some(Rc::downgrade(proto_map));
                             } else {
                                 obj.borrow_mut().prototype = None;
                             }
@@ -2590,7 +2590,7 @@ fn for_of_destructuring_object_iter(
                         // perform destructuring into env (var semantics)
                         perform_object_destructuring(env, pattern, &element, false)?;
                         let block_env = new_js_object_data();
-                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => *last_value = val,
@@ -2653,7 +2653,7 @@ fn for_of_destructuring_array_iter(
                         // perform array destructuring into env (var semantics)
                         perform_array_destructuring(env, pattern, &element, false)?;
                         let block_env = new_js_object_data();
-                        block_env.borrow_mut().prototype = Some(env.clone());
+                        block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                         block_env.borrow_mut().is_function_scope = false;
                         match evaluate_statements_with_context(&block_env, body)? {
                             ControlFlow::Normal(val) => *last_value = val,
@@ -2739,7 +2739,7 @@ fn for_of_destructuring_array_iter(
                                                 // perform array destructuring into env (var semantics)
                                                 perform_array_destructuring(env, pattern, &element, false)?;
                                                 let block_env = new_js_object_data();
-                                                block_env.borrow_mut().prototype = Some(env.clone());
+                                                block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                                                 block_env.borrow_mut().is_function_scope = false;
                                                 match evaluate_statements_with_context(&block_env, body)? {
                                                     ControlFlow::Normal(val) => *last_value = val,
@@ -2801,7 +2801,7 @@ fn for_of_destructuring_array_iter(
                                                 // perform array destructuring into env (var semantics)
                                                 perform_array_destructuring(env, pattern, &element, false)?;
                                                 let block_env = new_js_object_data();
-                                                block_env.borrow_mut().prototype = Some(env.clone());
+                                                block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                                                 block_env.borrow_mut().is_function_scope = false;
                                                 match evaluate_statements_with_context(&block_env, body)? {
                                                     ControlFlow::Normal(val) => *last_value = val,
@@ -2949,7 +2949,7 @@ fn statement_for_of_var_iter(
 
                                     env_set_recursive(env, var, element)?;
                                     let block_env = new_js_object_data();
-                                    block_env.borrow_mut().prototype = Some(env.clone());
+                                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                                     block_env.borrow_mut().is_function_scope = false;
                                     match evaluate_statements_with_context(&block_env, body)? {
                                         ControlFlow::Normal(val) => *last_value = val,
@@ -2997,7 +2997,7 @@ fn statement_for_of_var_iter(
 
                 env_set_recursive(env, var, Value::String(chunk.clone()))?;
                 let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(env.clone());
+                block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                 block_env.borrow_mut().is_function_scope = false;
                 match evaluate_statements_with_context(&block_env, body)? {
                     ControlFlow::Normal(val) => *last_value = val,
@@ -3035,7 +3035,7 @@ fn statement_for_in_var_object(
                     };
                     env_set_recursive(env, var, Value::String(utf8_to_utf16(&key_str)))?;
                     let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, body)? {
                         ControlFlow::Normal(val) => *last_value = val,
@@ -3079,7 +3079,7 @@ fn eval_switch_statement(
                 }
                 if found_match {
                     let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, case_stmts)? {
                         ControlFlow::Normal(val) => *last_value = val,
@@ -3102,7 +3102,7 @@ fn eval_switch_statement(
                 if !found_match && !executed_default {
                     executed_default = true;
                     let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, default_stmts)? {
                         ControlFlow::Normal(val) => *last_value = val,
@@ -3121,7 +3121,7 @@ fn eval_switch_statement(
                     }
                 } else if found_match {
                     let block_env = new_js_object_data();
-                    block_env.borrow_mut().prototype = Some(env.clone());
+                    block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                     block_env.borrow_mut().is_function_scope = false;
                     match evaluate_statements_with_context(&block_env, default_stmts)? {
                         ControlFlow::Normal(val) => *last_value = val,
@@ -3370,7 +3370,7 @@ fn evaluate_function_expression(
     // the function can refer to itself recursively.
     let closure_env = if let Some(n) = &name {
         let new_env = new_js_object_data();
-        new_env.borrow_mut().prototype = Some(env.clone());
+        new_env.borrow_mut().prototype = Some(Rc::downgrade(env));
         obj_set_key_value(&new_env, &n.into(), Value::Object(func_obj.clone()))?;
         new_env
     } else {
@@ -3405,7 +3405,7 @@ fn evaluate_function_expression(
         if let Value::Object(func_ctor) = &*func_ctor_val.borrow() {
             if let Some(func_proto_val) = obj_get_key_value(func_ctor, &"prototype".into())? {
                 if let Value::Object(func_proto) = &*func_proto_val.borrow() {
-                    func_obj.borrow_mut().prototype = Some(func_proto.clone());
+                    func_obj.borrow_mut().prototype = Some(Rc::downgrade(func_proto));
                     let _ = obj_set_key_value(&func_obj, &"__proto__".into(), Value::Object(func_proto.clone()));
                 }
             }
@@ -3445,7 +3445,7 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
             log::trace!("evaluate_var - {} (found in env) -> {:?}", name, resolved);
             return Ok(resolved);
         }
-        current_opt = current_env.borrow().prototype.clone();
+        current_opt = current_env.borrow().prototype.clone().and_then(|w| w.upgrade());
     }
 
     if name == "console" {
@@ -3743,7 +3743,7 @@ fn evaluate_var(env: &JSObjectDataPtr, name: &str, line: Option<usize>, column: 
                 log::trace!("evaluate_var - {} (found) -> {:?}", name, resolved);
                 return Ok(resolved);
             }
-            current_opt = current_env.borrow().prototype.clone();
+            current_opt = current_env.borrow().prototype.clone().and_then(|w| w.upgrade());
         }
         log::trace!("evaluate_var - {name} not found in scope, try global 'this' object");
         // As a fallback, some scripts (e.g. test harnesses) install
@@ -4555,7 +4555,7 @@ fn evaluate_typeof(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
                     found_val = Some(v);
                     break;
                 }
-                current_opt = current_env.borrow().prototype.clone();
+                current_opt = current_env.borrow().prototype.clone().and_then(|w| w.upgrade());
             }
             if let Some(rc) = found_val {
                 rc.borrow().clone()
@@ -4619,7 +4619,7 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
                     let deleted = obj_delete(&current_env, &name.into())?;
                     return Ok(Value::Boolean(deleted));
                 }
-                current_opt = current_env.borrow().prototype.clone();
+                current_opt = current_env.borrow().prototype.clone().and_then(|w| w.upgrade());
             }
             // If not found, return true
             Ok(Value::Boolean(true))
@@ -5739,7 +5739,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                             }
                         }
                     }
-                    current_env = e.borrow().prototype.clone();
+                    current_env = e.borrow().prototype.clone().and_then(|w| w.upgrade());
                 }
                 if !allowed {
                     if let Some(ctor_val) = obj_get_key_value(&object, &"constructor".into())? {
@@ -5764,7 +5764,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
             // Special-case the `__proto__` accessor so property reads return the
             // object's current prototype object when present.
             if prop == "__proto__" {
-                if let Some(proto) = object.borrow().prototype.clone() {
+                if let Some(proto) = object.borrow().prototype.clone().and_then(|w| w.upgrade()) {
                     return Ok(Value::Object(proto));
                 } else {
                     return Ok(Value::Undefined);
@@ -6001,6 +6001,8 @@ fn bind_destructuring_element(
             } else {
                 Value::Undefined
             };
+            // Debug: print parameter binding info to help diagnose missing bindings
+            log::trace!("[bind] env_ptr={:p} bind name='{}' val={:?}", Rc::as_ptr(env), name, val);
             env_set(env, name, val)?;
         }
         DestructuringElement::Rest(name) => {
@@ -6305,7 +6307,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 let params = &data.params;
                                 let body = &data.body;
                                 let captured_env = &data.env;
-                                let home_obj = data.home_object.borrow().clone();
+                                let home_obj_opt = data.home_object.borrow().clone();
                                 // Function call
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
@@ -6320,9 +6322,13 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     Some(&build_frame_name(env, method)),
                                     Some(env),
                                 )?;
-                                if let Some(home) = home_obj {
-                                    log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
-                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                if let Some(home_weak) = home_obj_opt {
+                                    if let Some(home_rc) = home_weak.upgrade() {
+                                        log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
+                                        obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                    } else {
+                                        log::trace!("DEBUG: home_obj weak upgrade failed in evaluate_call (generic method)");
+                                    }
                                 } else {
                                     log::trace!("DEBUG: home_obj is None in evaluate_call (generic method)");
                                 }
@@ -6376,7 +6382,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let params = &data.params;
                                             let body = &data.body;
                                             let captured_env = &data.env;
-                                            let home_obj = data.home_object.borrow().clone();
+                                            let home_obj_opt = data.home_object.borrow().clone();
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6389,8 +6395,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 Some(&build_frame_name(env, method)),
                                                 Some(env),
                                             )?;
-                                            if let Some(home) = home_obj {
-                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            if let Some(home_weak) = home_obj_opt {
+                                                if let Some(home_rc) = home_weak.upgrade() {
+                                                    obj_set_key_value(
+                                                        &func_env,
+                                                        &"__home_object__".into(),
+                                                        Value::Object(home_rc.clone()),
+                                                    )?;
+                                                }
                                             }
 
                                             // Create arguments object
@@ -6425,8 +6437,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 Some(&build_frame_name(env, method)),
                                                 Some(env),
                                             )?;
-                                            if let Some(home) = &*home_obj.borrow() {
-                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            if let Some(home_weak) = &*home_obj.borrow() {
+                                                if let Some(home_rc) = home_weak.upgrade() {
+                                                    obj_set_key_value(
+                                                        &func_env,
+                                                        &"__home_object__".into(),
+                                                        Value::Object(home_rc.clone()),
+                                                    )?;
+                                                }
                                             }
                                             // `this` is bound via prepare_function_call_env
                                             crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
@@ -6435,7 +6453,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                             let params = &data.params;
                                             let body = &data.body;
                                             let captured_env = &data.env;
-                                            let home_obj = data.home_object.borrow().clone();
+                                            let home_obj_opt = data.home_object.borrow().clone();
                                             // Async method-style call: returns a Promise object
                                             let mut evaluated_args = Vec::new();
                                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6455,8 +6473,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                                 Some(&build_frame_name(env, method)),
                                                 Some(env),
                                             )?;
-                                            if let Some(home) = home_obj {
-                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            if let Some(home_weak) = home_obj_opt {
+                                                if let Some(home_rc) = home_weak.upgrade() {
+                                                    obj_set_key_value(
+                                                        &func_env,
+                                                        &"__home_object__".into(),
+                                                        Value::Object(home_rc.clone()),
+                                                    )?;
+                                                }
                                             }
                                             func_env.borrow_mut().is_function_scope = true;
 
@@ -6518,6 +6542,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     body: data.body.clone(),
                     env: data.env.clone(),
                     home_object: data.home_object.clone(),
+                    captured_envs: data.captured_envs.clone(),
                     bound_this: Some(bound_this),
                 };
                 Ok(Value::Closure(Rc::new(new_data)))
@@ -6633,6 +6658,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let params = &data.params;
                             let body = &data.body;
                             let captured_env = &data.env;
+                            log::trace!(
+                                "[call] invoking closure - func_obj_ptr={:p} captured_env_ptr={:p} caller_env_ptr={:p}",
+                                Rc::as_ptr(&object),
+                                Rc::as_ptr(captured_env),
+                                Rc::as_ptr(env)
+                            );
                             // Function call
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
@@ -6824,7 +6855,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             let params = &data.params;
                             let body = &data.body;
                             let captured_env = &data.env;
-                            let home_obj = data.home_object.borrow().clone();
+                            let home_obj_opt = data.home_object.borrow().clone();
                             // Collect all arguments, expanding spreads
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -6847,8 +6878,10 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 Some(&frame),
                                 Some(env),
                             )?;
-                            if let Some(home) = home_obj {
-                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            if let Some(home_weak) = home_obj_opt {
+                                if let Some(home_rc) = home_weak.upgrade() {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                }
                             }
                             // Execute function body
                             return evaluate_statements(&func_env, body);
@@ -6862,8 +6895,8 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // plain callable value.
                 let mut root_env_opt = Some(env.clone());
                 while let Some(r) = root_env_opt.clone() {
-                    if r.borrow().prototype.is_some() {
-                        root_env_opt = r.borrow().prototype.clone();
+                    if let Some(parent) = r.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                        root_env_opt = Some(parent);
                     } else {
                         break;
                     }
@@ -7067,8 +7100,8 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
     // Walk to the top-level environment
     let mut root_env_opt = Some(env.clone());
     while let Some(r) = root_env_opt.clone() {
-        if r.borrow().prototype.is_some() {
-            root_env_opt = r.borrow().prototype.clone();
+        if let Some(parent) = r.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+            root_env_opt = Some(parent);
         } else {
             break;
         }
@@ -7178,16 +7211,16 @@ fn evaluate_object(env: &JSObjectDataPtr, properties: &Vec<(Expr, Expr, bool)>) 
                     let mut value = evaluate_expr(env, value_expr)?;
                     if *is_method {
                         match &mut value {
-                            Value::Closure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
-                            Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
-                            Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                            Value::Closure(data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
+                            Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
+                            Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
                             Value::Object(func_obj) => {
                                 if let Some(closure_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {
                                     let mut closure_val = closure_rc.borrow_mut();
                                     match &mut *closure_val {
-                                        Value::Closure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
-                                        Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(obj.clone()),
-                                        Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(obj.clone()),
+                                        Value::Closure(data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
+                                        Value::AsyncClosure(data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
+                                        Value::GeneratorFunction(_, data) => *data.home_object.borrow_mut() = Some(Rc::downgrade(&obj)),
                                         _ => {}
                                     }
                                 }
@@ -7707,7 +7740,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
             // Special-case `__proto__` assignment: set the prototype
             if prop == "__proto__" {
                 if let Value::Object(proto_map) = val {
-                    map.borrow_mut().prototype = Some(proto_map);
+                    map.borrow_mut().prototype = Some(Rc::downgrade(&proto_map));
                     return Ok(None);
                 } else {
                     // Non-object assigned to __proto__: ignore or set to None
@@ -7728,7 +7761,7 @@ pub fn set_prop_env(env: &JSObjectDataPtr, obj_expr: &Expr, prop: &str, val: Val
             // Special-case `__proto__` assignment: set the object's prototype
             if prop == "__proto__" {
                 if let Value::Object(proto_map) = val {
-                    obj.borrow_mut().prototype = Some(proto_map);
+                    obj.borrow_mut().prototype = Some(Rc::downgrade(&proto_map));
                     return Ok(Some(Value::Object(obj)));
                 } else {
                     obj.borrow_mut().prototype = None;
@@ -7779,7 +7812,7 @@ pub(crate) fn handle_user_defined_method_on_instance(
                 let params = &data.params;
                 let body = &data.body;
                 let captured_env = &data.env;
-                let home_obj = data.home_object.borrow().clone();
+                let home_obj_opt = data.home_object.borrow().clone();
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
                 expand_spread_in_call_args(env, args, &mut evaluated_args)?;
@@ -7793,9 +7826,11 @@ pub(crate) fn handle_user_defined_method_on_instance(
                     Some(&build_frame_name(env, method)),
                     Some(env),
                 )?;
-                if let Some(home) = home_obj {
-                    log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
-                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                if let Some(home_weak) = home_obj_opt {
+                    if let Some(home_rc) = home_weak.upgrade() {
+                        log::trace!("DEBUG: Setting __home_object__ in evaluate_call (generic method)");
+                        obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                    }
                 }
                 evaluate_statements(&func_env, body)
             }
@@ -7825,7 +7860,7 @@ pub(crate) fn handle_user_defined_method_on_instance(
                             let params = &data.params;
                             let body = &data.body;
                             let captured_env = &data.env;
-                            let home_obj = data.home_object.borrow().clone();
+                            let home_obj_opt = data.home_object.borrow().clone();
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                             let func_env = prepare_function_call_env(
@@ -7836,8 +7871,10 @@ pub(crate) fn handle_user_defined_method_on_instance(
                                 Some(&build_frame_name(env, method)),
                                 Some(env),
                             )?;
-                            if let Some(home) = home_obj {
-                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            if let Some(home_weak) = home_obj_opt {
+                                if let Some(home_rc) = home_weak.upgrade() {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                }
                             }
 
                             // Create arguments object
@@ -7870,8 +7907,10 @@ pub(crate) fn handle_user_defined_method_on_instance(
                                 Some(&build_frame_name(env, method)),
                                 Some(env),
                             )?;
-                            if let Some(home) = &*home_obj.borrow() {
-                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            if let Some(home_weak) = &*home_obj.borrow() {
+                                if let Some(home_rc) = home_weak.upgrade() {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                }
                             }
                             crate::js_generator::handle_generator_function_call(params, body, args, &func_env)
                         }
@@ -7879,7 +7918,7 @@ pub(crate) fn handle_user_defined_method_on_instance(
                             let params = &data.params;
                             let body = &data.body;
                             let captured_env = &data.env;
-                            let home_obj = data.home_object.borrow().clone();
+                            let home_obj_opt = data.home_object.borrow().clone();
                             let mut evaluated_args = Vec::new();
                             expand_spread_in_call_args(env, args, &mut evaluated_args)?;
                             let promise = Rc::new(RefCell::new(JSPromise::default()));
@@ -7896,8 +7935,10 @@ pub(crate) fn handle_user_defined_method_on_instance(
                                 Some(&build_frame_name(env, method)),
                                 Some(env),
                             )?;
-                            if let Some(home) = home_obj {
-                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                            if let Some(home_weak) = home_obj_opt {
+                                if let Some(home_rc) = home_weak.upgrade() {
+                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                }
                             }
                             func_env.borrow_mut().is_function_scope = true;
 

@@ -110,7 +110,7 @@ pub(crate) fn evaluate_this(env: &JSObjectDataPtr) -> Result<Value, JSError> {
         if let Some(this_val_rc) = obj_get_key_value(&env_ptr, &"this".into())? {
             return Ok(this_val_rc.borrow().clone());
         }
-        env_opt = env_ptr.borrow().prototype.clone();
+        env_opt = env_ptr.borrow().prototype.clone().and_then(|w| w.upgrade());
     }
     Ok(Value::Object(last_seen))
 }
@@ -169,7 +169,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                     // Set prototype from the constructor object's `.prototype` if available
                     if let Some(prototype_val) = obj_get_key_value(&class_obj, &"prototype".into())? {
                         if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                            instance.borrow_mut().prototype = Some(proto_obj.clone());
+                            instance.borrow_mut().prototype = Some(Rc::downgrade(proto_obj));
                             obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
                         } else {
                             obj_set_key_value(&instance, &"__proto__".into(), prototype_val.borrow().clone())?;
@@ -228,7 +228,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // Set prototype (both internal pointer and __proto__ property)
                 if let Some(prototype_val) = obj_get_key_value(&class_obj, &"prototype".into())? {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                        instance.borrow_mut().prototype = Some(proto_obj.clone());
+                        instance.borrow_mut().prototype = Some(Rc::downgrade(proto_obj));
                         obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
                     } else {
                         // Fallback: store whatever prototype value was provided
@@ -338,7 +338,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // Set prototype from the canonical constructor's `.prototype` if available
                 if let Some(prototype_val) = obj_get_key_value(&canonical_ctor, &"prototype".into())? {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
-                        instance.borrow_mut().prototype = Some(proto_obj.clone());
+                        instance.borrow_mut().prototype = Some(Rc::downgrade(proto_obj));
                         obj_set_key_value(&instance, &"__proto__".into(), Value::Object(proto_obj.clone()))?;
                     } else {
                         obj_set_key_value(&instance, &"__proto__".into(), prototype_val.borrow().clone())?;
@@ -574,7 +574,7 @@ pub(crate) fn create_class_object(
                 && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
             {
                 // Set the child class prototype's internal prototype pointer and __proto__ property
-                prototype_obj.borrow_mut().prototype = Some(parent_proto_obj.clone());
+                prototype_obj.borrow_mut().prototype = Some(Rc::downgrade(parent_proto_obj));
                 obj_set_key_value(&prototype_obj, &"__proto__".into(), Value::Object(parent_proto_obj.clone()))?;
             }
         } else {
@@ -828,7 +828,7 @@ pub(crate) fn create_class_object(
             }
             ClassMember::StaticBlock(body) => {
                 let block_env = new_js_object_data();
-                block_env.borrow_mut().prototype = Some(env.clone());
+                block_env.borrow_mut().prototype = Some(Rc::downgrade(env));
                 obj_set_key_value(&block_env, &"this".into(), Value::Object(class_obj.clone()))?;
                 evaluate_statements(&block_env, body)?;
             }
@@ -886,7 +886,7 @@ pub(crate) fn call_class_method(object: &JSObjectDataPtr, method: &str, args: &[
                 let params = &data.params;
                 let body = &data.body;
                 let captured_env = &data.env;
-                let home_obj = data.home_object.borrow().clone();
+                let home_obj_opt = data.home_object.borrow().clone();
                 log::trace!("Method is a closure with {} params", params.len());
                 // Collect all arguments, expanding spreads
                 let mut evaluated_args = Vec::new();
@@ -902,8 +902,10 @@ pub(crate) fn call_class_method(object: &JSObjectDataPtr, method: &str, args: &[
                     Some(env),
                 )?;
 
-                if let Some(home) = home_obj {
-                    crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                if let Some(home_weak) = home_obj_opt {
+                    if let Some(home_rc) = home_weak.upgrade() {
+                        crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                    }
                 }
 
                 log::trace!("Bound 'this' to instance");
@@ -946,7 +948,7 @@ pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPt
         log::trace!("is_instance_of: constructor.prototype raw = {:?}", constructor_proto);
         if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
             // Walk the internal prototype chain directly (don't use obj_get_key_value for __proto__)
-            let mut current_proto_opt: Option<JSObjectDataPtr> = obj.borrow().prototype.clone();
+            let mut current_proto_opt: Option<JSObjectDataPtr> = obj.borrow().prototype.clone().and_then(|w| w.upgrade());
             log::trace!(
                 "is_instance_of: starting internal current_proto = {:?}",
                 current_proto_opt.as_ref().map(Rc::as_ptr)
@@ -960,7 +962,7 @@ pub(crate) fn is_instance_of(obj: &JSObjectDataPtr, constructor: &JSObjectDataPt
                 if Rc::ptr_eq(&proto_obj, constructor_proto_obj) {
                     return Ok(true);
                 }
-                current_proto_opt = proto_obj.borrow().prototype.clone();
+                current_proto_opt = proto_obj.borrow().prototype.clone().and_then(|w| w.upgrade());
             }
         }
     }
@@ -1041,7 +1043,7 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                         if let Some(original_proto) = obj_get_key_value(instance, &"__proto__".into())? {
                             obj_set_key_value(&new_instance, &"__proto__".into(), original_proto.borrow().clone())?;
                             if let Value::Object(proto_obj) = &*original_proto.borrow() {
-                                new_instance.borrow_mut().prototype = Some(proto_obj.clone());
+                                new_instance.borrow_mut().prototype = Some(Rc::downgrade(proto_obj));
                             }
                         }
 
@@ -1066,9 +1068,9 @@ pub(crate) fn evaluate_super_property(env: &JSObjectDataPtr, prop: &str) -> Resu
     if let Some(home_obj_val) = obj_get_key_value(env, &"__home_object__".into())? {
         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
             // Super is the prototype of HomeObject
-            if let Some(super_obj) = &home_obj.borrow().prototype {
+            if let Some(super_obj) = home_obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
                 // Look up property on super object
-                if let Some(prop_val) = obj_get_key_value(super_obj, &prop.into())? {
+                if let Some(prop_val) = obj_get_key_value(&super_obj, &prop.into())? {
                     return Ok(prop_val.borrow().clone());
                 }
                 return Ok(Value::Undefined);
@@ -1102,16 +1104,16 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
     if let Some(home_obj_val) = obj_get_key_value(env, &"__home_object__".into())? {
         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
             // Super is the prototype of HomeObject
-            if let Some(super_obj) = &home_obj.borrow().prototype {
+            if let Some(super_obj) = home_obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
                 // Log a concise debug line for super resolution (reduced verbosity)
                 log::trace!(
                     "evaluate_super_method - home_ptr={:p} super_ptr={:p} method={}",
                     Rc::as_ptr(home_obj),
-                    Rc::as_ptr(super_obj),
+                    Rc::as_ptr(&super_obj),
                     method
                 );
                 // Look up method on super object
-                if let Some(method_val) = obj_get_key_value(super_obj, &method.into())? {
+                if let Some(method_val) = obj_get_key_value(&super_obj, &method.into())? {
                     // Reduce verbosity: only log a short method type rather than full Value debug
                     let method_type = match &*method_val.borrow() {
                         Value::Closure(..) => "Closure",
@@ -1128,7 +1130,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                 let params = &data.params;
                                 let body = &data.body;
                                 let captured_env = &data.env;
-                                let home_obj = data.home_object.borrow().clone();
+                                let home_obj_opt = data.home_object.borrow().clone();
 
                                 // Collect all arguments, expanding spreads
                                 let mut evaluated_args = Vec::new();
@@ -1144,8 +1146,10 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                     Some(env),
                                 )?;
 
-                                if let Some(home) = home_obj {
-                                    obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                if let Some(home_weak) = home_obj_opt {
+                                    if let Some(home_rc) = home_weak.upgrade() {
+                                        obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home_rc.clone()))?;
+                                    }
                                 }
 
                                 // Execute method body
@@ -1166,7 +1170,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                             let params = &data.params;
                                             let body = &data.body;
                                             let captured_env = &data.env;
-                                            let home_obj = data.home_object.borrow().clone();
+                                            let home_obj_opt = data.home_object.borrow().clone();
 
                                             // Collect all arguments, expanding spreads
                                             let mut evaluated_args = Vec::new();
@@ -1182,8 +1186,14 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                                 Some(env),
                                             )?;
 
-                                            if let Some(home) = home_obj {
-                                                obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
+                                            if let Some(home_weak) = home_obj_opt {
+                                                if let Some(home_rc) = home_weak.upgrade() {
+                                                    obj_set_key_value(
+                                                        &func_env,
+                                                        &"__home_object__".into(),
+                                                        Value::Object(home_rc.clone()),
+                                                    )?;
+                                                }
                                             }
 
                                             // Execute method body

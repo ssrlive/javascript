@@ -105,7 +105,7 @@ fn format_value_pretty(
 
                 // Try to get class name
                 let mut class_name = String::new();
-                if let Some(proto_rc) = &obj.borrow().prototype {
+                if let Some(proto_rc) = obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
                     if let Some(ctor_val_rc) = proto_rc
                         .borrow()
                         .properties

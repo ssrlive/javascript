@@ -331,7 +331,7 @@ pub fn ensure_constructor_object(env: &JSObjectDataPtr, name: &str, marker_key: 
         && let Some(obj_proto_val) = obj_get_key_value(object_ctor, &"prototype".into())?
         && let Value::Object(obj_proto_obj) = &*obj_proto_val.borrow()
     {
-        proto.borrow_mut().prototype = Some(obj_proto_obj.clone());
+        proto.borrow_mut().prototype = Some(Rc::downgrade(obj_proto_obj));
     }
 
     obj_set_key_value(&ctor, &"prototype".into(), Value::Object(proto.clone()))?;
@@ -375,8 +375,8 @@ pub fn get_constructor_prototype(env: &JSObjectDataPtr, name: &str) -> Result<Op
 // primitives and creating instances.
 pub fn set_internal_prototype_from_constructor(obj: &JSObjectDataPtr, env: &JSObjectDataPtr, ctor_name: &str) -> Result<(), JSError> {
     if let Some(proto_obj) = get_constructor_prototype(env, ctor_name)? {
-        // set internal prototype pointer
-        obj.borrow_mut().prototype = Some(proto_obj.clone());
+        // set internal prototype pointer (store Weak to avoid cycles)
+        obj.borrow_mut().prototype = Some(Rc::downgrade(&proto_obj));
     }
     Ok(())
 }
@@ -868,7 +868,7 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
                 if let Value::Object(func_proto) = &*func_proto_val.borrow() {
                     // Helper to set __proto__
                     let set_proto = |target: &JSObjectDataPtr| {
-                        target.borrow_mut().prototype = Some(func_proto.clone());
+                        target.borrow_mut().prototype = Some(Rc::downgrade(func_proto));
                         let _ = obj_set_key_value(target, &"__proto__".into(), Value::Object(func_proto.clone()));
                     };
 
@@ -881,7 +881,7 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
                             if let Some(obj_proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())? {
                                 if let Value::Object(obj_proto) = &*obj_proto_val.borrow() {
                                     // Fix Function.prototype.__proto__ -> Object.prototype
-                                    func_proto.borrow_mut().prototype = Some(obj_proto.clone());
+                                    func_proto.borrow_mut().prototype = Some(Rc::downgrade(obj_proto));
                                     let _ = obj_set_key_value(func_proto, &"__proto__".into(), Value::Object(obj_proto.clone()));
 
                                     // Fix Error.prototype.__proto__ -> Object.prototype
@@ -891,7 +891,7 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
 
                                             if let Some(err_proto_val) = obj_get_key_value(err_ctor, &"prototype".into())? {
                                                 if let Value::Object(err_proto) = &*err_proto_val.borrow() {
-                                                    err_proto.borrow_mut().prototype = Some(obj_proto.clone());
+                                                    err_proto.borrow_mut().prototype = Some(Rc::downgrade(obj_proto));
                                                     let _ =
                                                         obj_set_key_value(err_proto, &"__proto__".into(), Value::Object(obj_proto.clone()));
                                                 }

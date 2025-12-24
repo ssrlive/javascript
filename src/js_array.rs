@@ -1433,8 +1433,9 @@ pub(crate) fn create_array(env: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSE
     // Set prototype
     let mut root_env_opt = Some(env.clone());
     while let Some(r) = root_env_opt.clone() {
-        if r.borrow().prototype.is_some() {
-            root_env_opt = r.borrow().prototype.clone();
+        let proto_opt = r.borrow().prototype.clone().and_then(|w| w.upgrade());
+        if let Some(proto_rc) = proto_opt {
+            root_env_opt = Some(proto_rc);
         } else {
             break;
         }

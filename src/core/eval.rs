@@ -570,6 +570,8 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 // For generator functions, create a function object wrapper
                 let func_obj = new_js_object_data();
                 let prototype_obj = new_js_object_data();
+                // Link new function prototype to Object.prototype so instances inherit Object.prototype methods
+                crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object")?;
                 let generator_val = Value::GeneratorFunction(None, Rc::new(ClosureData::new(params, body, env, None)));
                 obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
@@ -579,6 +581,8 @@ fn hoist_declarations(env: &JSObjectDataPtr, statements: &[Statement]) -> Result
                 // For regular functions, create a function object wrapper
                 let func_obj = new_js_object_data();
                 let prototype_obj = new_js_object_data();
+                // Link new function prototype to Object.prototype so instances inherit Object.prototype methods
+                crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object")?;
                 let closure_val = Value::Closure(Rc::new(ClosureData::new(params, body, env, None)));
                 obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
                 obj_set_key_value(&func_obj, &"prototype".into(), Value::Object(prototype_obj.clone()))?;
@@ -3207,6 +3211,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // Create a callable function object wrapper for generator expressions
             let func_obj = new_js_object_data();
             let prototype_obj = new_js_object_data();
+            // Link new function prototype to Object.prototype so instances inherit Object.prototype methods
+            crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object")?;
             let generator_val = Value::GeneratorFunction(name.clone(), Rc::new(ClosureData::new(params, body, env, None)));
             obj_set_key_value(&func_obj, &"__closure__".into(), generator_val)?;
             // If this is a named generator expression, expose the `name` property
@@ -3254,6 +3260,8 @@ pub fn evaluate_expr(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErro
             // Create a callable function object wrapper for async function expressions
             let func_obj = new_js_object_data();
             let prototype_obj = new_js_object_data();
+            // Link new function prototype to Object.prototype so instances inherit Object.prototype methods
+            crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object")?;
             let closure_val = Value::AsyncClosure(Rc::new(ClosureData::new(params, body, env, None)));
             obj_set_key_value(&func_obj, &"__closure__".into(), closure_val)?;
             // If this is a named async function expression, expose the `name` property
@@ -3353,6 +3361,8 @@ fn evaluate_function_expression(
 
     // Create the associated prototype object for instances
     let prototype_obj = new_js_object_data();
+    // Link new function prototype to Object.prototype so instances inherit Object.prototype methods
+    crate::core::set_internal_prototype_from_constructor(&prototype_obj, env, "Object")?;
 
     // Determine the environment to capture.
     // If this is a named function expression, we must create a new environment

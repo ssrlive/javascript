@@ -36,10 +36,10 @@ pub(crate) mod unicode;
 
 pub use core::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 pub use core::{
-    JSObjectData, Token, TokenData, initialize_global_constructors, parse_expression, parse_object_destructuring_pattern, parse_statement,
-    parse_statements,
+    JSObjectData, Token, TokenData, initialize_global_constructors, new_js_object_data, parse_expression,
+    parse_object_destructuring_pattern, parse_statement, parse_statements,
 };
-pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, read_script_file, tokenize};
+pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, obj_set_key_value, read_script_file, tokenize};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

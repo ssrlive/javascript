@@ -1,7 +1,7 @@
 use crate::{
     core::{JSObjectDataPtr, PropertyKey, extract_closure_from_value, new_js_object_data, prepare_function_call_env},
     error::JSError,
-    unicode::utf8_to_utf16,
+    unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -290,7 +290,7 @@ pub(crate) fn handle_array_instance_method(
         "join" => {
             let separator = if !args.is_empty() {
                 match evaluate_expr(env, &args[0])? {
-                    Value::String(s) => String::from_utf16_lossy(&s),
+                    Value::String(s) => utf16_to_utf8(&s),
                     Value::Number(n) => n.to_string(),
                     _ => ",".to_string(),
                 }
@@ -308,7 +308,7 @@ pub(crate) fn handle_array_instance_method(
                 if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
-                        Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
+                        Value::String(s) => result.push_str(&utf16_to_utf8(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
                         Value::Boolean(b) => result.push_str(&b.to_string()),
                         Value::BigInt(b) => result.push_str(&format!("{}n", b)),
@@ -1129,7 +1129,7 @@ pub(crate) fn handle_array_instance_method(
                 if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
-                        Value::String(s) => result.push_str(&String::from_utf16_lossy(s)),
+                        Value::String(s) => result.push_str(&utf16_to_utf8(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
                         Value::Boolean(b) => result.push_str(&b.to_string()),
                         Value::BigInt(b) => result.push_str(&format!("{}n", b)),

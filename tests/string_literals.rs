@@ -30,7 +30,7 @@ Line 2`);
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
-            let out = String::from_utf16_lossy(&s);
+            let out = utf16_to_utf8(&s);
             let expected = "this string      is broken across multiple lines.\n---\nLine1\nLine2\n---\nTab\tTab\n---\nBackslash \\\n---\nQuote \"\n---\nSingle Quote '\n---\nUnknown escape z\n---\nTemplate\nLine 1 Line 2";
             assert_eq!(out, expected);
         }

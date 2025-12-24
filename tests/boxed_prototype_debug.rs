@@ -1,4 +1,4 @@
-use javascript::{JSError, Value, evaluate_script};
+use javascript::{JSError, Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn debug_boxed_prototype_identity() -> Result<(), JSError> {
@@ -15,7 +15,7 @@ fn debug_boxed_prototype_identity() -> Result<(), JSError> {
     let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::String(s) => {
-            let out = String::from_utf16_lossy(&s);
+            let out = utf16_to_utf8(&s);
             // Print to stdout so test logs show the result for debugging
             println!("boxed prototype debug: {}", out);
             Ok(())

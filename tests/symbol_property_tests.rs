@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -22,7 +21,7 @@ mod symbol_property_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol value"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol value"),
             _ => panic!("Expected string 'symbol value', got {:?}", result),
         }
     }

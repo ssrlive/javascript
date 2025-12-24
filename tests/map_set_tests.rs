@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -27,7 +26,7 @@ fn test_map_set_and_get() {
     )
     .unwrap();
     match result {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "value1"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "value1"),
         _ => panic!("Expected string"),
     }
 }

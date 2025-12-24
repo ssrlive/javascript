@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, obj_get_key_value};
+use javascript::{Value, evaluate_script, obj_get_key_value, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -62,12 +62,12 @@ fn test_async_promise_resolution() {
                     if let Some(first_val) = obj_get_key_value(obj, &"0".into()).unwrap()
                         && let Value::String(first) = &*first_val.borrow()
                     {
-                        assert_eq!(String::from_utf16_lossy(first), "sync");
+                        assert_eq!(utf16_to_utf8(first), "sync");
                     }
                     if let Some(second_val) = obj_get_key_value(obj, &"1".into()).unwrap()
                         && let Value::String(second) = &*second_val.borrow()
                     {
-                        assert_eq!(String::from_utf16_lossy(second), "async");
+                        assert_eq!(utf16_to_utf8(second), "async");
                     }
                 }
             } else {

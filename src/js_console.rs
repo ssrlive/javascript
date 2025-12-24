@@ -5,6 +5,7 @@ use crate::core::{
 };
 use crate::error::JSError;
 use crate::js_promise;
+use crate::unicode::utf16_to_utf8;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -33,9 +34,9 @@ fn format_value_pretty(
         Value::BigInt(h) => Ok(format!("{h}n")),
         Value::String(s) => {
             if quote_strings {
-                Ok(format!("\"{}\"", String::from_utf16_lossy(s)))
+                Ok(format!("\"{}\"", crate::unicode::utf16_to_utf8(s)))
             } else {
-                Ok(String::from_utf16_lossy(s))
+                Ok(crate::unicode::utf16_to_utf8(s))
             }
         }
         Value::Boolean(b) => Ok(b.to_string()),
@@ -45,7 +46,7 @@ fn format_value_pretty(
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
             if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
                 if let Value::String(s) = &*stack_rc.borrow() {
-                    let s_utf8 = String::from_utf16_lossy(s);
+                    let s_utf8 = crate::unicode::utf16_to_utf8(s);
                     if !s_utf8.is_empty() {
                         return Ok(s_utf8);
                     }
@@ -58,7 +59,7 @@ fn format_value_pretty(
                 }
             } else if crate::js_date::is_date_object(obj) {
                 match crate::js_date::handle_date_method(obj, "toISOString", &[], env) {
-                    Ok(Value::String(s)) => Ok(String::from_utf16_lossy(&s)),
+                    Ok(Value::String(s)) => Ok(crate::unicode::utf16_to_utf8(&s)),
                     _ => Ok("[object Date]".to_string()),
                 }
             } else if crate::js_array::is_array(obj) {
@@ -90,7 +91,7 @@ fn format_value_pretty(
                     match *val {
                         Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
                         Value::Number(n) => return Ok(format!("[Number: {}]", n)),
-                        Value::String(ref s) => return Ok(format!("[String: '{}']", String::from_utf16_lossy(s))),
+                        Value::String(ref s) => return Ok(format!("[String: '{}']", utf16_to_utf8(s))),
                         Value::BigInt(ref b) => return Ok(format!("[BigInt: {}n]", b)),
                         Value::Symbol(ref s) => return Ok(format!("[Symbol: Symbol({})]", s.description.as_deref().unwrap_or(""))),
                         _ => {}
@@ -118,7 +119,7 @@ fn format_value_pretty(
                                 .get(&crate::core::PropertyKey::String("name".to_string()))
                             {
                                 if let Value::String(name_u16) = &*name_val_rc.borrow() {
-                                    let name = String::from_utf16_lossy(name_u16);
+                                    let name = utf16_to_utf8(name_u16);
                                     if name != "Object" && !name.is_empty() {
                                         class_name = name;
                                     }
@@ -250,7 +251,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
             // Check for format string
             let mut formatted = false;
             if let Value::String(s_utf16) = &values[0] {
-                let s = String::from_utf16_lossy(s_utf16);
+                let s = utf16_to_utf8(s_utf16);
                 if s.contains('%') && values.len() > 1 {
                     formatted = true;
                     let mut chars = s.chars().peekable();
@@ -356,7 +357,7 @@ fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError
             match &*vrc.borrow() {
                 Value::Number(n) => print!("{}", n),
                 Value::BigInt(h) => print!("{h}"),
-                Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
+                Value::String(s) => print!("'{}'", utf16_to_utf8(s)),
                 Value::Boolean(b) => print!("{}", b),
                 Value::Undefined => print!("undefined"),
                 Value::Null => print!("null"),
@@ -410,7 +411,7 @@ fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError
         match &*val_rc.borrow() {
             Value::Number(n) => print!("{}", n),
             Value::BigInt(h) => print!("{h}"),
-            Value::String(s) => print!("'{}'", String::from_utf16_lossy(s)),
+            Value::String(s) => print!("'{}'", utf16_to_utf8(s)),
             Value::Boolean(b) => print!("{}", b),
             Value::Undefined => print!("undefined"),
             Value::Null => print!("null"),

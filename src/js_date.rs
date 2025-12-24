@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, ValuePtr, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
-use crate::unicode::utf8_to_utf16;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
 
 /// Check if an object is a Date object
@@ -185,7 +185,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
         let arg_val = evaluate_expr(env, &args[0])?;
         match arg_val {
             Value::String(s) => {
-                let date_str = String::from_utf16_lossy(&s);
+                let date_str = utf16_to_utf8(&s);
                 if let Some(timestamp) = parse_date_string(&date_str) {
                     timestamp
                 } else {
@@ -614,7 +614,7 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
             // Evaluate the argument
             let arg_val = evaluate_expr(_env, &args[0])?;
             if let Value::String(s) = arg_val {
-                let date_str = String::from_utf16_lossy(&s);
+                let date_str = utf16_to_utf8(&s);
                 if let Some(timestamp) = parse_date_string(&date_str) {
                     Ok(Value::Number(timestamp))
                 } else {

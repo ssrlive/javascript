@@ -6,6 +6,7 @@ use crate::core::{
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
 use crate::js_array::is_array;
+use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -352,7 +353,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                             log::debug!("DBG evaluate_new - eval args[0] result = {:?}", val);
                             match val {
                                 Value::String(s) => {
-                                    log::debug!("DBG evaluate_new - setting message (string) = {:?}", String::from_utf16_lossy(&s));
+                                    log::debug!("DBG evaluate_new - setting message (string) = {:?}", utf16_to_utf8(&s));
                                     obj_set_key_value(&instance, &"message".into(), Value::String(s))?;
                                 }
                                 Value::Number(n) => {
@@ -362,7 +363,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                                 _ => {
                                     // convert other types to string via value_to_string
                                     let s = utf8_to_utf16(&value_to_string(&val));
-                                    log::debug!("DBG evaluate_new - setting message (other) = {:?}", String::from_utf16_lossy(&s));
+                                    log::debug!("DBG evaluate_new - setting message (other) = {:?}", utf16_to_utf8(&s));
                                     obj_set_key_value(&instance, &"message".into(), Value::String(s))?;
                                 }
                             }
@@ -417,7 +418,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 // First line: Error: <message>
                 let message_text = match crate::core::get_own_property(&instance, &"message".into()) {
                     Some(mrc) => match &*mrc.borrow() {
-                        Value::String(s) => String::from_utf16_lossy(s),
+                        Value::String(s) => utf16_to_utf8(s),
                         other => crate::core::value_to_string(other),
                     },
                     None => String::new(),
@@ -429,7 +430,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 while let Some(env_ptr) = env_opt {
                     if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
                         if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
-                            stack_lines.push(format!("    at {}", String::from_utf16_lossy(s_utf16)));
+                            stack_lines.push(format!("    at {}", utf16_to_utf8(s_utf16)));
                         }
                     }
                     // follow caller link if present
@@ -1334,7 +1335,7 @@ pub(crate) fn handle_number_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
         match arg_val {
             Value::Number(n) => n,
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 str_val.trim().parse::<f64>().unwrap_or(f64::NAN)
             }
             Value::Boolean(b) => {

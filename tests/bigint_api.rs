@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -25,7 +25,7 @@ fn bigint_global_and_prototype_to_string_value_of() {
     // Converting BigInt to string via global String() should work
     let r3 = evaluate_script("String(123n)", None::<&std::path::Path>);
     match r3 {
-        Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "123"),
+        Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "123"),
         other => panic!("expected string result for String(123n), got {:?}", other),
     }
 
@@ -39,7 +39,7 @@ fn bigint_global_and_prototype_to_string_value_of() {
     // Boxed BigInt: Object(123n).toString() should use BigInt.prototype.toString
     let r5 = evaluate_script("Object(123n).toString()", None::<&std::path::Path>);
     match r5 {
-        Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "123"),
+        Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "123"),
         other => panic!("expected string result for Object(123n).toString(), got {:?}", other),
     }
 

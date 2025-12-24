@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -52,7 +51,7 @@ mod os_tests {
         assert!(result.is_ok());
         assert_eq!(
             match result.unwrap() {
-                Value::String(vec) => String::from_utf16_lossy(&vec),
+                Value::String(vec) => utf16_to_utf8(&vec),
                 _ => panic!("Expected string result"),
             },
             "Hello World"
@@ -71,7 +70,7 @@ mod os_tests {
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
-                let cwd = String::from_utf16_lossy(&s);
+                let cwd = utf16_to_utf8(&s);
                 let expected_cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
                 assert_eq!(cwd, expected_cwd);
             }
@@ -105,7 +104,7 @@ mod os_tests {
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
-                let joined = String::from_utf16_lossy(&s);
+                let joined = utf16_to_utf8(&s);
                 let expected = format!("a{}b{}c", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
                 assert_eq!(joined, expected);
             }
@@ -123,7 +122,7 @@ mod os_tests {
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
-                let basename = String::from_utf16_lossy(&s);
+                let basename = utf16_to_utf8(&s);
                 assert_eq!(basename, "file.txt");
             }
             _ => panic!("Expected string result"),
@@ -140,7 +139,7 @@ mod os_tests {
         assert!(result.is_ok());
         match result.unwrap() {
             Value::String(s) => {
-                let ext = String::from_utf16_lossy(&s);
+                let ext = utf16_to_utf8(&s);
                 assert_eq!(ext, ".txt");
             }
             _ => panic!("Expected string result"),

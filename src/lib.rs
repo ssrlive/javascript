@@ -42,3 +42,4 @@ pub use core::{
 pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, read_script_file, tokenize};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;
+pub use unicode::{utf8_to_utf16, utf16_to_utf8};

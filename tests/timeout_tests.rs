@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -24,7 +24,7 @@ mod timeout_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "called"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "called"),
             _ => panic!("Expected setTimeout to execute callback, got {:?}", result),
         }
     }
@@ -71,7 +71,7 @@ mod timeout_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "not called"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "not called"),
             _ => panic!("Expected clearTimeout to prevent callback execution, got {:?}", result),
         }
     }

@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -56,7 +55,7 @@ fn test_reflect_get_prototype_of() {
     // Test Reflect.getPrototypeOf returns an object (not null for regular objects)
     let result = evaluate_script("typeof Reflect.getPrototypeOf({})", None::<&std::path::Path>).unwrap();
     match result {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "object"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "object"),
         _ => panic!("Expected string"),
     }
 }

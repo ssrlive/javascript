@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -550,7 +549,7 @@ mod number_tests {
             let result = evaluate_script(&script, None::<&std::path::Path>);
             match result {
                 Ok(Value::String(s)) => {
-                    let type_str = String::from_utf16_lossy(&s);
+                    let type_str = utf16_to_utf8(&s);
                     assert_ne!(type_str, "undefined", "Number.{} should exist", prop);
                 }
                 _ => panic!("Expected typeof Number.{} to return a string, got {:?}", prop, result),

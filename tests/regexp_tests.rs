@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -74,7 +74,7 @@ mod regexp_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello");
             }
             _ => panic!("Expected string result"),
@@ -134,14 +134,14 @@ mod regexp_tests {
                 let a1 = arr.get(&"1".into()).unwrap().borrow().clone();
                 match a0 {
                     Value::String(s0) => {
-                        let s0s = String::from_utf16_lossy(&s0);
+                        let s0s = utf16_to_utf8(&s0);
                         assert_eq!(s0s, "hello@world.com");
                     }
                     _ => panic!("expected string at index 0"),
                 }
                 match a1 {
                     Value::String(s1) => {
-                        let s1s = String::from_utf16_lossy(&s1);
+                        let s1s = utf16_to_utf8(&s1);
                         assert_eq!(s1s, "test123@abc.org.cn");
                     }
                     _ => panic!("expected string at index 1"),
@@ -166,7 +166,7 @@ mod regexp_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
-                let s0 = String::from_utf16_lossy(&s);
+                let s0 = utf16_to_utf8(&s);
                 assert_eq!(s0, "123");
             }
             _ => panic!("Expected string result for sticky match"),
@@ -188,7 +188,7 @@ mod regexp_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
-                let val = String::from_utf16_lossy(&s);
+                let val = utf16_to_utf8(&s);
                 // Expect the returned match to reflect the original string with CRLF
                 assert_eq!(val, "o\r\nw");
             }
@@ -203,7 +203,7 @@ mod regexp_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let s_val = String::from_utf16_lossy(&s);
+                let s_val = utf16_to_utf8(&s);
                 assert_eq!(s_val, "/ab+c/");
             }
             _ => panic!("Expected string result"),
@@ -232,7 +232,7 @@ mod regexp_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
-                let s0 = String::from_utf16_lossy(&s);
+                let s0 = utf16_to_utf8(&s);
                 // Expect three matches: 'a', surrogate pair (as one code point), 'b'
                 // lastIndex returns UTF-16 code-unit index after match. After 'a' index is 1, after emoji index should be 3, and after 'b' index should be 4
                 // JSON.stringify produced an array like ["a",1,"😀",3,"b",4]
@@ -251,7 +251,7 @@ mod regexp_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let s_val = String::from_utf16_lossy(&s);
+                let s_val = utf16_to_utf8(&s);
                 assert_eq!(s_val, "dbbd");
             }
             _ => panic!("Expected string result"),
@@ -265,7 +265,7 @@ mod regexp_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let s_val = String::from_utf16_lossy(&s);
+                let s_val = utf16_to_utf8(&s);
                 assert_eq!(s_val, "bb");
             }
             _ => panic!("Expected string result"),
@@ -287,7 +287,7 @@ mod regexp_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
-                let val = String::from_utf16_lossy(&s);
+                let val = utf16_to_utf8(&s);
                 // Lazy match should stop at the first 'b'
                 assert_eq!(val, "a111b");
             }
@@ -311,7 +311,7 @@ mod regexp_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         match result {
             Value::String(s) => {
-                let val = String::from_utf16_lossy(&s);
+                let val = utf16_to_utf8(&s);
                 assert_eq!(val, "abcccx");
             }
             _ => panic!("Expected string result for complex lazy test"),

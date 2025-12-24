@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -18,7 +17,7 @@ mod std_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
+                let out = utf16_to_utf8(&s);
                 assert_eq!(out, "a=123 s=abc");
             }
             _ => panic!("Expected formatted string, got {:?}", result),
@@ -31,7 +30,7 @@ mod std_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
+                let out = utf16_to_utf8(&s);
                 assert_eq!(out, "hello");
             }
             _ => panic!("Expected string 'hello', got {:?}", result),
@@ -46,7 +45,7 @@ mod std_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
+                let out = utf16_to_utf8(&s);
                 // Accept any non-empty string representation of the engine error
                 assert!(!out.is_empty(), "expected non-empty error string delivered to catch");
             }
@@ -60,7 +59,7 @@ mod std_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
+                let out = utf16_to_utf8(&s);
                 assert!(out.contains("custom error"));
             }
             _ => panic!("Expected error string in catch body, got {:?}", result),

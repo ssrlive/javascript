@@ -44,7 +44,7 @@ fn test_mod_assign_numbers() {
 #[test]
 fn test_add_assign_string_concat() {
     let res = eval("let s = 'foo'; s += 'bar'; s").unwrap();
-    assert!(matches!(res, Value::String(ref v) if String::from_utf16_lossy(v) == "foobar"));
+    assert!(matches!(res, Value::String(ref v) if utf16_to_utf8(v) == "foobar"));
 }
 
 #[test]

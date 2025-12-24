@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -18,7 +17,7 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("undefined ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "default"),
             _ => panic!("Expected string result"),
         }
 
@@ -26,7 +25,7 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("null ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "default"),
             _ => panic!("Expected string result"),
         }
 
@@ -48,7 +47,7 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("'' ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), ""),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), ""),
             _ => panic!("Expected string result"),
         }
 
@@ -56,7 +55,7 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("'hello' ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "hello"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "hello"),
             _ => panic!("Expected string result"),
         }
 
@@ -71,7 +70,7 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("undefined ?? null ?? 'fallback'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "fallback"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "fallback"),
             _ => panic!("Expected string result"),
         }
 
@@ -79,14 +78,14 @@ mod nullish_coalescing_tests {
         let result = evaluate_script("let x = undefined; x ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "default"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "default"),
             _ => panic!("Expected string result"),
         }
 
         let result = evaluate_script("let x = 'value'; x ?? 'default'", None::<&std::path::Path>);
         assert!(result.is_ok());
         match result.unwrap() {
-            Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "value"),
+            Value::String(s) => assert_eq!(utf16_to_utf8(&s), "value"),
             _ => panic!("Expected string result"),
         }
     }

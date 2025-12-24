@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -23,7 +22,7 @@ mod symbol_additional_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol"),
             _ => panic!("Expected string 'symbol', got {:?}", result),
         }
     }
@@ -73,7 +72,7 @@ mod symbol_additional_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let out = String::from_utf16_lossy(&s);
+                let out = utf16_to_utf8(&s);
                 // Expect: "Symbol(my-desc)|Symbol()|string|undefined"
                 assert!(out.starts_with("Symbol(my-desc)|Symbol()|"), "got {}", out);
             }
@@ -105,7 +104,7 @@ mod symbol_additional_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "{}"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "{}"),
             _ => panic!("Expected JSON '{}' for object with only symbol keys", "{}"),
         }
     }
@@ -151,7 +150,7 @@ mod symbol_additional_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "{\"a\":1}"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "{\"a\":1}"),
             _ => panic!("Expected object string with only 'a' copied, got {:?}", result),
         }
     }
@@ -168,7 +167,7 @@ mod symbol_additional_tests {
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "error"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "error"),
             _ => panic!("Expected error when calling new Symbol(), got {:?}", result),
         }
     }
@@ -326,8 +325,8 @@ mod symbol_additional_tests {
                 let b = arr.borrow().get(&"1".into()).unwrap();
                 match (&*a.borrow(), &*b.borrow()) {
                     (Value::String(sa), Value::String(sb)) => {
-                        assert_eq!(String::from_utf16_lossy(sa), "function");
-                        assert_eq!(String::from_utf16_lossy(sb), "function");
+                        assert_eq!(utf16_to_utf8(sa), "function");
+                        assert_eq!(utf16_to_utf8(sb), "function");
                     }
                     _ => panic!("Expected string results for accessor descriptor types"),
                 }
@@ -343,7 +342,7 @@ mod symbol_additional_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "symbol"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol"),
             _ => panic!("Expected string 'symbol' for Symbol.iterator, got {:?}", result),
         }
 
@@ -378,7 +377,7 @@ mod symbol_additional_tests {
 
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "[object MyTag]"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "[object MyTag]"),
             _ => panic!("Expected [object MyTag], got {:?}", result),
         }
     }
@@ -394,7 +393,7 @@ mod symbol_additional_tests {
 
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "abc"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "abc"),
             _ => panic!("Expected 'abc' from string for-of, got {:?}", result),
         }
     }
@@ -414,8 +413,8 @@ mod symbol_additional_tests {
                 let a1 = arr.borrow().get(&"1".into()).unwrap();
                 match (&*a0.borrow(), &*a1.borrow()) {
                     (Value::String(tag_a), Value::String(tag_s)) => {
-                        assert_eq!(String::from_utf16_lossy(tag_a), "Array");
-                        assert_eq!(String::from_utf16_lossy(tag_s), "String");
+                        assert_eq!(utf16_to_utf8(tag_a), "Array");
+                        assert_eq!(utf16_to_utf8(tag_s), "String");
                     }
                     _ => panic!("Expected string tags in result"),
                 }
@@ -454,7 +453,7 @@ mod symbol_additional_tests {
 
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "xy"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "xy"),
             _ => panic!("Expected 'xy' from string iterator, got {:?}", result),
         }
     }
@@ -480,7 +479,7 @@ mod symbol_additional_tests {
                 let sum = arr.borrow().get(&"2".into()).unwrap();
                 match (&*s.borrow(), &*n.borrow(), &*sum.borrow()) {
                     (Value::String(ss), Value::Number(nn), Value::Number(sn)) => {
-                        assert_eq!(String::from_utf16_lossy(ss), "S-PRIM");
+                        assert_eq!(utf16_to_utf8(ss), "S-PRIM");
                         assert_eq!(*nn, 40.0);
                         assert_eq!(*sn, 42.0);
                     }

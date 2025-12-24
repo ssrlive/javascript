@@ -52,7 +52,7 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
     while let Some(env_ptr) = env_opt {
         if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
             if let Value::String(s_utf16) = &*sn_rc.borrow() {
-                script_name = String::from_utf16_lossy(s_utf16);
+                script_name = utf16_to_utf8(s_utf16);
             }
         }
         if line.is_none() {
@@ -74,9 +74,9 @@ fn build_frame_name(caller_env: &JSObjectDataPtr, base: &str) -> String {
     }
     if let Some(ln) = line {
         let col = column.unwrap_or(0);
-        format!("{} ({}:{}:{})", base, script_name, ln, col)
+        format!("{base} ({script_name}:{ln}:{col})")
     } else {
-        format!("{} ({})", base, script_name)
+        format!("{base} ({script_name})")
     }
 }
 
@@ -920,7 +920,7 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
             }
             if let Ok(Some(call_sn_rc)) = obj_get_key_value(&env_ptr, &"__call_script_name".into()) {
                 if let Value::String(s) = &*call_sn_rc.borrow() {
-                    script_name = String::from_utf16_lossy(s);
+                    script_name = utf16_to_utf8(s);
                 }
             }
 
@@ -939,7 +939,7 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
                         }
                         if let Ok(Some(sn_rc)) = obj_get_key_value(caller_env, &"__script_name".into()) {
                             if let Value::String(s) = &*sn_rc.borrow() {
-                                script_name = String::from_utf16_lossy(s);
+                                script_name = utf16_to_utf8(s);
                             }
                         }
                     }
@@ -963,7 +963,7 @@ fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<Cont
             if script_name == "<script>" {
                 if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
                     if let Value::String(s) = &*sn_rc.borrow() {
-                        script_name = String::from_utf16_lossy(s);
+                        script_name = utf16_to_utf8(s);
                     }
                 }
             }
@@ -1383,7 +1383,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                         // Derive base name (function name) from __frame if present
                         let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
                             if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
-                                String::from_utf16_lossy(s_utf16)
+                                utf16_to_utf8(s_utf16)
                             } else {
                                 build_frame_name(&env_ptr, "<anonymous>")
                             }
@@ -1417,7 +1417,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                         }
                         if let Ok(Some(call_sn_rc)) = obj_get_key_value(&env_ptr, &"__call_script_name".into()) {
                             if let Value::String(s) = &*call_sn_rc.borrow() {
-                                script_name = String::from_utf16_lossy(s);
+                                script_name = utf16_to_utf8(s);
                             }
                         }
 
@@ -1438,7 +1438,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                                     }
                                     if let Ok(Some(sn_rc)) = obj_get_key_value(caller_env, &"__script_name".into()) {
                                         if let Value::String(s) = &*sn_rc.borrow() {
-                                            script_name = String::from_utf16_lossy(s);
+                                            script_name = utf16_to_utf8(s);
                                         }
                                     }
                                 }
@@ -1464,7 +1464,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                         if script_name == "<script>" {
                             if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
                                 if let Value::String(s) = &*sn_rc.borrow() {
-                                    script_name = String::from_utf16_lossy(s);
+                                    script_name = utf16_to_utf8(s);
                                 }
                             }
                         }
@@ -1517,7 +1517,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                     // (it may include additional formatting like "name (script:line:col)").
                     let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&target_env, &"__frame".into()) {
                         if let Value::String(s) = &*frame_val_rc.borrow() {
-                            String::from_utf16_lossy(s)
+                            utf16_to_utf8(s)
                         } else {
                             build_frame_name(&target_env, "<anonymous>")
                         }
@@ -1532,7 +1532,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                     let mut script_name = "<script>".to_string();
                     if let Ok(Some(sn_rc)) = obj_get_key_value(&target_env, &"__script_name".into()) {
                         if let Value::String(s) = &*sn_rc.borrow() {
-                            script_name = String::from_utf16_lossy(s);
+                            script_name = utf16_to_utf8(s);
                         }
                     }
                     let thrown_frame = format!("    at {} ({}:{}:{})", base, script_name, js_line, js_col);
@@ -2128,7 +2128,7 @@ fn assign_to_target(env: &JSObjectDataPtr, target: &Expr, value: Value) -> Resul
                     }
                 }
                 Value::String(s) => {
-                    let key = String::from_utf16_lossy(&s);
+                    let key = utf16_to_utf8(&s);
                     if let Value::Object(obj) = obj_val {
                         if key == "__proto__" {
                             if let Value::Object(proto_map) = &value {
@@ -4226,7 +4226,7 @@ fn evaluate_assignment_expr(env: &JSObjectDataPtr, target: &Expr, value: &Expr) 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     obj_set_key_value(&object, &key, val.clone())?;
                     Ok(val)
                 }
@@ -4294,7 +4294,7 @@ fn evaluate_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     obj_set_key_value(&object, &key, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -4345,7 +4345,7 @@ fn evaluate_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSErr
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     obj_set_key_value(&object, &key, new_val.clone())?;
                     Ok(new_val)
                 }
@@ -4397,7 +4397,7 @@ fn evaluate_post_increment(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     obj_set_key_value(&object, &key, new_val)?;
                     Ok(old_val)
                 }
@@ -4449,7 +4449,7 @@ fn evaluate_post_decrement(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, 
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     obj_set_key_value(&object, &key, new_val)?;
                     Ok(old_val)
                 }
@@ -4631,7 +4631,7 @@ fn evaluate_delete(env: &JSObjectDataPtr, expr: &Expr) -> Result<Value, JSError>
             let idx_val = evaluate_expr(env, idx)?;
             match (obj_val, idx_val) {
                 (Value::Object(object), Value::String(s)) => {
-                    let key = PropertyKey::String(String::from_utf16_lossy(&s));
+                    let key = PropertyKey::String(utf16_to_utf8(&s));
                     let deleted = obj_delete(&object, &key)?;
                     Ok(Value::Boolean(deleted))
                 }
@@ -4674,7 +4674,7 @@ fn to_num(v: &Value) -> Result<f64, JSError> {
             }
         }
         Value::String(s) => {
-            let sstr = String::from_utf16_lossy(s);
+            let sstr = utf16_to_utf8(s);
             let t = sstr.trim();
             if t.is_empty() {
                 Ok(0.0)
@@ -5217,7 +5217,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
                 let prim = to_primitive(&l, "string", env)?;
                 // If left side is a string starting with '#', treat it as a private name check
                 if let Value::String(s) = &prim {
-                    let key_utf8 = String::from_utf16_lossy(s);
+                    let key_utf8 = utf16_to_utf8(s);
                     if let Some(private_name) = key_utf8.strip_prefix('#') {
                         // Look for class definition on object/prototype chain
                         if let Some(class_def_val) = obj_get_key_value(&obj, &"__class_def__".into())? {
@@ -5243,7 +5243,7 @@ fn evaluate_binary(env: &JSObjectDataPtr, left: &Expr, op: &BinaryOp, right: &Ex
 
                 let key = match prim {
                     Value::Symbol(s) => PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(s)))),
-                    Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                     Value::Number(n) => PropertyKey::String(n.to_string()),
                     Value::Boolean(b) => PropertyKey::String(b.to_string()),
                     Value::Undefined => PropertyKey::String("undefined".to_string()),
@@ -5502,7 +5502,7 @@ fn strict_equality(x: &Value, y: &Value) -> Result<Value, JSError> {
 }
 
 fn string_to_number(s: &[u16]) -> Result<f64, JSError> {
-    let sstr = String::from_utf16_lossy(s);
+    let sstr = utf16_to_utf8(s);
     let t = sstr.trim();
     if t.is_empty() {
         Ok(0.0)
@@ -5515,7 +5515,7 @@ fn string_to_number(s: &[u16]) -> Result<f64, JSError> {
 }
 
 fn string_to_bigint(s: &[u16]) -> Result<BigInt, JSError> {
-    let sstr = String::from_utf16_lossy(s);
+    let sstr = utf16_to_utf8(s);
     let t = sstr.trim();
     if t.is_empty() {
         Ok(BigInt::from(0))
@@ -5574,7 +5574,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
         }
         (Value::Object(object), Value::String(s)) => {
             // Object property access with string key
-            let key = PropertyKey::String(String::from_utf16_lossy(&s));
+            let key = PropertyKey::String(utf16_to_utf8(&s));
             if let Some(val) = obj_get_key_value(&object, &key)? {
                 Ok(val.borrow().clone())
             } else {
@@ -5601,7 +5601,7 @@ fn evaluate_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Result<Value
             if func_name == "Symbol" {
                 return WELL_KNOWN_SYMBOLS.with(|wk| {
                     let map = wk.borrow();
-                    if let Some(sym_rc) = map.get(&String::from_utf16_lossy(&s))
+                    if let Some(sym_rc) = map.get(&utf16_to_utf8(&s))
                         && let Value::Symbol(sd) = &*sym_rc.borrow()
                     {
                         Ok(Value::Symbol(sd.clone()))
@@ -5916,7 +5916,7 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
             }
         }
         (Value::Object(object), Value::String(s)) => {
-            let key = PropertyKey::String(String::from_utf16_lossy(&s));
+            let key = PropertyKey::String(utf16_to_utf8(&s));
             if let Some(val) = obj_get_key_value(&object, &key)? {
                 Ok(val.borrow().clone())
             } else {
@@ -5936,7 +5936,7 @@ fn evaluate_optional_index(env: &JSObjectDataPtr, obj: &Expr, idx: &Expr) -> Res
             if func_name == "Symbol" {
                 return WELL_KNOWN_SYMBOLS.with(|wk| {
                     let map = wk.borrow();
-                    if let Some(sym_rc) = map.get(&String::from_utf16_lossy(&s))
+                    if let Some(sym_rc) = map.get(&utf16_to_utf8(&s))
                         && let Value::Symbol(sd) = &*sym_rc.borrow()
                     {
                         Ok(Value::Symbol(sd.clone()))
@@ -6632,7 +6632,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 name.clone()
                             } else if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
                                 if let Value::String(s) = &*name_rc.borrow() {
-                                    String::from_utf16_lossy(s)
+                                    utf16_to_utf8(s)
                                 } else {
                                     "<anonymous>".to_string()
                                 }
@@ -6650,7 +6650,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     let mut script_name = "<script>".to_string();
                                     if let Ok(Some(sn_rc)) = obj_get_key_value(&data.env, &"__script_name".into()) {
                                         if let Value::String(s) = &*sn_rc.borrow() {
-                                            script_name = String::from_utf16_lossy(s);
+                                            script_name = utf16_to_utf8(s);
                                         }
                                     }
                                     frame = format!("{} ({}:{}:{})", frame_name, script_name, decl_line, decl_col);
@@ -6712,7 +6712,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 // Prepare frame name and environment for a direct closure call (this = undefined)
                 let frame_name = if let Ok(Some(name_rc)) = obj_get_key_value(captured_env, &"name".into()) {
                     if let Value::String(s) = &*name_rc.borrow() {
-                        String::from_utf16_lossy(s)
+                        utf16_to_utf8(s)
                     } else {
                         "<anonymous>".to_string()
                     }
@@ -6730,7 +6730,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                     let mut script_name = "<script>".to_string();
                     if let Ok(Some(sn_rc)) = obj_get_key_value(&data.env, &"__script_name".into()) {
                         if let Value::String(s) = &*sn_rc.borrow() {
-                            script_name = String::from_utf16_lossy(s);
+                            script_name = utf16_to_utf8(s);
                         }
                     }
                     frame = format!("{} ({}:{}:{})", frame_name, script_name, decl_line, decl_col);
@@ -6791,7 +6791,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 if get_own_property(&object, &"__class_def__".into()).is_some() {
                     let name = if let Ok(Some(n)) = obj_get_key_value(&object, &"name".into()) {
                         if let Value::String(s) = &*n.borrow() {
-                            String::from_utf16_lossy(s)
+                            utf16_to_utf8(s)
                         } else {
                             "Unknown".to_string()
                         }
@@ -6821,7 +6821,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             // Create frame and prepare environment (this = undefined)
                             let frame_name = if let Ok(Some(nrc)) = obj_get_key_value(&object, &"name".into()) {
                                 if let Value::String(s) = &*nrc.borrow() {
-                                    String::from_utf16_lossy(s)
+                                    utf16_to_utf8(s)
                                 } else {
                                     "<anonymous>".to_string()
                                 }

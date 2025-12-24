@@ -1,4 +1,4 @@
-use javascript::{JSError, Value, evaluate_script};
+use javascript::{JSError, Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn compare_proto_and_instanceof() -> Result<(), JSError> {
@@ -11,7 +11,7 @@ fn compare_proto_and_instanceof() -> Result<(), JSError> {
     let res = evaluate_script(script, None::<&std::path::Path>)?;
     match res {
         Value::String(s) => {
-            println!("proto vs instanceof: {}", String::from_utf16_lossy(&s));
+            println!("proto vs instanceof: {}", utf16_to_utf8(&s));
             Ok(())
         }
         other => panic!("Unexpected result: {:?}", other),

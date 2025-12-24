@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn string_iterator_simple() {
@@ -10,7 +10,7 @@ fn string_iterator_simple() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             assert_eq!(s, "[\"a\",\"b\",\"c\"]");
         }
         other => panic!("Expected JSON string result, got {:?}", other),
@@ -31,7 +31,7 @@ fn string_iterator_unicode() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             // Expect length 4, then code units [97, 55362, 57271, 98]
             assert!(s.contains("55362"));
             assert!(s.contains("57271"));
@@ -57,7 +57,7 @@ fn string_char_codes_direct() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("invalid json: {s}"));
             let arr = v.as_array().expect("expected array");
             assert_eq!(arr[0].as_i64().unwrap(), 4);
@@ -98,7 +98,7 @@ fn string_iterator_combining_mark() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("invalid json: {s}"));
             let arr = v.as_array().expect("expected array");
             assert_eq!(arr.len(), 2);
@@ -120,7 +120,7 @@ fn string_iterator_flag_regional_indicators() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("invalid json: {s}"));
             let arr = v.as_array().expect("expected array");
             // Expect two regional-indicator characters, each length 2 (surrogate pair)
@@ -152,7 +152,7 @@ fn string_iterator_zwj_sequence() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("invalid json: {s}"));
             let arr = v.as_array().expect("expected array");
             // ZWJ sequences are multiple code points; for-of should yield multiple entries
@@ -177,7 +177,7 @@ fn string_object_iterator_behaves_same() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             let v: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| panic!("invalid json: {s}"));
             let arr = v.as_array().expect("expected array");
             assert_eq!(arr[0].as_str().unwrap(), "a");

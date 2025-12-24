@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, obj_get_key_value};
+use javascript::{Value, evaluate_script, obj_get_key_value, utf16_to_utf8};
 
 #[test]
 fn test_promise_async_resolution() {
@@ -14,7 +14,7 @@ fn test_promise_async_resolution() {
             // Should get the resolved value
             match value {
                 Value::String(s) => {
-                    assert_eq!(String::from_utf16_lossy(&s), "async result");
+                    assert_eq!(utf16_to_utf8(&s), "async result");
                 }
                 _ => panic!("Expected string result, got {:?}", value),
             }
@@ -106,7 +106,7 @@ fn test_promise_allsettled() {
                         if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
-                            assert_eq!(String::from_utf16_lossy(s), "fulfilled");
+                            assert_eq!(utf16_to_utf8(s), "fulfilled");
                         }
                         if let Some(value) = obj_get_key_value(result_obj, &"value".into()).unwrap()
                             && let Value::Number(n) = *value.borrow()
@@ -121,7 +121,7 @@ fn test_promise_allsettled() {
                         if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
-                            assert_eq!(String::from_utf16_lossy(s), "rejected");
+                            assert_eq!(utf16_to_utf8(s), "rejected");
                         }
                         if let Some(reason) = obj_get_key_value(result_obj, &"reason".into()).unwrap()
                             && let Value::Number(n) = *reason.borrow()
@@ -136,7 +136,7 @@ fn test_promise_allsettled() {
                         if let Some(status) = obj_get_key_value(result_obj, &"status".into()).unwrap()
                             && let Value::String(s) = &*status.borrow()
                         {
-                            assert_eq!(String::from_utf16_lossy(s), "fulfilled");
+                            assert_eq!(utf16_to_utf8(s), "fulfilled");
                         }
                         if let Some(value) = obj_get_key_value(result_obj, &"value".into()).unwrap()
                             && let Value::Number(n) = *value.borrow()

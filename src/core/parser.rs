@@ -8,6 +8,7 @@ use crate::{
     },
     js_class::ClassMember,
     raise_parse_error, raise_parse_error_with_token,
+    unicode::utf16_to_utf8,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -1460,7 +1461,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             // Shorthand property { x } -> { x: x }
                             if is_shorthand_candidate {
                                 if let Expr::Value(Value::String(s)) = &key_expr {
-                                    let name = String::from_utf16_lossy(s);
+                                    let name = utf16_to_utf8(s);
                                     properties.push((key_expr, Expr::Var(name, None, None), false));
                                 } else {
                                     return Err(raise_parse_error_at(tokens));

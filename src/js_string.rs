@@ -542,7 +542,7 @@ fn string_split_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -> Resul
             let flags_opt = get_own_property(&object, &"__flags".into());
             let flags = match flags_opt {
                 Some(val_rc) => match &*val_rc.borrow() {
-                    Value::String(s) => String::from_utf16_lossy(s),
+                    Value::String(s) => utf16_to_utf8(s),
                     _ => String::new(),
                 },
                 None => String::new(),
@@ -792,7 +792,7 @@ fn string_char_code_at_method(s: &[u16], args: &[Expr], env: &JSObjectDataPtr) -
 
 fn string_trim_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
-        let str_val = String::from_utf16_lossy(s);
+        let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim();
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {
@@ -802,7 +802,7 @@ fn string_trim_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Resul
 
 fn string_trim_end_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
-        let str_val = String::from_utf16_lossy(s);
+        let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim_end();
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {
@@ -813,7 +813,7 @@ fn string_trim_end_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> R
 
 fn string_trim_start_method(s: &[u16], args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if args.is_empty() {
-        let str_val = String::from_utf16_lossy(s);
+        let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim_start();
         Ok(Value::String(utf8_to_utf16(trimmed)))
     } else {

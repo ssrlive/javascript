@@ -7,6 +7,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::js_array::{get_array_length, set_array_length};
 use crate::js_date::is_date_object;
+use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
     core::{
@@ -707,7 +708,7 @@ pub fn value_to_string(val: &Value) -> String {
     match val {
         Value::Number(n) => n.to_string(),
         Value::BigInt(b) => format!("{b}n"),
-        Value::String(s) => format!("\"{}\"", String::from_utf16_lossy(s)),
+        Value::String(s) => format!("\"{}\"", utf16_to_utf8(s)),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
@@ -787,7 +788,7 @@ pub fn value_to_string(val: &Value) -> String {
 // Returns true if an own property exists.
 pub fn has_own_property_value(obj: &JSObjectDataPtr, key_val: &Value) -> bool {
     match key_val {
-        Value::String(s) => get_own_property(obj, &String::from_utf16_lossy(s).into()).is_some(),
+        Value::String(s) => get_own_property(obj, &utf16_to_utf8(s).into()).is_some(),
         Value::Number(n) => get_own_property(obj, &n.to_string().into()).is_some(),
         Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
         Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
@@ -806,7 +807,7 @@ pub fn has_own_property_value(obj: &JSObjectDataPtr, key_val: &Value) -> bool {
 pub fn value_to_property_key(val: &Value) -> PropertyKey {
     match val {
         Value::Symbol(sd) => PropertyKey::Symbol(Rc::new(RefCell::new(Value::Symbol(sd.clone())))),
-        Value::String(s) => PropertyKey::String(String::from_utf16_lossy(s)),
+        Value::String(s) => PropertyKey::String(utf16_to_utf8(s)),
         Value::BigInt(b) => PropertyKey::String(b.to_string()),
         Value::Number(n) => PropertyKey::String(n.to_string()),
         Value::Boolean(b) => PropertyKey::String(b.to_string()),
@@ -975,7 +976,7 @@ pub fn value_to_sort_string(val: &Value) -> String {
             }
         }
         Value::BigInt(b) => b.to_string(),
-        Value::String(s) => String::from_utf16_lossy(s),
+        Value::String(s) => utf16_to_utf8(s),
         Value::Boolean(b) => b.to_string(),
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),

@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
@@ -52,7 +52,7 @@ fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
     // String concatenation with BigInt: "x" + 1n -> "x1"
     let r8 = evaluate_script("'x' + 1n", None::<&std::path::Path>);
     match r8 {
-        Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "x1"),
+        Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "x1"),
         other => panic!("expected string 'x1', got {:?}", other),
     }
 }

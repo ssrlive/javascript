@@ -2,7 +2,7 @@
 
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
 use crate::error::JSError;
-use crate::unicode::utf8_to_utf16;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 /// Create the Number object with all number constants and functions
 pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
@@ -71,7 +71,7 @@ pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
         match arg_val {
             Value::Number(n) => Ok(Value::Number(n)),
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 match str_val.trim().parse::<f64>() {
                     Ok(n) => Ok(Value::Number(n)),
                     Err(_) => Ok(Value::Number(f64::NAN)),
@@ -84,7 +84,7 @@ pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
                 match prim {
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {
-                        let str_val = String::from_utf16_lossy(&s);
+                        let str_val = utf16_to_utf8(&s);
                         match str_val.trim().parse::<f64>() {
                             Ok(n) => Ok(Value::Number(n)),
                             Err(_) => Ok(Value::Number(f64::NAN)),
@@ -159,7 +159,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 let arg_val = evaluate_expr(env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
-                        let str_val = String::from_utf16_lossy(&s);
+                        let str_val = utf16_to_utf8(&s);
                         match str_val.trim().parse::<f64>() {
                             Ok(n) => Ok(Value::Number(n)),
                             Err(_) => Ok(Value::Number(f64::NAN)),
@@ -184,7 +184,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
                 match arg_val {
                     Value::String(s) => {
-                        let str_val = String::from_utf16_lossy(&s);
+                        let str_val = utf16_to_utf8(&s);
                         let trimmed = str_val.trim();
                         if trimmed.is_empty() {
                             Ok(Value::Number(f64::NAN))

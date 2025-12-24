@@ -1,6 +1,13 @@
 use crate::core::{
     ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value, prepare_function_call_env,
 };
+use crate::core::{obj_get_key_value, obj_set_key_value};
+use crate::error::JSError;
+use crate::js_array::handle_array_constructor;
+use crate::js_date::handle_date_constructor;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 // Centralize dispatching small builtins that are represented as Value::Function
 // names and need to be applied to an object receiver (e.g., "BigInt_toString",
@@ -26,13 +33,6 @@ pub(crate) fn handle_receiver_builtin(
     }
     Ok(None)
 }
-use crate::core::{obj_get_key_value, obj_set_key_value};
-use crate::error::JSError;
-use crate::js_array::handle_array_constructor;
-use crate::js_date::handle_date_constructor;
-use crate::unicode::utf8_to_utf16;
-use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Helper function to extract and validate arguments for internal functions
 /// Returns a vector of evaluated arguments or an error
@@ -446,7 +446,7 @@ fn dynamic_import_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value
     }
     let module_specifier = evaluate_expr(env, &args[0])?;
     let module_name = match module_specifier {
-        Value::String(s) => String::from_utf16_lossy(&s),
+        Value::String(s) => utf16_to_utf8(&s),
         _ => return Err(raise_type_error!("import() argument must be a string")),
     };
 
@@ -740,7 +740,7 @@ fn is_nan_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSErro
     match arg_val {
         Value::Number(n) => Ok(Value::Boolean(n.is_nan())),
         Value::String(s) => {
-            let str_val = String::from_utf16_lossy(&s);
+            let str_val = utf16_to_utf8(&s);
             match str_val.trim().parse::<f64>() {
                 Ok(n) => Ok(Value::Boolean(n.is_nan())),
                 Err(_) => Ok(Value::Boolean(true)), // Non-numeric strings are NaN when parsed
@@ -768,7 +768,7 @@ fn is_finite_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSE
     match arg_val {
         Value::Number(n) => Ok(Value::Boolean(n.is_finite())),
         Value::String(s) => {
-            let str_val = String::from_utf16_lossy(&s);
+            let str_val = utf16_to_utf8(&s);
             match str_val.trim().parse::<f64>() {
                 Ok(n) => Ok(Value::Boolean(n.is_finite())),
                 Err(_) => Ok(Value::Boolean(false)), // Non-numeric strings are not finite
@@ -790,7 +790,7 @@ fn function_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, J
     let body_str = if !evaluated_args.is_empty() {
         let val = evaluated_args.last().unwrap();
         match val {
-            Value::String(s) => String::from_utf16_lossy(s),
+            Value::String(s) => utf16_to_utf8(s),
             _ => crate::core::value_to_string(val),
         }
     } else {
@@ -804,7 +804,7 @@ fn function_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, J
                 params_str.push(',');
             }
             let arg_str = match arg {
-                Value::String(s) => String::from_utf16_lossy(s),
+                Value::String(s) => utf16_to_utf8(s),
                 _ => crate::core::value_to_string(arg),
             };
             params_str.push_str(&arg_str);
@@ -842,7 +842,7 @@ fn encode_uri_component(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, J
     };
 
     let str_val = match arg_val {
-        Value::String(s) => String::from_utf16_lossy(&s),
+        Value::String(s) => utf16_to_utf8(&s),
         _ => crate::core::value_to_string(&arg_val),
     };
 
@@ -872,7 +872,7 @@ fn decode_uri_component(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, J
     };
 
     let str_val = match arg_val {
-        Value::String(s) => String::from_utf16_lossy(&s),
+        Value::String(s) => utf16_to_utf8(&s),
         _ => crate::core::value_to_string(&arg_val),
     };
 
@@ -962,7 +962,7 @@ fn symbol_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSE
     } else {
         let arg_val = &evaluated_args[0];
         match arg_val {
-            Value::String(s) => Some(String::from_utf16_lossy(s)),
+            Value::String(s) => Some(utf16_to_utf8(s)),
             Value::Undefined => None,
             _ => Some(crate::core::value_to_string(arg_val)),
         }
@@ -997,7 +997,7 @@ fn evalute_eval_function(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, 
         let arg_val = evaluate_expr(env, &args[0])?;
         match arg_val {
             Value::String(s) => {
-                let code = String::from_utf16_lossy(&s);
+                let code = utf16_to_utf8(&s);
                 match crate::core::evaluate_script(&code, None::<&std::path::Path>) {
                     Ok(v) => Ok(v),
                     Err(err) => {
@@ -1026,7 +1026,7 @@ fn encode_uri(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
         let arg_val = evaluate_expr(env, &args[0])?;
         match arg_val {
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 // Simple URI encoding - replace spaces with %20
                 let encoded = str_val.replace(" ", "%20");
                 Ok(Value::String(utf8_to_utf16(&encoded)))
@@ -1050,7 +1050,7 @@ fn decode_uri(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
         let arg_val = evaluate_expr(env, &args[0])?;
         match arg_val {
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 // Simple URI decoding - replace %20 with spaces
                 let decoded = str_val.replace("%20", " ");
                 Ok(Value::String(utf8_to_utf16(&decoded)))
@@ -1269,7 +1269,7 @@ fn handle_object_has_own_property(args: &[Expr], env: &JSObjectDataPtr) -> Resul
             Value::String(s) => {
                 // boxed string has 'length' and indexed properties
                 let key_str = match key_val {
-                    Value::String(ss) => String::from_utf16_lossy(&ss),
+                    Value::String(ss) => utf16_to_utf8(&ss),
                     Value::Number(n) => n.to_string(),
                     Value::Boolean(b) => b.to_string(),
                     Value::Undefined => "undefined".to_string(),

@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -47,7 +46,7 @@ fn object_prototype_to_string_with_primitive_receiver() {
 
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "[object String]"),
+        Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "[object String]"),
         other => panic!("Expected string '[object String]', got {:?}", other),
     }
 }

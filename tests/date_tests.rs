@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -19,7 +18,7 @@ mod date_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 println!("Date string: {}", str_val);
                 // Should be a properly formatted date string, not starting with "Date: "
                 assert!(!str_val.starts_with("Date: "));
@@ -59,7 +58,7 @@ mod date_tests {
         let value = result.unwrap();
         match value {
             Value::String(s) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 // Should be a properly formatted date string
                 assert!(str_val.contains("2009") || str_val.contains("Invalid Date"));
             }

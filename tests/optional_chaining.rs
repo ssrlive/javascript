@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -17,7 +16,7 @@ mod optional_chaining_tests {
         let script = "let obj = {prop: 'value'}; obj?.prop";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "value"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "value"),
             _ => panic!("Expected string 'value', got {:?}", result),
         }
     }
@@ -37,7 +36,7 @@ mod optional_chaining_tests {
         let script = "let obj = {method: function() { return 'called'; }}; obj?.method()";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "called"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "called"),
             _ => panic!("Expected string 'called', got {:?}", result),
         }
     }
@@ -57,7 +56,7 @@ mod optional_chaining_tests {
         let script = "let obj = {nested: {method: function() { return 'nested called'; }}}; obj?.nested?.method()";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "nested called"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "nested called"),
             _ => panic!("Expected string 'nested called', got {:?}", result),
         }
     }
@@ -67,7 +66,7 @@ mod optional_chaining_tests {
         let script = "let obj = {a: 'value'}; obj?.['a']";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "value"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "value"),
             _ => panic!("Expected string 'value', got {:?}", result),
         }
     }

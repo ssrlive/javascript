@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -328,7 +327,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "42");
             }
             _ => panic!("Expected JSON.stringify(42) to be '42', got {:?}", result),
@@ -341,7 +340,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 // Should be the same as input (order may differ, but for this simple case it should match)
                 assert_eq!(str_val, r#"{"age":30,"city":"New York","name":"John"}"#);
             }
@@ -370,7 +369,7 @@ mod builtin_functions_tests {
         let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello");
             }
             _ => panic!("Expected arr[1] to be 'hello', got {:?}", result3),
@@ -417,7 +416,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "a-b");
             }
             _ => panic!("Expected arr.join('-') to be 'a-b', got {:?}", result),
@@ -476,7 +475,7 @@ mod builtin_functions_tests {
         let script2 = "let proto = {inherited: 'yes'}; let obj = Object.create(proto); obj.own = 'mine'; obj.inherited + obj.own";
         let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "yesmine"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "yesmine"),
             _ => panic!("Expected Object.create with prototype to work, got {:?}", result2),
         }
 
@@ -495,7 +494,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello%20world");
             }
             _ => panic!("Expected encodeURIComponent('hello world') to be 'hello%20world', got {:?}", result),
@@ -508,7 +507,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world");
             }
             _ => panic!("Expected decodeURIComponent('hello%20world') to be 'hello world', got {:?}", result),
@@ -541,7 +540,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello");
             }
             _ => panic!("Expected eval('\"hello\"') to return 'hello', got {:?}", result),
@@ -564,7 +563,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello%20world");
             }
             _ => panic!("Expected encodeURI('hello world') to be 'hello%20world', got {:?}", result),
@@ -577,7 +576,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world");
             }
             _ => panic!("Expected decodeURI('hello%20world') to be 'hello world', got {:?}", result),
@@ -659,7 +658,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world");
             }
             _ => panic!("Expected split no args [0] to be 'hello world', got {:?}", result),
@@ -679,7 +678,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "a");
             }
             _ => panic!("Expected split with limit [0] to be 'a', got {:?}", result),
@@ -689,7 +688,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "b");
             }
             _ => panic!("Expected split with limit [1] to be 'b', got {:?}", result),
@@ -702,7 +701,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "e");
             }
             _ => panic!("Expected charAt to return 'e', got {:?}", result),
@@ -727,7 +726,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello there");
             }
             _ => panic!("Expected replace to return 'hello there', got {:?}", result),
@@ -740,7 +739,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "llo wor");
             }
             _ => panic!("Expected substr(2,7) to return 'llo wor', got {:?}", result),
@@ -750,7 +749,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "rld");
             }
             _ => panic!("Expected substr(-3) to return 'rld', got {:?}", result),
@@ -760,7 +759,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "name is hello");
             }
             _ => panic!("Expected substr(3) to return 'name is hello', got {:?}", result),
@@ -770,7 +769,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "");
             }
             _ => panic!("Expected substr(4,-7) to return '', got {:?}", result),
@@ -780,7 +779,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "s hel");
             }
             _ => panic!("Expected substr(-7,5) to return 's hel', got {:?}", result),
@@ -793,7 +792,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "llo");
             }
             _ => panic!("Expected substring(5,2) to return 'llo', got {:?}", result),
@@ -803,7 +802,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world");
             }
             _ => panic!("Expected substring(-3) to return 'hello world', got {:?}", result),
@@ -813,7 +812,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello w");
             }
             _ => panic!("Expected substring(7,-2) to return 'hello w', got {:?}", result),
@@ -826,7 +825,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "2,4");
             }
             _ => panic!("Expected mapped.join(',') to be '2,4', got {:?}", result),
@@ -839,7 +838,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world");
             }
             _ => panic!("Expected trim to return 'hello world', got {:?}", result),
@@ -852,7 +851,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "  hello world");
             }
             _ => panic!("Expected trimEnd to return '  hello world', got {:?}", result),
@@ -865,7 +864,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world  ");
             }
             _ => panic!("Expected trimStart to return 'hello world  ', got {:?}", result),
@@ -908,7 +907,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hahaha");
             }
             _ => panic!("Expected repeat to return 'hahaha', got {:?}", result),
@@ -921,7 +920,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "hello world!");
             }
             _ => panic!("Expected concat to return 'hello world!', got {:?}", result),
@@ -934,7 +933,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "005");
             }
             _ => panic!("Expected padStart to return '005', got {:?}", result),
@@ -947,7 +946,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "500");
             }
             _ => panic!("Expected padEnd to return '500', got {:?}", result),
@@ -1159,7 +1158,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "1,2,3");
             }
             _ => panic!("Expected sorted array join to return '1,2,3', got {:?}", result),
@@ -1170,7 +1169,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "3,2,1");
             }
             _ => panic!("Expected sorted array join to return '3,2,1', got {:?}", result),
@@ -1183,7 +1182,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "3,2,1");
             }
             _ => panic!("Expected reversed array join to return '3,2,1', got {:?}", result),
@@ -1198,7 +1197,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "2,3");
             }
             _ => panic!("Expected splice to return '2,3', got {:?}", result),
@@ -1219,7 +1218,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "2,3");
             }
             _ => panic!("Expected shift to result in '2,3', got {:?}", result),
@@ -1240,7 +1239,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "1,2,3,4,4");
             }
             _ => panic!("Expected unshift to return '1,2,3,4,4', got {:?}", result),
@@ -1261,7 +1260,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "1,9,9,4");
             }
             _ => panic!("Expected fill to return '1,9,9,4', got {:?}", result),
@@ -1272,7 +1271,7 @@ mod builtin_functions_tests {
         let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "0,0,0");
             }
             _ => panic!("Expected fill entire array to return '0,0,0', got {:?}", result2),
@@ -1311,7 +1310,7 @@ mod builtin_functions_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "1,2,3");
             }
             _ => panic!("Expected toString to return '1,2,3', got {:?}", result),
@@ -1322,7 +1321,7 @@ mod builtin_functions_tests {
         let result2 = evaluate_script(script2, None::<&std::path::Path>);
         match result2 {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "");
             }
             _ => panic!("Expected empty array toString to return '', got {:?}", result2),
@@ -1334,7 +1333,7 @@ mod builtin_functions_tests {
         let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
             Ok(Value::String(s)) => {
-                let str_val = String::from_utf16_lossy(&s);
+                let str_val = utf16_to_utf8(&s);
                 assert_eq!(str_val, "1,hello,true");
             }
             _ => panic!("Expected mixed array toString to return '1,hello,true', got {:?}", result3),
@@ -1635,42 +1634,42 @@ mod builtin_functions_tests {
         let script = "typeof 42";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "number"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "number"),
             _ => panic!("Expected typeof 42 to be 'number', got {:?}", result),
         }
 
         let script = "typeof 'hello'";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "string"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "string"),
             _ => panic!("Expected typeof 'hello' to be 'string', got {:?}", result),
         }
 
         let script = "typeof true";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "boolean"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "boolean"),
             _ => panic!("Expected typeof true to be 'boolean', got {:?}", result),
         }
 
         let script = "typeof undefined";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "undefined"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "undefined"),
             _ => panic!("Expected typeof undefined to be 'undefined', got {:?}", result),
         }
 
         let script = "typeof {}";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "object"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "object"),
             _ => panic!("Expected typeof {{}} to be 'object', got {:?}", result),
         }
 
         let script = "typeof function(){}";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "function"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "function"),
             _ => panic!("Expected typeof function(){{}} to be 'function', got {:?}", result),
         }
     }
@@ -1778,7 +1777,7 @@ mod builtin_functions_tests {
         let script3 = "let arr = ['a', 'b', 'c']; arr.findLast(x => x === 'b')";
         let result3 = evaluate_script(script3, None::<&std::path::Path>);
         match result3 {
-            Ok(Value::String(s)) => assert_eq!(String::from_utf16_lossy(&s), "b"),
+            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "b"),
             _ => panic!("Expected findLast to return 'b', got {:?}", result3),
         }
     }

@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -79,7 +79,7 @@ fn test_reflect_apply_with_native_function() {
 
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "123"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "123"),
         other => panic!("expected string '123', got {:?}", other),
     }
 }
@@ -97,7 +97,7 @@ fn test_reflect_construct_with_constructor_args() {
 
     let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
     match v {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "Jane Doe"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "Jane Doe"),
         other => panic!("expected string 'Jane Doe', got {:?}", other),
     }
 }

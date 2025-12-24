@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -143,7 +143,7 @@ mod class_tests {
         match &result {
             Ok(val) => {
                 if let Value::String(s) = val {
-                    let s = String::from_utf16_lossy(s);
+                    let s = utf16_to_utf8(s);
                     println!("{}", s);
                     assert!(s.contains("is_person_instance: true"));
                     assert!(s.contains("is_animal_instance: true"));
@@ -314,7 +314,7 @@ mod class_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(Value::String(s)) => {
-                let s = String::from_utf16_lossy(s);
+                let s = utf16_to_utf8(s);
                 assert_eq!(s, "parent");
             }
             Ok(v) => panic!("Unexpected result: {:?}", v),
@@ -334,7 +334,7 @@ mod class_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(Value::String(s)) => {
-                let s = String::from_utf16_lossy(s);
+                let s = utf16_to_utf8(s);
                 assert_eq!(s, "C B A");
             }
             Ok(v) => panic!("Unexpected result: {:?}", v),
@@ -352,7 +352,7 @@ mod class_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
             Ok(Value::String(s)) => {
-                let s = String::from_utf16_lossy(s);
+                let s = utf16_to_utf8(s);
                 assert_eq!(s, "P");
             }
             Ok(v) => panic!("Unexpected result: {:?}", v),

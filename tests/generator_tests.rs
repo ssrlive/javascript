@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn test_generator_function_syntax() {
@@ -16,7 +16,7 @@ fn test_generator_function_syntax() {
     );
     assert!(result.is_ok());
     match result.unwrap() {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "function"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "function"),
         _ => panic!("Expected string 'function'"),
     }
 }
@@ -37,7 +37,7 @@ fn test_generator_function_call() {
     assert!(result.is_ok());
     // Should return "object" for generator object
     match result.unwrap() {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "object"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "object"),
         _ => panic!("Expected string 'object'"),
     }
 }

@@ -7,7 +7,7 @@ use crate::core::{
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
-use crate::unicode::utf8_to_utf16;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::rc::Rc;
 
 fn define_property_internal(target_obj: &JSObjectDataPtr, prop_key: PropertyKey, desc_obj: &JSObjectDataPtr) -> Result<(), JSError> {
@@ -210,7 +210,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             }
 
             let key = match prop_val {
-                Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::BigInt(b) => PropertyKey::String(b.to_string()),
                 val @ Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(val))),
                 val => PropertyKey::String(value_to_string(&val)),
@@ -288,7 +288,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                     };
 
                     let key = match key_val {
-                        Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::BigInt(b) => PropertyKey::String(b.to_string()),
                         Value::Symbol(_) => PropertyKey::Symbol(std::rc::Rc::new(std::cell::RefCell::new(key_val))),
                         _ => PropertyKey::String(value_to_string(&key_val)),
@@ -574,7 +574,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let prop_val = evaluate_expr(env, &args[1])?;
             // Determine property key (support strings & numbers for now)
             let prop_key = match prop_val {
-                Value::String(s) => PropertyKey::String(String::from_utf16_lossy(&s)),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(n.to_string()),
                 _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
             };
@@ -697,7 +697,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
                     if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
                         match &*val_rc.borrow() {
                             Value::Undefined | Value::Null => parts.push("".to_string()), // push empty string for null and undefined
-                            Value::String(s) => parts.push(String::from_utf16_lossy(s)),
+                            Value::String(s) => parts.push(utf16_to_utf8(s)),
                             Value::Number(n) => parts.push(n.to_string()),
                             Value::Boolean(b) => parts.push(b.to_string()),
                             Value::BigInt(b) => parts.push(format!("{}n", b)),
@@ -716,7 +716,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
                 if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
                     && let Value::String(s) = &*tag_val_rc.borrow()
                 {
-                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", String::from_utf16_lossy(s)))));
+                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
                 }
             }
 
@@ -757,7 +757,7 @@ pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> R
         // name default to "Error"
         let name = if let Some(n_rc) = obj_get_key_value(object, &"name".into())? {
             if let Value::String(s) = &*n_rc.borrow() {
-                String::from_utf16_lossy(s)
+                utf16_to_utf8(s)
             } else {
                 "Error".to_string()
             }
@@ -768,7 +768,7 @@ pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> R
         // message default to empty
         let message = if let Some(m_rc) = obj_get_key_value(object, &"message".into())? {
             if let Value::String(s) = &*m_rc.borrow() {
-                String::from_utf16_lossy(s)
+                utf16_to_utf8(s)
             } else {
                 "".to_string()
             }

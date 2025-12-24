@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, obj_get_key_value};
+use javascript::{Value, evaluate_script, obj_get_key_value, utf16_to_utf8};
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -118,7 +118,7 @@ mod promise_tests {
                         // Check first element is "sync"
                         if let Ok(Some(first_val)) = obj_get_key_value(&arr, &"0".into()) {
                             if let Value::String(first) = &*first_val.borrow() {
-                                assert_eq!(String::from_utf16_lossy(first), "sync");
+                                assert_eq!(utf16_to_utf8(first), "sync");
                             } else {
                                 panic!("First element should be string 'sync'");
                             }
@@ -127,7 +127,7 @@ mod promise_tests {
                         // Check second element is "async result"
                         if let Ok(Some(second_val)) = obj_get_key_value(&arr, &"1".into()) {
                             if let Value::String(second) = &*second_val.borrow() {
-                                assert_eq!(String::from_utf16_lossy(second), "async result");
+                                assert_eq!(utf16_to_utf8(second), "async result");
                             } else {
                                 panic!("Second element should be string 'async result'");
                             }
@@ -189,7 +189,7 @@ mod promise_tests {
                             if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
-                                assert_eq!(String::from_utf16_lossy(status), "fulfilled");
+                                assert_eq!(utf16_to_utf8(status), "fulfilled");
                             }
                             if let Ok(Some(value_val)) = obj_get_key_value(settled, &"value".into())
                                 && let Value::Number(val) = *value_val.borrow()
@@ -205,12 +205,12 @@ mod promise_tests {
                             if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
-                                assert_eq!(String::from_utf16_lossy(status), "rejected");
+                                assert_eq!(utf16_to_utf8(status), "rejected");
                             }
                             if let Ok(Some(reason_val)) = obj_get_key_value(settled, &"reason".into())
                                 && let Value::String(reason) = &*reason_val.borrow()
                             {
-                                assert_eq!(String::from_utf16_lossy(reason), "error");
+                                assert_eq!(utf16_to_utf8(reason), "error");
                             }
                         }
 
@@ -221,7 +221,7 @@ mod promise_tests {
                             if let Ok(Some(status_val)) = obj_get_key_value(settled, &"status".into())
                                 && let Value::String(status) = &*status_val.borrow()
                             {
-                                assert_eq!(String::from_utf16_lossy(status), "fulfilled");
+                                assert_eq!(utf16_to_utf8(status), "fulfilled");
                             }
                             if let Ok(Some(value_val)) = obj_get_key_value(settled, &"value".into())
                                 && let Value::Number(val) = *value_val.borrow()

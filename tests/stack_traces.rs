@@ -1,5 +1,4 @@
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 #[ctor::ctor]
 fn __init_test_logger() {
@@ -21,7 +20,7 @@ fn nested_method_stack_contains_frames() {
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
         Ok(Value::String(s)) => {
-            let out = String::from_utf16_lossy(&s);
+            let out = utf16_to_utf8(&s);
             // Should include the error message and at least two frames
             assert!(
                 out.contains("Error") && out.contains("boom"),
@@ -55,7 +54,7 @@ fn throw_stack_includes_decl_site() {
     let result = evaluate_script(script, Some(std::path::Path::new("some.js")));
     match result {
         Ok(Value::String(s)) => {
-            let out = String::from_utf16_lossy(&s);
+            let out = utf16_to_utf8(&s);
             // The function is declared on the second script line in this snippet
             println!("Stack trace:\n{}", out);
             assert!(

@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn test_prototype_assignment() {
@@ -193,7 +193,7 @@ fn test_override_has_own_property() {
                 let mut found = false;
                 for (_k, v) in keys_arr.borrow().properties.iter() {
                     if let Value::String(s) = &*v.borrow()
-                        && String::from_utf16_lossy(s) == "hasOwnProperty"
+                        && utf16_to_utf8(s) == "hasOwnProperty"
                     {
                         found = true;
                         break;
@@ -242,8 +242,8 @@ fn test_to_string_default_and_tag() {
             let b = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
             match (a, b) {
                 (Value::String(sa), Value::String(sb)) => {
-                    assert_eq!(String::from_utf16_lossy(&sa), "[object Object]");
-                    assert_eq!(String::from_utf16_lossy(&sb), "[object Custom]");
+                    assert_eq!(utf16_to_utf8(&sa), "[object Object]");
+                    assert_eq!(utf16_to_utf8(&sb), "[object Custom]");
                 }
                 _ => panic!("Expected strings from toString"),
             }
@@ -271,9 +271,9 @@ fn test_to_locale_string_defaults_and_override() {
             let c = arr.borrow().get(&"2".into()).unwrap().borrow().clone();
             match (a, b, c) {
                 (Value::String(sa), Value::String(sb), Value::String(sc)) => {
-                    assert_eq!(String::from_utf16_lossy(&sa), "[object Object]");
-                    assert_eq!(String::from_utf16_lossy(&sb), "[object Custom]");
-                    assert_eq!(String::from_utf16_lossy(&sc), "my-locale");
+                    assert_eq!(utf16_to_utf8(&sa), "[object Object]");
+                    assert_eq!(utf16_to_utf8(&sb), "[object Custom]");
+                    assert_eq!(utf16_to_utf8(&sc), "my-locale");
                 }
                 _ => panic!("Expected strings from toLocaleString"),
             }
@@ -300,8 +300,8 @@ fn test_to_string_override_and_valueof() {
             let eq = arr.borrow().get(&"2".into()).unwrap().borrow().clone();
             match (t, pt, eq) {
                 (Value::String(ts), Value::String(pts), Value::Boolean(b)) => {
-                    assert_eq!(String::from_utf16_lossy(&ts), "my-toString");
-                    assert_eq!(String::from_utf16_lossy(&pts), "[object Object]");
+                    assert_eq!(utf16_to_utf8(&ts), "my-toString");
+                    assert_eq!(utf16_to_utf8(&pts), "[object Object]");
                     assert!(b);
                 }
                 _ => panic!("Unexpected types from toString/valueOf test"),
@@ -324,8 +324,8 @@ fn test_class_instance_to_string_inherits_object_prototype() {
             let b = arr.borrow().get(&"1".into()).unwrap().borrow().clone();
             match (a, b) {
                 (Value::String(sa), Value::String(sb)) => {
-                    assert_eq!(String::from_utf16_lossy(&sa), "[object Object]");
-                    assert_eq!(String::from_utf16_lossy(&sb), "[object Object]");
+                    assert_eq!(utf16_to_utf8(&sa), "[object Object]");
+                    assert_eq!(utf16_to_utf8(&sb), "[object Object]");
                 }
                 _ => panic!("Expected strings from class instance toString tests"),
             }

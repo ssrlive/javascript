@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Stage 1 Integration Tests - Comprehensive coverage of Phase 1 features
 // - Map and Set implementation
@@ -193,7 +193,7 @@ fn stage1_generator_functions() {
     )
     .unwrap();
     match result {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "function"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "function"),
         _ => panic!("Expected string 'function', got {:?}", result),
     }
 
@@ -210,7 +210,7 @@ fn stage1_generator_functions() {
     )
     .unwrap();
     match result {
-        Value::String(s) => assert_eq!(String::from_utf16_lossy(&s), "object"),
+        Value::String(s) => assert_eq!(utf16_to_utf8(&s), "object"),
         _ => panic!("Expected string 'object', got {:?}", result),
     }
 }

@@ -1,6 +1,4 @@
-use javascript::PropertyKey;
-use javascript::Value;
-use javascript::evaluate_script;
+use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -33,7 +31,7 @@ fn test_weakmap_set_get_has_delete() {
 
     match result {
         Value::String(s) => {
-            assert_eq!(String::from_utf16_lossy(&s), "value");
+            assert_eq!(utf16_to_utf8(&s), "value");
         }
         _ => panic!("Expected string value"),
     }
@@ -99,7 +97,7 @@ fn test_weakmap_non_object_key() {
 
     match result {
         Value::String(s) => {
-            assert_eq!(String::from_utf16_lossy(&s), "error");
+            assert_eq!(utf16_to_utf8(&s), "error");
         }
         _ => panic!("Expected error string"),
     }
@@ -177,7 +175,7 @@ fn test_weakset_non_object_value() {
 
     match result {
         Value::String(s) => {
-            assert_eq!(String::from_utf16_lossy(&s), "error");
+            assert_eq!(utf16_to_utf8(&s), "error");
         }
         _ => panic!("Expected error string"),
     }
@@ -188,7 +186,7 @@ fn test_weakmap_weakset_to_string() {
     let result = evaluate_script("new WeakMap().toString()", None::<&std::path::Path>).unwrap();
     match result {
         Value::String(s) => {
-            assert_eq!(String::from_utf16_lossy(&s), "[object WeakMap]");
+            assert_eq!(utf16_to_utf8(&s), "[object WeakMap]");
         }
         _ => panic!("Expected string"),
     }
@@ -196,7 +194,7 @@ fn test_weakmap_weakset_to_string() {
     let result = evaluate_script("new WeakSet().toString()", None::<&std::path::Path>).unwrap();
     match result {
         Value::String(s) => {
-            assert_eq!(String::from_utf16_lossy(&s), "[object WeakSet]");
+            assert_eq!(utf16_to_utf8(&s), "[object WeakSet]");
         }
         _ => panic!("Expected string"),
     }

@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 #[test]
 fn for_of_missing_iterator_throws() {
@@ -38,7 +38,7 @@ fn string_iteration_surrogate_pair_behaviour() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let rust_str = String::from_utf16_lossy(&s);
+            let rust_str = utf16_to_utf8(&s);
             assert!(rust_str.starts_with("a"));
             assert!(rust_str.ends_with("b"));
             assert!(rust_str.len() >= 2);

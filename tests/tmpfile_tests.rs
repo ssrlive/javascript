@@ -22,7 +22,7 @@ fn test_tmpfile_puts_tell() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "hello\nworld");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -46,7 +46,7 @@ fn test_tmpfile_getline() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "a");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -62,7 +62,7 @@ fn test_sprintf_basic() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "a=123 s=abc");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -78,7 +78,7 @@ fn test_sprintf_zero_pad() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "0000000123");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -94,7 +94,7 @@ fn test_sprintf_hex() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "fffffffe");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -110,7 +110,7 @@ fn test_sprintf_float() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "       2.1");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -126,7 +126,7 @@ fn test_sprintf_dynamic_width() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "     -2.13");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -142,7 +142,7 @@ fn test_sprintf_long_hex() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "fffffffffffffffe");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);
@@ -158,7 +158,7 @@ fn test_sprintf_hex_with_prefix() {
     match evaluate_script(src, None::<&std::path::Path>) {
         Ok(val) => {
             if let Value::String(vec) = val {
-                let s = String::from_utf16_lossy(&vec);
+                let s = utf16_to_utf8(&vec);
                 assert_eq!(s, "0x7b");
             } else {
                 panic!("expected string from evaluate_script, got {:?}", val);

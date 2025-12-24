@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::{Value, evaluate_script, utf16_to_utf8};
 
 // Initialize logger for these tests
 #[ctor::ctor]
@@ -18,7 +18,7 @@ fn named_function_expression_has_name() {
     let res = evaluate_script(script, None::<&std::path::Path>);
     match res {
         Ok(Value::String(s)) => {
-            let s = String::from_utf16_lossy(&s);
+            let s = utf16_to_utf8(&s);
             assert_eq!(s, "foo");
         }
         other => panic!("Expected string result, got {:?}", other),

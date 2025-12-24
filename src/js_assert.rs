@@ -1,6 +1,7 @@
 use crate::core::{Expr, JSObjectDataPtr, Value};
 use crate::core::{evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value, prepare_function_call_env};
 use crate::error::JSError;
+use crate::unicode::utf16_to_utf8;
 
 /// Handle assert object method calls
 pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
@@ -15,7 +16,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let message = if args.len() == 3 {
                 let message_val = evaluate_expr(env, &args[2])?;
                 match message_val {
-                    Value::String(s) => String::from_utf16_lossy(&s),
+                    Value::String(s) => utf16_to_utf8(&s),
                     _ => "assert.sameValue failed".to_string(),
                 }
             } else {
@@ -47,7 +48,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
             let message = if args.len() == 3 {
                 let message_val = evaluate_expr(env, &args[2])?;
                 match message_val {
-                    Value::String(s) => String::from_utf16_lossy(&s),
+                    Value::String(s) => utf16_to_utf8(&s),
                     _ => "assert.notSameValue failed".to_string(),
                 }
             } else {

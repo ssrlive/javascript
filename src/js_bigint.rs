@@ -1,6 +1,6 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value, parse_bigint_string, to_primitive};
 use crate::error::JSError;
-use crate::unicode::utf8_to_utf16;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
 use num_bigint::Sign;
 
@@ -19,7 +19,7 @@ pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
             Ok(Value::BigInt(BigInt::from(n as i64)))
         }
         Value::String(s) => {
-            let st = String::from_utf16_lossy(&s);
+            let st = utf16_to_utf8(&s);
             Ok(Value::BigInt(parse_bigint_string(&st)?))
         }
         Value::Boolean(b) => {
@@ -37,7 +37,7 @@ pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
                     Ok(Value::BigInt(BigInt::from(n as i64)))
                 }
                 Value::String(s) => {
-                    let st = String::from_utf16_lossy(&s);
+                    let st = utf16_to_utf8(&s);
                     Ok(Value::BigInt(parse_bigint_string(&st)?))
                 }
                 Value::BigInt(b) => Ok(Value::BigInt(b)),
@@ -126,7 +126,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
             BigInt::from(n as i64)
         }
         Value::String(s) => {
-            let st = String::from_utf16_lossy(&s);
+            let st = utf16_to_utf8(&s);
             parse_bigint_string(&st)?
         }
         Value::Boolean(b) => {
@@ -147,7 +147,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
                     BigInt::from(n as i64)
                 }
                 Value::String(s) => {
-                    let st = String::from_utf16_lossy(&s);
+                    let st = utf16_to_utf8(&s);
                     parse_bigint_string(&st)?
                 }
                 Value::BigInt(b) => b,

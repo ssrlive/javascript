@@ -45,6 +45,13 @@ fn format_value_pretty(
         Value::Undefined => Ok("undefined".to_string()),
         Value::Null => Ok("null".to_string()),
         Value::Object(obj) => {
+            // If this object is a Promise wrapper (stores inner promise under "__promise"),
+            // print it compactly like Node: `Promise { <pending> }` and avoid listing internal helpers.
+            if let Ok(Some(inner_rc)) = obj_get_key_value(obj, &"__promise".into()) {
+                if let Value::Promise(p_rc) = &*inner_rc.borrow() {
+                    return format_promise(p_rc, env, _depth, seen);
+                }
+            }
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
             if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
                 if let Value::String(s) = &*stack_rc.borrow() {
@@ -210,7 +217,7 @@ fn format_value_pretty(
             s.push(']');
             Ok(s)
         }
-        Value::Promise(_) => Ok("[object Promise]".to_string()),
+        Value::Promise(p_rc) => format_promise(p_rc, env, _depth, seen),
         Value::Symbol(s) => Ok(format!("Symbol({})", s.description.as_deref().unwrap_or(""))),
         Value::Map(_) => Ok("[object Map]".to_string()),
         Value::Set(_) => Ok("[object Set]".to_string()),
@@ -223,6 +230,27 @@ fn format_value_pretty(
         Value::DataView(_) => Ok("[object DataView]".to_string()),
         Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
         Value::Uninitialized => Ok("undefined".to_string()),
+    }
+}
+
+// Helper to format a Promise (or an Rc<RefCell<JSPromise>>) in Node-like style.
+fn format_promise(
+    p_rc: &Rc<RefCell<crate::js_promise::JSPromise>>,
+    env: &JSObjectDataPtr,
+    _depth: usize,
+    seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
+) -> Result<String, JSError> {
+    let p = p_rc.borrow();
+    match &p.state {
+        crate::js_promise::PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
+        crate::js_promise::PromiseState::Fulfilled(val) => {
+            let inner = format_value_pretty(val, env, _depth + 1, seen, false)?;
+            Ok(format!("Promise {{ {} }}", inner))
+        }
+        crate::js_promise::PromiseState::Rejected(val) => {
+            let inner = format_value_pretty(val, env, _depth + 1, seen, false)?;
+            Ok(format!("Promise {{ <rejected> {} }}", inner))
+        }
     }
 }
 

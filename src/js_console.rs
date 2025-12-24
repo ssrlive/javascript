@@ -14,6 +14,8 @@ use std::rc::Rc;
 pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
     let console_obj = new_js_object_data();
     obj_set_key_value(&console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
+    // Provide `console.error` as an alias to `console.log` for now
+    obj_set_key_value(&console_obj, &"error".into(), Value::Function("console.error".to_string()))?;
     Ok(console_obj)
 }
 
@@ -227,7 +229,7 @@ fn format_value_pretty(
 /// Handle console object method calls
 pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match method {
-        "log" => {
+        "log" | "error" => {
             // Instrument: record current tick and task-queue length when console.log is invoked
             log::debug!(
                 "console.log called; CURRENT_TICK={} task_queue_len={}",

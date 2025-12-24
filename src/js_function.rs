@@ -70,6 +70,7 @@ fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSErro
 
 pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     match func_name {
+        "console.error" => crate::js_console::handle_console_method("error", args, env),
         "console.log" => crate::js_console::handle_console_method("log", args, env),
         "import" => dynamic_import_function(args, env),
         "std.sprintf" => crate::sprintf::handle_sprintf_call(env, args),

@@ -1048,7 +1048,9 @@ impl ClosureData {
         let mut free_names: HashSet<String> = referenced.difference(&declared).cloned().collect();
 
         let mut captured_envs: Vec<JSObjectDataPtr> = Vec::new();
-        let mut cur_opt = env.borrow().prototype.clone().and_then(|w| w.upgrade());
+        // Start checking from the immediate environment (to capture locals
+        // like `resolve`/`reject`), then walk up the prototype chain.
+        let mut cur_opt = Some(env.clone());
         while let Some(cur_rc) = cur_opt {
             if free_names.is_empty() {
                 break;
@@ -1067,6 +1069,36 @@ impl ClosureData {
                 }
             }
             cur_opt = cur_rc.borrow().prototype.clone().and_then(|w| w.upgrade());
+        }
+
+        // If there are still unresolved free names, try a precise fallback:
+        // check only the topmost (global) environment and capture it only
+        // if it owns any of the remaining free names. This avoids retaining
+        // the entire chain while still fixing references to global builtins
+        // (e.g. `Error`) that may live at the top.
+        if !free_names.is_empty() {
+            // Find the topmost env
+            let mut top_opt = Some(env.clone());
+            let mut last = env.clone();
+            while let Some(t) = top_opt {
+                last = t.clone();
+                top_opt = t.borrow().prototype.clone().and_then(|w| w.upgrade());
+            }
+            // See if the topmost env defines any remaining free names
+            let mut matched_top: Vec<String> = Vec::new();
+            for name in free_names.iter() {
+                if get_own_property(&last, &name.clone().into()).is_some() {
+                    matched_top.push(name.clone());
+                }
+            }
+            if !matched_top.is_empty() {
+                if !captured_envs.iter().any(|c| Rc::ptr_eq(c, &last)) {
+                    captured_envs.push(last.clone());
+                }
+                for m in matched_top {
+                    free_names.remove(&m);
+                }
+            }
         }
 
         ClosureData {
@@ -1304,6 +1336,14 @@ pub fn prepare_function_call_env(
     log::trace!("prepare_function_call_env - created func_env_ptr={:p}", Rc::as_ptr(&func_env));
     if let Some(captured_env) = captured_env_opt {
         func_env.borrow_mut().prototype = Some(Rc::downgrade(captured_env));
+        // Keep a hidden strong reference to the captured env/wrapper so
+        // it is not dropped while this activation is alive. This ensures
+        // the prototype chain used for variable lookup remains valid
+        // for asynchronous callbacks.
+        func_env.borrow_mut().insert(
+            PropertyKey::String("__captured_env_wrapper".to_string()),
+            Rc::new(RefCell::new(Value::Object(captured_env.clone()))),
+        );
         // If the captured environment contains iterator sentinel keys
         // like `__array` or `__str`, keep a hidden strong reference on
         // the activation to ensure the sentinel object remains alive
@@ -1417,16 +1457,60 @@ pub fn prepare_closure_call_env(
 // executable closure under the internal `"__closure__"` property.
 #[allow(clippy::type_complexity)]
 pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr)> {
+    // Helper: when a closure has multiple `captured_envs`, create a
+    // lightweight wrapper environment that holds strong references to
+    // those captured envs and whose prototype points to the first
+    // captured env. This wrapper can be used as the `captured_env` in
+    // existing call sites without changing their signatures.
+    fn make_wrapper_for_captured_envs(captured_envs: &[JSObjectDataPtr], fallback: &JSObjectDataPtr) -> JSObjectDataPtr {
+        if captured_envs.is_empty() {
+            return fallback.clone();
+        }
+        let wrapper = new_js_object_data();
+        // Link wrapper prototype to the first captured env so lookups work
+        wrapper.borrow_mut().prototype = Some(Rc::downgrade(&captured_envs[0]));
+        // Retain strong references on the wrapper under hidden keys
+        for (i, env) in captured_envs.iter().enumerate() {
+            let key = PropertyKey::String(format!("__captured_env_{}", i));
+            wrapper.borrow_mut().insert(key, Rc::new(RefCell::new(Value::Object(env.clone()))));
+        }
+        wrapper
+    }
+
     match val {
-        Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
-        Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
-        Value::GeneratorFunction(_, data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+        Value::Closure(data) => Some((
+            data.params.clone(),
+            data.body.clone(),
+            make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+        )),
+        Value::AsyncClosure(data) => Some((
+            data.params.clone(),
+            data.body.clone(),
+            make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+        )),
+        Value::GeneratorFunction(_, data) => Some((
+            data.params.clone(),
+            data.body.clone(),
+            make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+        )),
         Value::Object(object) => {
             if let Ok(Some(cl_rc)) = obj_get_key_value(object, &"__closure__".into()) {
                 match &*cl_rc.borrow() {
-                    Value::Closure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
-                    Value::AsyncClosure(data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
-                    Value::GeneratorFunction(_, data) => Some((data.params.clone(), data.body.clone(), data.env.clone())),
+                    Value::Closure(data) => Some((
+                        data.params.clone(),
+                        data.body.clone(),
+                        make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+                    )),
+                    Value::AsyncClosure(data) => Some((
+                        data.params.clone(),
+                        data.body.clone(),
+                        make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+                    )),
+                    Value::GeneratorFunction(_, data) => Some((
+                        data.params.clone(),
+                        data.body.clone(),
+                        make_wrapper_for_captured_envs(&data.captured_envs, &data.env),
+                    )),
                     _ => None,
                 }
             } else {

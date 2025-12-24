@@ -644,6 +644,7 @@ fn evaluate_stmt_block(env: &JSObjectDataPtr, stmts: &[Statement], last_value: &
 fn evaluate_stmt_assign(env: &JSObjectDataPtr, name: &str, expr: &Expr) -> Result<Value, JSError> {
     let val = evaluate_expr(env, expr)?;
     env_set_recursive(env, name, val.clone())?;
+    log::trace!("Assigned value to '{name}': {val:?}");
     Ok(val)
 }
 
@@ -770,12 +771,237 @@ fn evaluate_stmt_return(env: &JSObjectDataPtr, expr_opt: &Option<Expr>) -> Resul
         Some(expr) => evaluate_expr(env, expr)?,
         None => Value::Undefined,
     };
-    log::trace!("StatementKind::Return evaluated value = {:?}", return_val);
+    log::trace!("StatementKind::Return evaluated value = {return_val:?}");
     Ok(Some(ControlFlow::Return(return_val)))
 }
 
 fn evaluate_stmt_throw(env: &JSObjectDataPtr, expr: &Expr) -> Result<Option<ControlFlow>, JSError> {
     let throw_val = evaluate_expr(env, expr)?;
+
+    // If the thrown value is an Error-like object, update its `stack` string
+    // here at the throw site so it reflects the actual statement location
+    // (rather than an earlier construction site or a surrounding callback).
+    if let Value::Object(obj_map) = &throw_val {
+        // Determine header (Error: message) similar to JSError::message handling
+        let mut header = None;
+        if let Ok(Some(ctor_rc)) = obj_get_key_value(obj_map, &"constructor".into()) {
+            if let Value::Object(ctor_obj) = &*ctor_rc.borrow() {
+                if let Ok(Some(name_rc)) = obj_get_key_value(ctor_obj, &"name".into()) {
+                    if let Value::String(name_utf16) = &*name_rc.borrow() {
+                        let ctor_name = utf16_to_utf8(name_utf16);
+                        // prefer message property if present
+                        if let Ok(Some(msg_rc)) = obj_get_key_value(obj_map, &"message".into())
+                            && let Value::String(msg_utf16) = &*msg_rc.borrow()
+                        {
+                            let msg = utf16_to_utf8(msg_utf16);
+                            header = Some(format!("{ctor_name}: {msg}"));
+                        } else {
+                            header = ctor_name.into();
+                        }
+                    }
+                }
+            }
+        }
+        if header.is_none() {
+            if let Ok(Some(msg_rc)) = obj_get_key_value(obj_map, &"message".into()) {
+                if let Value::String(msg_utf16) = &*msg_rc.borrow() {
+                    header = Some(format!("Uncaught {}", utf16_to_utf8(msg_utf16)));
+                }
+            }
+        }
+        let header = header.unwrap_or_else(|| "Uncaught thrown value".to_string());
+
+        // Fetch the current statement location from env if present
+        let mut line = 0usize;
+        let mut column = 0usize;
+        if let Ok(Some(line_rc)) = obj_get_key_value(env, &"__line".into()) {
+            if let Value::Number(n) = &*line_rc.borrow() {
+                line = *n as usize;
+            }
+        }
+        if let Ok(Some(col_rc)) = obj_get_key_value(env, &"__column".into()) {
+            if let Value::Number(n) = &*col_rc.borrow() {
+                column = *n as usize;
+            }
+        }
+
+        // (debugging removed)
+
+        // Prefer a more-precise location from the thrown expression itself
+        // when available (e.g. `new Error(...)` -> use position of `Error`).
+        fn expr_position(expr: &crate::core::Expr) -> Option<(usize, usize)> {
+            use crate::core::Expr::*;
+            match expr {
+                Var(_, Some(l), Some(c)) => Some((*l, *c)),
+                New(boxed, _) => match &**boxed {
+                    Var(_, Some(l), Some(c)) => Some((*l, *c)),
+                    _ => None,
+                },
+                Call(boxed, _) => match &**boxed {
+                    Var(_, Some(l), Some(c)) => Some((*l, *c)),
+                    _ => None,
+                },
+                Property(boxed, _) => match &**boxed {
+                    Var(_, Some(l), Some(c)) => Some((*l, *c)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+
+        if let Some((el, ec)) = expr_position(expr) {
+            // override column/line with the expression's position for better parity
+            // with Node.js which points at the constructor/identifier inside
+            // `throw new Error(...)` rather than the `throw` keyword.
+            line = el;
+            column = ec;
+        }
+
+        // Record these precise thrown-site coordinates on the thrown object
+        let _ = obj_set_key_value(obj_map, &"__thrown_line".into(), Value::Number(line as f64));
+        let _ = obj_set_key_value(obj_map, &"__thrown_column".into(), Value::Number(column as f64));
+
+        // Derive frame base name from current env's __frame if present
+        let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(env, &"__frame".into()) {
+            if let Value::String(s) = &*frame_val_rc.borrow() {
+                String::from_utf16_lossy(s)
+            } else {
+                build_frame_name(env, "<anonymous>")
+            }
+        } else {
+            build_frame_name(env, "<anonymous>")
+        };
+        let base = match frame_name.find(" (") {
+            Some(idx) => frame_name[..idx].to_string(),
+            None => frame_name,
+        };
+        // script name
+        let mut script_name = "<script>".to_string();
+        if let Ok(Some(sn_rc)) = obj_get_key_value(env, &"__script_name".into()) {
+            if let Value::String(s) = &*sn_rc.borrow() {
+                script_name = String::from_utf16_lossy(s);
+            }
+        }
+
+        // Build full frame list by walking __frame / __caller links so we
+        // include the full call path (innermost first). Replace the innermost
+        // frame with the precise thrown-site location (line/column) so the
+        // top of the stack points to the actual throw site.
+        // Build frames using the same heuristics as `capture_frames_from_env`
+        // so we prefer recorded call-site (`__call_*`) info over a
+        // function's own declaration/body location.
+        let mut frames: Vec<String> = Vec::new();
+        let mut env_opt = Some(env.clone());
+        while let Some(env_ptr) = env_opt {
+            // derive base name
+            let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
+                if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
+                    String::from_utf16_lossy(s_utf16)
+                } else {
+                    build_frame_name(&env_ptr, "<anonymous>")
+                }
+            } else {
+                build_frame_name(&env_ptr, "<anonymous>")
+            };
+            let base = match frame_name.find(" (") {
+                Some(idx) => frame_name[..idx].to_string(),
+                None => frame_name,
+            };
+
+            // prefer __call_* on the function env, then caller env's __line/__column,
+            // then fall back to env's own __line/__column
+            let mut line = 0usize;
+            let mut col = 0usize;
+            let mut script_name = "<script>".to_string();
+            if let Ok(Some(call_line_rc)) = obj_get_key_value(&env_ptr, &"__call_line".into()) {
+                if let Value::Number(n) = &*call_line_rc.borrow() {
+                    line = *n as usize;
+                }
+            }
+            if let Ok(Some(call_col_rc)) = obj_get_key_value(&env_ptr, &"__call_column".into()) {
+                if let Value::Number(n) = &*call_col_rc.borrow() {
+                    col = *n as usize;
+                }
+            }
+            if let Ok(Some(call_sn_rc)) = obj_get_key_value(&env_ptr, &"__call_script_name".into()) {
+                if let Value::String(s) = &*call_sn_rc.borrow() {
+                    script_name = String::from_utf16_lossy(s);
+                }
+            }
+
+            if line == 0 {
+                if let Ok(Some(caller_rc)) = obj_get_key_value(&env_ptr, &"__caller".into()) {
+                    if let Value::Object(caller_env) = &*caller_rc.borrow() {
+                        if let Ok(Some(line_rc)) = obj_get_key_value(caller_env, &"__line".into()) {
+                            if let Value::Number(n) = &*line_rc.borrow() {
+                                line = *n as usize;
+                            }
+                        }
+                        if let Ok(Some(col_rc)) = obj_get_key_value(caller_env, &"__column".into()) {
+                            if let Value::Number(n) = &*col_rc.borrow() {
+                                col = *n as usize;
+                            }
+                        }
+                        if let Ok(Some(sn_rc)) = obj_get_key_value(caller_env, &"__script_name".into()) {
+                            if let Value::String(s) = &*sn_rc.borrow() {
+                                script_name = String::from_utf16_lossy(s);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if line == 0 {
+                if let Ok(Some(line_rc)) = obj_get_key_value(&env_ptr, &"__line".into()) {
+                    if let Value::Number(n) = &*line_rc.borrow() {
+                        line = *n as usize;
+                    }
+                }
+            }
+            if col == 0 {
+                if let Ok(Some(col_rc)) = obj_get_key_value(&env_ptr, &"__column".into()) {
+                    if let Value::Number(n) = &*col_rc.borrow() {
+                        col = *n as usize;
+                    }
+                }
+            }
+            if script_name == "<script>" {
+                if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
+                    if let Value::String(s) = &*sn_rc.borrow() {
+                        script_name = String::from_utf16_lossy(s);
+                    }
+                }
+            }
+
+            frames.push(format!("{} ({}:{}:{})", base, script_name, line, col));
+
+            // follow caller link if present
+            if let Ok(Some(caller_rc)) = obj_get_key_value(&env_ptr, &"__caller".into()) {
+                if let Value::Object(caller_env) = &*caller_rc.borrow() {
+                    env_opt = Some(caller_env.clone());
+                    continue;
+                }
+            }
+            env_opt = env_ptr.borrow().prototype.clone();
+        }
+
+        // Create thrown-site frame and place it at the front
+        let thrown_frame = format!("{} ({}:{}:{})", base, script_name, line, column);
+        if frames.is_empty() {
+            frames.push(thrown_frame);
+        } else {
+            frames[0] = thrown_frame;
+        }
+
+        // Build stack string: header + each frame on its own line
+        let mut stack_lines = vec![header];
+        for f in frames {
+            stack_lines.push(format!("    at {}", f));
+        }
+        let stack_str = stack_lines.join("\n");
+        let _ = obj_set_key_value(obj_map, &"stack".into(), Value::String(utf8_to_utf16(&stack_str)));
+    }
+
     Err(raise_throw_error!(throw_val))
 }
 
@@ -1095,8 +1321,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                             Value::String(s_utf16) => {
                                 let s = utf16_to_utf8(s_utf16);
                                 log::debug!(
-                                    "evaluate_statements_with_context thrown JS value (String) at statement {i}: '{}' stmt={stmt:?}",
-                                    s
+                                    "evaluate_statements_with_context thrown JS value (String) at statement {i}: '{s}' stmt={stmt:?}"
                                 );
                             }
                             Value::Object(obj_ptr) => {
@@ -1107,14 +1332,12 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                             }
                             Value::Number(n) => {
                                 log::debug!(
-                                    "evaluate_statements_with_context thrown JS value (Number) at statement {i}: {} stmt={stmt:?}",
-                                    n
+                                    "evaluate_statements_with_context thrown JS value (Number) at statement {i}: {n} stmt={stmt:?}"
                                 );
                             }
                             Value::Boolean(b) => {
                                 log::debug!(
-                                    "evaluate_statements_with_context thrown JS value (Boolean) at statement {i}: {} stmt={stmt:?}",
-                                    b
+                                    "evaluate_statements_with_context thrown JS value (Boolean) at statement {i}: {b} stmt={stmt:?}"
                                 );
                             }
                             Value::Undefined => {
@@ -1123,8 +1346,7 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                             other => {
                                 // Fallback: print Debug and a stringified form
                                 log::debug!(
-                                    "evaluate_statements_with_context thrown JS value at statement {i}: {:?} (toString='{}') stmt={stmt:?}",
-                                    other,
+                                    "evaluate_statements_with_context thrown JS value at statement {i}: {other:?} (toString='{}') stmt={stmt:?}",
                                     crate::core::value_to_string(other)
                                 );
                             }
@@ -1134,17 +1356,128 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                         log::warn!("evaluate_statements_with_context error at statement {i}: {e}, stmt={stmt:?}");
                     }
                 }
+                // If the thrown JS value recorded a thrown-site on the object
+                // (via `__thrown_line` / `__thrown_column`), prefer that
+                // location for the error so the message points to the actual
+                // throw site instead of the statement's recorded position.
+                if let JSErrorKind::Throw { value } = e.kind() {
+                    if let Value::Object(obj_ptr) = value {
+                        if let Ok(Some(tl_rc)) = obj_get_key_value(obj_ptr, &"__thrown_line".into()) {
+                            if let Value::Number(n) = &*tl_rc.borrow() {
+                                let col = if let Ok(Some(tc_rc)) = obj_get_key_value(obj_ptr, &"__thrown_column".into()) {
+                                    if let Value::Number(nc) = &*tc_rc.borrow() {
+                                        *nc as usize
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
+                                e.set_js_location(*n as usize, col);
+                            }
+                        }
+                    }
+                }
+
                 // Capture a minimal JS-style call stack by walking `__frame`/`__caller`
                 // links from the environment where the error occurred. This produces
                 // a vector of frame descriptions (innermost first).
                 fn capture_frames_from_env(mut env_opt: Option<JSObjectDataPtr>) -> Vec<String> {
                     let mut frames = Vec::new();
                     while let Some(env_ptr) = env_opt {
-                        if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
+                        // Derive base name (function name) from __frame if present
+                        let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
                             if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
-                                frames.push(String::from_utf16_lossy(s_utf16));
+                                String::from_utf16_lossy(s_utf16)
+                            } else {
+                                build_frame_name(&env_ptr, "<anonymous>")
+                            }
+                        } else {
+                            build_frame_name(&env_ptr, "<anonymous>")
+                        };
+                        let base = match frame_name.find(" (") {
+                            Some(idx) => frame_name[..idx].to_string(),
+                            None => frame_name,
+                        };
+
+                        // Prefer explicit `__call_*` info (set when the call frame
+                        // was created) so stack traces show the call-site rather
+                        // than the function declaration/body location. Fall back
+                        // to the caller env's `__line`/`__column` if present, and
+                        // finally to the env's own recorded location.
+                        let mut line = 0usize;
+                        let mut col = 0usize;
+                        let mut script_name = "<script>".to_string();
+                        // First, prefer an explicit `__call_line` recorded on the
+                        // function env at call-creation time.
+                        if let Ok(Some(call_line_rc)) = obj_get_key_value(&env_ptr, &"__call_line".into()) {
+                            if let Value::Number(n) = &*call_line_rc.borrow() {
+                                line = *n as usize;
                             }
                         }
+                        if let Ok(Some(call_col_rc)) = obj_get_key_value(&env_ptr, &"__call_column".into()) {
+                            if let Value::Number(n) = &*call_col_rc.borrow() {
+                                col = *n as usize;
+                            }
+                        }
+                        if let Ok(Some(call_sn_rc)) = obj_get_key_value(&env_ptr, &"__call_script_name".into()) {
+                            if let Value::String(s) = &*call_sn_rc.borrow() {
+                                script_name = String::from_utf16_lossy(s);
+                            }
+                        }
+
+                        // If no explicit call-site recorded, fall back to the
+                        // caller env's recorded `__line`/`__column`/`__script_name`.
+                        if line == 0 {
+                            if let Ok(Some(caller_rc)) = obj_get_key_value(&env_ptr, &"__caller".into()) {
+                                if let Value::Object(caller_env) = &*caller_rc.borrow() {
+                                    if let Ok(Some(line_rc)) = obj_get_key_value(caller_env, &"__line".into()) {
+                                        if let Value::Number(n) = &*line_rc.borrow() {
+                                            line = *n as usize;
+                                        }
+                                    }
+                                    if let Ok(Some(col_rc)) = obj_get_key_value(caller_env, &"__column".into()) {
+                                        if let Value::Number(n) = &*col_rc.borrow() {
+                                            col = *n as usize;
+                                        }
+                                    }
+                                    if let Ok(Some(sn_rc)) = obj_get_key_value(caller_env, &"__script_name".into()) {
+                                        if let Value::String(s) = &*sn_rc.borrow() {
+                                            script_name = String::from_utf16_lossy(s);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Fallback to the env's own recorded location when caller
+                        // did not provide position information.
+                        if line == 0 {
+                            if let Ok(Some(line_rc)) = obj_get_key_value(&env_ptr, &"__line".into()) {
+                                if let Value::Number(n) = &*line_rc.borrow() {
+                                    line = *n as usize;
+                                }
+                            }
+                        }
+                        if col == 0 {
+                            if let Ok(Some(col_rc)) = obj_get_key_value(&env_ptr, &"__column".into()) {
+                                if let Value::Number(n) = &*col_rc.borrow() {
+                                    col = *n as usize;
+                                }
+                            }
+                        }
+                        if script_name == "<script>" {
+                            if let Ok(Some(sn_rc)) = obj_get_key_value(&env_ptr, &"__script_name".into()) {
+                                if let Value::String(s) = &*sn_rc.borrow() {
+                                    script_name = String::from_utf16_lossy(s);
+                                }
+                            }
+                        }
+
+                        // debug: print raw recorded values for troubleshooting
+                        // debug printing removed
+                        frames.push(format!("    at {} ({}:{}:{})", base, script_name, line, col));
+
                         // follow caller link if present
                         if let Ok(Some(caller_rc)) = obj_get_key_value(&env_ptr, &"__caller".into()) {
                             if let Value::Object(caller_env) = &*caller_rc.borrow() {
@@ -1152,12 +1485,69 @@ pub fn evaluate_statements_with_context(env: &JSObjectDataPtr, statements: &[Sta
                                 continue;
                             }
                         }
-                        break;
+                        env_opt = env_ptr.borrow().prototype.clone();
                     }
                     frames
                 }
 
-                let frames = capture_frames_from_env(Some(env.clone()));
+                let mut frames = capture_frames_from_env(Some(env.clone()));
+
+                // If the thrown JS error recorded a precise statement location (js_line/js_column),
+                // prefer that location for the innermost frame so stack traces point to the
+                // actual throw site instead of the function's first statement.
+                if e.inner.js_line.is_some() {
+                    let js_line = e.inner.js_line.unwrap();
+                    let js_col = e.inner.js_column.unwrap_or(0);
+
+                    // Try to find the environment whose recorded `__line` matches the
+                    // thrown statement location. This gives us the most accurate
+                    // function frame name to associate with that statement.
+                    let mut matched_env_opt: Option<JSObjectDataPtr> = None;
+                    let mut probe_env = Some(env.clone());
+                    while let Some(pe) = probe_env {
+                        if let Ok(Some(line_rc)) = obj_get_key_value(&pe, &"__line".into()) {
+                            if let Value::Number(n) = &*line_rc.borrow() {
+                                if (*n as usize) == js_line {
+                                    matched_env_opt = Some(pe.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        probe_env = pe.borrow().prototype.clone();
+                    }
+
+                    let target_env = matched_env_opt.unwrap_or_else(|| env.clone());
+
+                    // Derive a base frame name from the target env's __frame if present
+                    // (it may include additional formatting like "name (script:line:col)").
+                    let frame_name = if let Ok(Some(frame_val_rc)) = obj_get_key_value(&target_env, &"__frame".into()) {
+                        if let Value::String(s) = &*frame_val_rc.borrow() {
+                            String::from_utf16_lossy(s)
+                        } else {
+                            build_frame_name(&target_env, "<anonymous>")
+                        }
+                    } else {
+                        build_frame_name(&target_env, "<anonymous>")
+                    };
+                    let base = match frame_name.find(" (") {
+                        Some(idx) => frame_name[..idx].to_string(),
+                        None => frame_name,
+                    };
+                    // Determine script name from the target environment if available
+                    let mut script_name = "<script>".to_string();
+                    if let Ok(Some(sn_rc)) = obj_get_key_value(&target_env, &"__script_name".into()) {
+                        if let Value::String(s) = &*sn_rc.borrow() {
+                            script_name = String::from_utf16_lossy(s);
+                        }
+                    }
+                    let thrown_frame = format!("    at {} ({}:{}:{})", base, script_name, js_line, js_col);
+                    if frames.is_empty() {
+                        frames.push(thrown_frame);
+                    } else {
+                        frames[0] = thrown_frame;
+                    }
+                }
+
                 set_last_stack(frames.clone());
                 let mut err = e;
                 if err.stack().is_empty() {
@@ -5382,7 +5772,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                     Value::Getter(body, getter_env, home_opt) => {
                         // Prepare a fresh function env with `this` bound to the instance
                         let func_env =
-                            prepare_function_call_env(Some(getter_env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                            prepare_function_call_env(Some(getter_env), Some(Value::Object(obj_map.clone())), None, &[], None, Some(env))?;
                         if let Some(home) = home_opt {
                             crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                         }
@@ -5400,7 +5790,7 @@ fn evaluate_property(env: &JSObjectDataPtr, obj: &Expr, prop: &str) -> Result<Va
                         ..
                     } => {
                         let func_env =
-                            prepare_function_call_env(Some(getter_env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                            prepare_function_call_env(Some(getter_env), Some(Value::Object(obj_map.clone())), None, &[], None, Some(env))?;
                         if let Some(home) = home_opt {
                             crate::core::obj_set_key_value(&func_env, &"__home_object__".into(), Value::Object(home.clone()))?;
                         }
@@ -5957,8 +6347,14 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                     crate::js_function::handle_global_function(&func_name, args, env)
                                 } else if func_name.starts_with("Function.prototype.") {
                                     // Call Function.prototype.* handlers with the receiver bound as `this`.
-                                    let call_env =
-                                        prepare_function_call_env(Some(env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                                    let call_env = prepare_function_call_env(
+                                        Some(env),
+                                        Some(Value::Object(obj_map.clone())),
+                                        None,
+                                        &[],
+                                        None,
+                                        Some(env),
+                                    )?;
                                     crate::js_function::handle_global_function(&func_name, args, &call_env)
                                 } else {
                                     crate::js_function::handle_global_function(&func_name, args, env)
@@ -6101,12 +6497,12 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             // Allow function values and closures to support `.call` and `.apply` forwarding
             (Value::Closure(data), "call") => {
                 // Delegate to Function.prototype.call with closure as the target
-                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, None)?;
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, Some(env))?;
                 crate::js_function::handle_global_function("Function.prototype.call", args, &call_env)
             }
             (Value::Closure(data), "apply") => {
                 // Delegate to Function.prototype.apply with closure as the target
-                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, None)?;
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Closure(data.clone())), None, &[], None, Some(env))?;
                 crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
             }
             (Value::Closure(data), "bind") => {
@@ -6125,17 +6521,17 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
             }
             (Value::Function(func_name), "call") => {
                 // Delegate to Function.prototype.call
-                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, Some(env))?;
                 crate::js_function::handle_global_function("Function.prototype.call", args, &call_env)
             }
             (Value::Function(func_name), "apply") => {
                 // Delegate to Function.prototype.apply
-                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, Some(env))?;
                 crate::js_function::handle_global_function("Function.prototype.apply", args, &call_env)
             }
             (Value::Function(func_name), "bind") => {
                 // Delegate to Function.prototype.bind
-                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, None)?;
+                let call_env = prepare_function_call_env(Some(env), Some(Value::Function(func_name.clone())), None, &[], None, Some(env))?;
                 crate::js_function::handle_global_function("Function.prototype.bind", args, &call_env)
             }
             (Value::Function(func_name), method) => {
@@ -6213,7 +6609,7 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                                 Some(params),
                                 &evaluated_args,
                                 None,
-                                None,
+                                Some(env),
                             )?;
                             // Execute function body and resolve/reject promise
                             let result = evaluate_statements(&func_env, body);
@@ -6250,7 +6646,24 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                             } else {
                                 "<anonymous>".to_string()
                             };
-                            let frame = build_frame_name(env, &frame_name);
+                            // Attempt to use the function's recorded declaration site (if present) for clearer frames,
+                            // falling back to build_frame_name if no useful decl site is available.
+                            let mut frame = build_frame_name(env, &frame_name);
+                            // The closure data is available via `cl_rc` (we matched it above), so use its decl site if present.
+                            if let Value::Closure(data) | Value::AsyncClosure(data) = &*cl_rc.borrow() {
+                                if !data.body.is_empty() {
+                                    let decl_line = data.body[0].line;
+                                    let decl_col = data.body[0].column;
+                                    let mut script_name = "<script>".to_string();
+                                    if let Ok(Some(sn_rc)) = obj_get_key_value(&data.env, &"__script_name".into()) {
+                                        if let Value::String(s) = &*sn_rc.borrow() {
+                                            script_name = String::from_utf16_lossy(s);
+                                        }
+                                    }
+                                    frame = format!("{} ({}:{}:{})", frame_name, script_name, decl_line, decl_col);
+                                }
+                            }
+
                             let func_env = prepare_function_call_env(
                                 Some(captured_env),
                                 Some(Value::Undefined),
@@ -6313,7 +6726,22 @@ fn evaluate_call(env: &JSObjectDataPtr, func_expr: &Expr, args: &[Expr]) -> Resu
                 } else {
                     "<anonymous>".to_string()
                 };
-                let frame = build_frame_name(env, &frame_name);
+                // Attempt to use the function's recorded declaration site (if present) for clearer frames,
+                // falling back to the first statement's location in the body if necessary.
+                let mut frame = build_frame_name(env, &frame_name);
+
+                if !data.body.is_empty() {
+                    let decl_line = data.body[0].line;
+                    let decl_col = data.body[0].column;
+                    // Try to fetch script name from the captured environment
+                    let mut script_name = "<script>".to_string();
+                    if let Ok(Some(sn_rc)) = obj_get_key_value(&data.env, &"__script_name".into()) {
+                        if let Value::String(s) = &*sn_rc.borrow() {
+                            script_name = String::from_utf16_lossy(s);
+                        }
+                    }
+                    frame = format!("{} ({}:{}:{})", frame_name, script_name, decl_line, decl_col);
+                }
                 let this_val = data.bound_this.clone().unwrap_or(Value::Undefined);
                 let func_env = prepare_function_call_env(
                     Some(captured_env),
@@ -7383,7 +7811,7 @@ pub(crate) fn handle_user_defined_method_on_instance(
                     }
                     crate::js_function::handle_global_function(&func_name, args, env)
                 } else if func_name.starts_with("Function.prototype.") {
-                    let call_env = prepare_function_call_env(Some(env), Some(Value::Object(obj_map.clone())), None, &[], None, None)?;
+                    let call_env = prepare_function_call_env(Some(env), Some(Value::Object(obj_map.clone())), None, &[], None, Some(env))?;
                     crate::js_function::handle_global_function(&func_name, args, &call_env)
                 } else {
                     crate::js_function::handle_global_function(&func_name, args, env)

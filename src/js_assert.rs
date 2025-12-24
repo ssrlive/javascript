@@ -85,7 +85,7 @@ pub fn handle_assert_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
                 Value::Closure(data) => {
                     let body = &data.body;
                     let captured_env = &data.env;
-                    let func_env = prepare_function_call_env(Some(captured_env), None, None, &[], None, None)?;
+                    let func_env = prepare_function_call_env(Some(captured_env), None, None, &[], None, Some(env))?;
                     match evaluate_statements(&func_env, body) {
                         Ok(_) => Err(raise_eval_error!("assert.throws expected function to throw a value")),
                         Err(_) => Ok(Value::Undefined),

@@ -115,7 +115,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Some(params),
                         &evaluated_args,
                         None,
-                        None,
+                        Some(env),
                     )?;
 
                     // Execute function body
@@ -143,7 +143,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                         Some(params),
                         &evaluated_args,
                         None,
-                        None,
+                        Some(env),
                     )?;
                     // Execute function body
                     let result = crate::core::evaluate_statements(&func_env, body);
@@ -192,7 +192,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                     Some(params),
                                     &evaluated_args,
                                     None,
-                                    None,
+                                    Some(env),
                                 )?;
 
                                 // Execute function body
@@ -223,7 +223,7 @@ pub fn handle_reflect_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                     Some(params),
                                     &evaluated_args,
                                     None,
-                                    None,
+                                    Some(env),
                                 )?;
 
                                 // Execute function body and resolve/reject promise

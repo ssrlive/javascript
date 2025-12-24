@@ -42,6 +42,15 @@ fn format_value_pretty(
         Value::Undefined => Ok("undefined".to_string()),
         Value::Null => Ok("null".to_string()),
         Value::Object(obj) => {
+            // If object looks like an Error (has non-empty "stack" string), print the stack directly
+            if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
+                if let Value::String(s) = &*stack_rc.borrow() {
+                    let s_utf8 = String::from_utf16_lossy(s);
+                    if !s_utf8.is_empty() {
+                        return Ok(s_utf8);
+                    }
+                }
+            }
             if crate::js_regexp::is_regex_object(obj) {
                 match crate::js_regexp::get_regex_literal_pattern(obj) {
                     Ok(pat) => Ok(pat),

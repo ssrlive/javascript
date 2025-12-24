@@ -184,7 +184,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                         Some(params),
                         &evaluated_args,
                         None,
-                        None,
+                        Some(env),
                     )?;
 
                     // Execute constructor body
@@ -260,7 +260,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                             Some(params),
                             &evaluated_args,
                             None,
-                            None,
+                            Some(env),
                         )?;
 
                         // Execute constructor body
@@ -464,7 +464,7 @@ pub(crate) fn evaluate_new(env: &JSObjectDataPtr, constructor: &Expr, args: &[Ex
                 Some(params),
                 &evaluated_args,
                 None,
-                None,
+                Some(env),
             )?;
 
             // Execute function body
@@ -861,7 +861,7 @@ pub(crate) fn call_static_method(
                     Some(params),
                     &evaluated_args,
                     None,
-                    None,
+                    Some(env),
                 )?;
 
                 // Execute method body
@@ -898,7 +898,7 @@ pub(crate) fn call_class_method(obj_map: &JSObjectDataPtr, method: &str, args: &
                     Some(params),
                     &evaluated_args,
                     None,
-                    None,
+                    Some(env),
                 )?;
 
                 if let Some(home) = home_obj {
@@ -1010,7 +1010,7 @@ pub(crate) fn evaluate_super_call(env: &JSObjectDataPtr, args: &[Expr]) -> Resul
                             Some(params),
                             &evaluated_args,
                             None,
-                            None,
+                            Some(env),
                         )?;
 
                         // Execute parent constructor body
@@ -1140,7 +1140,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                     Some(params),
                                     &evaluated_args,
                                     None,
-                                    None,
+                                    Some(env),
                                 )?;
 
                                 if let Some(home) = home_obj {
@@ -1178,7 +1178,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                                                 Some(params),
                                                 &evaluated_args,
                                                 None,
-                                                None,
+                                                Some(env),
                                             )?;
 
                                             if let Some(home) = home_obj {
@@ -1229,7 +1229,7 @@ pub(crate) fn evaluate_super_method(env: &JSObjectDataPtr, method: &str, args: &
                             Some(params),
                             &evaluated_args,
                             None,
-                            None,
+                            Some(env),
                         )?;
 
                         // Execute method body

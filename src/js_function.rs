@@ -196,7 +196,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             let forwarded_args = args[1..].to_vec();
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, None)?;
+                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, Some(env))?;
 
                             return handle_global_function(&func_name, &forwarded_args, &call_env);
                         }
@@ -219,8 +219,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         let params = &data.params;
                         let body = &data.body;
                         let captured_env = &data.env;
-                        let func_env =
-                            prepare_function_call_env(Some(captured_env), Some(receiver_val), Some(params), &evaluated_args, None, None)?;
+                        let func_env = prepare_function_call_env(
+                            Some(captured_env),
+                            Some(receiver_val),
+                            Some(params),
+                            &evaluated_args,
+                            None,
+                            Some(env),
+                        )?;
 
                         // Create arguments object
                         let arguments_obj = crate::js_array::create_array(&func_env)?;
@@ -255,7 +261,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                                 Some(params),
                                 &evaluated_args,
                                 None,
-                                None,
+                                Some(env),
                             )?;
 
                             // Create arguments object
@@ -314,7 +320,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                             }
 
                             // Create a new call environment with 'this' bound to receiver
-                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, None)?;
+                            let call_env = prepare_function_call_env(Some(env), Some(receiver_val), None, &[], None, Some(env))?;
 
                             return handle_global_function(&func_name, &forwarded_exprs, &call_env);
                         }
@@ -351,8 +357,14 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                         let params = &data.params;
                         let body = &data.body;
                         let captured_env = &data.env;
-                        let func_env =
-                            prepare_function_call_env(Some(captured_env), Some(receiver_val), Some(params), &evaluated_args, None, None)?;
+                        let func_env = prepare_function_call_env(
+                            Some(captured_env),
+                            Some(receiver_val),
+                            Some(params),
+                            &evaluated_args,
+                            None,
+                            Some(env),
+                        )?;
 
                         // Create arguments object
                         let arguments_obj = crate::js_array::create_array(&func_env)?;
@@ -400,7 +412,7 @@ pub fn handle_global_function(func_name: &str, args: &[Expr], env: &JSObjectData
                                 Some(params),
                                 &evaluated_args,
                                 None,
-                                None,
+                                Some(env),
                             )?;
 
                             // Create arguments object

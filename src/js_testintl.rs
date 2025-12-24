@@ -309,7 +309,8 @@ pub fn handle_testintl_method(method: &str, args: &[Expr], env: &JSObjectDataPtr
 
                 // Call the callback with the mock constructor
                 let args_vals = vec![mock_constructor];
-                let func_env = crate::core::prepare_function_call_env(Some(&captured_env), None, Some(&params), &args_vals, None, None)?;
+                let func_env =
+                    crate::core::prepare_function_call_env(Some(&captured_env), None, Some(&params), &args_vals, None, Some(env))?;
 
                 // Execute the callback body
                 evaluate_statements(&func_env, &body)?;

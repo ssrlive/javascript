@@ -3,7 +3,7 @@
 use crate::error::JSError;
 use crate::js_promise::{PollResult, PromiseState, run_event_loop};
 use crate::raise_eval_error;
-use crate::unicode::utf8_to_utf16;
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -120,7 +120,53 @@ fn run_promise_resolution_loop(promise: &Rc<RefCell<crate::js_promise::JSPromise
                     // thrown error when test harnesses attach late handlers.
                     if let Some(unhandled_reason) = crate::js_promise::take_unhandled_rejection() {
                         log::trace!("evaluate_script: consuming recorded unhandled rejection (surfacing as error)");
-                        return Err(crate::raise_throw_error!(unhandled_reason));
+                        // Convert recorded JS Value into a JSError while preserving
+                        // any recorded thrown-site metadata stored on the JS object
+                        // (e.g. `__thrown_line` / `__thrown_column`) or an existing
+                        // `stack` string when available.
+                        let mut err = crate::raise_throw_error!(unhandled_reason.clone());
+                        if let crate::core::Value::Object(obj_ptr) = &unhandled_reason {
+                            if let Ok(Some(tl_rc)) = crate::core::obj_get_key_value(obj_ptr, &"__thrown_line".into()) {
+                                if let crate::core::Value::Number(n) = &*tl_rc.borrow() {
+                                    let col = if let Ok(Some(tc_rc)) = crate::core::obj_get_key_value(obj_ptr, &"__thrown_column".into()) {
+                                        if let crate::core::Value::Number(nc) = &*tc_rc.borrow() {
+                                            *nc as usize
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    };
+                                    err.set_js_location(*n as usize, col);
+                                }
+                            }
+                            // If the thrown object already has a JS `stack` string,
+                            // prefer to use its frames for the surfaced error.
+                            if err.stack().is_empty() {
+                                if let Ok(Some(stack_rc)) = crate::core::obj_get_key_value(obj_ptr, &"stack".into()) {
+                                    if let crate::core::Value::String(s_utf16) = &*stack_rc.borrow() {
+                                        let s = utf16_to_utf8(s_utf16);
+                                        let mut frames: Vec<String> = Vec::new();
+                                        for line in s.lines().skip(1) {
+                                            let l = line.trim_start();
+                                            // strip leading `at ` or `    at ` if present
+                                            let f = if let Some(stripped) = l.strip_prefix("at ") {
+                                                stripped.to_string()
+                                            } else if let Some(stripped) = l.strip_prefix("    at ") {
+                                                stripped.to_string()
+                                            } else {
+                                                l.to_string()
+                                            };
+                                            frames.push(f);
+                                        }
+                                        if !frames.is_empty() {
+                                            err.set_stack(frames);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        return Err(err);
                     }
 
                     // No recorded unhandled rejection — assume the rejection was

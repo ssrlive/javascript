@@ -281,7 +281,7 @@ pub fn handle_object_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
 
                     let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
                         let args = vec![val.clone(), Value::Number(i as f64)];
-                        let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
+                        let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, Some(env))?;
                         crate::core::evaluate_statements(&func_env, &body)?
                     } else {
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
@@ -843,7 +843,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                         let body = &data.body;
                         let captured_env = &data.env;
                         let func_env =
-                            prepare_function_call_env(Some(captured_env), Some(Value::Object(obj.clone())), None, &[], None, None)?;
+                            prepare_function_call_env(Some(captured_env), Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
                         let result = crate::core::evaluate_statements(&func_env, body)?;
                         if matches!(
                             result,
@@ -863,7 +863,7 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                             return crate::js_object::handle_to_string_method(&Value::Object(obj.clone()), args, env);
                         }
 
-                        let func_env = prepare_function_call_env(None, Some(Value::Object(obj.clone())), None, &[], None, None)?;
+                        let func_env = prepare_function_call_env(None, Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
                         let res = crate::js_function::handle_global_function(&func_name, &[], &func_env)?;
                         if matches!(
                             res,
@@ -882,8 +882,14 @@ pub(crate) fn handle_value_of_method(obj_val: &Value, args: &[Expr], env: &JSObj
                                 let _params = &data.params;
                                 let body = &data.body;
                                 let captured_env = &data.env;
-                                let func_env =
-                                    prepare_function_call_env(Some(captured_env), Some(Value::Object(obj.clone())), None, &[], None, None)?;
+                                let func_env = prepare_function_call_env(
+                                    Some(captured_env),
+                                    Some(Value::Object(obj.clone())),
+                                    None,
+                                    &[],
+                                    None,
+                                    Some(env),
+                                )?;
                                 let result = crate::core::evaluate_statements(&func_env, body)?;
                                 if matches!(
                                     result,

@@ -846,6 +846,26 @@ pub fn prepare_function_call_env(
     if let Some(caller) = caller_env_opt {
         let _ = obj_set_key_value(&func_env, &"__caller".into(), Value::Object(caller.clone()));
     }
+    // If a caller environment was provided, copy its current statement
+    // location into the new function env as `__call_line`/`__call_column`
+    // so stack construction can reliably show the call-site.
+    if let Some(caller) = caller_env_opt {
+        if let Ok(Some(line_rc)) = obj_get_key_value(caller, &"__line".into()) {
+            if let Value::Number(n) = &*line_rc.borrow() {
+                let _ = obj_set_key_value(&func_env, &"__call_line".into(), Value::Number(*n));
+            }
+        }
+        if let Ok(Some(col_rc)) = obj_get_key_value(caller, &"__column".into()) {
+            if let Value::Number(n) = &*col_rc.borrow() {
+                let _ = obj_set_key_value(&func_env, &"__call_column".into(), Value::Number(*n));
+            }
+        }
+        if let Ok(Some(sn_rc)) = obj_get_key_value(caller, &"__script_name".into()) {
+            if let Value::String(s) = &*sn_rc.borrow() {
+                let _ = obj_set_key_value(&func_env, &"__call_script_name".into(), Value::String(s.clone()));
+            }
+        }
+    }
     Ok(func_env)
 }
 

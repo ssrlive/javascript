@@ -55,12 +55,12 @@ enum Task {
     /// Task to execute fulfilled callbacks with the resolved value
     Resolution {
         promise: Rc<RefCell<JSPromise>>,
-        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
+        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>, Option<JSObjectDataPtr>)>,
     },
     /// Task to execute rejected callbacks with the rejection reason
     Rejection {
         promise: Rc<RefCell<JSPromise>>,
-        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>)>,
+        callbacks: Vec<(Value, Rc<RefCell<JSPromise>>, Option<JSObjectDataPtr>)>,
     },
     /// Task to execute a setTimeout callback
     Timeout {
@@ -192,11 +192,12 @@ fn process_task(task: Task) -> Result<(), JSError> {
     match task {
         Task::Resolution { promise, callbacks } => {
             log::trace!("Processing Resolution task with {} callbacks", callbacks.len());
-            for (callback, new_promise) in callbacks {
+            for (callback, new_promise, caller_env_opt) in callbacks {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
+                    let func_env =
+                        prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, caller_env_opt.as_ref())?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             log::trace!("Callback executed successfully, resolving promise");
@@ -223,11 +224,12 @@ fn process_task(task: Task) -> Result<(), JSError> {
         }
         Task::Rejection { promise, callbacks } => {
             log::trace!("Processing Rejection task with {} callbacks", callbacks.len());
-            for (callback, new_promise) in callbacks {
+            for (callback, new_promise, caller_env_opt) in callbacks {
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    let func_env = prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, None)?;
+                    let func_env =
+                        prepare_function_call_env(Some(&captured_env), None, Some(&params), &args, None, caller_env_opt.as_ref())?;
                     match evaluate_statements(&func_env, &body) {
                         Ok(result) => {
                             resolve_promise(&new_promise, result);
@@ -483,9 +485,9 @@ pub enum PromiseState {
 #[derive(Clone, Default)]
 pub struct JSPromise {
     pub state: PromiseState,
-    pub value: Option<Value>,                               // The resolved value or rejection reason
-    pub on_fulfilled: Vec<(Value, Rc<RefCell<JSPromise>>)>, // Callbacks and their chaining promises
-    pub on_rejected: Vec<(Value, Rc<RefCell<JSPromise>>)>,  // Callbacks and their chaining promises
+    pub value: Option<Value>, // The resolved value or rejection reason
+    pub on_fulfilled: Vec<(Value, Rc<RefCell<JSPromise>>, Option<JSObjectDataPtr>)>, // Callbacks and their chaining promises + optional caller env
+    pub on_rejected: Vec<(Value, Rc<RefCell<JSPromise>>, Option<JSObjectDataPtr>)>, // Callbacks and their chaining promises + optional caller env
 }
 
 /// Represents the result of a settled promise in Promise.allSettled
@@ -862,7 +864,9 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
     // Add to the promise's callback lists
     let mut promise_borrow = promise.borrow_mut();
     if let Some(ref callback) = on_fulfilled {
-        promise_borrow.on_fulfilled.push((callback.clone(), new_promise.clone()));
+        promise_borrow
+            .on_fulfilled
+            .push((callback.clone(), new_promise.clone(), Some(env.clone())));
     } else {
         // Add pass-through for fulfillment
         let closure_data = ClosureData::new(
@@ -882,11 +886,15 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
             None,
         );
         let pass_through_fulfill = Value::Closure(Rc::new(closure_data));
-        promise_borrow.on_fulfilled.push((pass_through_fulfill, new_promise.clone()));
+        promise_borrow
+            .on_fulfilled
+            .push((pass_through_fulfill, new_promise.clone(), Some(env.clone())));
     }
 
     if let Some(ref callback) = on_rejected {
-        promise_borrow.on_rejected.push((callback.clone(), new_promise.clone()));
+        promise_borrow
+            .on_rejected
+            .push((callback.clone(), new_promise.clone(), Some(env.clone())));
     } else {
         // Add pass-through for rejection
         let closure_data = ClosureData::new(
@@ -907,7 +915,9 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
         );
 
         let pass_through_reject = Value::Closure(Rc::new(closure_data));
-        promise_borrow.on_rejected.push((pass_through_reject, new_promise.clone()));
+        promise_borrow
+            .on_rejected
+            .push((pass_through_reject, new_promise.clone(), Some(env.clone())));
     }
 
     // If promise is already settled, queue task to execute callback asynchronously
@@ -917,7 +927,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
                 // Queue task to execute callback asynchronously
                 queue_task(Task::Resolution {
                     promise: promise.clone(),
-                    callbacks: vec![(callback.clone(), new_promise.clone())],
+                    callbacks: vec![(callback.clone(), new_promise.clone(), Some(env.clone()))],
                 });
             } else {
                 // No callback, resolve with the original value
@@ -929,7 +939,7 @@ pub fn handle_promise_then_direct(promise: Rc<RefCell<JSPromise>>, args: &[Expr]
                 // Queue task to execute callback asynchronously
                 queue_task(Task::Rejection {
                     promise: promise.clone(),
-                    callbacks: vec![(callback.clone(), new_promise.clone())],
+                    callbacks: vec![(callback.clone(), new_promise.clone(), Some(env.clone()))],
                 });
             } else {
                 // No callback, reject with the original reason
@@ -1027,10 +1037,14 @@ pub fn handle_promise_catch_direct(
     );
 
     let pass_through_fulfill = Value::Closure(Rc::new(closure_data));
-    promise_borrow.on_fulfilled.push((pass_through_fulfill, new_promise.clone()));
+    promise_borrow
+        .on_fulfilled
+        .push((pass_through_fulfill, new_promise.clone(), Some(env.clone())));
 
     if let Some(ref callback) = on_rejected {
-        promise_borrow.on_rejected.push((callback.clone(), new_promise.clone()));
+        promise_borrow
+            .on_rejected
+            .push((callback.clone(), new_promise.clone(), Some(env.clone())));
     } else {
         // Add pass-through for rejection
         let closure_data = ClosureData::new(
@@ -1050,7 +1064,9 @@ pub fn handle_promise_catch_direct(
             None,
         );
         let pass_through_reject = Value::Closure(Rc::new(closure_data));
-        promise_borrow.on_rejected.push((pass_through_reject, new_promise.clone()));
+        promise_borrow
+            .on_rejected
+            .push((pass_through_reject, new_promise.clone(), Some(env.clone())));
     }
 
     // If promise is already settled, queue task to execute callback asynchronously
@@ -1060,7 +1076,7 @@ pub fn handle_promise_catch_direct(
                 // Queue task to execute callback asynchronously
                 queue_task(Task::Rejection {
                     promise: promise.clone(),
-                    callbacks: vec![(callback.clone(), new_promise.clone())],
+                    callbacks: vec![(callback.clone(), new_promise.clone(), Some(env.clone()))],
                 });
             } else {
                 // No callback, reject the new promise with the same reason
@@ -1169,21 +1185,25 @@ pub fn handle_promise_finally_direct(
 
     // Add the same callback to both fulfilled and rejected lists
     let mut promise_borrow = promise.borrow_mut();
-    promise_borrow.on_fulfilled.push((finally_callback.clone(), new_promise.clone()));
-    promise_borrow.on_rejected.push((finally_callback.clone(), new_promise.clone()));
+    promise_borrow
+        .on_fulfilled
+        .push((finally_callback.clone(), new_promise.clone(), Some(env.clone())));
+    promise_borrow
+        .on_rejected
+        .push((finally_callback.clone(), new_promise.clone(), Some(env.clone())));
 
     // If promise is already settled, queue task to execute callback asynchronously
     match &promise_borrow.state {
         PromiseState::Fulfilled(_) => {
             queue_task(Task::Resolution {
                 promise: promise.clone(),
-                callbacks: vec![(finally_callback.clone(), new_promise.clone())],
+                callbacks: vec![(finally_callback.clone(), new_promise.clone(), Some(env.clone()))],
             });
         }
         PromiseState::Rejected(_) => {
             queue_task(Task::Rejection {
                 promise: promise.clone(),
-                callbacks: vec![(finally_callback.clone(), new_promise.clone())],
+                callbacks: vec![(finally_callback.clone(), new_promise.clone(), Some(env.clone()))],
             });
         }
         _ => {}
@@ -1272,8 +1292,8 @@ pub fn resolve_promise(promise: &Rc<RefCell<JSPromise>>, value: Value) {
                     // Still pending, attach callbacks
                     drop(other_promise_borrow);
                     let mut other_promise_mut = other_promise.borrow_mut();
-                    other_promise_mut.on_fulfilled.push((then_callback, promise.clone()));
-                    other_promise_mut.on_rejected.push((catch_callback, promise.clone()));
+                    other_promise_mut.on_fulfilled.push((then_callback, promise.clone(), None));
+                    other_promise_mut.on_rejected.push((catch_callback, promise.clone(), None));
                     return;
                 }
             }

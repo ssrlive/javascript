@@ -507,6 +507,12 @@ pub struct JSObjectData {
     pub is_function_scope: bool,
 }
 
+impl Drop for JSObjectData {
+    fn drop(&mut self) {
+        log::trace!("JSObjectData {self:?} dropped");
+    }
+}
+
 impl std::fmt::Debug for JSObjectData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

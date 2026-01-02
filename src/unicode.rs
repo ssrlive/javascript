@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Helper functions for UTF-16 string operations
 pub fn utf8_to_utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()

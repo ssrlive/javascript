@@ -1,38 +1,39 @@
-use std::{cell::RefCell, rc::Rc};
-
 use crate::core::Value;
+use crate::core::gc::GcPtr;
+use gc_arena::Collect;
 
-#[derive(Clone, Debug)]
-pub enum PropertyKey {
+#[derive(Clone, Debug, Collect)]
+#[collect(no_drop)]
+pub enum PropertyKey<'gc> {
     String(String),
-    Symbol(Rc<RefCell<Value>>),
+    Symbol(GcPtr<'gc, Value<'gc>>),
 }
 
-impl From<&str> for PropertyKey {
+impl<'gc> From<&str> for PropertyKey<'gc> {
     fn from(s: &str) -> Self {
         PropertyKey::String(s.to_string())
     }
 }
 
-impl From<String> for PropertyKey {
+impl<'gc> From<String> for PropertyKey<'gc> {
     fn from(s: String) -> Self {
         PropertyKey::String(s)
     }
 }
 
-impl From<&String> for PropertyKey {
+impl<'gc> From<&String> for PropertyKey<'gc> {
     fn from(s: &String) -> Self {
         PropertyKey::String(s.clone())
     }
 }
 
-impl PartialEq for PropertyKey {
+impl<'gc> PartialEq for PropertyKey<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (PropertyKey::String(s1), PropertyKey::String(s2)) => s1 == s2,
             (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => {
                 if let (Value::Symbol(s1), Value::Symbol(s2)) = (&*sym1.borrow(), &*sym2.borrow()) {
-                    Rc::ptr_eq(s1, s2)
+                    gc_arena::Gc::ptr_eq(*s1, *s2)
                 } else {
                     false
                 }
@@ -42,9 +43,9 @@ impl PartialEq for PropertyKey {
     }
 }
 
-impl Eq for PropertyKey {}
+impl<'gc> Eq for PropertyKey<'gc> {}
 
-impl std::hash::Hash for PropertyKey {
+impl<'gc> std::hash::Hash for PropertyKey<'gc> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self {
             PropertyKey::String(s) => {
@@ -54,14 +55,14 @@ impl std::hash::Hash for PropertyKey {
             PropertyKey::Symbol(sym) => {
                 1u8.hash(state);
                 if let Value::Symbol(s) = &*sym.borrow() {
-                    Rc::as_ptr(s).hash(state);
+                    gc_arena::Gc::as_ptr(*s).hash(state);
                 }
             }
         }
     }
 }
 
-impl std::fmt::Display for PropertyKey {
+impl<'gc> std::fmt::Display for PropertyKey<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PropertyKey::String(s) => write!(f, "{}", s),
@@ -70,7 +71,7 @@ impl std::fmt::Display for PropertyKey {
     }
 }
 
-impl AsRef<str> for PropertyKey {
+impl<'gc> AsRef<str> for PropertyKey<'gc> {
     fn as_ref(&self) -> &str {
         match self {
             PropertyKey::String(s) => s,

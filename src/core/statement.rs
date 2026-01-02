@@ -1,3 +1,44 @@
+use crate::core::Expr;
+
+#[derive(Clone, Debug)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Clone, Debug)]
+pub enum StatementKind {
+    Expr(Expr),
+    Let(Vec<(String, Option<Expr>)>),
+    Var(Vec<(String, Option<Expr>)>),
+    Const(Vec<(String, Expr)>),
+    Return(Option<Expr>),
+    Throw(Expr),
+    Block(Vec<Statement>),
+    If(Expr, Vec<Statement>, Option<Vec<Statement>>),
+    FunctionDeclaration(String, Vec<crate::core::DestructuringElement>, Vec<Statement>, bool),
+}
+
+impl From<StatementKind> for Statement {
+    fn from(kind: StatementKind) -> Self {
+        Statement { kind, line: 0, column: 0 }
+    }
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for Statement {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::core::gc::trace_stmt(cc, self);
+    }
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for StatementKind {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {
+        // Handled via Statement trace
+    }
+}
+
+/*
 use crate::{
     JSError,
     core::{
@@ -1242,24 +1283,24 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
             }
         }
     }
-    if !tokens.is_empty() && matches!(tokens[0].token, Token::Class) {
-        tokens.remove(0); // consume class
-        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-            tokens.remove(0);
-            let extends = if !tokens.is_empty() && matches!(tokens[0].token, Token::Extends) {
-                tokens.remove(0); // consume extends
-                // Parse an arbitrary expression for the superclass (e.g. Intl.PluralRules)
-                let super_expr = parse_expression(tokens)?;
-                Some(super_expr)
-            } else {
-                None
-            };
+    // if !tokens.is_empty() && matches!(tokens[0].token, Token::Class) {
+    //     tokens.remove(0); // consume class
+    //     if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+    //         tokens.remove(0);
+    //         let extends = if !tokens.is_empty() && matches!(tokens[0].token, Token::Extends) {
+    //             tokens.remove(0); // consume extends
+    //             // Parse an arbitrary expression for the superclass (e.g. Intl.PluralRules)
+    //             let super_expr = parse_expression(tokens)?;
+    //             Some(super_expr)
+    //         } else {
+    //             None
+    //         };
 
-            let members = parse_class_body(tokens)?;
+    //         let members = parse_class_body(tokens)?;
 
-            return Ok(StatementKind::Class(name, extends, members));
-        }
-    }
+    //         return Ok(StatementKind::Class(name, extends, members));
+    //     }
+    // }
     let expr = parse_expression(tokens)?;
     // Check if this is an assignment expression
     if let Expr::Assign(target, value) = &expr
@@ -1269,3 +1310,4 @@ pub fn parse_statement_kind(tokens: &mut Vec<TokenData>) -> Result<StatementKind
     }
     Ok(StatementKind::Expr(expr))
 }
+// */

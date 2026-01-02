@@ -1,8 +1,10 @@
 use crate::{JSError, raise_tokenize_error};
+use gc_arena::{Collect, collect::Trace};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Collect)]
+#[collect(no_drop)]
 pub enum Token {
     Number(f64),
     /// BigInt literal: integer digits followed by an 'n' suffix
@@ -114,6 +116,17 @@ pub enum Token {
     As,
     Import,
     Export,
+    // Strict mode reserved words and other keywords
+    Debugger,
+    With,
+    Enum,
+    Implements,
+    Interface,
+    Package,
+    Private,
+    Protected,
+    Public,
+    EOF,
 }
 
 impl Token {
@@ -158,19 +171,37 @@ impl Token {
             Token::Await => Some("await".to_string()),
             Token::Yield => Some("yield".to_string()),
             Token::FunctionStar => Some("function*".to_string()),
+            Token::Debugger => Some("debugger".to_string()),
+            Token::With => Some("with".to_string()),
+            Token::Enum => Some("enum".to_string()),
+            Token::Implements => Some("implements".to_string()),
+            Token::Interface => Some("interface".to_string()),
+            Token::Package => Some("package".to_string()),
+            Token::Private => Some("private".to_string()),
+            Token::Protected => Some("protected".to_string()),
+            Token::Public => Some("public".to_string()),
             _ => None,
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TokenData {
     pub token: Token,
     pub line: usize,
     pub column: usize,
 }
 
-#[derive(Debug, Clone)]
+unsafe impl<'gc> Collect<'gc> for TokenData {
+    const NEEDS_TRACE: bool = false;
+
+    fn trace<'a, T: Trace<'gc>>(&self, _cc: &mut T) {
+        // do not trace token to break cycle
+    }
+}
+
+#[derive(Debug, Clone, Collect, PartialEq)]
+#[collect(no_drop)]
 pub enum TemplatePart {
     String(Vec<u16>),
     Expr(Vec<TokenData>),
@@ -1139,6 +1170,17 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 column += 1;
             }
             'a'..='z' | 'A'..='Z' | '_' | '$' | '#' => {
+                // Hashbang check: only valid at the start of the file, such as `#!/usr/bin/env node`
+                if chars[i] == '#' && i == 0 && i + 1 < chars.len() && chars[i + 1] == '!' {
+                    // Skip until newline
+                    while i < chars.len() && chars[i] != '\n' {
+                        i += 1;
+                        column += 1;
+                    }
+                    // Don't emit token, loop continues (will hit newline handling next or just end)
+                    continue;
+                }
+
                 let start = i;
                 while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$' || chars[i] == '#') {
                     i += 1;
@@ -1170,6 +1212,15 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                         "catch" => Token::Catch,
                         "finally" => Token::Finally,
                         "throw" => Token::Throw,
+                        "debugger" => Token::Debugger,
+                        "with" => Token::With,
+                        "enum" => Token::Enum,
+                        "implements" => Token::Implements,
+                        "interface" => Token::Interface,
+                        "package" => Token::Package,
+                        "private" => Token::Private,
+                        "protected" => Token::Protected,
+                        "public" => Token::Public,
                         "function" => {
                             // Check if followed by '*'
                             if i < chars.len() && chars[i] == '*' {

@@ -1,3 +1,395 @@
+#![allow(clippy::collapsible_if, clippy::collapsible_match, dead_code)]
+
+use gc_arena::Mutation as MutationContext;
+use gc_arena::collect::Trace;
+use gc_arena::lock::RefLock as GcCell;
+use gc_arena::{Collect, Gc};
+use num_bigint::BigInt;
+use std::sync::{Arc, Mutex};
+
+use crate::unicode::utf16_to_utf8;
+use crate::{
+    JSError,
+    core::{DestructuringElement, PropertyKey, Statement, is_error},
+    raise_type_error,
+};
+
+pub type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSMap<'gc> {
+    pub entries: Vec<(Value<'gc>, Value<'gc>)>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSSet<'gc> {
+    pub values: Vec<Value<'gc>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSWeakMap<'gc> {
+    pub entries: Vec<(gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSWeakSet<'gc> {
+    pub values: Vec<gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSGenerator<'gc> {
+    pub params: Vec<DestructuringElement>,
+    pub body: Vec<Statement>,
+    pub env: JSObjectDataPtr<'gc>,
+    pub state: GeneratorState<'gc>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSProxy<'gc> {
+    pub target: Box<Value<'gc>>,
+    pub handler: Box<Value<'gc>>,
+    pub revoked: bool,
+}
+
+#[derive(Clone, Debug, Collect)]
+#[collect(require_static)]
+pub struct JSArrayBuffer {
+    pub data: Arc<Mutex<Vec<u8>>>,
+    pub detached: bool,
+    pub shared: bool,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSDataView<'gc> {
+    pub buffer: GcPtr<'gc, JSArrayBuffer>,
+    pub byte_offset: usize,
+    pub byte_length: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Collect)]
+#[collect(require_static)]
+pub enum TypedArrayKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+    BigInt64,
+    BigUint64,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSTypedArray<'gc> {
+    pub kind: TypedArrayKind,
+    pub buffer: GcPtr<'gc, JSArrayBuffer>,
+    pub byte_offset: usize,
+    pub length: usize,
+}
+
+#[derive(Clone, Debug, Collect)]
+#[collect(no_drop)]
+pub enum GeneratorState<'gc> {
+    NotStarted,
+    Running { pc: usize, stack: Vec<Value<'gc>> },
+    Suspended { pc: usize, stack: Vec<Value<'gc>> },
+    Completed,
+}
+
+pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
+pub type JSObjectDataWeakPtr<'gc> = gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>;
+
+#[inline]
+pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc> {
+    Gc::new(mc, GcCell::new(JSObjectData::new()))
+}
+
+#[derive(Clone, Default)]
+pub struct JSObjectData<'gc> {
+    pub properties: std::collections::HashMap<PropertyKey<'gc>, GcPtr<'gc, Value<'gc>>>,
+    pub constants: std::collections::HashSet<String>,
+    pub non_enumerable: std::collections::HashSet<PropertyKey<'gc>>,
+    pub non_writable: std::collections::HashSet<PropertyKey<'gc>>,
+    pub non_configurable: std::collections::HashSet<PropertyKey<'gc>>,
+    pub prototype: Option<JSObjectDataPtr<'gc>>,
+    pub is_function_scope: bool,
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for JSObjectData<'gc> {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        for (k, v) in &self.properties {
+            k.trace(cc);
+            (*v.borrow()).trace(cc);
+        }
+        for k in &self.non_enumerable {
+            k.trace(cc);
+        }
+        for k in &self.non_writable {
+            k.trace(cc);
+        }
+        for k in &self.non_configurable {
+            k.trace(cc);
+        }
+        if let Some(p) = &self.prototype {
+            (*p.borrow()).trace(cc);
+        }
+    }
+}
+
+impl<'gc> JSObjectData<'gc> {
+    pub fn new() -> Self {
+        JSObjectData::default()
+    }
+    pub fn insert(&mut self, key: PropertyKey<'gc>, val: GcPtr<'gc, Value<'gc>>) {
+        self.properties.insert(key, val);
+    }
+    pub fn set_const(&mut self, key: String) {
+        self.constants.insert(key);
+    }
+    pub fn set_non_configurable(&mut self, key: PropertyKey<'gc>) {
+        self.non_configurable.insert(key);
+    }
+    pub fn is_const(&self, key: &str) -> bool {
+        self.constants.contains(key)
+    }
+
+    pub fn get_property(&self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
+        let key = key.into();
+        if let Some(val_ptr) = self.properties.get(&key) {
+            if let Value::String(s) = &*val_ptr.borrow() {
+                return Some(utf16_to_utf8(s));
+            }
+            return None;
+        }
+        if let Some(proto) = &self.prototype {
+            if let Ok(Some(val_ptr)) = obj_get_key_value(mc, proto, &key) {
+                if let Value::String(s) = &*val_ptr.borrow() {
+                    return Some(utf16_to_utf8(s));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_name(&self, mc: &MutationContext<'gc>) -> Option<String> {
+        self.get_property(mc, "name")
+    }
+
+    pub fn get_message(&self) -> Option<String> {
+        if let Some(msg_ptr) = self.properties.get(&PropertyKey::String("message".to_string()))
+            && let Value::String(s) = &*msg_ptr.borrow()
+        {
+            return Some(utf16_to_utf8(s));
+        }
+        None
+    }
+
+    pub fn set_line(&mut self, line: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
+        if !self.properties.contains_key(&"__line__".into()) {
+            let val = Value::Number(line as f64);
+            let val_ptr = Gc::new(mc, GcCell::new(val));
+            self.insert(PropertyKey::String("__line__".to_string()), val_ptr);
+        }
+        Ok(())
+    }
+
+    pub fn get_line(&self) -> Option<usize> {
+        if let Some(line_ptr) = self.properties.get(&PropertyKey::String("__line__".to_string()))
+            && let Value::Number(n) = &*line_ptr.borrow()
+        {
+            return Some(*n as usize);
+        }
+        None
+    }
+
+    pub fn set_column(&mut self, column: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
+        if !self.properties.contains_key(&"__column__".into()) {
+            let val = Value::Number(column as f64);
+            let val_ptr = Gc::new(mc, GcCell::new(val));
+            self.insert(PropertyKey::String("__column__".to_string()), val_ptr);
+        }
+        Ok(())
+    }
+
+    pub fn get_column(&self) -> Option<usize> {
+        if let Some(col_ptr) = self.properties.get(&PropertyKey::String("__column__".to_string()))
+            && let Value::Number(n) = &*col_ptr.borrow()
+        {
+            return Some(*n as usize);
+        }
+        None
+    }
+}
+
+#[derive(Clone, Debug, Collect)]
+#[collect(require_static)]
+pub struct SymbolData {
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct ClosureData<'gc> {
+    pub params: Vec<DestructuringElement>,
+    pub body: Vec<Statement>,
+    pub env: JSObjectDataPtr<'gc>,
+    pub home_object: GcCell<Option<JSObjectDataPtr<'gc>>>,
+    pub captured_envs: Vec<JSObjectDataPtr<'gc>>,
+    pub bound_this: Option<Value<'gc>>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub struct JSPromise<'gc> {
+    pub state: PromiseState<'gc>,
+}
+
+#[derive(Clone, Collect)]
+#[collect(no_drop)]
+pub enum PromiseState<'gc> {
+    Pending,
+    Fulfilled(Value<'gc>),
+    Rejected(Value<'gc>),
+}
+
+#[derive(Clone)]
+pub enum Value<'gc> {
+    Number(f64),
+    BigInt(BigInt),
+    String(Vec<u16>),
+    Boolean(bool),
+    Undefined,
+    Null,
+    Object(JSObjectDataPtr<'gc>),
+    Function(String),
+    Closure(Gc<'gc, ClosureData<'gc>>),
+    Property {
+        value: Option<GcPtr<'gc, Value<'gc>>>,
+        getter: Option<Box<Value<'gc>>>,
+        setter: Option<Box<Value<'gc>>>,
+    },
+    Symbol(Gc<'gc, SymbolData>),
+    Uninitialized,
+}
+
+unsafe impl<'gc> Collect<'gc> for Value<'gc> {
+    fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
+        match self {
+            Value::Object(obj) => obj.trace(cc),
+            Value::Closure(cl) => cl.trace(cc),
+            Value::Property { value, getter, setter } => {
+                if let Some(v) = value {
+                    (*v.borrow()).trace(cc);
+                }
+                if let Some(g) = getter {
+                    g.trace(cc);
+                }
+                if let Some(s) = setter {
+                    s.trace(cc);
+                }
+            }
+            Value::Symbol(sym) => sym.trace(cc),
+            _ => {}
+        }
+    }
+}
+
+impl<'gc> std::fmt::Debug for Value<'gc> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Number(n) => write!(f, "Number({})", n),
+            _ => write!(f, "[value]"),
+        }
+    }
+}
+
+pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
+    match val {
+        Value::Number(n) => n.to_string(),
+        Value::BigInt(b) => format!("{b}n"),
+        Value::String(s) => format!("\"{}\"", utf16_to_utf8(s)),
+        Value::Boolean(b) => b.to_string(),
+        Value::Undefined => "undefined".to_string(),
+        Value::Null => "null".to_string(),
+        Value::Object(obj) => {
+            if is_error(val) {
+                let msg = obj.borrow().get_message().unwrap_or("Unknown error".into());
+                return format!("Error: {msg}");
+            }
+            "[object Object]".to_string()
+        }
+        Value::Function(name) => format!("function {}", name),
+        Value::Closure(..) => "function".to_string(),
+        _ => "[unknown]".to_string(),
+    }
+}
+
+pub fn obj_get_key_value<'gc>(
+    _mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key: &PropertyKey<'gc>,
+) -> Result<Option<GcPtr<'gc, Value<'gc>>>, JSError> {
+    let mut current = Some(*obj);
+    while let Some(cur) = current {
+        if let Some(val) = cur.borrow().properties.get(key) {
+            return Ok(Some(*val));
+        }
+        current = cur.borrow().prototype;
+    }
+    Ok(None)
+}
+
+pub fn obj_set_key_value<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key: &PropertyKey<'gc>,
+    val: Value<'gc>,
+) -> Result<(), JSError> {
+    let val_ptr = Gc::new(mc, GcCell::new(val));
+    obj.borrow_mut(mc).insert(key.clone(), val_ptr);
+    Ok(())
+}
+
+pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    env.borrow().properties.get(&PropertyKey::String(key.to_string())).cloned()
+}
+
+pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
+    if (*env.borrow()).is_const(key) {
+        return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
+    }
+    let val_ptr = Gc::new(mc, GcCell::new(val));
+    env.borrow_mut(mc).insert(PropertyKey::String(key.to_string()), val_ptr);
+    Ok(())
+}
+
+pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
+    let mut current = *env;
+    loop {
+        if current.borrow().properties.contains_key(&PropertyKey::String(key.to_string())) {
+            return env_set(mc, &current, key, val);
+        }
+        let parent_opt = current.borrow().prototype;
+        if let Some(parent_rc) = parent_opt {
+            current = parent_rc;
+        } else {
+            return env_set(mc, env, key, val);
+        }
+    }
+}
+
+/*
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use num_bigint::BigInt;
@@ -1462,7 +1854,7 @@ pub fn prepare_closure_call_env(
 // either a direct `Value::Closure` or an object wrapper that stores the
 // executable closure under the internal `"__closure__"` property.
 #[allow(clippy::type_complexity)]
-pub fn extract_closure_from_value(val: &Value) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr)> {
+pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr<'gc>)> {
     // Helper: when a closure has multiple `captured_envs`, create a
     // lightweight wrapper environment that holds strong references to
     // those captured envs and whose prototype points to the first
@@ -2584,3 +2976,4 @@ mod tests {
         assert!(res.is_none());
     }
 }
+// */

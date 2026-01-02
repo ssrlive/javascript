@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 // Shared numeric conversion helpers used by core evaluation
 
 const TWO_32: f64 = 2_i64.pow(32) as f64; // 2^32

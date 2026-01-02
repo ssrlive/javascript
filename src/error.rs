@@ -30,8 +30,8 @@ pub enum JSErrorKind {
     #[error("Runtime error: {message}")]
     RuntimeError { message: String },
 
-    #[error("Thrown value")]
-    Throw { value: crate::core::Value },
+    #[error("Thrown value: {0}")]
+    Throw(String),
 
     #[error("std::io error: {0}")]
     IoError(#[from] std::io::Error),
@@ -118,6 +118,8 @@ impl JSError {
             JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
             JSErrorKind::ReferenceError { message } => format!("ReferenceError: {}", message),
             JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
+            JSErrorKind::Throw(msg) => msg.clone(),
+            /*
             JSErrorKind::Throw { value } => {
                 // If the thrown value is an object, prefer a human-friendly
                 // message that includes the constructor name and/or message
@@ -152,6 +154,7 @@ impl JSError {
                 }
                 result.unwrap_or_else(|| format!("Uncaught {}", crate::core::value_to_string(value)))
             }
+            // */
             JSErrorKind::IoError(e) => format!("IOError: {}", e),
         }
     }
@@ -334,6 +337,6 @@ macro_rules! raise_runtime_error {
 #[doc(hidden)]
 macro_rules! raise_throw_error {
     ($value:expr) => {
-        $crate::make_js_error!($crate::JSErrorKind::Throw { value: $value })
+        $crate::make_js_error!($crate::JSErrorKind::Throw($crate::core::value_to_string(&$value)))
     };
 }

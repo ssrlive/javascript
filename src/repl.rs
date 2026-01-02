@@ -1,12 +1,12 @@
 use crate::{
     JSError,
-    core::drain_event_loop,
     core::{
-        JSObjectDataPtr, Value, evaluate_statements, initialize_global_constructors, new_js_object_data, obj_get_key_value,
-        parse_statements, tokenize,
+        JsArena, JsRoot, Value, env_set, evaluate_statements, initialize_global_constructors, new_js_object_data, parse_statements,
+        tokenize,
     },
-    js_promise::PromiseState,
 };
+use gc_arena::{Gc, lock::RefLock as GcCell};
+use std::collections::HashMap;
 
 /// A small persistent REPL environment wrapper.
 ///
@@ -15,7 +15,7 @@ use crate::{
 /// - `Repl::eval(&self, code)` evaluates the provided code in the persistent env
 ///   so variables, functions and imports persist between calls.
 pub struct Repl {
-    env: JSObjectDataPtr,
+    arena: JsArena,
 }
 
 impl Default for Repl {
@@ -27,22 +27,40 @@ impl Default for Repl {
 impl Repl {
     /// Create a new persistent REPL environment (with built-ins initialized).
     pub fn new() -> Self {
-        let env: JSObjectDataPtr = new_js_object_data();
-        env.borrow_mut().is_function_scope = true;
-        // Initialize built-in constructors once for the persistent environment
-        initialize_global_constructors(&env).unwrap();
-        Repl { env }
+        let arena = JsArena::new(|mc| {
+            let global_env = new_js_object_data(mc);
+            global_env.borrow_mut(mc).is_function_scope = true;
+
+            JsRoot {
+                global_env,
+                well_known_symbols: Gc::new(mc, GcCell::new(HashMap::new())),
+            }
+        });
+
+        // Initialize global constructors
+        arena.mutate(|mc, root| {
+            initialize_global_constructors(mc, &root.global_env).unwrap();
+            env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env)).unwrap();
+        });
+
+        Repl { arena }
     }
 
     /// Evaluate a script in the persistent environment.
-    /// Returns the evaluation result or an error.
-    pub fn eval<T: AsRef<str>>(&self, script: T) -> Result<Value, JSError> {
+    /// Returns the evaluation result as a string or an error.
+    pub fn eval<T: AsRef<str>>(&self, script: T) -> Result<String, JSError> {
         let script = script.as_ref();
 
         // Parse tokens and statements
-        let mut tokens = tokenize(script)?;
-        let statements = parse_statements(&mut tokens)?;
+        let tokens = tokenize(script)?;
+        let mut index = 0;
+        let mut statements = parse_statements(&tokens, &mut index)?;
 
+        self.arena.mutate(move |mc, root| {
+            let result = evaluate_statements(mc, &root.global_env, &mut statements)?;
+            Ok(crate::core::value_to_string(&result))
+        })
+        /*
         match evaluate_statements(&self.env, &statements) {
             Ok(v) => {
                 // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
@@ -74,6 +92,7 @@ impl Repl {
             }
             Err(e) => Err(e),
         }
+        // */
     }
 
     /// Returns true when the given `input` looks like a complete JavaScript

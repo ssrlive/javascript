@@ -48,24 +48,38 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     };
 
     // If we got here we have a script to execute. Prefer the safe evaluate_script
-    match evaluate_script(script_content, cli.file.as_ref()) {
+    let script_path = cli.file.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or(p.clone()));
+
+    match evaluate_script(&script_content, script_path.as_ref()) {
         Ok(result) => println!("{result}"),
         Err(err) => {
-            if let Some(file_path) = cli.file.as_ref() {
-                let msg = err.message();
-                if let (Some(line), Some(col)) = (err.js_line(), err.js_column()) {
-                    eprintln!("{} at file: {}:{}:{}", msg, file_path.display(), line, col);
-                } else {
-                    eprintln!("{} at file: {}", msg, file_path.display());
+            if let Some(file_path) = script_path.as_ref() {
+                if let Some(line) = err.js_line() {
+                    eprintln!("{}:{}", file_path.display(), line);
+                    let lines: Vec<&str> = script_content.lines().collect();
+                    if line > 0 && line <= lines.len() {
+                        eprintln!("{}", lines[line - 1]);
+                        if let Some(col) = err.js_column() {
+                            if col > 0 {
+                                eprintln!("{}^", " ".repeat(col - 1));
+                            }
+                        }
+                    }
+                    eprintln!();
                 }
-            } else {
-                eprintln!("{}", err.user_message());
             }
+
+            eprintln!("{}", err.message());
+
             let stack = err.stack();
             if !stack.is_empty() {
-                eprintln!("Stack trace:");
                 for frame in stack {
-                    eprintln!("    at {}", frame);
+                    let formatted_frame = if let Some(file_path) = script_path.as_ref() {
+                        frame.replace("(:", &format!("({}:", file_path.display()))
+                    } else {
+                        frame.clone()
+                    };
+                    eprintln!("    {}", formatted_frame);
                 }
             }
             std::process::exit(1);

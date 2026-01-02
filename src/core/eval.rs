@@ -1,3 +1,494 @@
+#![allow(dead_code, unused_variables)]
+
+use crate::{
+    JSError, PropertyKey, Value,
+    core::{
+        BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, StatementKind, env_get, env_set, env_set_recursive,
+        is_error, obj_get_key_value, obj_set_key_value, value_to_string,
+    },
+    raise_eval_error, raise_reference_error,
+    unicode::{utf8_to_utf16, utf16_to_utf8},
+};
+use gc_arena::Gc;
+use gc_arena::Mutation as MutationContext;
+use gc_arena::lock::RefLock as GcCell;
+
+#[derive(Clone, Debug)]
+pub enum ControlFlow<'gc> {
+    Normal(Value<'gc>),
+    Return(Value<'gc>),
+    Throw(Value<'gc>, Option<(usize, usize)>),
+    Break(Option<String>),
+    Continue(Option<String>),
+}
+
+pub fn evaluate_statements<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &mut [Statement],
+) -> Result<Value<'gc>, JSError> {
+    match evaluate_statements_with_context(mc, env, statements)? {
+        ControlFlow::Normal(val) => Ok(val),
+        ControlFlow::Return(val) => Ok(val),
+        ControlFlow::Throw(val, loc) => {
+            let mut err = crate::raise_throw_error!(val);
+            let mut location_set = false;
+
+            if let Value::Object(obj) = val {
+                if let Ok(borrowed) = obj.try_borrow() {
+                    let line = borrowed.get_line();
+                    let col = borrowed.get_column();
+                    if let (Some(line), Some(col)) = (line, col) {
+                        err.set_js_location(line, col);
+                        err.inner.stack.push(format!("at <anonymous> (:{line}:{col})"));
+                        location_set = true;
+                    }
+                }
+            }
+
+            if !location_set {
+                if let Some((line, col)) = loc {
+                    err.set_js_location(line, col);
+                    err.inner.stack.push(format!("at <anonymous> (:{line}:{col})"));
+                }
+            }
+            Err(err)
+        }
+        _ => Err(raise_eval_error!("Illegal control flow")),
+    }
+}
+
+pub fn evaluate_statements_with_context<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &mut [Statement],
+) -> Result<ControlFlow<'gc>, JSError> {
+    let mut last_value = Value::Undefined;
+    for stmt in statements {
+        if let Some(cf) = eval_res(mc, stmt, &mut last_value, env)? {
+            return Ok(cf);
+        }
+    }
+    Ok(ControlFlow::Normal(last_value))
+}
+
+fn eval_res<'gc>(
+    mc: &MutationContext<'gc>,
+    stmt: &Statement,
+    last_value: &mut Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Option<ControlFlow<'gc>>, JSError> {
+    match &stmt.kind {
+        StatementKind::Expr(expr) => match evaluate_expr(mc, env, expr) {
+            Ok(val) => {
+                *last_value = val;
+                Ok(None)
+            }
+            Err(mut e) => {
+                e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                Err(e)
+            }
+        },
+        StatementKind::Let(decls) => {
+            for (name, expr_opt) in decls {
+                let val = if let Some(expr) = expr_opt {
+                    match evaluate_expr(mc, env, expr) {
+                        Ok(v) => v,
+                        Err(mut e) => {
+                            e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                            return Err(e);
+                        }
+                    }
+                } else {
+                    Value::Undefined
+                };
+                env_set(mc, env, name, val)?;
+            }
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Return(expr_opt) => {
+            let val = if let Some(expr) = expr_opt {
+                match evaluate_expr(mc, env, expr) {
+                    Ok(v) => v,
+                    Err(mut e) => {
+                        e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                        return Err(e);
+                    }
+                }
+            } else {
+                Value::Undefined
+            };
+            Ok(Some(ControlFlow::Return(val)))
+        }
+        StatementKind::FunctionDeclaration(name, params, body, _) => {
+            let mut body_clone = body.clone();
+            let func = evaluate_function_expression(mc, env, Some(name.clone()), params, &mut body_clone)?;
+            env_set(mc, env, name, func)?;
+            Ok(None)
+        }
+        StatementKind::Throw(expr) => {
+            let val = evaluate_expr(mc, env, expr)?;
+            if let Value::Object(obj) = val {
+                if is_error(&val) {
+                    obj.borrow_mut(mc).set_line(stmt.line, mc)?;
+                    obj.borrow_mut(mc).set_column(stmt.column, mc)?;
+                }
+            }
+            Ok(Some(ControlFlow::Throw(val, Some((stmt.line, stmt.column)))))
+        }
+        StatementKind::Block(stmts) => {
+            let mut stmts_clone = stmts.clone();
+            let res = evaluate_statements_with_context(mc, env, &mut stmts_clone)?;
+            match res {
+                ControlFlow::Normal(val) => {
+                    *last_value = val;
+                    Ok(None)
+                }
+                other => Ok(Some(other)),
+            }
+        }
+        StatementKind::If(cond, then_block, else_block) => {
+            let cond_val = evaluate_expr(mc, env, cond)?;
+            let is_true = match cond_val {
+                Value::Boolean(b) => b,
+                Value::Number(n) => n != 0.0 && !n.is_nan(),
+                Value::String(s) => !s.is_empty(),
+                Value::Null | Value::Undefined => false,
+                Value::Object(_) => true,
+                _ => false,
+            };
+
+            if is_true {
+                let mut stmts = then_block.clone();
+                let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+                match res {
+                    ControlFlow::Normal(val) => {
+                        *last_value = val;
+                        Ok(None)
+                    }
+                    other => Ok(Some(other)),
+                }
+            } else if let Some(else_stmts) = else_block {
+                let mut stmts = else_stmts.clone();
+                let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+                match res {
+                    ControlFlow::Normal(val) => {
+                        *last_value = val;
+                        Ok(None)
+                    }
+                    other => Ok(Some(other)),
+                }
+            } else {
+                Ok(None)
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, JSError> {
+    match expr {
+        Expr::Number(n) => Ok(Value::Number(*n)),
+        Expr::StringLit(s) => Ok(Value::String(s.clone())),
+        Expr::Boolean(b) => Ok(Value::Boolean(*b)),
+        Expr::Var(name, _, _) => evaluate_var(mc, env, name),
+        Expr::Assign(target, value_expr) => {
+            let val = evaluate_expr(mc, env, value_expr)?;
+            if let Expr::Var(name, _, _) = &**target {
+                env_set_recursive(mc, env, name, val.clone())?;
+                Ok(val)
+            } else {
+                Err(raise_eval_error!("Only simple assignment implemented"))
+            }
+        }
+        Expr::Binary(left, op, right) => {
+            let l_val = evaluate_expr(mc, env, left)?;
+            let r_val = evaluate_expr(mc, env, right)?;
+            match op {
+                BinaryOp::Add => match (l_val, r_val) {
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                    (Value::String(ls), Value::String(rs)) => {
+                        let mut res = ls.clone();
+                        res.extend(rs);
+                        Ok(Value::String(res))
+                    }
+                    (Value::String(ls), other) => {
+                        let mut res = ls.clone();
+                        res.extend(utf8_to_utf16(&value_to_string(&other)));
+                        Ok(Value::String(res))
+                    }
+                    (other, Value::String(rs)) => {
+                        let mut res = utf8_to_utf16(&value_to_string(&other));
+                        res.extend(rs);
+                        Ok(Value::String(res))
+                    }
+                    _ => Err(raise_eval_error!("Binary Add only for numbers or strings")),
+                },
+                BinaryOp::Sub => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Number(ln - rn))
+                    } else {
+                        Err(raise_eval_error!("Binary Sub only for numbers"))
+                    }
+                }
+                BinaryOp::Mul => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Number(ln * rn))
+                    } else {
+                        Err(raise_eval_error!("Binary Mul only for numbers"))
+                    }
+                }
+                BinaryOp::Div => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Number(ln / rn))
+                    } else {
+                        Err(raise_eval_error!("Binary Div only for numbers"))
+                    }
+                }
+                BinaryOp::StrictEqual => {
+                    let eq = match (l_val, r_val) {
+                        (Value::Number(l), Value::Number(r)) => l == r,
+                        (Value::String(l), Value::String(r)) => l == r,
+                        (Value::Boolean(l), Value::Boolean(r)) => l == r,
+                        (Value::Null, Value::Null) => true,
+                        (Value::Undefined, Value::Undefined) => true,
+                        _ => false,
+                    };
+                    Ok(Value::Boolean(eq))
+                }
+                BinaryOp::StrictNotEqual => {
+                    let eq = match (l_val, r_val) {
+                        (Value::Number(l), Value::Number(r)) => l == r,
+                        (Value::String(l), Value::String(r)) => l == r,
+                        (Value::Boolean(l), Value::Boolean(r)) => l == r,
+                        (Value::Null, Value::Null) => true,
+                        (Value::Undefined, Value::Undefined) => true,
+                        _ => false,
+                    };
+                    Ok(Value::Boolean(!eq))
+                }
+                _ => todo!(),
+            }
+        }
+        Expr::LogicalNot(expr) => {
+            let val = evaluate_expr(mc, env, expr)?;
+            let b = match val {
+                Value::Boolean(b) => b,
+                Value::Number(n) => n != 0.0 && !n.is_nan(),
+                Value::String(s) => !s.is_empty(),
+                Value::Null | Value::Undefined => false,
+                Value::Object(_) => true,
+                _ => false,
+            };
+            Ok(Value::Boolean(!b))
+        }
+        Expr::Function(name, params, body) => {
+            let mut body_clone = body.clone();
+            evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)
+        }
+        Expr::Call(func_expr, args) => {
+            let func_val = evaluate_expr(mc, env, func_expr)?;
+            let mut eval_args = Vec::new();
+            for arg in args {
+                eval_args.push(evaluate_expr(mc, env, arg)?);
+            }
+
+            match func_val {
+                Value::Object(obj) => {
+                    if let Some(cl_ptr) = obj_get_key_value(mc, &obj, &"__closure__".into())? {
+                        match &*cl_ptr.borrow() {
+                            Value::Closure(cl) => {
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = Some(cl.env);
+                                call_env.borrow_mut(mc).is_function_scope = true;
+
+                                for (i, param) in cl.params.iter().enumerate() {
+                                    if let DestructuringElement::Variable(name, _) = param {
+                                        let arg_val = eval_args.get(i).cloned().unwrap_or(Value::Undefined);
+                                        env_set(mc, &call_env, name, arg_val)?;
+                                    }
+                                }
+                                let mut body_clone = cl.body.clone();
+                                match evaluate_statements(mc, &call_env, &mut body_clone) {
+                                    Ok(v) => Ok(v),
+                                    Err(mut e) => {
+                                        if let Some(name_str) = obj.borrow_mut(mc).get_name(mc) {
+                                            if let Some(last_frame) = e.inner.stack.last_mut() {
+                                                if last_frame.contains("<anonymous>") {
+                                                    *last_frame = last_frame.replace("<anonymous>", &name_str);
+                                                }
+                                            }
+                                        }
+                                        Err(e)
+                                    }
+                                }
+                            }
+                            _ => Err(raise_eval_error!("Not a function")),
+                        }
+                    } else {
+                        Err(raise_eval_error!("Not a function"))
+                    }
+                }
+                _ => Err(raise_eval_error!("Not a function")),
+            }
+        }
+        Expr::New(ctor, args) => {
+            let func_val = evaluate_expr(mc, env, ctor)?;
+            let mut eval_args = Vec::new();
+            for arg in args {
+                eval_args.push(evaluate_expr(mc, env, arg)?);
+            }
+
+            match func_val {
+                Value::Object(obj) => {
+                    if let Some(cl_ptr) = obj_get_key_value(mc, &obj, &"__closure__".into())? {
+                        match &*cl_ptr.borrow() {
+                            Value::Closure(cl) => {
+                                let call_env = crate::core::new_js_object_data(mc);
+                                call_env.borrow_mut(mc).prototype = Some(cl.env);
+                                call_env.borrow_mut(mc).is_function_scope = true;
+
+                                for (i, param) in cl.params.iter().enumerate() {
+                                    if let DestructuringElement::Variable(name, _) = param {
+                                        let arg_val = eval_args.get(i).cloned().unwrap_or(Value::Undefined);
+                                        env_set(mc, &call_env, name, arg_val)?;
+                                    }
+                                }
+                                let mut body_clone = cl.body.clone();
+                                evaluate_statements(mc, &call_env, &mut body_clone)
+                            }
+                            _ => Err(raise_eval_error!("Not a constructor")),
+                        }
+                    } else {
+                        if let Some(native_name) = obj_get_key_value(mc, &obj, &"__native_ctor".into())? {
+                            if let Value::String(name) = &*native_name.borrow() {
+                                if name == &crate::unicode::utf8_to_utf16("Error") {
+                                    let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                                    let prototype = if let Some(proto_val) = obj_get_key_value(mc, &obj, &"prototype".into())?
+                                        && let Value::Object(proto_obj) = &*proto_val.borrow()
+                                    {
+                                        Some(*proto_obj)
+                                    } else {
+                                        None
+                                    };
+
+                                    return crate::core::js_error::create_error(mc, prototype, msg);
+                                }
+                            }
+                        }
+                        let new_obj = crate::core::new_js_object_data(mc);
+                        Ok(Value::Object(new_obj))
+                    }
+                }
+                _ => Err(raise_eval_error!("Not a constructor")),
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                if let Some(val) = obj_get_key_value(mc, &obj, &key.as_str().into())? {
+                    Ok(val.borrow().clone())
+                } else {
+                    Ok(Value::Undefined)
+                }
+            } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                Err(raise_eval_error!("Cannot read properties of null or undefined"))
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+
+            if let Value::Object(obj) = obj_val {
+                let key = match key_val {
+                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                    Value::Number(n) => PropertyKey::String(n.to_string()),
+                    _ => PropertyKey::String(value_to_string(&key_val)),
+                };
+
+                if let Some(val) = obj_get_key_value(mc, &obj, &key)? {
+                    Ok(val.borrow().clone())
+                } else {
+                    Ok(Value::Undefined)
+                }
+            } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                Err(raise_eval_error!("Cannot read properties of null or undefined"))
+            } else {
+                Ok(Value::Undefined)
+            }
+        }
+        Expr::TemplateString(parts) => {
+            let mut result = Vec::new();
+            for part in parts {
+                match part {
+                    crate::core::TemplatePart::String(s) => result.extend(s),
+                    crate::core::TemplatePart::Expr(tokens) => {
+                        let (expr, _) = crate::core::parse_simple_expression(tokens, 0)?;
+                        let val = evaluate_expr(mc, env, &expr)?;
+                        // For template interpolation we must not include surrounding
+                        // quotes for string values. Convert different Value variants
+                        // to their string content (no extra quotes for strings).
+                        match val {
+                            Value::String(s) => result.extend(s),
+                            Value::Number(n) => result.extend(crate::unicode::utf8_to_utf16(&n.to_string())),
+                            Value::BigInt(b) => result.extend(crate::unicode::utf8_to_utf16(&format!("{}n", b))),
+                            Value::Boolean(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
+                            Value::Undefined => result.extend(crate::unicode::utf8_to_utf16("undefined")),
+                            Value::Null => result.extend(crate::unicode::utf8_to_utf16("null")),
+                            _ => {
+                                // Fallback to the generic representation (may include quotes)
+                                let s = value_to_string(&val);
+                                result.extend(crate::unicode::utf8_to_utf16(&s));
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Value::String(result))
+        }
+        _ => Ok(Value::Undefined),
+    }
+}
+
+fn evaluate_var<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<Value<'gc>, JSError> {
+    let mut current_opt = Some(*env);
+    while let Some(current_env) = current_opt {
+        if let Some(val_ptr) = env_get(&current_env, name) {
+            return Ok(val_ptr.borrow().clone());
+        }
+        current_opt = current_env.borrow().prototype;
+    }
+    Err(raise_reference_error!(format!("Variable '{}' not found", name)))
+}
+
+fn evaluate_function_expression<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: Option<String>,
+    params: &[DestructuringElement],
+    body: &mut [Statement],
+) -> Result<Value<'gc>, JSError> {
+    let func_obj = crate::core::new_js_object_data(mc);
+    let closure_data = ClosureData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+        env: *env,
+        home_object: GcCell::new(None),
+        captured_envs: Vec::new(),
+        bound_this: None,
+    };
+    let closure_val = Value::Closure(Gc::new(mc, closure_data));
+    obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+    if let Some(n) = name {
+        obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(&n)))?;
+    }
+    Ok(Value::Object(func_obj))
+}
+
+/*
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
@@ -7968,3 +8459,4 @@ pub(crate) fn handle_user_defined_method_on_instance(
         Err(raise_eval_error!(format!("Property '{method}' is not a function")))
     }
 }
+// */

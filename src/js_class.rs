@@ -1,43 +1,42 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::{
-    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, get_own_property,
-    new_js_object_data, prepare_function_call_env,
+    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, new_js_object_data,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
-use crate::js_array::is_array;
+// use crate::js_array::is_array;
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 #[derive(Debug, Clone)]
-pub enum ClassMember {
-    Constructor(Vec<DestructuringElement>, Vec<Statement>),           // parameters, body
-    Method(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameters, body
-    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameters, body
-    Property(String, Expr),                                           // name, value
-    StaticProperty(String, Expr),                                     // name, value
-    PrivateProperty(String, Expr),                                    // name, value
-    PrivateStaticProperty(String, Expr),                              // name, value
-    PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
-    PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
-    PrivateGetter(String, Vec<Statement>),                            // name, body
-    PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
-    PrivateStaticGetter(String, Vec<Statement>),                      // name, body
-    PrivateStaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
-    StaticBlock(Vec<Statement>),                                      // body
-    Getter(String, Vec<Statement>),                                   // name, body
-    Setter(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameter, body
-    StaticGetter(String, Vec<Statement>),                             // name, body
-    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameter, body
+pub enum ClassMember<'a> {
+    Constructor(Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // parameters, body
+    Method(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameters, body
+    StaticMethod(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameters, body
+    Property(String, Expr<'a>),                                     // name, value
+    StaticProperty(String, Expr<'a>),                               // name, value
+    PrivateProperty(String, Expr<'a>),                              // name, value
+    PrivateStaticProperty(String, Expr<'a>),                        // name, value
+    PrivateMethod(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameters, body
+    PrivateStaticMethod(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameters, body
+    PrivateGetter(String, Vec<Statement<'a>>),                      // name, body
+    PrivateSetter(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameter, body
+    PrivateStaticGetter(String, Vec<Statement<'a>>),                // name, body
+    PrivateStaticSetter(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameter, body
+    StaticBlock(Vec<Statement<'a>>),                                // body
+    Getter(String, Vec<Statement<'a>>),                             // name, body
+    Setter(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameter, body
+    StaticGetter(String, Vec<Statement<'a>>),                       // name, body
+    StaticSetter(String, Vec<DestructuringElement<'a>>, Vec<Statement<'a>>), // name, parameter, body
 }
 
 #[derive(Debug, Clone)]
-pub struct ClassDefinition {
+pub struct ClassDefinition<'a> {
     pub name: String,
-    pub extends: Option<Expr>,
-    pub members: Vec<ClassMember>,
+    pub extends: Option<Expr<'a>>,
+    pub members: Vec<ClassMember<'a>>,
 }
 
 pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {

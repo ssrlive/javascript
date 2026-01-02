@@ -5,6 +5,7 @@ use crate::{
     error::JSError,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
+use gc_arena::Mutation as MutationContext;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -14,16 +15,20 @@ use crate::core::{
 };
 
 /// Handle Array static method calls (Array.isArray, Array.from, Array.of)
-pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_array_static_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "isArray" => {
             if args.len() != 1 {
                 return Err(raise_eval_error!("Array.isArray requires exactly one argument"));
             }
-
-            let arg = evaluate_expr(env, &args[0])?;
+            let arg = evaluate_expr(mc, env, &args[0])?;
             let is_array = match arg {
-                Value::Object(object) => is_array(&object),
+                Value::Object(object) => is_array(mc, &object),
                 _ => false,
             };
             Ok(Value::Boolean(is_array))
@@ -34,9 +39,9 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                 return Err(raise_eval_error!("Array.from requires at least one argument"));
             }
 
-            let iterable = evaluate_expr(env, &args[0])?;
+            let iterable = evaluate_expr(mc, env, &args[0])?;
             let map_fn = if args.len() > 1 {
-                Some(evaluate_expr(env, &args[1])?)
+                Some(evaluate_expr(mc, env, &args[1])?)
             } else {
                 None
             };
@@ -47,12 +52,13 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
             match iterable {
                 Value::Set(set) => {
                     // Handle Set iteration
-                    for val in &set.borrow().values {
+                    for val in &set.borrow(&mc).values {
                         if let Some(ref fn_val) = map_fn {
                             if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                 let args = vec![val.clone(), val.clone()]; // Set iterator yields value as key
                                 let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                                let mapped = evaluate_statements(&func_env, &body)?;
+                                let mut body_clone = body.clone();
+                                let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
                                 result.push(mapped);
                             } else {
                                 return Err(raise_eval_error!("Array.from map function must be a function"));
@@ -64,25 +70,26 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                 }
                 Value::Object(object) => {
                     let maybe_set = {
-                        let borrow = object.borrow();
+                        let borrow = object.borrow(&mc);
                         borrow.get(&PropertyKey::String("__set__".to_string()))
                     };
 
                     let maybe_map = if maybe_set.is_none() {
-                        let borrow = object.borrow();
+                        let borrow = object.borrow(&mc);
                         borrow.get(&PropertyKey::String("__map__".to_string()))
                     } else {
                         None
                     };
 
                     if let Some(set_val) = maybe_set {
-                        if let Value::Set(set) = &*set_val.borrow() {
-                            for (i, val) in set.borrow().values.iter().enumerate() {
+                        if let Value::Set(set) = &*set_val.borrow(&mc) {
+                            for (i, val) in set.borrow(&mc).values.iter().enumerate() {
                                 if let Some(ref fn_val) = map_fn {
                                     if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                         let args = vec![val.clone(), Value::Number(i as f64)];
                                         let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                                        let mapped = evaluate_statements(&func_env, &body)?;
+                                        let mut body_clone = body.clone();
+                                        let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
                                         result.push(mapped);
                                     } else {
                                         return Err(raise_eval_error!("Array.from map function must be a function"));
@@ -93,19 +100,20 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                             }
                         }
                     } else if let Some(map_val) = maybe_map {
-                        if let Value::Map(map) = &*map_val.borrow() {
-                            for (i, (key, val)) in map.borrow().entries.iter().enumerate() {
-                                let entry_obj = create_array(env)?;
-                                set_array_length(&entry_obj, 2)?;
-                                obj_set_key_value(&entry_obj, &"0".into(), key.clone())?;
-                                obj_set_key_value(&entry_obj, &"1".into(), val.clone())?;
+                        if let Value::Map(map) = &*map_val.borrow(&mc) {
+                            for (i, (key, val)) in map.borrow(&mc).entries.iter().enumerate() {
+                                let entry_obj = create_array(mc, env)?;
+                                set_array_length(mc, &entry_obj, 2)?;
+                                obj_set_key_value(mc, &entry_obj, &"0".into(), key.clone())?;
+                                obj_set_key_value(mc, &entry_obj, &"1".into(), val.clone())?;
                                 let entry_val = Value::Object(entry_obj);
 
                                 if let Some(ref fn_val) = map_fn {
                                     if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                         let args = vec![entry_val.clone(), Value::Number(i as f64)];
                                         let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                                        let mapped = evaluate_statements(&func_env, &body)?;
+                                        let mut body_clone = body.clone();
+                                        let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
                                         result.push(mapped);
                                     } else {
                                         return Err(raise_eval_error!("Array.from map function must be a function"));
@@ -115,11 +123,11 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 }
                             }
                         }
-                    } else if let Some(len) = get_array_length(&object) {
+                    } else if let Some(len) = get_array_length(mc, &object) {
                         for i in 0..len {
-                            let val_opt = obj_get_key_value(&object, &i.to_string().into())?;
+                            let val_opt = obj_get_key_value(mc, &object, &i.to_string().into())?;
                             let element = if let Some(val) = val_opt {
-                                val.borrow().clone()
+                                val.borrow(&mc).clone()
                             } else {
                                 Value::Undefined
                             };
@@ -128,7 +136,8 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                                     let args = vec![element, Value::Number(i as f64)];
                                     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                                    let mapped = evaluate_statements(&func_env, &body)?;
+                                    let mut body_clone = body.clone();
+                                    let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
                                     result.push(mapped);
                                 } else {
                                     return Err(raise_eval_error!("Array.from map function must be a function"));
@@ -146,21 +155,21 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
                 }
             }
 
-            let new_array = create_array(env)?;
-            set_array_length(&new_array, result.len())?;
+            let new_array = create_array(mc, env)?;
+            set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_key_value(&new_array, &i.to_string().into(), val)?;
+                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
             }
             Ok(Value::Object(new_array))
         }
         "of" => {
             // Array.of(...elements)
-            let new_array = create_array(env)?;
+            let new_array = create_array(mc, env)?;
             for (i, arg) in args.iter().enumerate() {
-                let val = evaluate_expr(env, arg)?;
-                obj_set_key_value(&new_array, &i.to_string().into(), val)?;
+                let val = evaluate_expr(mc, env, arg)?;
+                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
             }
-            set_array_length(&new_array, args.len())?;
+            set_array_length(mc, &new_array, args.len())?;
             Ok(Value::Object(new_array))
         }
         _ => Err(raise_eval_error!(format!("Array.{method} is not implemented"))),
@@ -168,15 +177,19 @@ pub(crate) fn handle_array_static_method(method: &str, args: &[Expr], env: &JSOb
 }
 
 /// Handle Array constructor calls
-pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_array_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     if args.is_empty() {
         // Array() - create empty array
-        let array_obj = create_array(env)?;
-        set_array_length(&array_obj, 0)?;
+        let array_obj = create_array(mc, env)?;
+        set_array_length(mc, &array_obj, 0)?;
         Ok(Value::Object(array_obj))
     } else if args.len() == 1 {
         // Array(length) or Array(element)
-        let arg_val = evaluate_expr(env, &args[0])?;
+        let arg_val = evaluate_expr(mc, env, &args[0])?;
         match arg_val {
             Value::Number(n) => {
                 if n.is_nan() {
@@ -192,41 +205,42 @@ pub(crate) fn handle_array_constructor(args: &[Expr], env: &JSObjectDataPtr) -> 
                     return Err(raise_range_error!("Invalid array length"));
                 }
                 // Array(length) - create array with specified length
-                let array_obj = create_array(env)?;
-                set_array_length(&array_obj, n as usize)?;
+                let array_obj = create_array(mc, env)?;
+                set_array_length(mc, &array_obj, n as usize)?;
                 Ok(Value::Object(array_obj))
             }
             _ => {
                 // Array(element) - create array with single element
-                let array_obj = create_array(env)?;
-                obj_set_key_value(&array_obj, &"0".into(), arg_val)?;
-                set_array_length(&array_obj, 1)?;
+                let array_obj = create_array(mc, env)?;
+                obj_set_key_value(mc, &array_obj, &"0".into(), arg_val)?;
+                set_array_length(mc, &array_obj, 1)?;
                 Ok(Value::Object(array_obj))
             }
         }
     } else {
         // Array(element1, element2, ...) - create array with multiple elements
-        let array_obj = create_array(env)?;
+        let array_obj = create_array(mc, env)?;
         for (i, arg) in args.iter().enumerate() {
-            let arg_val = evaluate_expr(env, arg)?;
-            obj_set_key_value(&array_obj, &i.to_string().into(), arg_val)?;
+            let arg_val = evaluate_expr(mc, env, arg)?;
+            obj_set_key_value(mc, &array_obj, &i.to_string().into(), arg_val)?;
         }
-        set_array_length(&array_obj, args.len())?;
+        set_array_length(mc, &array_obj, args.len())?;
         Ok(Value::Object(array_obj))
     }
 }
 
 /// Handle Array instance method calls
-pub(crate) fn handle_array_instance_method(
-    object: &JSObjectDataPtr,
+pub(crate) fn handle_array_instance_method<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
     method: &str,
     args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "at" => {
             let index = if !args.is_empty() {
-                match evaluate_expr(env, &args[0])? {
+                match evaluate_expr(mc, env, &args[0])? {
                     Value::Number(n) => n as i64,
                     _ => 0,
                 }
@@ -240,8 +254,8 @@ pub(crate) fn handle_array_instance_method(
             if k < 0 || k >= len {
                 Ok(Value::Undefined)
             } else {
-                let val_opt = obj_get_key_value(object, &k.to_string().into())?;
-                Ok(val_opt.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
+                let val_opt = obj_get_key_value(mc, object, &k.to_string().into())?;
+                Ok(val_opt.map(|v| v.borrow(&mc).clone()).unwrap_or(Value::Undefined))
             }
         }
         "push" => {
@@ -250,21 +264,26 @@ pub(crate) fn handle_array_instance_method(
                 // so that push is chainable (returns the array) and mutations persist.
                 // Evaluate all args and append them.
                 // First determine current length from the local object
-                let mut current_len = get_array_length(object).unwrap_or(0);
+                let mut current_len = get_array_length(mc, object).unwrap_or(0);
 
                 // Helper closure to push a value into a map
-                fn push_into_map(map: &JSObjectDataPtr, val: Value, current_len: &mut usize) -> Result<(), JSError> {
-                    obj_set_key_value(map, &current_len.to_string().into(), val)?;
+                fn push_into_map<'gc>(
+                    mc: &MutationContext<'gc>,
+                    map: &JSObjectDataPtr<'gc>,
+                    val: Value<'gc>,
+                    current_len: &mut usize,
+                ) -> Result<(), JSError> {
+                    obj_set_key_value(mc, map, &current_len.to_string().into(), val)?;
                     *current_len += 1;
                     Ok(())
                 }
 
                 // Fallback: mutate the local object copy
                 for arg in args {
-                    let val = evaluate_expr(env, arg)?;
-                    push_into_map(object, val, &mut current_len)?;
+                    let val = evaluate_expr(mc, env, arg)?;
+                    push_into_map(mc, object, val, &mut current_len)?;
                 }
-                set_array_length(object, current_len)?;
+                set_array_length(mc, object, current_len)?;
                 // Return the array object (chainable)
                 Ok(Value::Object(object.clone()))
             } else {
@@ -272,12 +291,12 @@ pub(crate) fn handle_array_instance_method(
             }
         }
         "pop" => {
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
             if current_len > 0 {
                 let last_idx = (current_len - 1).to_string();
-                let val = object.borrow_mut().remove(&last_idx.into());
-                set_array_length(object, current_len - 1)?;
-                Ok(val.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
+                let val = object.borrow_mut(&mc).remove(&last_idx.into());
+                set_array_length(mc, object, current_len - 1)?;
+                Ok(val.map(|v| v.borrow(&mc).clone()).unwrap_or(Value::Undefined))
             } else {
                 Ok(Value::Undefined)
             }
@@ -288,7 +307,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "join" => {
             let separator = if !args.is_empty() {
-                match evaluate_expr(env, &args[0])? {
+                match evaluate_expr(mc, env, &args[0])? {
                     Value::String(s) => utf16_to_utf8(&s),
                     Value::Number(n) => n.to_string(),
                     _ => ",".to_string(),
@@ -297,15 +316,15 @@ pub(crate) fn handle_array_instance_method(
                 ",".to_string()
             };
 
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let mut result = String::new();
             for i in 0..current_len {
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                    match &*val.borrow() {
+                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    match &*val.borrow(&mc) {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&utf16_to_utf8(s)),
                         Value::Number(n) => result.push_str(&n.to_string()),
@@ -319,7 +338,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "slice" => {
             let start = if !args.is_empty() {
-                match evaluate_expr(env, &args[0])? {
+                match evaluate_expr(mc, env, &args[0])? {
                     Value::Number(n) => n as isize,
                     _ => 0isize,
                 }
@@ -327,7 +346,7 @@ pub(crate) fn handle_array_instance_method(
                 0isize
             };
 
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let end = if args.len() >= 2 {
                 match evaluate_expr(env, &args[1])? {
@@ -359,7 +378,7 @@ pub(crate) fn handle_array_instance_method(
         "forEach" => {
             if !args.is_empty() {
                 // Evaluate the callback expression
-                let callback_val = evaluate_expr(env, &args[0])?;
+                let callback_val = evaluate_expr(mc, env, &args[0])?;
                 let current_len = get_array_length(object).unwrap_or(0);
 
                 for i in 0..current_len {
@@ -368,7 +387,7 @@ pub(crate) fn handle_array_instance_method(
                             // Map params: (element, index, array)
                             let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
                             let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                            evaluate_statements(&func_env, &body)?;
+                            evaluate_statements(mc, &func_env, &mut body.clone())?;
                         } else {
                             return Err(raise_eval_error!("Array.forEach expects a function"));
                         }
@@ -381,10 +400,10 @@ pub(crate) fn handle_array_instance_method(
         }
         "map" => {
             if !args.is_empty() {
-                let callback_val = evaluate_expr(env, &args[0])?;
+                let callback_val = evaluate_expr(mc, env, &args[0])?;
                 let current_len = get_array_length(object).unwrap_or(0);
 
-                let new_array = create_array(env)?;
+                let new_array = create_array(mc, env)?;
                 set_array_length(&new_array, current_len)?;
 
                 for i in 0..current_len {
@@ -407,7 +426,7 @@ pub(crate) fn handle_array_instance_method(
         }
         "filter" => {
             if !args.is_empty() {
-                let callback_val = evaluate_expr(env, &args[0])?;
+                let callback_val = evaluate_expr(mc, env, &args[0])?;
                 let current_len = get_array_length(object).unwrap_or(0);
 
                 let new_array = create_array(env)?;
@@ -577,7 +596,7 @@ pub(crate) fn handle_array_instance_method(
                             let args = vec![element.clone(), index_val, Value::Object(object.clone())];
                             let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
 
-                            let res = evaluate_statements(&func_env, &body)?;
+                            let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
                             // truthy check
                             let is_truthy = match res {
                                 Value::Boolean(b) => b,
@@ -715,7 +734,7 @@ pub(crate) fn handle_array_instance_method(
             let result = create_array(env)?;
 
             // First, copy all elements from current array
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let mut new_index = 0;
             for i in 0..current_len {
@@ -727,7 +746,7 @@ pub(crate) fn handle_array_instance_method(
 
             // Then, append all arguments
             for arg in args {
-                let arg_val = evaluate_expr(env, arg)?;
+                let arg_val = evaluate_expr(mc, env, arg)?;
                 match arg_val {
                     Value::Object(arg_obj) => {
                         // If argument is an array-like object, copy its elements
@@ -765,7 +784,7 @@ pub(crate) fn handle_array_instance_method(
                 0isize
             };
 
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let start = if from_index < 0 {
                 (current_len as isize + from_index).max(0) as usize
@@ -798,7 +817,7 @@ pub(crate) fn handle_array_instance_method(
                 0isize
             };
 
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let start = if from_index < 0 {
                 (current_len as isize + from_index).max(0) as usize
@@ -824,10 +843,10 @@ pub(crate) fn handle_array_instance_method(
             // For better memory efficiency with large arrays, an in-place sort
             // could be implemented, but it would be more complex with the current
             // object storage model.
-            let mut elements: Vec<(String, Value)> = Vec::new();
+            let mut elements: Vec<(String, Value<'gc>)> = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                    elements.push((i.to_string(), val.borrow().clone()));
+                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    elements.push((i.to_string(), val.borrow(&mc).clone()));
                 }
             }
 
@@ -851,7 +870,7 @@ pub(crate) fn handle_array_instance_method(
                             Err(_) => return std::cmp::Ordering::Equal,
                         };
 
-                        match evaluate_statements(&func_env, &body) {
+                        match evaluate_statements(mc, &func_env, &mut body.clone()) {
                             Ok(Value::Number(n)) => {
                                 if n < 0.0 {
                                     std::cmp::Ordering::Less
@@ -871,7 +890,7 @@ pub(crate) fn handle_array_instance_method(
 
             // Update the array with sorted elements
             for (new_index, (_old_key, value)) in elements.into_iter().enumerate() {
-                obj_set_key_value(object, &new_index.to_string().into(), value)?;
+                obj_set_key_value(mc, object, &new_index.to_string().into(), value)?;
             }
 
             Ok(Value::Object(object.clone()))
@@ -887,19 +906,19 @@ pub(crate) fn handle_array_instance_method(
                 let left_key = left.to_string();
                 let right_key = right.to_string();
 
-                let left_val = obj_get_key_value(object, &left_key.clone().into())?.map(|v| v.borrow().clone());
-                let right_val = obj_get_key_value(object, &right_key.clone().into())?.map(|v| v.borrow().clone());
+                let left_val = obj_get_key_value(mc, object, &left_key.clone().into())?.map(|v| v.borrow(&mc).clone());
+                let right_val = obj_get_key_value(mc, object, &right_key.clone().into())?.map(|v| v.borrow(&mc).clone());
 
                 if let Some(val) = right_val {
-                    obj_set_key_value(object, &left_key.clone().into(), val)?;
+                    obj_set_key_value(mc, object, &left_key.clone().into(), val)?;
                 } else {
-                    object.borrow_mut().remove(&left_key.clone().into());
+                    object.borrow_mut(&mc).remove(&left_key.clone().into());
                 }
 
                 if let Some(val) = left_val {
-                    obj_set_key_value(object, &right_key.clone().into(), val)?;
+                    obj_set_key_value(mc, object, &right_key.clone().into(), val)?;
                 } else {
-                    object.borrow_mut().remove(&right_key.clone().into());
+                    object.borrow_mut(&mc).remove(&right_key.clone().into());
                 }
 
                 left += 1;
@@ -939,53 +958,53 @@ pub(crate) fn handle_array_instance_method(
             // Collect elements to be deleted
             let mut deleted_elements = Vec::new();
             for i in start..(start + delete_count).min(current_len) {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                    deleted_elements.push(val.borrow().clone());
+                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    deleted_elements.push(val.borrow(&mc).clone());
                 }
             }
 
             // Create new array for deleted elements
-            let deleted_array = create_array(env)?;
+            let deleted_array = create_array(mc, env)?;
             for (i, val) in deleted_elements.iter().enumerate() {
-                obj_set_key_value(&deleted_array, &i.to_string().into(), val.clone())?;
+                obj_set_key_value(mc, &deleted_array, &i.to_string().into(), val.clone())?;
             }
-            set_array_length(&deleted_array, deleted_elements.len())?;
+            set_array_length(mc, &deleted_array, deleted_elements.len())?;
 
             // Collect tail elements (elements that need to be shifted)
             // We must collect them before we start writing new items to avoid overwriting them
             let mut tail_elements = Vec::new();
             let shift_start = start + delete_count;
             for i in shift_start..current_len {
-                let val_opt = obj_get_key_value(object, &i.to_string().into())?;
-                tail_elements.push(val_opt.map(|v| v.borrow().clone()));
+                let val_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
+                tail_elements.push(val_opt.map(|v| v.borrow(&mc).clone()));
             }
 
             // Insert new items at start position
             let mut write_idx = start;
             for item in args.iter().skip(2) {
-                let item_val = evaluate_expr(env, item)?;
-                obj_set_key_value(object, &write_idx.to_string().into(), item_val)?;
+                let item_val = evaluate_expr(mc, env, item)?;
+                obj_set_key_value(mc, object, &write_idx.to_string().into(), item_val)?;
                 write_idx += 1;
             }
 
             // Write tail elements back
             for val_opt in tail_elements {
                 if let Some(val) = val_opt {
-                    obj_set_key_value(object, &write_idx.to_string().into(), val)?;
+                    obj_set_key_value(mc, object, &write_idx.to_string().into(), val)?;
                 } else {
                     // If the element was a hole (or missing), ensure the destination is also a hole
-                    object.borrow_mut().remove(&write_idx.to_string().into());
+                    object.borrow_mut(&mc).remove(&write_idx.to_string().into());
                 }
                 write_idx += 1;
             }
 
             // If the array shrank, remove the remaining properties at the end
             for i in write_idx..current_len {
-                object.borrow_mut().remove(&i.to_string().into());
+                object.borrow_mut(&mc).remove(&i.to_string().into());
             }
 
             // Update length
-            set_array_length(object, write_idx)?;
+            set_array_length(mc, object, write_idx)?;
 
             Ok(Value::Object(deleted_array))
         }
@@ -995,24 +1014,24 @@ pub(crate) fn handle_array_instance_method(
             if current_len > 0 {
                 // Get the first element
                 // Fallback: mutate the local object copy
-                let first_element = obj_get_key_value(object, &"0".into())?.map(|v| v.borrow().clone());
+                let first_element = obj_get_key_value(mc, object, &"0".into())?.map(|v| v.borrow(&mc).clone());
                 for i in 1..current_len {
-                    let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
+                    let val_rc_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
                     if let Some(val_rc) = val_rc_opt {
-                        obj_set_rc(object, &(i - 1).to_string().into(), val_rc);
+                        obj_set_rc(mc, object, &(i - 1).to_string().into(), val_rc);
                     } else {
-                        object.borrow_mut().remove(&(i - 1).to_string().into());
+                        object.borrow_mut(&mc).remove(&(i - 1).to_string().into());
                     }
                 }
-                object.borrow_mut().remove(&(current_len - 1).to_string().into());
-                set_array_length(object, current_len - 1)?;
+                object.borrow_mut(&mc).remove(&(current_len - 1).to_string().into());
+                set_array_length(mc, object, current_len - 1)?;
                 Ok(first_element.unwrap_or(Value::Undefined))
             } else {
                 Ok(Value::Undefined)
             }
         }
         "unshift" => {
-            let current_len = get_array_length(object).unwrap_or(0);
+            let current_len = get_array_length(mc, object).unwrap_or(0);
             if args.is_empty() {
                 return Ok(Value::Number(current_len as f64));
             }
@@ -1020,19 +1039,19 @@ pub(crate) fn handle_array_instance_method(
             // Fallback: mutate local copy (shift right by number of new elements)
             for i in (0..current_len).rev() {
                 let dest = (i + args.len()).to_string();
-                let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
+                let val_rc_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
                 if let Some(val_rc) = val_rc_opt {
-                    obj_set_rc(object, &dest.into(), val_rc);
+                    obj_set_rc(mc, object, &dest.into(), val_rc);
                 } else {
-                    object.borrow_mut().remove(&dest.into());
+                    object.borrow_mut(&mc).remove(&dest.into());
                 }
             }
             for (i, arg) in args.iter().enumerate() {
-                let val = evaluate_expr(env, arg)?;
-                obj_set_key_value(object, &i.to_string().into(), val)?;
+                let val = evaluate_expr(mc, env, arg)?;
+                obj_set_key_value(mc, object, &i.to_string().into(), val)?;
             }
             let new_len = current_len + args.len();
-            set_array_length(object, new_len)?;
+            set_array_length(mc, object, new_len)?;
             Ok(Value::Number(new_len as f64))
         }
         "fill" => {
@@ -1149,7 +1168,7 @@ pub(crate) fn handle_array_instance_method(
             };
 
             let mut result = Vec::new();
-            flatten_array(object, &mut result, depth)?;
+            flatten_array(mc, object, &mut result, depth)?;
 
             let new_array = create_array(env)?;
             set_array_length(&new_array, result.len())?;
@@ -1173,7 +1192,7 @@ pub(crate) fn handle_array_instance_method(
                         let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
                         let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
                         let mapped_val = evaluate_statements(&func_env, &body)?;
-                        flatten_single_value(mapped_val, &mut result, 1)?;
+                        flatten_single_value(mc, mapped_val, &mut result, 1)?;
                     } else {
                         return Err(raise_eval_error!("Array.flatMap expects a function"));
                     }
@@ -1256,18 +1275,18 @@ pub(crate) fn handle_array_instance_method(
             Ok(Value::Object(object.clone()))
         }
         "entries" => {
-            let length = get_array_length(object).unwrap_or(0);
+            let length = get_array_length(mc, object).unwrap_or(0);
 
-            let result = create_array(env)?;
-            set_array_length(&result, length)?;
+            let result = create_array(mc, env)?;
+            set_array_length(mc, &result, length)?;
             for i in 0..length {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
                     // Create entry [i, value]
-                    let entry = create_array(env)?;
-                    obj_set_key_value(&entry, &"0".into(), Value::Number(i as f64))?;
-                    obj_set_key_value(&entry, &"1".into(), val.borrow().clone())?;
-                    set_array_length(&entry, 2)?;
-                    obj_set_key_value(&result, &i.to_string().into(), Value::Object(entry))?;
+                    let entry = create_array(mc, env)?;
+                    obj_set_key_value(mc, &entry, &"0".into(), Value::Number(i as f64))?;
+                    obj_set_key_value(mc, &entry, &"1".into(), val.borrow(&mc).clone())?;
+                    set_array_length(mc, &entry, 2)?;
+                    obj_set_key_value(mc, &result, &i.to_string().into(), Value::Object(entry))?;
                 }
             }
             Ok(Value::Object(result))
@@ -1361,19 +1380,29 @@ pub(crate) fn handle_array_instance_method(
 }
 
 // Helper functions for array flattening
-fn flatten_array(object: &JSObjectDataPtr, result: &mut Vec<Value>, depth: usize) -> Result<(), JSError> {
-    let current_len = get_array_length(object).unwrap_or(0);
+fn flatten_array<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    result: &mut Vec<Value<'gc>>,
+    depth: usize,
+) -> Result<(), JSError> {
+    let current_len = get_array_length(mc, object).unwrap_or(0);
 
     for i in 0..current_len {
-        if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-            let value = val.borrow().clone();
-            flatten_single_value(value, result, depth)?;
+        if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+            let value = val.borrow(&mc).clone();
+            flatten_single_value(mc, value, result, depth)?;
         }
     }
     Ok(())
 }
 
-fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> Result<(), JSError> {
+fn flatten_single_value<'gc>(
+    mc: &MutationContext<'gc>,
+    value: Value<'gc>,
+    result: &mut Vec<Value<'gc>>,
+    depth: usize,
+) -> Result<(), JSError> {
     if depth == 0 {
         result.push(value);
         return Ok(());
@@ -1382,9 +1411,9 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> 
     match value {
         Value::Object(obj) => {
             // Check if it's an array-like object
-            let is_arr = { is_array(&obj) };
+            let is_arr = { is_array(mc, &obj) };
             if is_arr {
-                flatten_array(&obj, result, depth - 1)?;
+                flatten_array(mc, &obj, result, depth - 1)?;
             } else {
                 result.push(Value::Object(obj));
             }
@@ -1397,18 +1426,18 @@ fn flatten_single_value(value: Value, result: &mut Vec<Value>, depth: usize) -> 
 }
 
 /// Check if an object is an Array
-pub(crate) fn is_array(obj: &JSObjectDataPtr) -> bool {
+pub(crate) fn is_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> bool {
     if let Some(val) = get_own_property(obj, &"__is_array".into())
-        && let Value::Boolean(b) = *val.borrow()
+        && let Value::Boolean(b) = *val.borrow(&mc)
     {
         return b;
     }
     false
 }
 
-pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
+pub(crate) fn get_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
     if let Some(length_rc) = get_own_property(obj, &"length".into())
-        && let Value::Number(len) = *length_rc.borrow()
+        && let Value::Number(len) = *length_rc.borrow(&mc)
         && len >= 0.0
         && len == len.floor()
     {
@@ -1417,23 +1446,23 @@ pub(crate) fn get_array_length(obj: &JSObjectDataPtr) -> Option<usize> {
     None
 }
 
-pub(crate) fn set_array_length(obj: &JSObjectDataPtr, new_length: usize) -> Result<(), JSError> {
-    obj_set_key_value(obj, &"length".into(), Value::Number(new_length as f64))?;
-    obj.borrow_mut().set_non_enumerable("length".into());
+pub(crate) fn set_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
+    obj_set_key_value(mc, obj, &"length".into(), Value::Number(new_length as f64))?;
+    obj.borrow_mut(&mc).set_non_enumerable("length".into());
     Ok(())
 }
 
-pub(crate) fn create_array(env: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSError> {
-    let arr = new_js_object_data();
-    set_array_length(&arr, 0)?;
+pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let arr = new_js_object_data(mc);
+    set_array_length(mc, &arr, 0)?;
 
-    obj_set_key_value(&arr, &"__is_array".into(), Value::Boolean(true))?;
-    arr.borrow_mut().set_non_enumerable("__is_array".into());
+    obj_set_key_value(mc, &arr, &"__is_array".into(), Value::Boolean(true))?;
+    arr.borrow_mut(&mc).set_non_enumerable("__is_array".into());
 
     // Set prototype
     let mut root_env_opt = Some(env.clone());
     while let Some(r) = root_env_opt.clone() {
-        let proto_opt = r.borrow().prototype.clone().and_then(|w| w.upgrade());
+        let proto_opt = r.borrow(&mc).prototype.clone().and_then(|w| w.upgrade());
         if let Some(proto_rc) = proto_opt {
             root_env_opt = Some(proto_rc);
         } else {
@@ -1442,9 +1471,9 @@ pub(crate) fn create_array(env: &JSObjectDataPtr) -> Result<JSObjectDataPtr, JSE
     }
     if let Some(root_env) = root_env_opt {
         // Try to set prototype to Array.prototype
-        if crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Array").is_err() {
+        if crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Array").is_err() {
             // Fallback to Object.prototype
-            let _ = crate::core::set_internal_prototype_from_constructor(&arr, &root_env, "Object");
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Object");
         }
     }
 

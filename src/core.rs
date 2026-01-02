@@ -1,6 +1,140 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::error::JSError;
+use crate::raise_eval_error;
+use gc_arena::Mutation as MutationContext;
+use gc_arena::lock::RefLock as GcCell;
+use gc_arena::{Collect, Gc};
+use std::collections::HashMap;
+
+mod gc;
+
+mod value;
+pub use value::*;
+
+mod property_key;
+pub use property_key::*;
+
+mod statement;
+pub use statement::*;
+
+mod token;
+pub use token::*;
+
+mod number;
+
+mod eval;
+pub use eval::*;
+
+mod parser;
+pub use parser::*;
+
+pub mod js_error;
+pub use js_error::*;
+
+#[derive(Collect)]
+#[collect(no_drop)]
+pub struct JsRoot<'gc> {
+    pub global_env: JSObjectDataPtr<'gc>,
+    pub well_known_symbols: Gc<'gc, GcCell<HashMap<String, gc::GcPtr<'gc, Value<'gc>>>>>,
+}
+
+pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
+
+pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let object_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &object_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+
+    let object_proto = new_js_object_data(mc);
+    obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
+    obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
+
+    env_set(mc, env, "Object", Value::Object(object_ctor))?;
+
+    initialize_error_constructor(mc, env)?;
+
+    Ok(())
+}
+
+pub fn evaluate_script<T, P>(script: T, _script_path: Option<P>) -> Result<String, JSError>
+where
+    T: AsRef<str>,
+    P: AsRef<std::path::Path>,
+{
+    let script = script.as_ref();
+    let mut tokens = tokenize(script)?;
+    if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+        tokens.pop();
+    }
+    let mut index = 0;
+    let mut statements = parse_statements(&tokens, &mut index)?;
+    // DEBUG: show parsed statements for troubleshooting
+    log::trace!("PARSED STATEMENTS: {:#?}", statements);
+
+    let arena = JsArena::new(|mc| {
+        let global_env = new_js_object_data(mc);
+        global_env.borrow_mut(mc).is_function_scope = true;
+
+        JsRoot {
+            global_env,
+            well_known_symbols: Gc::new(mc, GcCell::new(HashMap::new())),
+        }
+    });
+
+    arena.mutate(|mc, root| {
+        initialize_global_constructors(mc, &root.global_env)?;
+        env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
+        let result = evaluate_statements(mc, &root.global_env, &mut statements)?;
+        Ok(value_to_string(&result))
+    })
+}
+
+/// Read a script file from disk and decode it into a UTF-8 Rust `String`.
+/// Supports UTF-8 (with optional BOM) and UTF-16 (LE/BE) with BOM.
+pub fn read_script_file<P: AsRef<std::path::Path>>(path: P) -> Result<String, JSError> {
+    let path = path.as_ref();
+    let bytes = std::fs::read(path).map_err(|e| raise_eval_error!(format!("Failed to read script file '{}': {e}", path.display())))?;
+    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+        // UTF-8 with BOM
+        let s = std::str::from_utf8(&bytes[3..]).map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))?;
+        return Ok(s.to_string());
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+        // UTF-16LE
+        if (bytes.len() - 2) % 2 != 0 {
+            return Err(raise_eval_error!("Invalid UTF-16LE script file length"));
+        }
+        let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
+        for chunk in bytes[2..].chunks(2) {
+            let lo = chunk[0] as u16;
+            let hi = chunk[1] as u16;
+            u16s.push((hi << 8) | lo);
+        }
+        return String::from_utf16(&u16s).map_err(|e| raise_eval_error!(format!("Invalid UTF-16LE script file contents: {e}")));
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+        // UTF-16BE
+        if (bytes.len() - 2) % 2 != 0 {
+            return Err(raise_eval_error!("Invalid UTF-16BE script file length"));
+        }
+        let mut u16s = Vec::with_capacity((bytes.len() - 2) / 2);
+        for chunk in bytes[2..].chunks(2) {
+            let hi = chunk[0] as u16;
+            let lo = chunk[1] as u16;
+            u16s.push((hi << 8) | lo);
+        }
+        return String::from_utf16(&u16s).map_err(|e| raise_eval_error!(format!("Invalid UTF-16BE script file contents: {e}")));
+    }
+    // Otherwise assume UTF-8 without BOM
+    std::str::from_utf8(&bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| raise_eval_error!(format!("Script file contains invalid UTF-8: {e}")))
+}
+
+/*
+#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+
+use crate::error::JSError;
 use crate::js_promise::{PollResult, PromiseState, run_event_loop};
 use crate::raise_eval_error;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -198,7 +332,8 @@ where
             return Err(e);
         }
     };
-    let statements = match parse_statements(&mut tokens) {
+    let mut index = 0;
+    let statements = match parse_statements(&tokens, &mut index) {
         Ok(s) => s,
         Err(e) => {
             log::debug!("parse_statements error: {e:?}");
@@ -919,3 +1054,4 @@ pub fn initialize_global_constructors(env: &JSObjectDataPtr) -> Result<(), JSErr
 
     Ok(())
 }
+// */

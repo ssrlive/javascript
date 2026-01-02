@@ -1,15 +1,476 @@
-#![allow(clippy::collapsible_if, clippy::collapsible_match, clippy::collapsible_else_if)]
+#![allow(
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::collapsible_else_if,
+    unused_variables,
+    dead_code,
+    unused_imports
+)]
 
-use crate::{
-    JSError,
-    core::{
-        BinaryOp, DestructuringElement, Expr, ObjectDestructuringElement, Statement, StatementKind, TemplatePart, Token, TokenData, Value,
-        parse_statements,
-    },
-    js_class::ClassMember,
-    raise_parse_error, raise_parse_error_with_token,
-    unicode::utf16_to_utf8,
-};
+#[derive(Clone, Copy, Debug)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    LeftShift,
+    RightShift,
+    UnsignedRightShift,
+    LessThan,
+    GreaterThan,
+    LessEqual,
+    GreaterEqual,
+    InstanceOf,
+    In,
+    Equal,
+    StrictEqual,
+    NotEqual,
+    StrictNotEqual,
+    BitAnd,
+    BitXor,
+    BitOr,
+    NullishCoalescing,
+    Mod,
+    Pow,
+}
+
+#[derive(Clone, Debug)]
+pub enum DestructuringElement {
+    Variable(String, Option<Box<Expr>>),
+    Property(String, Box<DestructuringElement>),
+    Rest(String),
+    Empty,
+    NestedArray(Vec<DestructuringElement>),
+    NestedObject(Vec<DestructuringElement>),
+}
+
+use crate::JSError;
+use crate::core::statement::{Statement, StatementKind};
+use crate::core::{TemplatePart, Token, TokenData};
+use crate::raise_parse_error;
+
+pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<crate::core::Statement>, JSError> {
+    let mut statements = Vec::new();
+
+    while *index < t.len() && t[*index].token != Token::EOF && t[*index].token != Token::RBrace {
+        if matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1;
+            continue;
+        }
+        statements.push(parse_statement_item(t, index)?);
+    }
+
+    Ok(statements)
+}
+
+fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    if *index >= t.len() {
+        return Err(raise_parse_error!("Unexpected end of input"));
+    }
+    let start_token = &t[*index];
+    let line = start_token.line;
+    let column = start_token.column;
+
+    match start_token.token {
+        Token::Function => parse_function_declaration(t, index),
+        Token::If => parse_if_statement(t, index),
+        Token::Return => parse_return_statement(t, index),
+        Token::Throw => parse_throw_statement(t, index),
+        Token::LBrace => parse_block_statement(t, index),
+        Token::Var => parse_var_statement(t, index),
+        Token::Let => parse_let_statement(t, index),
+        Token::Const => parse_const_statement(t, index),
+        _ => {
+            let expr = parse_expression(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+            Ok(Statement {
+                kind: StatementKind::Expr(expr),
+                line,
+                column,
+            })
+        }
+    }
+}
+
+fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume function
+    let name = if let Token::Identifier(name) = &t[*index].token {
+        name.clone()
+    } else {
+        return Err(raise_parse_error_at(&t[*index..]));
+    };
+    *index += 1;
+
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume (
+
+    let params = parse_parameters(t, index)?;
+
+    if !matches!(t[*index].token, Token::LBrace) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume {
+
+    let body = parse_statement_block(t, index)?;
+
+    Ok(Statement {
+        kind: StatementKind::FunctionDeclaration(name, params, body, false),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume if
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume (
+    let condition = parse_expression(t, index)?;
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume )
+
+    let then_stmt = parse_statement_item(t, index)?;
+    let then_block = match then_stmt.kind {
+        StatementKind::Block(stmts) => stmts,
+        _ => vec![then_stmt],
+    };
+
+    let else_block = if *index < t.len() && matches!(t[*index].token, Token::Else) {
+        *index += 1;
+        let else_stmt = parse_statement_item(t, index)?;
+        match else_stmt.kind {
+            StatementKind::Block(stmts) => Some(stmts),
+            _ => Some(vec![else_stmt]),
+        }
+    } else {
+        None
+    };
+
+    Ok(Statement {
+        kind: StatementKind::If(condition, then_block, else_block),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_return_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume return
+    let expr = if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
+        Some(parse_expression(t, index)?)
+    } else {
+        None
+    };
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+    Ok(Statement {
+        kind: StatementKind::Return(expr),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_throw_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume throw
+    if matches!(t[*index].token, Token::LineTerminator) {
+        return Err(raise_parse_error!("Illegal newline after throw"));
+    }
+    let expr = parse_expression(t, index)?;
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+    Ok(Statement {
+        kind: StatementKind::Throw(expr),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_block_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume {
+    let body = parse_statements(t, index)?;
+    if *index >= t.len() || !matches!(t[*index].token, Token::RBrace) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume }
+    Ok(Statement {
+        kind: StatementKind::Block(body),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_var_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume var
+    let decls = parse_variable_declaration_list(t, index)?;
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+    Ok(Statement {
+        kind: StatementKind::Var(decls),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_let_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume let
+    let decls = parse_variable_declaration_list(t, index)?;
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+    Ok(Statement {
+        kind: StatementKind::Let(decls),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume const
+    let decls = parse_variable_declaration_list(t, index)?;
+    let mut const_decls = Vec::new();
+    for (name, init) in decls {
+        if let Some(expr) = init {
+            const_decls.push((name, expr));
+        } else {
+            return Err(raise_parse_error!("Missing initializer in const declaration"));
+        }
+    }
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+    Ok(Statement {
+        kind: StatementKind::Const(const_decls),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result<Vec<(String, Option<Expr>)>, JSError> {
+    let mut decls = Vec::new();
+    loop {
+        if let Token::Identifier(name) = &t[*index].token {
+            let name = name.clone();
+            *index += 1;
+            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                Some(parse_assignment(t, index)?)
+            } else {
+                None
+            };
+            decls.push((name, init));
+        } else {
+            return Err(raise_parse_error_at(&t[*index..]));
+        }
+
+        if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+            *index += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(decls)
+}
+
+pub fn parse_simple_expression(t: &[crate::core::TokenData], i: usize) -> Result<(Expr, usize), JSError> {
+    let mut index = i;
+    let expr = parse_expression(t, &mut index)?;
+    Ok((expr, index))
+}
+
+pub fn parse_statement(t: &mut [TokenData]) -> Result<Statement, JSError> {
+    if t.is_empty() {
+        return Err(raise_parse_error!("No tokens to parse"));
+    }
+
+    let mut index = 0;
+    parse_statement_item(t, &mut index)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tokenize;
+
+    #[test]
+    fn test_comments_and_empty_lines_not_parsed_as_number_zero() {
+        let src = "// comment\n\n3 + 8\n";
+        let mut tokens = tokenize(src).unwrap();
+        if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+            tokens.pop();
+        }
+        let mut index = 0;
+        let stmts = parse_statements(&tokens, &mut index).unwrap();
+        assert_eq!(stmts.len(), 1, "expected only one statement (the binary expression)");
+
+        match &stmts[0].kind {
+            StatementKind::Expr(expr) => match expr {
+                Expr::Binary(left, op, right) => {
+                    assert!(matches!(op, BinaryOp::Add));
+                    if let Expr::Number(l) = **left {
+                        assert_eq!(l, 3.0);
+                    } else {
+                        panic!("left is not a number")
+                    }
+                    if let Expr::Number(r) = **right {
+                        assert_eq!(r, 8.0);
+                    } else {
+                        panic!("right is not a number")
+                    }
+                }
+                _ => panic!("expected binary add expression"),
+            },
+            _ => panic!("expected expression statement"),
+        }
+    }
+}
+
+pub fn parse_full_expression(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    // Allow line terminators inside expressions (e.g., after a binary operator
+    // at the end of a line). Tokenizer emits `LineTerminator` for newlines —
+    // when parsing an expression we should treat those as insignificant
+    // whitespace and skip them so expressions that span lines parse correctly.
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+    log::trace!(
+        "parse_full_expression: tokens after initial skip (first 8): {:?}",
+        tokens.iter().take(8).collect::<Vec<_>>()
+    );
+    let left = parse_assignment(tokens, index)?;
+    Ok(left)
+}
+
+#[derive(Clone, Debug)]
+pub enum Expr {
+    Number(f64),
+    StringLit(Vec<u16>),
+    Boolean(bool),
+    Null,
+    Undefined,
+    Var(String, Option<usize>, Option<usize>),
+    Assign(Box<Expr>, Box<Expr>),
+    Binary(Box<Expr>, BinaryOp, Box<Expr>),
+    LogicalAnd(Box<Expr>, Box<Expr>),
+    LogicalOr(Box<Expr>, Box<Expr>),
+    NullishCoalescing(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
+    Pow(Box<Expr>, Box<Expr>),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    LogicalAndAssign(Box<Expr>, Box<Expr>),
+    LogicalOrAssign(Box<Expr>, Box<Expr>),
+    NullishAssign(Box<Expr>, Box<Expr>),
+    AddAssign(Box<Expr>, Box<Expr>),
+    SubAssign(Box<Expr>, Box<Expr>),
+    PowAssign(Box<Expr>, Box<Expr>),
+    MulAssign(Box<Expr>, Box<Expr>),
+    DivAssign(Box<Expr>, Box<Expr>),
+    ModAssign(Box<Expr>, Box<Expr>),
+    BitXorAssign(Box<Expr>, Box<Expr>),
+    BitAndAssign(Box<Expr>, Box<Expr>),
+    BitOrAssign(Box<Expr>, Box<Expr>),
+    LeftShiftAssign(Box<Expr>, Box<Expr>),
+    RightShiftAssign(Box<Expr>, Box<Expr>),
+    UnsignedRightShiftAssign(Box<Expr>, Box<Expr>),
+    OptionalProperty(Box<Expr>, String),
+    OptionalIndex(Box<Expr>, Box<Expr>),
+    OptionalCall(Box<Expr>, Vec<Expr>),
+    Property(Box<Expr>, String),
+    Index(Box<Expr>, Box<Expr>),
+    BigInt(Vec<u16>),
+    TypeOf(Box<Expr>),
+    Delete(Box<Expr>),
+    Void(Box<Expr>),
+    Await(Box<Expr>),
+    Yield(Option<Box<Expr>>),
+    YieldStar(Box<Expr>),
+    LogicalNot(Box<Expr>),
+    // Class(std::rc::Rc<crate::js_class::ClassDefinition>),
+    New(Box<Expr>, Vec<Expr>),
+    UnaryNeg(Box<Expr>),
+    UnaryPlus(Box<Expr>),
+    BitNot(Box<Expr>),
+    Increment(Box<Expr>),
+    Decrement(Box<Expr>),
+    Spread(Box<Expr>),
+    ArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
+    This,
+    SuperCall(Vec<Expr>),
+    SuperMethod(String, Vec<Expr>),
+    SuperProperty(String),
+    Super,
+    Object(Vec<(Expr, Expr, bool)>),
+    Getter(Box<Expr>),
+    Setter(Box<Expr>),
+    Array(Vec<Option<Expr>>),
+    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
+    PostIncrement(Box<Expr>),
+    PostDecrement(Box<Expr>),
+    TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>),
+    TemplateString(Vec<TemplatePart>),
+    Regex(String, String),
+    Comma(Box<Expr>, Box<Expr>),
+    Function(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    Call(Box<Expr>, Vec<Expr>),
+    ValuePlaceholder,
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for BinaryOp {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {}
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for DestructuringElement {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        match self {
+            DestructuringElement::Variable(_, e) => {
+                if let Some(e) = e {
+                    e.trace(cc);
+                }
+            }
+            DestructuringElement::Property(_, elem) => {
+                elem.trace(cc);
+            }
+            DestructuringElement::Rest(_) => {}
+            DestructuringElement::Empty => {}
+            DestructuringElement::NestedArray(arr) => {
+                for elem in arr {
+                    elem.trace(cc);
+                }
+            }
+            DestructuringElement::NestedObject(obj) => {
+                for elem in obj {
+                    elem.trace(cc);
+                }
+            }
+        }
+    }
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for Expr {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::core::gc::trace_expr(cc, self);
+    }
+}
+
+use crate::{core::value::Value, raise_parse_error_with_token, unicode::utf16_to_utf8};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -25,19 +486,19 @@ pub fn raise_parse_error_at(tokens: &[TokenData]) -> JSError {
 }
 
 // Helper: Generic binary operator parser for left-associative operators
-fn parse_binary_op<F, M>(tokens: &mut Vec<TokenData>, parse_next_level: F, op_mapper: M) -> Result<Expr, JSError>
+fn parse_binary_op<F, M>(tokens: &[TokenData], index: &mut usize, parse_next_level: F, op_mapper: M) -> Result<Expr, JSError>
 where
-    F: Fn(&mut Vec<TokenData>) -> Result<Expr, JSError>,
+    F: Fn(&[TokenData], &mut usize) -> Result<Expr, JSError>,
     M: Fn(&Token) -> Option<BinaryOp>,
 {
-    let mut left = parse_next_level(tokens)?;
+    let mut left = parse_next_level(tokens, index)?;
     loop {
-        if tokens.is_empty() {
+        if *index >= tokens.len() {
             break;
         }
-        if let Some(op) = op_mapper(&tokens[0].token) {
-            tokens.remove(0);
-            let right = parse_next_level(tokens)?;
+        if let Some(op) = op_mapper(&tokens[*index].token) {
+            *index += 1;
+            let right = parse_next_level(tokens, index)?;
             left = Expr::Binary(Box::new(left), op, Box::new(right));
         } else {
             break;
@@ -59,28 +520,28 @@ fn flatten_commas(expr: Expr) -> Vec<Expr> {
 }
 
 #[allow(clippy::type_complexity)]
-pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<DestructuringElement>, JSError> {
+pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
     let mut params = Vec::new();
     log::trace!(
         "parse_parameters: starting tokens (first 16): {:?}",
         tokens.iter().take(16).collect::<Vec<_>>()
     );
-    if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+    if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
         loop {
-            if matches!(tokens[0].token, Token::Spread) {
+            if matches!(tokens[*index].token, Token::Spread) {
                 // Handle rest parameter: ...args
-                tokens.remove(0); // consume ...
-                if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                    tokens.remove(0);
+                *index += 1; // consume ...
+                if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                    *index += 1;
                     params.push(DestructuringElement::Rest(name));
 
-                    if tokens.is_empty() {
+                    if *index >= tokens.len() {
                         return Err(raise_parse_error!("Unexpected end of parameters after rest"));
                     }
                     // Rest parameter must be the last one
-                    if !matches!(tokens[0].token, Token::RParen) {
+                    if !matches!(tokens[*index].token, Token::RParen) {
                         return Err(raise_parse_error_with_token!(
-                            tokens[0],
+                            tokens[*index],
                             "Rest parameter must be last formal parameter"
                         ));
                     }
@@ -88,19 +549,19 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
-            } else if matches!(tokens[0].token, Token::LBrace) {
-                let pattern = parse_object_destructuring_pattern(tokens)?;
+            } else if matches!(tokens[*index].token, Token::LBrace) {
+                let pattern = parse_object_destructuring_pattern(tokens, index)?;
                 params.push(DestructuringElement::NestedObject(pattern));
-            } else if matches!(tokens[0].token, Token::LBracket) {
-                let pattern = parse_array_destructuring_pattern(tokens)?;
+            } else if matches!(tokens[*index].token, Token::LBracket) {
+                let pattern = parse_array_destructuring_pattern(tokens, index)?;
                 params.push(DestructuringElement::NestedArray(pattern));
-            } else if let Some(Token::Identifier(param)) = tokens.first().map(|t| &t.token).cloned() {
-                tokens.remove(0);
+            } else if let Some(Token::Identifier(param)) = tokens.get(*index).map(|t| &t.token).cloned() {
+                *index += 1;
                 let mut default_expr: Option<Box<Expr>> = None;
                 // Support default initializers: identifier '=' expression
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                    tokens.remove(0);
-                    let expr = parse_assignment(tokens)?;
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1;
+                    let expr = parse_assignment(tokens, index)?;
                     default_expr = Some(Box::new(expr));
                 }
                 params.push(DestructuringElement::Variable(param, default_expr));
@@ -108,22 +569,22 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
                 return Err(raise_parse_error_at(tokens));
             }
 
-            if tokens.is_empty() {
+            if *index >= tokens.len() {
                 return Err(raise_parse_error!("Unexpected end of parameters"));
             }
-            if matches!(tokens[0].token, Token::RParen) {
+            if matches!(tokens[*index].token, Token::RParen) {
                 break;
             }
-            if !matches!(tokens[0].token, Token::Comma) {
-                return Err(raise_parse_error_with_token!(tokens[0], "Expected ',' in parameter list"));
+            if !matches!(tokens[*index].token, Token::Comma) {
+                return Err(raise_parse_error_with_token!(tokens[*index], "Expected ',' in parameter list"));
             }
-            tokens.remove(0); // consume ,
+            *index += 1; // consume ,
         }
     }
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
         return Err(raise_parse_error_at(tokens));
     }
-    tokens.remove(0); // consume )
+    *index += 1; // consume )
     log::trace!(
         "parse_parameters: consumed ')', remaining tokens (first 16): {:?}",
         tokens.iter().take(16).collect::<Vec<_>>()
@@ -131,49 +592,49 @@ pub fn parse_parameters(tokens: &mut Vec<TokenData>) -> Result<Vec<Destructuring
     Ok(params)
 }
 
-pub fn parse_statement_block(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, JSError> {
-    let body = parse_statements(tokens)?;
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
-        return Err(raise_parse_error_at(tokens));
+pub fn parse_statement_block(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    let body = parse_statements(tokens, index)?;
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+        return Err(raise_parse_error_at(&tokens[*index..]));
     }
-    tokens.remove(0); // consume }
+    *index += 1; // consume }
     Ok(body)
 }
 
-pub fn parse_expression(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
+pub fn parse_expression(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     // Allow line terminators inside expressions (e.g., after a binary operator
     // at the end of a line). Tokenizer emits `LineTerminator` for newlines —
     // when parsing an expression we should treat those as insignificant
     // whitespace and skip them so expressions that span lines parse correctly.
-    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-        tokens.remove(0);
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
     }
     log::trace!(
         "parse_object_destructuring_pattern: tokens after initial skip (first 8): {:?}",
         tokens.iter().take(8).collect::<Vec<_>>()
     );
-    let mut left = parse_assignment(tokens)?;
-    while !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-        tokens.remove(0); // consume ,
-        let right = parse_assignment(tokens)?;
+    let mut left = parse_assignment(tokens, index)?;
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+        *index += 1; // consume ,
+        let right = parse_assignment(tokens, index)?;
         left = Expr::Comma(Box::new(left), Box::new(right));
     }
     Ok(left)
 }
 
-pub fn parse_conditional(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    let condition = parse_nullish(tokens)?;
-    if tokens.is_empty() {
+pub fn parse_conditional(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let condition = parse_nullish(tokens, index)?;
+    if *index >= tokens.len() {
         return Ok(condition);
     }
-    if matches!(tokens[0].token, Token::QuestionMark) {
-        tokens.remove(0); // consume ?
-        let true_expr = parse_conditional(tokens)?; // Allow nesting
-        if tokens.is_empty() || !matches!(tokens[0].token, Token::Colon) {
-            return Err(raise_parse_error_at(tokens));
+    if matches!(tokens[*index].token, Token::QuestionMark) {
+        *index += 1; // consume ?
+        let true_expr = parse_conditional(tokens, index)?; // Allow nesting
+        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Colon) {
+            return Err(raise_parse_error_at(&tokens[*index..]));
         }
-        tokens.remove(0); // consume :
-        let false_expr = parse_conditional(tokens)?; // Allow nesting
+        *index += 1; // consume :
+        let false_expr = parse_conditional(tokens, index)?; // Allow nesting
         Ok(Expr::Conditional(Box::new(condition), Box::new(true_expr), Box::new(false_expr)))
     } else {
         Ok(condition)
@@ -213,18 +674,18 @@ fn contains_optional_chain(e: &Expr) -> bool {
     }
 }
 
-pub fn parse_assignment(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    let left = parse_conditional(tokens)?;
-    if tokens.is_empty() {
+pub fn parse_assignment(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let left = parse_conditional(tokens, index)?;
+    if *index >= tokens.len() {
         return Ok(left);
     }
 
-    if let Some(ctor) = get_assignment_ctor(&tokens[0].token) {
+    if let Some(ctor) = get_assignment_ctor(&tokens[*index].token) {
         if contains_optional_chain(&left) {
-            return Err(raise_parse_error_at(tokens));
+            return Err(raise_parse_error_at(&tokens[*index..]));
         }
-        tokens.remove(0);
-        let right = parse_assignment(tokens)?;
+        *index += 1;
+        let right = parse_assignment(tokens, index)?;
         return Ok(ctor(Box::new(left), Box::new(right)));
     }
 
@@ -235,8 +696,8 @@ pub fn parse_assignment(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
 // -> additive -> shift -> relational -> equality -> bitwise-and -> xor -> or
 // -> logical-and -> logical-or -> nullish -> conditional -> assignment).
 
-fn parse_shift(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_additive, |token| match token {
+fn parse_shift(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_additive, |token| match token {
         Token::LeftShift => Some(BinaryOp::LeftShift),
         Token::RightShift => Some(BinaryOp::RightShift),
         Token::UnsignedRightShift => Some(BinaryOp::UnsignedRightShift),
@@ -244,8 +705,8 @@ fn parse_shift(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     })
 }
 
-fn parse_relational(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_shift, |token| match token {
+fn parse_relational(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_shift, |token| match token {
         Token::LessThan => Some(BinaryOp::LessThan),
         Token::GreaterThan => Some(BinaryOp::GreaterThan),
         Token::LessEqual => Some(BinaryOp::LessEqual),
@@ -256,8 +717,8 @@ fn parse_relational(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     })
 }
 
-fn parse_equality(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_relational, |token| match token {
+fn parse_equality(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_relational, |token| match token {
         Token::Equal => Some(BinaryOp::Equal),
         Token::StrictEqual => Some(BinaryOp::StrictEqual),
         Token::NotEqual => Some(BinaryOp::NotEqual),
@@ -266,79 +727,79 @@ fn parse_equality(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     })
 }
 
-fn parse_bitwise_and(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_equality, |token| match token {
+fn parse_bitwise_and(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_equality, |token| match token {
         Token::BitAnd => Some(BinaryOp::BitAnd),
         _ => None,
     })
 }
 
-fn parse_bitwise_xor_chain(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_bitwise_and, |token| match token {
+fn parse_bitwise_xor_chain(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_bitwise_and, |token| match token {
         Token::BitXor => Some(BinaryOp::BitXor),
         _ => None,
     })
 }
 
-fn parse_bitwise_or(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_bitwise_xor_chain, |token| match token {
+fn parse_bitwise_or(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_bitwise_xor_chain, |token| match token {
         Token::BitOr => Some(BinaryOp::BitOr),
         _ => None,
     })
 }
 
-fn parse_logical_and(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    let left = parse_bitwise_or(tokens)?;
-    if tokens.is_empty() {
+fn parse_logical_and(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let left = parse_bitwise_or(tokens, index)?;
+    if *index >= tokens.len() {
         return Ok(left);
     }
-    if matches!(tokens[0].token, Token::LogicalAnd) {
-        tokens.remove(0);
-        let right = parse_logical_and(tokens)?;
+    if matches!(tokens[*index].token, Token::LogicalAnd) {
+        *index += 1;
+        let right = parse_logical_and(tokens, index)?;
         Ok(Expr::LogicalAnd(Box::new(left), Box::new(right)))
     } else {
         Ok(left)
     }
 }
 
-fn parse_logical_or(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    let left = parse_logical_and(tokens)?;
-    if tokens.is_empty() {
+fn parse_logical_or(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let left = parse_logical_and(tokens, index)?;
+    if *index >= tokens.len() {
         return Ok(left);
     }
-    if matches!(tokens[0].token, Token::LogicalOr) {
-        tokens.remove(0);
-        let right = parse_logical_or(tokens)?;
+    if matches!(tokens[*index].token, Token::LogicalOr) {
+        *index += 1;
+        let right = parse_logical_or(tokens, index)?;
         Ok(Expr::LogicalOr(Box::new(left), Box::new(right)))
     } else {
         Ok(left)
     }
 }
 
-fn parse_nullish(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    let left = parse_logical_or(tokens)?;
-    if tokens.is_empty() {
+fn parse_nullish(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    let left = parse_logical_or(tokens, index)?;
+    if *index >= tokens.len() {
         return Ok(left);
     }
-    if matches!(tokens[0].token, Token::NullishCoalescing) {
-        tokens.remove(0);
-        let right = parse_nullish(tokens)?;
+    if matches!(tokens[*index].token, Token::NullishCoalescing) {
+        *index += 1;
+        let right = parse_nullish(tokens, index)?;
         Ok(Expr::Binary(Box::new(left), BinaryOp::NullishCoalescing, Box::new(right)))
     } else {
         Ok(left)
     }
 }
 
-fn parse_additive(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_multiplicative, |token| match token {
+fn parse_additive(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_multiplicative, |token| match token {
         Token::Plus => Some(BinaryOp::Add),
         Token::Minus => Some(BinaryOp::Sub),
         _ => None,
     })
 }
 
-fn parse_multiplicative(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
-    parse_binary_op(tokens, parse_exponentiation, |token| match token {
+fn parse_multiplicative(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
+    parse_binary_op(tokens, index, parse_exponentiation, |token| match token {
         Token::Multiply => Some(BinaryOp::Mul),
         Token::Divide => Some(BinaryOp::Div),
         Token::Mod => Some(BinaryOp::Mod),
@@ -346,15 +807,15 @@ fn parse_multiplicative(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
     })
 }
 
-fn parse_exponentiation(tokens: &mut Vec<TokenData>) -> Result<Expr, JSError> {
+fn parse_exponentiation(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     // Right-associative exponentiation operator: a ** b ** c -> a ** (b ** c)
-    let left = parse_primary(tokens, true)?;
-    if tokens.is_empty() {
+    let left = parse_primary(tokens, index, true)?;
+    if *index >= tokens.len() {
         return Ok(left);
     }
-    if matches!(tokens[0].token, Token::Exponent) {
-        tokens.remove(0);
-        let right = parse_exponentiation(tokens)?; // right-associative
+    if matches!(tokens[*index].token, Token::Exponent) {
+        *index += 1;
+        let right = parse_exponentiation(tokens, index)?; // right-associative
         Ok(Expr::Binary(Box::new(left), BinaryOp::Pow, Box::new(right)))
     } else {
         Ok(left)
@@ -406,6 +867,7 @@ impl Drop for ClassPrivateNamesGuard {
     }
 }
 
+/*
 pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>, JSError> {
     // Mark that we're parsing inside a class body so that private identifier
     // property access (like `obj.#x`) can be validated syntactically only
@@ -413,10 +875,10 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
     // cross-thread races while running tests in parallel.
     let _guard = ClassContextGuard::new();
 
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
         return Err(raise_parse_error_at(tokens));
     }
-    tokens.remove(0); // consume {
+    *index += 1; // consume {
 
     let mut members = Vec::new();
     // Track declared private names to detect duplicate private declarations.
@@ -608,24 +1070,24 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
         }
     }
 
-    while !tokens.is_empty() && !matches!(tokens[0].token, Token::RBrace) {
+    while !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RBrace) {
         // Skip blank lines or stray semicolons in class body
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
-            tokens.remove(0);
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1;
         }
-        if tokens.is_empty() || matches!(tokens[0].token, Token::RBrace) {
+        if *index >= tokens.len() || matches!(tokens[*index].token, Token::RBrace) {
             break;
         }
-        let is_static = if !tokens.is_empty() && matches!(tokens[0].token, Token::Static) {
-            tokens.remove(0);
+        let is_static = if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Static) {
+            *index += 1;
             true
         } else {
             false
         };
 
-        if is_static && !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
-            tokens.remove(0); // consume {
-            let body = parse_statement_block(tokens)?;
+        if is_static && !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+            *index += 1; // consume {
+            let body = parse_statement_block(tokens, index)?;
             members.push(ClassMember::StaticBlock(body));
             continue;
         }
@@ -634,28 +1096,28 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
         if let Some(Token::Identifier(kw)) = tokens.first().map(|t| &t.token) {
             if kw == "get" || kw == "set" {
                 let is_getter = kw == "get";
-                tokens.remove(0); // consume get/set keyword
-                if tokens.is_empty()
-                    || (!matches!(tokens[0].token, Token::Identifier(_)) && !matches!(tokens[0].token, Token::PrivateIdentifier(_)))
+                *index += 1; // consume get/set keyword
+                if *index >= tokens.len()
+                    || (!matches!(tokens[*index].token, Token::Identifier(_)) && !matches!(tokens[*index].token, Token::PrivateIdentifier(_)))
                 {
                     return Err(raise_parse_error_at(tokens));
                 }
                 // Capture whether this accessor uses a private identifier
-                let (prop_name, is_private) = match &tokens.remove(0).token {
+                let (prop_name, is_private) = match & *index += 1.token {
                     Token::Identifier(name) => (name.clone(), false),
                     Token::PrivateIdentifier(name) => (name.clone(), true),
                     _ => return Err(raise_parse_error_at(tokens)),
                 };
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume (
-                let params = parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                *index += 1; // consume (
+                let params = parse_parameters(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume {
-                let body = parse_statement_block(tokens)?;
+                *index += 1; // consume {
+                let body = parse_statement_block(tokens, index)?;
                 if is_getter {
                     if !params.is_empty() {
                         return Err(raise_parse_error_at(tokens)); // getters should have no parameters
@@ -699,49 +1161,49 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
         if let Some(Token::Identifier(method_name)) = tokens.first().map(|t| &t.token) {
             let method_name = method_name.clone();
             if method_name == "constructor" {
-                tokens.remove(0);
+                *index += 1;
                 // Parse constructor
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume (
-                let params = parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                *index += 1; // consume (
+                let params = parse_parameters(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume {
-                let body = parse_statement_block(tokens)?;
+                *index += 1; // consume {
+                let body = parse_statement_block(tokens, index)?;
                 members.push(ClassMember::Constructor(params, body));
             } else {
-                tokens.remove(0);
-                if tokens.is_empty() {
+                *index += 1;
+                if *index >= tokens.len() {
                     return Err(raise_parse_error_at(tokens));
                 }
                 // Check for getter/setter
-                let is_getter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "get");
-                let is_setter = matches!(tokens[0].token, Token::Identifier(ref id) if id == "set");
+                let is_getter = matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get");
+                let is_setter = matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set");
                 if is_getter || is_setter {
-                    tokens.remove(0); // consume get/set
-                    if tokens.is_empty()
-                        || (!matches!(tokens[0].token, Token::Identifier(_)) && !matches!(tokens[0].token, Token::PrivateIdentifier(_)))
+                    *index += 1; // consume get/set
+                    if *index >= tokens.len()
+                        || (!matches!(tokens[*index].token, Token::Identifier(_)) && !matches!(tokens[*index].token, Token::PrivateIdentifier(_)))
                     {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    let (prop_name, is_private) = match &tokens.remove(0).token {
+                    let (prop_name, is_private) = match & *index += 1.token {
                         Token::Identifier(name) => (name.clone(), false),
                         Token::PrivateIdentifier(name) => (name.clone(), true),
                         _ => return Err(raise_parse_error_at(tokens)),
                     };
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume (
-                    let params = parse_parameters(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    *index += 1; // consume (
+                    let params = parse_parameters(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume {
-                    let body = parse_statement_block(tokens)?;
+                    *index += 1; // consume {
+                    let body = parse_statement_block(tokens, index)?;
                     if is_getter {
                         if !params.is_empty() {
                             return Err(raise_parse_error_at(tokens)); // getters should have no parameters
@@ -778,40 +1240,40 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
                             }
                         }
                     }
-                } else if matches!(tokens[0].token, Token::LParen) {
+                } else if matches!(tokens[*index].token, Token::LParen) {
                     // This is a method
-                    tokens.remove(0); // consume (
-                    let params = parse_parameters(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    *index += 1; // consume (
+                    let params = parse_parameters(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume {
-                    let body = parse_statement_block(tokens)?;
+                    *index += 1; // consume {
+                    let body = parse_statement_block(tokens, index)?;
                     if is_static {
                         members.push(ClassMember::StaticMethod(method_name, params, body));
                     } else {
                         members.push(ClassMember::Method(method_name, params, body));
                     }
-                } else if matches!(tokens[0].token, Token::Assign) {
+                } else if matches!(tokens[*index].token, Token::Assign) {
                     // This is a property
-                    tokens.remove(0); // consume =
+                    *index += 1; // consume =
                     let value = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Semicolon | Token::LineTerminator) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume ;
+                    *index += 1; // consume ;
                     if is_static {
                         members.push(ClassMember::StaticProperty(method_name, value));
                     } else {
                         members.push(ClassMember::Property(method_name, value));
                     }
-                } else if matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                } else if matches!(tokens[*index].token, Token::Semicolon | Token::LineTerminator) {
                     // Property without initializer
-                    tokens.remove(0); // consume ;
+                    *index += 1; // consume ;
                     if is_static {
-                        members.push(ClassMember::StaticProperty(method_name, Expr::Value(Value::Undefined)));
+                        members.push(ClassMember::StaticProperty(method_name, Expr::Undefined));
                     } else {
-                        members.push(ClassMember::Property(method_name, Expr::Value(Value::Undefined)));
+                        members.push(ClassMember::Property(method_name, Expr::Undefined));
                     }
                 } else {
                     return Err(raise_parse_error_at(tokens));
@@ -822,7 +1284,7 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             // Duplicate private names are a syntax error
             if declared_private_names.contains(&name) {
                 let msg = format!("Identifier '#{name}' has already been declared");
-                return Err(raise_parse_error_with_token!(tokens[0], msg));
+                return Err(raise_parse_error_with_token!(tokens[*index], msg));
             }
             // Record declaration
             declared_private_names.insert(name.clone());
@@ -830,41 +1292,41 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             // method bodies parsed subsequently.
             current_private_names.borrow_mut().insert(name.clone());
 
-            tokens.remove(0);
-            if matches!(tokens[0].token, Token::LParen) {
+            *index += 1;
+            if matches!(tokens[*index].token, Token::LParen) {
                 // Private method
-                tokens.remove(0); // consume (
-                let params = parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                *index += 1; // consume (
+                let params = parse_parameters(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume {
-                let body = parse_statement_block(tokens)?;
+                *index += 1; // consume {
+                let body = parse_statement_block(tokens, index)?;
                 if is_static {
                     members.push(ClassMember::PrivateStaticMethod(name, params, body));
                 } else {
                     members.push(ClassMember::PrivateMethod(name, params, body));
                 }
-            } else if matches!(tokens[0].token, Token::Assign) {
+            } else if matches!(tokens[*index].token, Token::Assign) {
                 // Private property
-                tokens.remove(0); // consume =
+                *index += 1; // consume =
                 let value = parse_expression(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Semicolon | Token::LineTerminator) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume ;
+                *index += 1; // consume ;
                 if is_static {
                     members.push(ClassMember::PrivateStaticProperty(name, value));
                 } else {
                     members.push(ClassMember::PrivateProperty(name, value));
                 }
-            } else if matches!(tokens[0].token, Token::Semicolon | Token::LineTerminator) {
+            } else if matches!(tokens[*index].token, Token::Semicolon | Token::LineTerminator) {
                 // Private property without initializer
-                tokens.remove(0); // consume ;
+                *index += 1; // consume ;
                 if is_static {
-                    members.push(ClassMember::PrivateStaticProperty(name, Expr::Value(Value::Undefined)));
+                    members.push(ClassMember::PrivateStaticProperty(name, Expr::Undefined));
                 } else {
-                    members.push(ClassMember::PrivateProperty(name, Expr::Value(Value::Undefined)));
+                    members.push(ClassMember::PrivateProperty(name, Expr::Undefined));
                 }
             } else {
                 return Err(raise_parse_error_at(tokens));
@@ -874,37 +1336,39 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
         }
     }
 
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
         return Err(raise_parse_error_at(tokens));
     }
-    tokens.remove(0); // consume }
+    *index += 1; // consume }
     Ok(members)
 }
+*/
 
-fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, JSError> {
+fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> Result<Expr, JSError> {
     // Skip any leading line terminators inside expressions so multi-line
     // expression continuations like `a +\n b` parse correctly.
-    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-        tokens.remove(0);
+    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
     }
-    if tokens.is_empty() {
-        return Err(raise_parse_error_at(tokens));
+    if *index >= tokens.len() {
+        return Err(raise_parse_error_at(&tokens[*index..]));
     }
-    let token_data = tokens.remove(0);
-    let current = token_data.token.clone();
+    let token_data = &tokens[*index];
+    *index += 1;
+    let current = &token_data.token;
     let mut expr = match current {
-        Token::Number(n) => Expr::Number(n),
-        Token::BigInt(s) => Expr::BigInt(s.clone()),
-        Token::StringLit(s) => Expr::StringLit(s),
+        Token::Number(n) => Expr::Number(*n),
+        Token::BigInt(s) => Expr::BigInt(crate::unicode::utf8_to_utf16(s)),
+        Token::StringLit(s) => Expr::StringLit(s.to_vec()),
         Token::True => Expr::Boolean(true),
         Token::False => Expr::Boolean(false),
-        Token::Null => Expr::Value(Value::Null),
+        Token::Null => Expr::Null,
         Token::TypeOf => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::TypeOf(Box::new(inner))
         }
         Token::Delete => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             // Deleting a private field is a SyntaxError (e.g., `delete this.#priv`)
             if let Expr::Property(_, prop_name) = &inner {
                 if prop_name.starts_with('#') {
@@ -915,42 +1379,42 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             Expr::Delete(Box::new(inner))
         }
         Token::Void => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::Void(Box::new(inner))
         }
         Token::Await => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::Await(Box::new(inner))
         }
         Token::Yield => {
             // yield can be followed by an optional expression
-            if tokens.is_empty()
+            if *index >= tokens.len()
                 || matches!(
-                    tokens[0].token,
+                    tokens[*index].token,
                     Token::Semicolon | Token::Comma | Token::RParen | Token::RBracket | Token::RBrace | Token::Colon
                 )
             {
                 Expr::Yield(None)
             } else {
-                let inner = parse_assignment(tokens)?;
+                let inner = parse_assignment(tokens, index)?;
                 Expr::Yield(Some(Box::new(inner)))
             }
         }
         Token::YieldStar => {
-            let inner = parse_assignment(tokens)?;
+            let inner = parse_assignment(tokens, index)?;
             Expr::YieldStar(Box::new(inner))
         }
         Token::LogicalNot => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::LogicalNot(Box::new(inner))
         }
         Token::Class => {
             // Class Expression
             // class [Identifier] [extends Expression] { ClassBody }
-            let name = if !tokens.is_empty() {
-                if let Token::Identifier(n) = &tokens[0].token {
+            let name = if *index < tokens.len() {
+                if let Token::Identifier(n) = &tokens[*index].token {
                     let n = n.clone();
-                    tokens.remove(0);
+                    *index += 1;
                     n
                 } else {
                     "".to_string() // Anonymous class expression
@@ -959,54 +1423,55 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 "".to_string()
             };
 
-            let extends = if !tokens.is_empty() && matches!(tokens[0].token, Token::Extends) {
-                tokens.remove(0); // consume extends
-                Some(parse_expression(tokens)?)
+            let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
+                *index += 1; // consume extends
+                Some(parse_expression(tokens, index)?)
             } else {
                 None
             };
 
-            let members = parse_class_body(tokens)?;
+            // let members = parse_class_body(tokens)?;
 
-            let class_def = crate::js_class::ClassDefinition { name, extends, members };
-            Expr::Class(std::rc::Rc::new(class_def))
+            // let class_def = crate::js_class::ClassDefinition { name, extends, members };
+            // Expr::Class(std::rc::Rc::new(class_def))
+            Expr::Number(0.0) // TODO: class
         }
         Token::New => {
-            let constructor = parse_primary(tokens, false)?;
+            let constructor = parse_primary(tokens, index, false)?;
 
             // Check for arguments
-            let args = if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                tokens.remove(0); // consume '('
+            let args = if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                *index += 1; // consume '('
                 let mut args = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                     loop {
-                        let arg = parse_assignment(tokens)?;
+                        let arg = parse_assignment(tokens, index)?;
                         args.push(arg);
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RParen) {
+                        if matches!(tokens[*index].token, Token::RParen) {
                             break;
                         }
-                        if !matches!(tokens[0].token, Token::Comma) {
+                        if !matches!(tokens[*index].token, Token::Comma) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume ','
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                            tokens.remove(0);
+                        *index += 1; // consume ','
+                        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                            *index += 1;
                         }
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RParen) {
+                        if matches!(tokens[*index].token, Token::RParen) {
                             break;
                         }
                     }
                 }
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume ')'
+                *index += 1; // consume ')'
                 if args.len() == 1 {
                     if let Expr::Comma(_, _) = &args[0] {
                         let first = args.remove(0);
@@ -1021,27 +1486,27 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             Expr::New(Box::new(constructor), args)
         }
         Token::Minus => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::UnaryNeg(Box::new(inner))
         }
         Token::Plus => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::UnaryPlus(Box::new(inner))
         }
         Token::BitNot => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::BitNot(Box::new(inner))
         }
         Token::Increment => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::Increment(Box::new(inner))
         }
         Token::Decrement => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::Decrement(Box::new(inner))
         }
         Token::Spread => {
-            let inner = parse_primary(tokens, true)?;
+            let inner = parse_primary(tokens, index, true)?;
             Expr::Spread(Box::new(inner))
         }
         Token::TemplateString(parts) => {
@@ -1051,8 +1516,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 match &parts[0] {
                     TemplatePart::String(s) => Expr::StringLit(s.clone()),
                     TemplatePart::Expr(expr_tokens) => {
-                        let mut expr_tokens = expr_tokens.clone();
-                        let e = parse_expression(&mut expr_tokens)?;
+                        let expr_tokens = expr_tokens.clone();
+                        let e = parse_expression(&expr_tokens, &mut 0)?;
                         // Force string context by prepending "" + e
                         Expr::Binary(Box::new(Expr::StringLit(Vec::new())), BinaryOp::Add, Box::new(e))
                     }
@@ -1062,8 +1527,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 let mut expr = match &parts[0] {
                     TemplatePart::String(s) => Expr::StringLit(s.clone()),
                     TemplatePart::Expr(expr_tokens) => {
-                        let mut expr_tokens = expr_tokens.clone();
-                        let e = parse_expression(&mut expr_tokens)?;
+                        let expr_tokens = expr_tokens.clone();
+                        let e = parse_expression(&expr_tokens, &mut 0)?;
                         // Force string context by prepending "" + e
                         Expr::Binary(Box::new(Expr::StringLit(Vec::new())), BinaryOp::Add, Box::new(e))
                     }
@@ -1072,8 +1537,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     let right = match part {
                         TemplatePart::String(s) => Expr::StringLit(s.clone()),
                         TemplatePart::Expr(expr_tokens) => {
-                            let mut expr_tokens = expr_tokens.clone();
-                            parse_expression(&mut expr_tokens)?
+                            let expr_tokens = expr_tokens.clone();
+                            parse_expression(&expr_tokens, &mut 0)?
                         }
                     };
                     expr = Expr::Binary(Box::new(expr), BinaryOp::Add, Box::new(right));
@@ -1085,91 +1550,92 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             let line = token_data.line;
             let column = token_data.column;
             let mut expr = Expr::Var(name.clone(), Some(line), Some(column));
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                tokens.remove(0);
-                let body = parse_arrow_body(tokens)?;
-                expr = Expr::ArrowFunction(vec![DestructuringElement::Variable(name, None)], body);
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                *index += 1;
+                let body = parse_arrow_body(tokens, index)?;
+                expr = Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body);
             }
             expr
         }
         Token::PrivateIdentifier(name) => {
             // Represent a standalone private name as a string like "#name" so
             // it can be used in contexts like `#name in obj`.
-            Expr::Value(Value::String(crate::unicode::utf8_to_utf16(&format!("#{}", name))))
+            Expr::StringLit(crate::unicode::utf8_to_utf16(&format!("#{}", name)))
         }
         Token::Import => Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column)),
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
         Token::Super => {
             // Check if followed by ( for super() call
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                tokens.remove(0); // consume '('
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                *index += 1; // consume '('
                 let mut args = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                     loop {
-                        let arg = parse_assignment(tokens)?;
+                        let arg = parse_assignment(tokens, index)?;
                         args.push(arg);
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RParen) {
+                        if matches!(tokens[*index].token, Token::RParen) {
                             break;
                         }
-                        if !matches!(tokens[0].token, Token::Comma) {
+                        if !matches!(tokens[*index].token, Token::Comma) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume ','
+                        *index += 1; // consume ','
                     }
                 }
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume ')'
+                *index += 1; // consume ')'
                 Expr::SuperCall(args)
-            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Dot) {
-                tokens.remove(0); // consume '.'
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::Identifier(_)) {
+            } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Dot) {
+                *index += 1; // consume '.'
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::Identifier(_)) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                let prop = if let Token::Identifier(name) = tokens.remove(0).token {
-                    name
+                *index += 1;
+                let prop = if let Token::Identifier(name) = &tokens[*index - 1].token {
+                    name.clone()
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 };
                 // Check if followed by ( for method call
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                    tokens.remove(0); // consume '('
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    *index += 1; // consume '('
                     let mut args = Vec::new();
-                    if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                    if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                         loop {
-                            let arg = parse_assignment(tokens)?;
+                            let arg = parse_assignment(tokens, index)?;
                             args.push(arg);
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            if matches!(tokens[0].token, Token::RParen) {
+                            if matches!(tokens[*index].token, Token::RParen) {
                                 break;
                             }
-                            if !matches!(tokens[0].token, Token::Comma) {
+                            if !matches!(tokens[*index].token, Token::Comma) {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            tokens.remove(0); // consume ','
+                            *index += 1; // consume ','
                             // permit trailing comma before ) and skip newlines
-                            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                                tokens.remove(0);
+                            while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                                *index += 1;
                             }
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            if matches!(tokens[0].token, Token::RParen) {
+                            if matches!(tokens[*index].token, Token::RParen) {
                                 break;
                             }
                         }
                     }
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume ')'
+                    *index += 1; // consume ')'
                     // Flatten accidental single-Comma argument
                     if args.len() == 1 {
                         if let Expr::Comma(_, _) = &args[0] {
@@ -1190,13 +1656,13 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             // Parse object literal
             // Skip any leading line terminators inside the object literal so
             // properties spread across multiple lines parse correctly.
-            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                tokens.remove(0);
+            while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
             }
             let mut properties = Vec::new();
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::RBrace) {
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
                 // Empty object {}
-                tokens.remove(0); // consume }
+                *index += 1; // consume }
                 return Ok(Expr::Object(properties));
             }
             loop {
@@ -1205,33 +1671,33 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
                 // Skip blank lines that may appear between properties.
-                while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
-                    tokens.remove(0);
+                while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                    *index += 1;
                 }
 
                 // If we hit the closing brace after skipping blank lines,
                 // consume it and finish the object literal. This handles
                 // trailing commas followed by whitespace/newlines before `}`.
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::RBrace) {
-                    tokens.remove(0); // consume }
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
+                    *index += 1; // consume }
                     break;
                 }
-                if tokens.is_empty() {
+                if *index >= tokens.len() {
                     return Err(raise_parse_error_at(tokens));
                 }
                 // Check for spread
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Spread) {
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Spread) {
                     log::trace!(
                         "parse_primary: object property is spread; next tokens (first 8): {:?}",
                         tokens.iter().take(8).collect::<Vec<_>>()
                     );
-                    tokens.remove(0); // consume ...
+                    *index += 1; // consume ...
                     // Use parse_assignment here so a spread is a single expression
                     // and doesn't accidentally capture following comma-separated
                     // properties via the comma operator.
-                    let expr = parse_assignment(tokens)?;
+                    let expr = parse_assignment(tokens, index)?;
                     // Use empty string as key for spread
-                    properties.push((Expr::Value(Value::String(Vec::new())), Expr::Spread(Box::new(expr)), false));
+                    properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false));
                 } else {
                     // Check for getter/setter: only treat as getter/setter if the
                     // identifier 'get'/'set' is followed by a property key and
@@ -1239,7 +1705,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     // regular property named 'get'/'set' (e.g. `set: function(...)`) with
                     // the getter/setter syntax.
                     // Recognize getter/setter signatures including computed keys
-                    let is_getter = if tokens.len() >= 2 && matches!(tokens[0].token, Token::Identifier(ref id) if id == "get") {
+                    let is_getter = if tokens.len() >= 2 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
                         if matches!(tokens[1].token, Token::Identifier(_) | Token::StringLit(_)) {
                             tokens.len() >= 3 && matches!(tokens[2].token, Token::LParen)
                         } else if matches!(tokens[1].token, Token::LBracket) {
@@ -1271,7 +1737,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         false
                     };
 
-                    let is_setter = if tokens.len() >= 2 && matches!(tokens[0].token, Token::Identifier(ref id) if id == "set") {
+                    let is_setter = if tokens.len() >= 2 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
                         if matches!(tokens[1].token, Token::Identifier(_) | Token::StringLit(_)) {
                             tokens.len() >= 3 && matches!(tokens[2].token, Token::LParen)
                         } else if matches!(tokens[1].token, Token::LBracket) {
@@ -1307,7 +1773,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             "parse_primary: object property is getter/setter; next tokens (first 8): {:?}",
                             tokens.iter().take(8).collect::<Vec<_>>()
                         );
-                        tokens.remove(0); // consume get/set
+                        *index += 1; // consume get/set
                     }
 
                     // Parse key
@@ -1316,151 +1782,151 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         // Check for concise method: Identifier + (
                         if !is_getter && !is_setter && tokens.len() >= 2 && matches!(tokens[1].token, Token::LParen) {
                             // Concise method
-                            tokens.remove(0); // consume name
-                            tokens.remove(0); // consume (
-                            let params = parse_parameters(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                            *index += 1; // consume name
+                            *index += 1; // consume (
+                            let params = parse_parameters(tokens, index)?;
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            tokens.remove(0); // consume {
-                            let body = parse_statements(tokens)?;
-                            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                            *index += 1; // consume {
+                            let body = parse_statements(tokens, index)?;
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            tokens.remove(0); // consume }
+                            *index += 1; // consume }
                             properties.push((
-                                Expr::Value(Value::String(crate::unicode::utf8_to_utf16(&name))),
+                                Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
                                 Expr::Function(None, params, body),
                                 true,
                             ));
 
                             // After adding method, skip any newline/semicolons and handle comma/end in outer loop
-                            while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
-                                tokens.remove(0);
+                            while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                                *index += 1;
                             }
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            if matches!(tokens[0].token, Token::RBrace) {
-                                tokens.remove(0);
+                            if matches!(tokens[*index].token, Token::RBrace) {
+                                *index += 1;
                                 break;
                             }
-                            if matches!(tokens[0].token, Token::Comma) {
-                                tokens.remove(0);
+                            if matches!(tokens[*index].token, Token::Comma) {
+                                *index += 1;
                                 continue;
                             }
                             continue;
                         }
                         is_shorthand_candidate = true;
-                        tokens.remove(0);
-                        Expr::Value(Value::String(crate::unicode::utf8_to_utf16(&name)))
+                        *index += 1;
+                        Expr::StringLit(crate::unicode::utf8_to_utf16(&name))
                     } else if let Some(Token::Number(n)) = tokens.first().map(|t| t.token.clone()) {
                         // Numeric property keys are allowed in object literals (they become strings)
-                        tokens.remove(0);
+                        *index += 1;
                         // Format as integer if whole number, otherwise use default representation
                         let s = if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() };
-                        Expr::Value(Value::String(crate::unicode::utf8_to_utf16(&s)))
+                        Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
                     } else if let Some(Token::StringLit(s)) = tokens.first().map(|t| t.token.clone()) {
-                        tokens.remove(0);
-                        Expr::Value(Value::String(s))
+                        *index += 1;
+                        Expr::StringLit(s)
                     } else if let Some(Token::Default) = tokens.first().map(|t| t.token.clone()) {
                         // allow the reserved word `default` as an object property key
-                        tokens.remove(0);
-                        Expr::Value(Value::String(crate::unicode::utf8_to_utf16("default")))
-                    } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBracket) {
+                        *index += 1;
+                        Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
+                    } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
                         // Computed key (e.g., get [Symbol.toPrimitive]())
-                        tokens.remove(0); // consume [
-                        let expr = parse_assignment(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBracket) {
+                        *index += 1; // consume [
+                        let expr = parse_assignment(tokens, index)?;
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume ]
+                        *index += 1; // consume ]
                         expr
                     } else {
                         return Err(raise_parse_error_at(tokens));
                     };
 
                     // Check for method definition after computed key
-                    if !is_getter && !is_setter && !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                        tokens.remove(0); // consume (
-                        let params = parse_parameters(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                    if !is_getter && !is_setter && !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                        *index += 1; // consume (
+                        let params = parse_parameters(tokens, index)?;
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume {
-                        let body = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                        *index += 1; // consume {
+                        let body = parse_statements(tokens, index)?;
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume }
+                        *index += 1; // consume }
                         properties.push((key_expr, Expr::Function(None, params, body), true));
 
                         // After adding method, skip any newline/semicolons and handle comma/end in outer loop
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
-                            tokens.remove(0);
+                        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                            *index += 1;
                         }
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RBrace) {
-                            tokens.remove(0);
+                        if matches!(tokens[*index].token, Token::RBrace) {
+                            *index += 1;
                             break;
                         }
-                        if matches!(tokens[0].token, Token::Comma) {
-                            tokens.remove(0);
+                        if matches!(tokens[*index].token, Token::Comma) {
+                            *index += 1;
                             continue;
                         }
                         continue;
                     }
 
                     if is_getter {
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume (
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        *index += 1; // consume (
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume )
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        *index += 1; // consume )
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume {
-                        let body = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                        *index += 1; // consume {
+                        let body = parse_statements(tokens, index)?;
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume }
+                        *index += 1; // consume }
                         properties.push((key_expr, Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))), false));
                     } else if is_setter {
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LParen) {
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume (
-                        let params = parse_parameters(tokens)?;
+                        *index += 1; // consume (
+                        let params = parse_parameters(tokens, index)?;
                         if params.len() != 1 {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume {
-                        let body = parse_statements(tokens)?;
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                        *index += 1; // consume {
+                        let body = parse_statements(tokens, index)?;
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume }
+                        *index += 1; // consume }
                         properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false));
                     } else {
                         // Regular property
-                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Colon) {
-                            tokens.remove(0); // consume :
-                            let value = parse_assignment(tokens)?;
+                        if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Colon) {
+                            *index += 1; // consume :
+                            let value = parse_assignment(tokens, index)?;
                             properties.push((key_expr, value, false));
                         } else {
                             // Shorthand property { x } -> { x: x }
                             if is_shorthand_candidate {
-                                if let Expr::Value(Value::String(s)) = &key_expr {
+                                if let Expr::StringLit(s) = &key_expr {
                                     let name = utf16_to_utf8(s);
                                     properties.push((key_expr, Expr::Var(name, None, None), false));
                                 } else {
@@ -1474,8 +1940,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 }
 
                 // Handle comma
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-                    tokens.remove(0);
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                    *index += 1;
                 }
             }
             Expr::Object(properties)
@@ -1487,22 +1953,22 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 tokens.iter().take(12).collect::<Vec<_>>()
             );
             let mut elements = Vec::new();
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::RBracket) {
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
                 // Empty array []
-                tokens.remove(0); // consume ]
+                *index += 1; // consume ]
                 return Ok(Expr::Array(elements));
             }
             loop {
                 // Skip leading blank lines inside array literals to avoid
                 // attempting to parse a `]` or other tokens as elements.
-                while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
-                    tokens.remove(0);
+                while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                    *index += 1;
                 }
                 // If next token is a closing bracket then the array is complete
                 // This handles trailing commas like `[1, 2,]` correctly — we should
                 // stop and not attempt to parse a non-existent element.
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::RBracket) {
-                    tokens.remove(0); // consume ]
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
+                    *index += 1; // consume ]
                     log::trace!(
                         "parse_primary: completed array literal with {} elements; remaining tokens (first 12): {:?}",
                         elements.len(),
@@ -1514,10 +1980,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 log::trace!("parse_primary: array element next token: {:?}", tokens.first());
                 // Support elisions (sparse arrays) where a comma without an
                 // expression indicates an empty slot, e.g. `[ , ]` or `[a,,b]`.
-                if matches!(tokens[0].token, Token::Comma) {
+                if matches!(tokens[*index].token, Token::Comma) {
                     // Push an explicit `None` element to represent the elision (hole)
                     elements.push(None);
-                    tokens.remove(0); // consume comma representing empty slot
+                    *index += 1; // consume comma representing empty slot
                     // After consuming the comma, allow the loop to continue and
                     // possibly encounter another comma or the closing bracket.
                     // If the next token is RBracket we'll handle completion below.
@@ -1525,23 +1991,23 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 }
 
                 // Parse element expression
-                let elem = parse_assignment(tokens)?;
+                let elem = parse_assignment(tokens, index)?;
                 elements.push(Some(elem));
 
                 // Check for comma or end. Allow intervening line terminators
                 // between elements so array items can be split across lines.
-                while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator | Token::Semicolon) {
-                    tokens.remove(0);
+                while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                    *index += 1;
                 }
 
-                if tokens.is_empty() {
+                if *index >= tokens.len() {
                     return Err(raise_parse_error_at(tokens));
                 }
-                if matches!(tokens[0].token, Token::RBracket) {
-                    tokens.remove(0); // consume ]
+                if matches!(tokens[*index].token, Token::RBracket) {
+                    *index += 1; // consume ]
                     break;
-                } else if matches!(tokens[0].token, Token::Comma) {
-                    tokens.remove(0); // consume ,
+                } else if matches!(tokens[*index].token, Token::Comma) {
+                    *index += 1; // consume ,
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
@@ -1560,8 +2026,8 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             // (possibly after line terminators) by a '('. This avoids
             // misinterpreting the first parameter as a name in the forgiving
             // case where the '(' may have been consumed earlier.
-            let name = if !tokens.is_empty() {
-                if let Token::Identifier(n) = &tokens[0].token {
+            let name = if !*index >= tokens.len() {
+                if let Token::Identifier(n) = &tokens[*index].token {
                     // Look ahead for next non-LineTerminator token
                     let mut idx = 1usize;
                     while idx < tokens.len() && matches!(tokens[idx].token, Token::LineTerminator) {
@@ -1570,7 +2036,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     if idx < tokens.len() && matches!(tokens[idx].token, Token::LParen) {
                         let name = n.clone();
                         log::trace!("parse_primary: treating '{}' as function name", name);
-                        tokens.remove(0);
+                        *index += 1;
                         Some(name)
                     } else {
                         None
@@ -1584,24 +2050,26 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             // Now expect parameter list. Be forgiving if the '(' was consumed
             // earlier; accept either an explicit '(' or start directly at an
             // identifier (first parameter) or an immediate ')' for empty params.
-            if !tokens.is_empty() && (matches!(tokens[0].token, Token::LParen) || matches!(tokens[0].token, Token::Identifier(_))) {
-                if matches!(tokens[0].token, Token::LParen) {
-                    tokens.remove(0); // consume "("
+            if !*index >= tokens.len()
+                && (matches!(tokens[*index].token, Token::LParen) || matches!(tokens[*index].token, Token::Identifier(_)))
+            {
+                if matches!(tokens[*index].token, Token::LParen) {
+                    *index += 1; // consume "("
                 }
                 log::trace!(
                     "parse_primary: about to call parse_parameters; tokens (first 8): {:?}",
                     tokens.iter().take(8).collect::<Vec<_>>()
                 );
-                let params = parse_parameters(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                let params = parse_parameters(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume {
-                let body = parse_statements(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                *index += 1; // consume {
+                let body = parse_statements(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume }
+                *index += 1; // consume }
                 if is_generator {
                     log::trace!("parse_primary: constructed GeneratorFunction name={:?} params={:?}", name, params);
                     Expr::GeneratorFunction(name, params, body)
@@ -1609,18 +2077,18 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     log::trace!("parse_primary: constructed Function name={:?} params={:?}", name, params);
                     Expr::Function(name, params, body)
                 }
-            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::RParen) {
+            } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RParen) {
                 // Defensive case: treat `) {` as an empty parameter list
-                tokens.remove(0); // consume ')'
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                *index += 1; // consume ')'
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume {
-                let body = parse_statements(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                *index += 1; // consume {
+                let body = parse_statements(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume }
+                *index += 1; // consume }
                 if is_generator {
                     log::trace!("parse_primary: constructed GeneratorFunction name={:?} params=Vec::new()", name);
                     Expr::GeneratorFunction(name, Vec::new(), body)
@@ -1634,11 +2102,11 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
         }
         Token::Async => {
             // Check if followed by function or arrow function parameters
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::Function) {
-                tokens.remove(0); // consume function
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Function) {
+                *index += 1; // consume function
                 // Optional name for async function expressions (same rules as normal functions)
-                let name = if !tokens.is_empty() {
-                    if let Token::Identifier(n) = &tokens[0].token {
+                let name = if !*index >= tokens.len() {
+                    if let Token::Identifier(n) = &tokens[*index].token {
                         // Look ahead for next non-LineTerminator token
                         let mut idx = 1usize;
                         while idx < tokens.len() && matches!(tokens[idx].token, Token::LineTerminator) {
@@ -1647,7 +2115,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         if idx < tokens.len() && matches!(tokens[idx].token, Token::LParen) {
                             let name = n.clone();
                             log::trace!("parse_primary: treating '{}' as async function name", name);
-                            tokens.remove(0);
+                            *index += 1;
                             Some(name)
                         } else {
                             None
@@ -1659,31 +2127,31 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     None
                 };
 
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                    tokens.remove(0); // consume "("
-                    let params = parse_parameters(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                    *index += 1; // consume "("
+                    let params = parse_parameters(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume {
-                    let body = parse_statements(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+                    *index += 1; // consume {
+                    let body = parse_statements(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume }
+                    *index += 1; // consume }
                     Expr::AsyncFunction(name, params, body)
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
-            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
+            } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                 // Async arrow function
-                tokens.remove(0); // consume (
+                *index += 1; // consume (
                 let mut params: Vec<DestructuringElement> = Vec::new();
                 let mut is_arrow = false;
                 if matches!(tokens.first().map(|t| &t.token), Some(&Token::RParen)) {
-                    tokens.remove(0);
-                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                        tokens.remove(0);
+                    *index += 1;
+                    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                        *index += 1;
                         is_arrow = true;
                     } else {
                         return Err(raise_parse_error_at(tokens));
@@ -1691,30 +2159,26 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 } else {
                     // Try to parse params
                     let mut param_names: Vec<DestructuringElement> = Vec::new();
-                    let mut local_consumed = Vec::new();
                     let mut valid = true;
                     loop {
                         if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                            let t = tokens.remove(0);
-                            local_consumed.push(t);
+                            *index += 1;
                             param_names.push(DestructuringElement::Variable(name, None));
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 valid = false;
                                 break;
                             }
-                            if matches!(tokens[0].token, Token::RParen) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
-                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                    tokens.remove(0);
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                *index += 1;
+                                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                    *index += 1;
                                     is_arrow = true;
                                 } else {
                                     valid = false;
                                 }
                                 break;
-                            } else if matches!(tokens[0].token, Token::Comma) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
+                            } else if matches!(tokens[*index].token, Token::Comma) {
+                                *index += 1;
                             } else {
                                 valid = false;
                                 break;
@@ -1725,11 +2189,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         }
                     }
                     if !valid || !is_arrow {
-                        // Put back local_consumed
-                        for t in local_consumed.into_iter().rev() {
-                            tokens.insert(0, t);
-                        }
-                        return Err(raise_parse_error_at(tokens));
+                        return Err(raise_parse_error_at(&tokens[*index..]));
                     }
                     params = param_names;
                 }
@@ -1737,7 +2197,7 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     // For async arrow functions, we need to create a special async closure
                     // For now, we'll treat them as regular arrow functions but mark them as async
                     // This will need to be handled in evaluation
-                    Expr::AsyncArrowFunction(params, parse_arrow_body(tokens)?)
+                    Expr::AsyncArrowFunction(params, parse_arrow_body(tokens, index)?)
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
@@ -1751,9 +2211,9 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             let mut is_arrow = false;
             let mut result_expr = None;
             if matches!(tokens.first().map(|t| &t.token), Some(&Token::RParen)) {
-                tokens.remove(0);
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                    tokens.remove(0);
+                *index += 1;
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                    *index += 1;
                     is_arrow = true;
                 } else {
                     return Err(raise_parse_error_at(tokens));
@@ -1761,57 +2221,50 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
             } else {
                 // Try to parse params
                 let mut param_names: Vec<DestructuringElement> = Vec::new();
-                let mut local_consumed = Vec::new();
                 let mut valid = true;
                 loop {
                     log::trace!(
                         "parse_primary LParen param loop: tokens first={:?} local_consumed_len={} param_names_len={}",
                         tokens.first(),
-                        local_consumed.len(),
+                        param_names.len(),
                         param_names.len()
                     );
                     if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                        let t = tokens.remove(0);
-                        local_consumed.push(t);
+                        *index += 1;
                         param_names.push(DestructuringElement::Variable(name, None));
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             valid = false;
                             break;
                         }
 
                         // Support default initializers in parameter lists: identifier '=' expression
-                        if matches!(tokens[0].token, Token::Assign) {
+                        if matches!(tokens[*index].token, Token::Assign) {
                             // Speculatively parse the default expression on a clone so we can
                             // rollback if this isn't actually an arrow parameter list.
-                            let mut tmp = tokens.clone();
-                            tmp.remove(0); // consume '=' in tmp
-                            if parse_expression(&mut tmp).is_ok() {
+                            let tmp = &tokens[*index + 1..];
+                            if parse_expression(tmp, &mut 0).is_ok() {
                                 // After parsing the default expression, tmp should start with
                                 // either ',' or ')' for a valid parameter list.
                                 if !tmp.is_empty() && (matches!(tmp[0].token, Token::Comma) || matches!(tmp[0].token, Token::RParen)) {
                                     // consume the same tokens from the real tokens vector and
                                     // record them for possible rollback
                                     let consumed = tokens.len() - tmp.len();
-                                    for _ in 0..consumed {
-                                        local_consumed.push(tokens.remove(0));
-                                    }
-                                    if tokens.is_empty() {
+                                    for _ in 0..consumed {}
+                                    if *index >= tokens.len() {
                                         valid = false;
                                         break;
                                     }
-                                    if matches!(tokens[0].token, Token::RParen) {
-                                        let t = tokens.remove(0);
-                                        local_consumed.push(t);
-                                        if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                            tokens.remove(0);
+                                    if matches!(tokens[*index].token, Token::RParen) {
+                                        *index += 1;
+                                        if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                            *index += 1;
                                             is_arrow = true;
                                         } else {
                                             valid = false;
                                         }
                                         break;
-                                    } else if matches!(tokens[0].token, Token::Comma) {
-                                        let t = tokens.remove(0);
-                                        local_consumed.push(t);
+                                    } else if matches!(tokens[*index].token, Token::Comma) {
+                                        *index += 1;
                                         continue;
                                     } else {
                                         valid = false;
@@ -1827,50 +2280,47 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             }
                         }
 
-                        if matches!(tokens[0].token, Token::RParen) {
-                            let t = tokens.remove(0);
-                            local_consumed.push(t);
-                            if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                tokens.remove(0);
+                        if matches!(tokens[*index].token, Token::RParen) {
+                            *index += 1;
+                            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                *index += 1;
                                 is_arrow = true;
                             } else {
                                 valid = false;
                             }
                             break;
-                        } else if matches!(tokens[0].token, Token::Comma) {
-                            let t = tokens.remove(0);
-                            local_consumed.push(t);
+                        } else if matches!(tokens[*index].token, Token::Comma) {
+                            *index += 1;
                         } else {
                             valid = false;
                             break;
                         }
-                    } else if let Some(Token::LBrace) = tokens.first().map(|t| t.token.clone()) {
-                        let mut tmp = tokens.clone();
-                        if let Ok(pattern) = parse_object_destructuring_pattern(&mut tmp) {
-                            let consumed = tokens.len() - tmp.len();
-                            for _ in 0..consumed {
-                                local_consumed.push(tokens.remove(0));
-                            }
+                    } else if tokens.get(*index).map(|t| &t.token) == Some(&Token::LBrace) {
+                        let start = *index;
+                        if let Ok(pattern) = parse_object_destructuring_pattern(tokens, index) {
                             param_names.push(DestructuringElement::NestedObject(pattern));
+                            // } else {
+                            //     *index = start;
+                            //     valid = false;
+                            //     break;
+                            // }
 
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 valid = false;
                                 break;
                             }
 
-                            if matches!(tokens[0].token, Token::RParen) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
-                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                    tokens.remove(0);
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                *index += 1;
+                                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                    *index += 1;
                                     is_arrow = true;
                                 } else {
                                     valid = false;
                                 }
                                 break;
-                            } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
+                            } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                                *index += 1;
                             } else {
                                 valid = false;
                                 break;
@@ -1879,33 +2329,32 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             valid = false;
                             break;
                         }
-                    } else if let Some(Token::LBracket) = tokens.first().map(|t| t.token.clone()) {
-                        let mut tmp = tokens.clone();
-                        if let Ok(pattern) = parse_array_destructuring_pattern(&mut tmp) {
-                            let consumed = tokens.len() - tmp.len();
-                            for _ in 0..consumed {
-                                local_consumed.push(tokens.remove(0));
-                            }
+                    } else if tokens.get(*index).map(|t| &t.token) == Some(&Token::LBracket) {
+                        let start = *index;
+                        if let Ok(pattern) = parse_array_destructuring_pattern(tokens, index) {
                             param_names.push(DestructuringElement::NestedArray(pattern));
+                            // } else {
+                            //     *index = start;
+                            //     valid = false;
+                            //     break;
+                            // }
 
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 valid = false;
                                 break;
                             }
 
-                            if matches!(tokens[0].token, Token::RParen) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
-                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                    tokens.remove(0);
+                            if matches!(tokens[*index].token, Token::RParen) {
+                                *index += 1;
+                                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                    *index += 1;
                                     is_arrow = true;
                                 } else {
                                     valid = false;
                                 }
                                 break;
-                            } else if matches!(tokens[0].token, Token::Comma) {
-                                let t = tokens.remove(0);
-                                local_consumed.push(t);
+                            } else if matches!(tokens[*index].token, Token::Comma) {
+                                *index += 1;
                             } else {
                                 valid = false;
                                 break;
@@ -1914,19 +2363,16 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                             valid = false;
                             break;
                         }
-                    } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Spread) {
+                    } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Spread) {
                         // Handle rest parameter: ...args
-                        let t_spread = tokens.remove(0);
-                        local_consumed.push(t_spread);
-                        if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                            let t_name = tokens.remove(0);
-                            local_consumed.push(t_name);
+                        *index += 1;
+                        if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                            *index += 1;
                             // Rest parameter must be the last one, so expect RParen
-                            if !tokens.is_empty() && matches!(tokens[0].token, Token::RParen) {
-                                let t_paren = tokens.remove(0);
-                                local_consumed.push(t_paren);
-                                if !tokens.is_empty() && matches!(tokens[0].token, Token::Arrow) {
-                                    tokens.remove(0);
+                            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RParen) {
+                                *index += 1;
+                                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                                    *index += 1;
                                     is_arrow = true;
                                     // Store rest param as a regular param for now, but we might need
                                     // to mark it specially in the AST if we want strict validation.
@@ -1972,21 +2418,17 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 if valid && is_arrow {
                     params = param_names;
                 } else {
-                    // Put back local_consumed
-                    for t in local_consumed.into_iter().rev() {
-                        tokens.insert(0, t);
-                    }
                     // Parse as expression
-                    let expr_inner = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
-                        return Err(raise_parse_error_at(tokens));
+                    let expr_inner = parse_expression(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                        return Err(raise_parse_error_at(&tokens[*index..]));
                     }
-                    tokens.remove(0);
+                    *index += 1;
                     result_expr = Some(expr_inner);
                 }
             }
             if is_arrow {
-                Expr::ArrowFunction(params, parse_arrow_body(tokens)?)
+                Expr::ArrowFunction(params, parse_arrow_body(tokens, index)?)
             } else {
                 result_expr.unwrap()
             }
@@ -1994,10 +2436,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
         _ => {
             // Provide better error information for unexpected tokens during parsing
             // Log the remaining tokens for better context to help debugging
-            if !tokens.is_empty() {
+            if !*index >= tokens.len() {
                 log::debug!(
                     "parse_expression unexpected token: {:?}; remaining tokens: {:?}",
-                    tokens[0].token,
+                    tokens[*index].token,
                     tokens
                 );
             } else {
@@ -2011,32 +2453,32 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
     // between the primary and the postfix operator to support call-chains
     // split across lines (e.g. `promise.then(...)
     // .then(...)`).
-    while !tokens.is_empty() {
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-            tokens.remove(0);
+    while !*index >= tokens.len() {
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
-        if tokens.is_empty() {
+        if *index >= tokens.len() {
             break;
         }
-        match &tokens[0].token {
+        match &tokens[*index].token {
             Token::LBracket => {
-                tokens.remove(0); // consume '['
-                let index_expr = parse_expression(tokens)?;
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RBracket) {
+                *index += 1; // consume '['
+                let index_expr = parse_expression(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume ']'
+                *index += 1; // consume ']'
                 expr = Expr::Index(Box::new(expr), Box::new(index_expr));
             }
             Token::Dot => {
-                tokens.remove(0); // consume '.'
-                if tokens.is_empty() {
+                *index += 1; // consume '.'
+                if *index >= tokens.len() {
                     return Err(raise_parse_error_at(tokens));
                 }
-                if let Some(prop) = tokens[0].token.as_identifier_string() {
-                    tokens.remove(0);
+                if let Some(prop) = tokens[*index].token.as_identifier_string() {
+                    *index += 1;
                     expr = Expr::Property(Box::new(expr), prop);
-                } else if let Token::PrivateIdentifier(prop) = &tokens[0].token {
+                } else if let Token::PrivateIdentifier(prop) = &tokens[*index].token {
                     // Private identifiers (e.g. `obj.#x`) are only syntactically
                     // valid inside class bodies and furthermore the referenced
                     // private name must have been *declared* in the *enclosing*
@@ -2044,21 +2486,21 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                     let invalid = PRIVATE_NAME_STACK.with(|s| s.borrow().last().map(|rc| !rc.borrow().contains(prop)).unwrap_or(true));
                     if invalid {
                         let msg = format!("Private field '#{}' must be declared in an enclosing class", prop);
-                        return Err(raise_parse_error_with_token!(tokens[0], msg));
+                        return Err(raise_parse_error_with_token!(tokens[*index], msg));
                     }
                     let prop = format!("#{}", prop);
-                    tokens.remove(0);
+                    *index += 1;
                     expr = Expr::Property(Box::new(expr), prop);
                 } else {
                     return Err(raise_parse_error_at(tokens));
                 }
             }
             Token::OptionalChain => {
-                tokens.remove(0); // consume '?.'
-                if tokens.is_empty() {
+                *index += 1; // consume '?.'
+                if *index >= tokens.len() {
                     return Err(raise_parse_error_at(tokens));
                 }
-                if matches!(tokens[0].token, Token::LParen) {
+                if matches!(tokens[*index].token, Token::LParen) {
                     if !allow_call {
                         // If calls are not allowed (e.g. inside `new`), we stop here.
                         // But wait, `?.(` is an optional call.
@@ -2089,72 +2531,72 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         // If `allow_call` is false, we should break if we see `LParen`.
                     }
                     // Optional call: obj?.method(args)
-                    tokens.remove(0); // consume '('
+                    *index += 1; // consume '('
                     let mut args = Vec::new();
-                    if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                    if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                         loop {
-                            let arg = parse_assignment(tokens)?;
+                            let arg = parse_assignment(tokens, index)?;
                             args.push(arg);
-                            if tokens.is_empty() {
+                            if *index >= tokens.len() {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            if matches!(tokens[0].token, Token::RParen) {
+                            if matches!(tokens[*index].token, Token::RParen) {
                                 break;
                             }
-                            if !matches!(tokens[0].token, Token::Comma) {
+                            if !matches!(tokens[*index].token, Token::Comma) {
                                 return Err(raise_parse_error_at(tokens));
                             }
-                            tokens.remove(0); // consume ','
+                            *index += 1; // consume ','
                         }
                     }
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume ')'
+                    *index += 1; // consume ')'
                     expr = Expr::OptionalCall(Box::new(expr), args);
-                } else if matches!(tokens[0].token, Token::Identifier(_)) {
+                } else if matches!(tokens[*index].token, Token::Identifier(_)) {
                     // Optional property access: obj?.prop
-                    if let Some(prop) = tokens[0].token.as_identifier_string() {
-                        tokens.remove(0);
+                    if let Some(prop) = tokens[*index].token.as_identifier_string() {
+                        *index += 1;
                         expr = Expr::OptionalProperty(Box::new(expr), prop);
                     } else {
                         return Err(raise_parse_error_at(tokens));
                     }
-                } else if matches!(tokens[0].token, Token::LBracket) {
+                } else if matches!(tokens[*index].token, Token::LBracket) {
                     // Optional computed property access: obj?.[expr]
-                    tokens.remove(0); // consume '['
-                    let index_expr = parse_expression(tokens)?;
-                    if tokens.is_empty() || !matches!(tokens[0].token, Token::RBracket) {
+                    *index += 1; // consume '['
+                    let index_expr = parse_expression(tokens, index)?;
+                    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                         return Err(raise_parse_error_at(tokens));
                     }
-                    tokens.remove(0); // consume ']'
+                    *index += 1; // consume ']'
                     // If the bracket access is immediately followed by a call,
                     // e.g. `obj?.[expr](...)`, this is an optional call on the
                     // computed property. Parse the call arguments and build an
                     // OptionalCall around the computed access.
-                    if !tokens.is_empty() && matches!(tokens[0].token, Token::LParen) {
-                        tokens.remove(0); // consume '('
+                    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                        *index += 1; // consume '('
                         let mut args = Vec::new();
-                        if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                        if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                             loop {
-                                let arg = parse_assignment(tokens)?;
+                                let arg = parse_assignment(tokens, index)?;
                                 args.push(arg);
-                                if tokens.is_empty() {
+                                if *index >= tokens.len() {
                                     return Err(raise_parse_error_at(tokens));
                                 }
-                                if matches!(tokens[0].token, Token::RParen) {
+                                if matches!(tokens[*index].token, Token::RParen) {
                                     break;
                                 }
-                                if !matches!(tokens[0].token, Token::Comma) {
+                                if !matches!(tokens[*index].token, Token::Comma) {
                                     return Err(raise_parse_error_at(tokens));
                                 }
-                                tokens.remove(0); // consume ','
+                                *index += 1; // consume ','
                             }
                         }
-                        if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume ')'
+                        *index += 1; // consume ')'
                         // Flatten accidental single-Comma argument
                         if args.len() == 1 {
                             if let Expr::Comma(_, _) = &args[0] {
@@ -2175,30 +2617,30 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 if !allow_call {
                     break;
                 }
-                tokens.remove(0); // consume '('
+                *index += 1; // consume '('
                 let mut args = Vec::new();
-                if !tokens.is_empty() && !matches!(tokens[0].token, Token::RParen) {
+                if !*index >= tokens.len() && !matches!(tokens[*index].token, Token::RParen) {
                     loop {
-                        let arg = parse_assignment(tokens)?;
+                        let arg = parse_assignment(tokens, index)?;
                         args.push(arg);
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RParen) {
+                        if matches!(tokens[*index].token, Token::RParen) {
                             break;
                         }
-                        if !matches!(tokens[0].token, Token::Comma) {
+                        if !matches!(tokens[*index].token, Token::Comma) {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        tokens.remove(0); // consume ','
+                        *index += 1; // consume ','
                         // allow trailing comma before ')' and skip newlines
-                        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-                            tokens.remove(0);
+                        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                            *index += 1;
                         }
-                        if tokens.is_empty() {
+                        if *index >= tokens.len() {
                             return Err(raise_parse_error_at(tokens));
                         }
-                        if matches!(tokens[0].token, Token::RParen) {
+                        if matches!(tokens[*index].token, Token::RParen) {
                             break;
                         }
                         // If we have a trailing comma but NOT a RParen, we loop again.
@@ -2208,10 +2650,10 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                         // But parse_assignment might fail if the next token is not an expression start.
                     }
                 }
-                if tokens.is_empty() || !matches!(tokens[0].token, Token::RParen) {
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                     return Err(raise_parse_error_at(tokens));
                 }
-                tokens.remove(0); // consume ')'
+                *index += 1; // consume ')'
                 // Flatten accidental single-Comma argument
                 if args.len() == 1 {
                     if let Expr::Comma(_, _) = &args[0] {
@@ -2223,24 +2665,24 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
                 expr = Expr::Call(Box::new(expr), args);
             }
             Token::Increment => {
-                tokens.remove(0);
+                *index += 1;
                 expr = Expr::PostIncrement(Box::new(expr));
             }
             Token::Decrement => {
-                tokens.remove(0);
+                *index += 1;
                 expr = Expr::PostDecrement(Box::new(expr));
             }
             Token::TemplateString(parts) => {
                 let parts = parts.clone();
-                tokens.remove(0);
+                *index += 1;
                 let mut strings = Vec::new();
                 let mut exprs = Vec::new();
                 for part in parts {
                     match part {
                         TemplatePart::String(s) => strings.push(s.clone()),
                         TemplatePart::Expr(expr_tokens) => {
-                            let mut expr_tokens = expr_tokens.clone();
-                            let e = parse_expression(&mut expr_tokens)?;
+                            let expr_tokens = expr_tokens.clone();
+                            let e = parse_expression(&expr_tokens, &mut 0)?;
                             exprs.push(e);
                         }
                     }
@@ -2254,89 +2696,90 @@ fn parse_primary(tokens: &mut Vec<TokenData>, allow_call: bool) -> Result<Expr, 
     Ok(expr)
 }
 
-fn parse_arrow_body(tokens: &mut Vec<TokenData>) -> Result<Vec<Statement>, JSError> {
-    if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
-        tokens.remove(0);
-        let body = parse_statements(tokens)?;
-        if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+fn parse_arrow_body(tokens: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
+    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+        *index += 1;
+        let body = parse_statements(tokens, index)?;
+        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
             return Err(raise_parse_error_at(tokens));
         }
-        tokens.remove(0);
+        *index += 1;
         Ok(body)
     } else {
-        let expr = parse_assignment(tokens)?;
+        let expr = parse_assignment(tokens, index)?;
         Ok(vec![Statement::from(StatementKind::Return(Some(expr)))])
     }
 }
 
-pub fn parse_array_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result<Vec<DestructuringElement>, JSError> {
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBracket) {
+pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBracket) {
         return Err(raise_parse_error_at(tokens));
     }
-    tokens.remove(0); // consume [
+    *index += 1; // consume [
 
     let mut pattern = Vec::new();
     // Skip initial blank lines inside the pattern
-    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-        tokens.remove(0);
+    while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
     }
-    if !tokens.is_empty() && matches!(tokens[0].token, Token::RBracket) {
-        tokens.remove(0); // consume ]
+    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
+        *index += 1; // consume ]
         return Ok(pattern);
     }
 
     loop {
         // skip any blank lines at the start of a new property entry
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-            tokens.remove(0);
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
-        if !tokens.is_empty() && matches!(tokens[0].token, Token::Spread) {
-            tokens.remove(0); // consume ...
+        if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Spread) {
+            *index += 1; // consume ...
             if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                tokens.remove(0);
+                *index += 1;
                 pattern.push(DestructuringElement::Rest(name));
             } else {
                 return Err(raise_parse_error_at(tokens));
             }
             // Rest must be the last element
-            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBracket) {
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
                 return Err(raise_parse_error_at(tokens));
             }
-            tokens.remove(0); // consume ]
+            *index += 1; // consume ]
             break;
-        } else if !tokens.is_empty() && matches!(tokens[0].token, Token::Comma) {
+        } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Comma) {
             pattern.push(DestructuringElement::Empty);
-        } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBracket) {
+        } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
             // Nested array destructuring
-            let nested_pattern = parse_array_destructuring_pattern(tokens)?;
+            let nested_pattern = parse_array_destructuring_pattern(tokens, index)?;
             pattern.push(DestructuringElement::NestedArray(nested_pattern));
-        } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
+        } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
             // Nested object destructuring
-            let nested_pattern = parse_object_destructuring_pattern(tokens)?;
+            let nested_pattern = parse_object_destructuring_pattern(tokens, index)?;
             pattern.push(DestructuringElement::NestedObject(nested_pattern));
         } else if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-            tokens.remove(0);
+            *index += 1;
             // Accept optional default initializer in patterns: e.g. `a = 1`
             let mut default_expr: Option<Box<Expr>> = None;
-            if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                tokens.remove(0); // consume '='
+            if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                *index += 1; // consume '='
                 // capture initializer tokens until top-level comma or ] and parse them
                 let mut depth: i32 = 0;
                 let mut init_tokens: Vec<TokenData> = Vec::new();
-                while !tokens.is_empty() {
-                    if depth == 0 && (matches!(tokens[0].token, Token::Comma) || matches!(tokens[0].token, Token::RBracket)) {
+                while !*index >= tokens.len() {
+                    if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBracket)) {
                         break;
                     }
-                    match tokens[0].token {
+                    match tokens[*index].token {
                         Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
                         Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
                         _ => {}
                     }
-                    init_tokens.push(tokens.remove(0));
+                    init_tokens.push(tokens[*index].clone());
+                    *index += 1;
                 }
                 if !init_tokens.is_empty() {
-                    let mut tmp = init_tokens.clone();
-                    let expr = parse_expression(&mut tmp)?;
+                    let tmp = init_tokens.clone();
+                    let expr = parse_expression(&tmp, &mut 0)?;
                     default_expr = Some(Box::new(expr));
                 }
             }
@@ -2346,18 +2789,18 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result<
         }
 
         // allow blank lines between last element and closing brace
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-            tokens.remove(0);
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
 
-        if tokens.is_empty() {
+        if *index >= tokens.len() {
             return Err(raise_parse_error_at(tokens));
         }
-        if matches!(tokens[0].token, Token::RBracket) {
-            tokens.remove(0); // consume ]
+        if matches!(tokens[*index].token, Token::RBracket) {
+            *index += 1; // consume ]
             break;
-        } else if matches!(tokens[0].token, Token::Comma) {
-            tokens.remove(0); // consume ,
+        } else if matches!(tokens[*index].token, Token::Comma) {
+            *index += 1; // consume ,
         } else {
             return Err(raise_parse_error_at(tokens));
         }
@@ -2366,11 +2809,11 @@ pub fn parse_array_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result<
     Ok(pattern)
 }
 
-pub fn parse_object_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result<Vec<ObjectDestructuringElement>, JSError> {
-    if tokens.is_empty() || !matches!(tokens[0].token, Token::LBrace) {
+pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
+    if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
         return Err(raise_parse_error_at(tokens));
     }
-    tokens.remove(0); // consume {
+    *index += 1; // consume {
 
     let mut pattern = Vec::new();
     log::trace!(
@@ -2381,47 +2824,47 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result
     // object patterns like `{
     //   a = 0,
     // }` are accepted.
-    while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-        tokens.remove(0);
+    while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+        *index += 1;
     }
 
-    if !tokens.is_empty() && matches!(tokens[0].token, Token::RBrace) {
-        tokens.remove(0); // consume }
+    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
+        *index += 1; // consume }
         return Ok(pattern);
     }
 
     loop {
         // allow and skip blank lines between elements
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-            tokens.remove(0);
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
         // If after skipping blanks we immediately hit a closing brace, accept
         // it. This handles the common formatting where there is a trailing
         // comma and then a newline before the closing `}` (e.g.
         // `a = 0,\n}`) which should be treated as the end of the object
         // pattern instead of expecting another property.
-        if !tokens.is_empty() && matches!(tokens[0].token, Token::RBrace) {
-            tokens.remove(0); // consume }
+        if !*index >= tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
+            *index += 1; // consume }
             break;
         }
-        if !tokens.is_empty() && matches!(tokens[0].token, Token::Spread) {
-            tokens.remove(0); // consume ...
+        if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Spread) {
+            *index += 1; // consume ...
             if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                tokens.remove(0);
-                pattern.push(ObjectDestructuringElement::Rest(name));
+                *index += 1;
+                pattern.push(DestructuringElement::Rest(name));
             } else {
                 return Err(raise_parse_error_at(tokens));
             }
             // Rest must be the last element
-            if tokens.is_empty() || !matches!(tokens[0].token, Token::RBrace) {
+            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
                 return Err(raise_parse_error_at(tokens));
             }
-            tokens.remove(0); // consume }
+            *index += 1; // consume }
             break;
         } else {
             // Parse property
             let key = if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                tokens.remove(0);
+                *index += 1;
                 name
             } else {
                 log::trace!(
@@ -2431,35 +2874,37 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result
                 return Err(raise_parse_error_at(tokens));
             };
 
-            let value = if !tokens.is_empty() && matches!(tokens[0].token, Token::Colon) {
-                tokens.remove(0); // consume :
+            let value = if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Colon) {
+                *index += 1; // consume :
                 // Parse the value pattern
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::LBracket) {
-                    DestructuringElement::NestedArray(parse_array_destructuring_pattern(tokens)?)
-                } else if !tokens.is_empty() && matches!(tokens[0].token, Token::LBrace) {
-                    DestructuringElement::NestedObject(parse_object_destructuring_pattern(tokens)?)
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                    DestructuringElement::NestedArray(parse_array_destructuring_pattern(tokens, index)?)
+                } else if !*index >= tokens.len() && matches!(tokens[*index].token, Token::LBrace) {
+                    DestructuringElement::NestedObject(parse_object_destructuring_pattern(tokens, index)?)
                 } else if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
-                    tokens.remove(0);
+                    *index += 1;
                     // Allow default initializer for property value like `a: b = 1`
                     let mut default_expr: Option<Box<Expr>> = None;
-                    if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                        tokens.remove(0);
+                    if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                        *index += 1;
                         let mut depth: i32 = 0;
                         let mut init_tokens: Vec<TokenData> = Vec::new();
-                        while !tokens.is_empty() {
-                            if depth == 0 && (matches!(tokens[0].token, Token::Comma) || matches!(tokens[0].token, Token::RBrace)) {
+                        while !*index >= tokens.len() {
+                            if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBrace))
+                            {
                                 break;
                             }
-                            match tokens[0].token {
+                            match tokens[*index].token {
                                 Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
                                 Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
                                 _ => {}
                             }
-                            init_tokens.push(tokens.remove(0));
+                            init_tokens.push(tokens[*index].clone());
+                            *index += 1;
                         }
                         if !init_tokens.is_empty() {
-                            let mut tmp = init_tokens.clone();
-                            let expr = parse_expression(&mut tmp)?;
+                            let tmp = init_tokens.clone();
+                            let expr = parse_expression(&tmp, &mut 0)?;
                             default_expr = Some(Box::new(expr));
                         }
                     }
@@ -2471,46 +2916,47 @@ pub fn parse_object_destructuring_pattern(tokens: &mut Vec<TokenData>) -> Result
                 // Shorthand: key is the same as variable name. Allow optional
                 // default initializer after the shorthand, e.g. `{a = 1}`.
                 let mut init_tokens: Vec<TokenData> = Vec::new();
-                if !tokens.is_empty() && matches!(tokens[0].token, Token::Assign) {
-                    tokens.remove(0); // consume '='
+                if !*index >= tokens.len() && matches!(tokens[*index].token, Token::Assign) {
+                    *index += 1; // consume '='
                     let mut depth: i32 = 0;
-                    while !tokens.is_empty() {
-                        if depth == 0 && (matches!(tokens[0].token, Token::Comma) || matches!(tokens[0].token, Token::RBrace)) {
+                    while !*index >= tokens.len() {
+                        if depth == 0 && (matches!(tokens[*index].token, Token::Comma) || matches!(tokens[*index].token, Token::RBrace)) {
                             break;
                         }
-                        match tokens[0].token {
+                        match tokens[*index].token {
                             Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
                             Token::RParen | Token::RBracket | Token::RBrace => depth -= 1,
                             _ => {}
                         }
-                        init_tokens.push(tokens.remove(0));
+                        init_tokens.push(tokens[*index].clone());
+                        *index += 1;
                     }
                 }
                 let mut default_expr: Option<Box<Expr>> = None;
                 if !init_tokens.is_empty() {
-                    let mut tmp = init_tokens.clone();
-                    let expr = parse_expression(&mut tmp)?;
+                    let tmp = init_tokens.clone();
+                    let expr = parse_expression(&tmp, &mut 0)?;
                     default_expr = Some(Box::new(expr));
                 }
                 DestructuringElement::Variable(key.clone(), default_expr)
             };
 
-            pattern.push(ObjectDestructuringElement::Property { key, value });
+            pattern.push(DestructuringElement::Property(key, Box::new(value)));
         }
 
         // allow whitespace / blank lines before separators or closing brace
-        while !tokens.is_empty() && matches!(tokens[0].token, Token::LineTerminator) {
-            tokens.remove(0);
+        while !*index >= tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+            *index += 1;
         }
 
-        if tokens.is_empty() {
+        if *index >= tokens.len() {
             return Err(raise_parse_error_at(tokens));
         }
-        if matches!(tokens[0].token, Token::RBrace) {
-            tokens.remove(0); // consume }
+        if matches!(tokens[*index].token, Token::RBrace) {
+            *index += 1; // consume }
             break;
-        } else if matches!(tokens[0].token, Token::Comma) {
-            tokens.remove(0); // consume ,
+        } else if matches!(tokens[*index].token, Token::Comma) {
+            *index += 1; // consume ,
         } else {
             return Err(raise_parse_error_at(tokens));
         }

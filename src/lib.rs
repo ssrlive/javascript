@@ -3,43 +3,43 @@
 pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
-pub(crate) mod js_array;
-pub(crate) mod js_assert;
-pub(crate) mod js_bigint;
-pub(crate) mod js_class;
-pub(crate) mod js_console;
-pub(crate) mod js_date;
-pub(crate) mod js_function;
-pub(crate) mod js_generator;
-pub(crate) mod js_json;
-pub(crate) mod js_map;
-pub(crate) mod js_math;
-pub(crate) mod js_module;
-pub(crate) mod js_number;
-pub(crate) mod js_object;
-pub(crate) mod js_os;
-pub(crate) mod js_promise;
-pub(crate) mod js_proxy;
-pub(crate) mod js_reflect;
-pub(crate) mod js_regexp;
-pub(crate) mod js_set;
-pub(crate) mod js_std;
-pub(crate) mod js_string;
-pub(crate) mod js_testintl;
-pub(crate) mod js_typedarray;
-pub(crate) mod js_weakmap;
-pub(crate) mod js_weakset;
+// pub(crate) mod js_array;
+// pub(crate) mod js_assert;
+// pub(crate) mod js_bigint;
+// pub(crate) mod js_class;
+// pub(crate) mod js_console;
+// pub(crate) mod js_date;
+// pub(crate) mod js_function;
+// pub(crate) mod js_generator;
+// pub(crate) mod js_json;
+// pub(crate) mod js_map;
+// pub(crate) mod js_math;
+// pub(crate) mod js_module;
+// pub(crate) mod js_number;
+// pub(crate) mod js_object;
+// pub(crate) mod js_os;
+// pub(crate) mod js_promise;
+// pub(crate) mod js_proxy;
+// pub(crate) mod js_reflect;
+// pub(crate) mod js_regexp;
+// pub(crate) mod js_set;
+// pub(crate) mod js_std;
+// pub(crate) mod js_string;
+// pub(crate) mod js_testintl;
+// pub(crate) mod js_typedarray;
+// pub(crate) mod js_weakmap;
+// pub(crate) mod js_weakset;
 pub(crate) mod repl;
-pub(crate) mod sprintf;
-pub(crate) mod tmpfile;
+// pub(crate) mod sprintf;
+// pub(crate) mod tmpfile;
 pub(crate) mod unicode;
 
-pub use core::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
+pub use crate::core::Token;
 pub use core::{
-    JSObjectData, Token, TokenData, initialize_global_constructors, new_js_object_data, parse_expression,
-    parse_object_destructuring_pattern, parse_statement, parse_statements,
+    JSArrayBuffer, JSDataView, JSObjectData, JSTypedArray, JsArena, TypedArrayKind, initialize_global_constructors, new_js_object_data,
+    parse_object_destructuring_pattern, parse_simple_expression, parse_statement, parse_statements, read_script_file,
 };
-pub use core::{PropertyKey, Value, evaluate_script, get_prop_env, obj_get_key_value, obj_set_key_value, read_script_file, tokenize};
+pub use core::{PropertyKey, Value, env_set, evaluate_script, obj_get_key_value, obj_set_key_value, tokenize};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

@@ -18,6 +18,7 @@ pub enum StatementKind {
     Block(Vec<Statement>),
     If(Expr, Vec<Statement>, Option<Vec<Statement>>),
     FunctionDeclaration(String, Vec<crate::core::DestructuringElement>, Vec<Statement>, bool),
+    TryCatch(Vec<Statement>, Option<String>, Option<Vec<Statement>>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
 }
 
 impl From<StatementKind> for Statement {

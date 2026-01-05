@@ -1,8 +1,30 @@
 use crate::{
     JSError,
-    core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value},
-    obj_get_key_value, utf8_to_utf16,
+    core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value, value_to_string},
+    obj_get_key_value, utf8_to_utf16, utf16_to_utf8,
 };
+
+#[derive(Debug)]
+pub enum EvalError<'gc> {
+    Js(JSError),
+    Throw(Value<'gc>, Option<usize>, Option<usize>),
+}
+
+impl<'gc> From<JSError> for EvalError<'gc> {
+    fn from(e: JSError) -> Self {
+        EvalError::Js(e)
+    }
+}
+
+impl<'gc> EvalError<'gc> {
+    #[allow(dead_code)]
+    pub fn message(&self) -> String {
+        match self {
+            EvalError::Js(e) => e.message(),
+            EvalError::Throw(v, ..) => value_to_string(v),
+        }
+    }
+}
 
 /// Initialize the Error constructor and its prototype.
 pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -49,7 +71,15 @@ pub fn create_error<'gc>(
     error_obj.borrow_mut(mc).prototype = prototype;
 
     obj_set_key_value(mc, &error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
-    obj_set_key_value(mc, &error_obj, &"message".into(), message)?;
+    obj_set_key_value(mc, &error_obj, &"message".into(), message.clone())?;
+
+    let msg_str = if let Value::String(s) = &message {
+        utf16_to_utf8(s)
+    } else {
+        "Unknown error".to_string()
+    };
+    let stack_str = format!("Error: {msg_str}");
+    obj_set_key_value(mc, &error_obj, &"stack".into(), Value::String(utf8_to_utf16(&stack_str)))?;
 
     // Internal marker to identify Error objects
     obj_set_key_value(mc, &error_obj, &"__is_error".into(), Value::Boolean(true))?;

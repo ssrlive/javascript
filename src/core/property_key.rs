@@ -66,7 +66,7 @@ impl<'gc> std::fmt::Display for PropertyKey<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PropertyKey::String(s) => write!(f, "{}", s),
-            PropertyKey::Symbol(_) => write!(f, "[symbol]"),
+            PropertyKey::Symbol(ptr) => write!(f, "[symbol {:p}]", gc_arena::Gc::as_ptr(*ptr)),
         }
     }
 }
@@ -75,7 +75,7 @@ impl<'gc> AsRef<str> for PropertyKey<'gc> {
     fn as_ref(&self) -> &str {
         match self {
             PropertyKey::String(s) => s,
-            PropertyKey::Symbol(_) => "[symbol]",
+            PropertyKey::Symbol(_ptr) => todo!("Cannot convert Symbol to &str"),
         }
     }
 }

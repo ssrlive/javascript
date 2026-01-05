@@ -117,7 +117,7 @@ pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc
 
 #[derive(Clone, Default)]
 pub struct JSObjectData<'gc> {
-    pub properties: std::collections::HashMap<PropertyKey<'gc>, GcPtr<'gc, Value<'gc>>>,
+    pub properties: indexmap::IndexMap<PropertyKey<'gc>, GcPtr<'gc, Value<'gc>>>,
     pub constants: std::collections::HashSet<String>,
     pub non_enumerable: std::collections::HashSet<PropertyKey<'gc>>,
     pub non_writable: std::collections::HashSet<PropertyKey<'gc>>,
@@ -164,6 +164,11 @@ impl<'gc> JSObjectData<'gc> {
         self.constants.contains(key)
     }
 
+    pub fn set_property(&mut self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
+        let val_ptr = Gc::new(mc, GcCell::new(val));
+        self.insert(key.into(), val_ptr);
+    }
+
     pub fn get_property(&self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
         let key = key.into();
         if let Some(val_ptr) = self.properties.get(&key) {
@@ -196,10 +201,11 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_line(&mut self, line: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
-        if !self.properties.contains_key(&"__line__".into()) {
+        let key = PropertyKey::String("__line__".to_string());
+        if !self.properties.contains_key(&key) {
             let val = Value::Number(line as f64);
             let val_ptr = Gc::new(mc, GcCell::new(val));
-            self.insert(PropertyKey::String("__line__".to_string()), val_ptr);
+            self.insert(key, val_ptr);
         }
         Ok(())
     }
@@ -214,10 +220,11 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_column(&mut self, column: usize, mc: &MutationContext<'gc>) -> Result<(), JSError> {
-        if !self.properties.contains_key(&"__column__".into()) {
+        let key = PropertyKey::String("__column__".to_string());
+        if !self.properties.contains_key(&key) {
             let val = Value::Number(column as f64);
             let val_ptr = Gc::new(mc, GcCell::new(val));
-            self.insert(PropertyKey::String("__column__".to_string()), val_ptr);
+            self.insert(key, val_ptr);
         }
         Ok(())
     }

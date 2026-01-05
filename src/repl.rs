@@ -1,8 +1,8 @@
 use crate::{
     JSError,
     core::{
-        JsArena, JsRoot, Value, env_set, evaluate_statements, initialize_global_constructors, new_js_object_data, parse_statements,
-        tokenize,
+        EvalError, JsArena, JsRoot, Value, env_set, evaluate_statements, initialize_global_constructors, new_js_object_data,
+        parse_statements, tokenize,
     },
 };
 use gc_arena::{Gc, lock::RefLock as GcCell};
@@ -56,10 +56,20 @@ impl Repl {
         let mut index = 0;
         let mut statements = parse_statements(&tokens, &mut index)?;
 
-        self.arena.mutate(move |mc, root| {
-            let result = evaluate_statements(mc, &root.global_env, &mut statements)?;
-            Ok(crate::core::value_to_string(&result))
-        })
+        self.arena
+            .mutate(move |mc, root| match evaluate_statements(mc, &root.global_env, &mut statements) {
+                Ok(val) => Ok(crate::core::value_to_string(&val)),
+                Err(e) => match e {
+                    EvalError::Js(js_err) => Err(js_err),
+                    EvalError::Throw(val, line, column) => {
+                        let mut err = crate::raise_throw_error!(val);
+                        if let Some((l, c)) = line.zip(column) {
+                            err.set_js_location(l, c);
+                        }
+                        Err(err)
+                    }
+                },
+            })
         /*
         match evaluate_statements(&self.env, &statements) {
             Ok(v) => {

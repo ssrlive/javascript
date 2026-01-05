@@ -2,6 +2,7 @@
 
 use crate::error::JSError;
 use crate::raise_eval_error;
+use crate::unicode::utf8_to_utf16;
 use gc_arena::Mutation as MutationContext;
 use gc_arena::lock::RefLock as GcCell;
 use gc_arena::{Collect, Gc};
@@ -53,10 +54,20 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_error_constructor(mc, env)?;
 
+    initialize_console(mc, env)?;
+
     Ok(())
 }
 
-pub fn evaluate_script<T, P>(script: T, _script_path: Option<P>) -> Result<String, JSError>
+pub fn initialize_console<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let console_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
+    obj_set_key_value(mc, &console_obj, &"error".into(), Value::Function("console.error".to_string()))?;
+    env_set(mc, env, "console", Value::Object(console_obj))?;
+    Ok(())
+}
+
+pub fn evaluate_script<T, P>(script: T, script_path: Option<P>) -> Result<String, JSError>
 where
     T: AsRef<str>,
     P: AsRef<std::path::Path>,
@@ -84,8 +95,33 @@ where
     arena.mutate(|mc, root| {
         initialize_global_constructors(mc, &root.global_env)?;
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
-        let result = evaluate_statements(mc, &root.global_env, &mut statements)?;
-        Ok(value_to_string(&result))
+        if let Some(p) = script_path.as_ref() {
+            let p_str = p.as_ref().to_string_lossy().to_string();
+            obj_set_key_value(mc, &root.global_env, &"__filename".into(), Value::String(utf8_to_utf16(&p_str)))?;
+        }
+        match evaluate_statements(mc, &root.global_env, &mut statements) {
+            Ok(result) => Ok(value_to_string(&result)),
+            Err(e) => match e {
+                EvalError::Js(js_err) => Err(js_err),
+                EvalError::Throw(val, line, column) => {
+                    let mut err = crate::raise_throw_error!(val);
+                    if let Some((l, c)) = line.zip(column) {
+                        err.set_js_location(l, c);
+                    }
+                    if let Value::Object(obj) = &val {
+                        if let Some(stack_str) = obj.borrow().get_property(mc, "stack") {
+                            let lines: Vec<String> = stack_str
+                                .lines()
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| s.starts_with("at "))
+                                .collect();
+                            err.inner.stack = lines;
+                        }
+                    }
+                    Err(err)
+                }
+            },
+        }
     })
 }
 

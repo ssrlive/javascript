@@ -76,6 +76,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
         Token::If => parse_if_statement(t, index),
         Token::Return => parse_return_statement(t, index),
         Token::Throw => parse_throw_statement(t, index),
+        Token::Try => parse_try_statement(t, index),
         Token::LBrace => parse_block_statement(t, index),
         Token::Var => parse_var_statement(t, index),
         Token::Let => parse_let_statement(t, index),
@@ -192,6 +193,68 @@ fn parse_throw_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
     Ok(Statement {
         kind: StatementKind::Throw(expr),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume try
+
+    let try_block = parse_block_statement(t, index)?;
+    let try_body = if let StatementKind::Block(stmts) = try_block.kind {
+        stmts
+    } else {
+        return Err(raise_parse_error!("Expected block after try"));
+    };
+
+    let mut catch_param = None;
+    let mut catch_body = None;
+
+    if *index < t.len() && matches!(t[*index].token, Token::Catch) {
+        *index += 1; // consume catch
+
+        // Optional catch binding
+        if *index < t.len() && matches!(t[*index].token, Token::LParen) {
+            *index += 1; // consume (
+            if let Token::Identifier(name) = &t[*index].token {
+                catch_param = Some(name.clone());
+                *index += 1;
+            } else {
+                return Err(raise_parse_error!("Expected identifier in catch binding"));
+            }
+            if *index >= t.len() || !matches!(t[*index].token, Token::RParen) {
+                return Err(raise_parse_error!("Expected ) after catch binding"));
+            }
+            *index += 1; // consume )
+        }
+
+        let catch_block = parse_block_statement(t, index)?;
+        if let StatementKind::Block(stmts) = catch_block.kind {
+            catch_body = Some(stmts);
+        } else {
+            return Err(raise_parse_error!("Expected block after catch"));
+        }
+    }
+
+    let mut finally_body = None;
+    if *index < t.len() && matches!(t[*index].token, Token::Finally) {
+        *index += 1; // consume finally
+        let finally_block = parse_block_statement(t, index)?;
+        if let StatementKind::Block(stmts) = finally_block.kind {
+            finally_body = Some(stmts);
+        } else {
+            return Err(raise_parse_error!("Expected block after finally"));
+        }
+    }
+
+    if catch_body.is_none() && finally_body.is_none() {
+        return Err(raise_parse_error!("Missing catch or finally after try"));
+    }
+
+    Ok(Statement {
+        kind: StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body),
         line: t[start].line,
         column: t[start].column,
     })
@@ -2445,7 +2508,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             } else {
                 log::debug!("parse_expression unexpected end of tokens; tokens empty");
             }
-            return Err(raise_parse_error_at(tokens));
+            return Err(raise_parse_error_at(&tokens[*index - 1..]));
         }
     };
 

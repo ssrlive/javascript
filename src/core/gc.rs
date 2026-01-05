@@ -119,5 +119,20 @@ pub fn trace_stmt<'gc, T: Trace<'gc>>(context: &mut T, stmt: &Statement) {
                 trace_stmt(context, s);
             }
         }
+        StatementKind::TryCatch(try_body, _, catch_body, finally_body) => {
+            for s in try_body {
+                trace_stmt(context, s);
+            }
+            if let Some(stmts) = catch_body {
+                for s in stmts {
+                    trace_stmt(context, s);
+                }
+            }
+            if let Some(stmts) = finally_body {
+                for s in stmts {
+                    trace_stmt(context, s);
+                }
+            }
+        }
     }
 }

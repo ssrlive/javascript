@@ -3,8 +3,8 @@
 use crate::{
     JSError, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, StatementKind, env_get, env_set, env_set_recursive,
-        is_error, obj_get_key_value, obj_set_key_value, value_to_string,
+        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, env_get, env_set,
+        env_set_recursive, is_error, obj_get_key_value, obj_set_key_value, value_to_string,
     },
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
@@ -17,7 +17,7 @@ use gc_arena::lock::RefLock as GcCell;
 pub enum ControlFlow<'gc> {
     Normal(Value<'gc>),
     Return(Value<'gc>),
-    Throw(Value<'gc>, Option<(usize, usize)>),
+    Throw(Value<'gc>, Option<usize>, Option<usize>), // value, line, column
     Break(Option<String>),
     Continue(Option<String>),
 }
@@ -26,35 +26,13 @@ pub fn evaluate_statements<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &mut [Statement],
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match evaluate_statements_with_context(mc, env, statements)? {
         ControlFlow::Normal(val) => Ok(val),
         ControlFlow::Return(val) => Ok(val),
-        ControlFlow::Throw(val, loc) => {
-            let mut err = crate::raise_throw_error!(val);
-            let mut location_set = false;
-
-            if let Value::Object(obj) = val {
-                if let Ok(borrowed) = obj.try_borrow() {
-                    let line = borrowed.get_line();
-                    let col = borrowed.get_column();
-                    if let (Some(line), Some(col)) = (line, col) {
-                        err.set_js_location(line, col);
-                        err.inner.stack.push(format!("at <anonymous> (:{line}:{col})"));
-                        location_set = true;
-                    }
-                }
-            }
-
-            if !location_set {
-                if let Some((line, col)) = loc {
-                    err.set_js_location(line, col);
-                    err.inner.stack.push(format!("at <anonymous> (:{line}:{col})"));
-                }
-            }
-            Err(err)
-        }
-        _ => Err(raise_eval_error!("Illegal control flow")),
+        ControlFlow::Throw(val, line, column) => Err(EvalError::Throw(val, line, column)),
+        ControlFlow::Break(_) => Ok(Value::Undefined),
+        ControlFlow::Continue(_) => Ok(Value::Undefined),
     }
 }
 
@@ -62,7 +40,7 @@ pub fn evaluate_statements_with_context<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &mut [Statement],
-) -> Result<ControlFlow<'gc>, JSError> {
+) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
     let mut last_value = Value::Undefined;
     for stmt in statements {
         if let Some(cf) = eval_res(mc, stmt, &mut last_value, env)? {
@@ -77,7 +55,7 @@ fn eval_res<'gc>(
     stmt: &Statement,
     last_value: &mut Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Option<ControlFlow<'gc>>, JSError> {
+) -> Result<Option<ControlFlow<'gc>>, EvalError<'gc>> {
     match &stmt.kind {
         StatementKind::Expr(expr) => match evaluate_expr(mc, env, expr) {
             Ok(val) => {
@@ -85,7 +63,25 @@ fn eval_res<'gc>(
                 Ok(None)
             }
             Err(mut e) => {
-                e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                let mut filename = String::new();
+                if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
+                    if let Value::String(s) = &*val_ptr.borrow() {
+                        filename = utf16_to_utf8(s);
+                    }
+                }
+                let frame = format!("at <anonymous> ({}:{}:{})", filename, stmt.line, stmt.column);
+                if let EvalError::Js(js_err) = &mut e {
+                    js_err.inner.stack.push(frame.clone());
+                }
+                if let EvalError::Throw(val, ..) = &mut e
+                    && is_error(val)
+                    && let Value::Object(obj) = val
+                {
+                    let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+                    let new_stack = format!("{}\n    {}", current_stack, frame);
+                    obj.borrow_mut(mc)
+                        .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
+                }
                 Err(e)
             }
         },
@@ -95,7 +91,19 @@ fn eval_res<'gc>(
                     match evaluate_expr(mc, env, expr) {
                         Ok(v) => v,
                         Err(mut e) => {
-                            e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                            let frame = format!("at <anonymous> (:{}:{})", stmt.line, stmt.column);
+                            if let EvalError::Js(js_err) = &mut e {
+                                js_err.inner.stack.push(frame.clone());
+                            }
+                            if let EvalError::Throw(val, ..) = &mut e
+                                && is_error(val)
+                                && let Value::Object(obj) = val
+                            {
+                                let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+                                let new_stack = format!("{}\n    {}", current_stack, frame);
+                                obj.borrow_mut(mc)
+                                    .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
+                            }
                             return Err(e);
                         }
                     }
@@ -112,7 +120,19 @@ fn eval_res<'gc>(
                 match evaluate_expr(mc, env, expr) {
                     Ok(v) => v,
                     Err(mut e) => {
-                        e.inner.stack.push(format!("at <anonymous> (:{}:{})", stmt.line, stmt.column));
+                        let frame = format!("at <anonymous> (:{}:{})", stmt.line, stmt.column);
+                        if let EvalError::Js(js_err) = &mut e {
+                            js_err.inner.stack.push(frame.clone());
+                        }
+                        if let EvalError::Throw(val, ..) = &mut e
+                            && is_error(val)
+                            && let Value::Object(obj) = val
+                        {
+                            let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+                            let new_stack = format!("{}\n    {}", current_stack, frame);
+                            obj.borrow_mut(mc)
+                                .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
+                        }
                         return Err(e);
                     }
                 }
@@ -131,11 +151,23 @@ fn eval_res<'gc>(
             let val = evaluate_expr(mc, env, expr)?;
             if let Value::Object(obj) = val {
                 if is_error(&val) {
+                    let mut filename = String::new();
+                    if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
+                        if let Value::String(s) = &*val_ptr.borrow() {
+                            filename = utf16_to_utf8(s);
+                        }
+                    }
+                    let frame = format!("at <anonymous> ({}:{}:{})", filename, stmt.line, stmt.column);
+                    let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+                    let new_stack = format!("{}\n    {}", current_stack, frame);
+                    obj.borrow_mut(mc)
+                        .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
+
                     obj.borrow_mut(mc).set_line(stmt.line, mc)?;
                     obj.borrow_mut(mc).set_column(stmt.column, mc)?;
                 }
             }
-            Ok(Some(ControlFlow::Throw(val, Some((stmt.line, stmt.column)))))
+            Ok(Some(ControlFlow::Throw(val, Some(stmt.line), Some(stmt.column))))
         }
         StatementKind::Block(stmts) => {
             let mut stmts_clone = stmts.clone();
@@ -183,23 +215,95 @@ fn eval_res<'gc>(
                 Ok(None)
             }
         }
+        StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body) => {
+            let mut try_stmts = try_body.clone();
+            let try_res = evaluate_statements_with_context(mc, env, &mut try_stmts);
+
+            let mut result = match try_res {
+                Ok(cf) => cf,
+                Err(e) => match e {
+                    EvalError::Js(js_err) => {
+                        let msg = js_err.message();
+                        let val = Value::String(utf8_to_utf16(&msg));
+                        ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column)
+                    }
+                    EvalError::Throw(val, line, column) => ControlFlow::Throw(val, line, column),
+                },
+            };
+
+            if let ControlFlow::Throw(val, ..) = &result {
+                if let Some(catch_stmts) = catch_body {
+                    // Create new scope for catch
+                    let catch_env = crate::core::new_js_object_data(mc);
+                    catch_env.borrow_mut(mc).prototype = Some(*env);
+
+                    if let Some(param_name) = catch_param {
+                        env_set(mc, &catch_env, param_name, val.clone())?;
+                    }
+
+                    let mut catch_stmts_clone = catch_stmts.clone();
+                    let catch_res = evaluate_statements_with_context(mc, &catch_env, &mut catch_stmts_clone);
+                    match catch_res {
+                        Ok(cf) => result = cf,
+                        Err(e) => match e {
+                            EvalError::Js(js_err) => {
+                                let msg = js_err.message();
+                                let val = Value::String(utf8_to_utf16(&msg));
+                                result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
+                            }
+                            EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
+                        },
+                    }
+                }
+            }
+
+            if let Some(finally_stmts) = finally_body {
+                let mut finally_stmts_clone = finally_stmts.clone();
+                let finally_res = evaluate_statements_with_context(mc, env, &mut finally_stmts_clone);
+                match finally_res {
+                    Ok(ControlFlow::Normal(_)) => {
+                        // If finally completes normally, return the previous result (try or catch)
+                    }
+                    Ok(other) => {
+                        // If finally is abrupt (return, throw, break, continue), it overrides.
+                        result = other;
+                    }
+                    Err(e) => match e {
+                        EvalError::Js(js_err) => {
+                            let msg = js_err.message();
+                            let val = Value::String(utf8_to_utf16(&msg));
+                            result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
+                        }
+                        EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
+                    },
+                }
+            }
+
+            match result {
+                ControlFlow::Normal(val) => {
+                    *last_value = val;
+                    Ok(None)
+                }
+                other => Ok(Some(other)),
+            }
+        }
         _ => Ok(None),
     }
 }
 
-pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, JSError> {
+pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
-        Expr::Var(name, _, _) => evaluate_var(mc, env, name),
+        Expr::Var(name, _, _) => Ok(evaluate_var(mc, env, name)?),
         Expr::Assign(target, value_expr) => {
             let val = evaluate_expr(mc, env, value_expr)?;
             if let Expr::Var(name, _, _) = &**target {
                 env_set_recursive(mc, env, name, val.clone())?;
                 Ok(val)
             } else {
-                Err(raise_eval_error!("Only simple assignment implemented"))
+                Err(EvalError::Js(raise_eval_error!("Only simple assignment implemented")))
             }
         }
         Expr::Binary(left, op, right) => {
@@ -223,27 +327,27 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         res.extend(rs);
                         Ok(Value::String(res))
                     }
-                    _ => Err(raise_eval_error!("Binary Add only for numbers or strings")),
+                    _ => Err(EvalError::Js(raise_eval_error!("Binary Add only for numbers or strings"))),
                 },
                 BinaryOp::Sub => {
                     if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
                         Ok(Value::Number(ln - rn))
                     } else {
-                        Err(raise_eval_error!("Binary Sub only for numbers"))
+                        Err(EvalError::Js(raise_eval_error!("Binary Sub only for numbers")))
                     }
                 }
                 BinaryOp::Mul => {
                     if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
                         Ok(Value::Number(ln * rn))
                     } else {
-                        Err(raise_eval_error!("Binary Mul only for numbers"))
+                        Err(EvalError::Js(raise_eval_error!("Binary Mul only for numbers")))
                     }
                 }
                 BinaryOp::Div => {
                     if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
                         Ok(Value::Number(ln / rn))
                     } else {
-                        Err(raise_eval_error!("Binary Div only for numbers"))
+                        Err(EvalError::Js(raise_eval_error!("Binary Div only for numbers")))
                     }
                 }
                 BinaryOp::StrictEqual => {
@@ -285,7 +389,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::Function(name, params, body) => {
             let mut body_clone = body.clone();
-            evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)
+            Ok(evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)?)
         }
         Expr::Call(func_expr, args) => {
             let func_val = evaluate_expr(mc, env, func_expr)?;
@@ -295,6 +399,56 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             }
 
             match func_val {
+                Value::Function(name) => {
+                    if name == "console.log" {
+                        let output = eval_args
+                            .iter()
+                            .map(|v| {
+                                if is_error(v)
+                                    && let Value::Object(obj) = v
+                                {
+                                    // If it has a stack property, use it
+                                    if let Some(stack) = obj.borrow().get_property(mc, "stack") {
+                                        return stack;
+                                    }
+                                }
+
+                                if let Value::String(s) = v {
+                                    utf16_to_utf8(s)
+                                } else {
+                                    value_to_string(v)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("{}", output);
+                        Ok(Value::Undefined)
+                    } else if name == "console.error" {
+                        let output = eval_args
+                            .iter()
+                            .map(|v| {
+                                if is_error(v)
+                                    && let Value::Object(obj) = v
+                                {
+                                    // If it has a stack property, use it
+                                    if let Some(stack) = obj.borrow().get_property(mc, "stack") {
+                                        return stack;
+                                    }
+                                }
+                                if let Value::String(s) = v {
+                                    utf16_to_utf8(s)
+                                } else {
+                                    value_to_string(v)
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        println!("{}", output);
+                        Ok(Value::Undefined)
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!(format!("Unknown native function: {}", name))))
+                    }
+                }
                 Value::Object(obj) => {
                     if let Some(cl_ptr) = obj_get_key_value(mc, &obj, &"__closure__".into())? {
                         match &*cl_ptr.borrow() {
@@ -313,10 +467,44 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 match evaluate_statements(mc, &call_env, &mut body_clone) {
                                     Ok(v) => Ok(v),
                                     Err(mut e) => {
-                                        if let Some(name_str) = obj.borrow_mut(mc).get_name(mc) {
-                                            if let Some(last_frame) = e.inner.stack.last_mut() {
-                                                if last_frame.contains("<anonymous>") {
-                                                    *last_frame = last_frame.replace("<anonymous>", &name_str);
+                                        // Avoid borrowing obj while modifying err_obj if they might be related or if obj is already borrowed?
+                                        // obj is the function object.
+                                        // We need its name.
+                                        let name_opt = obj.borrow().get_name(mc);
+
+                                        if let Some(name_str) = name_opt {
+                                            if let EvalError::Js(js_err) = &mut e {
+                                                if let Some(last_frame) = js_err.inner.stack.last_mut() {
+                                                    if last_frame.contains("<anonymous>") {
+                                                        *last_frame = last_frame.replace("<anonymous>", &name_str);
+                                                    }
+                                                }
+                                            }
+                                            if let EvalError::Throw(val, ..) = &mut e {
+                                                if let Value::Object(err_obj) = val {
+                                                    // If err_obj is the same as obj (unlikely for function call), we might have issues.
+                                                    // But err_obj is the thrown error. obj is the function being called.
+
+                                                    // The panic "RefCell already borrowed" likely comes from obj_set_key_value borrowing err_obj mutably,
+                                                    // while err_obj.borrow().get_property borrowed it immutably.
+                                                    // We need to drop the immutable borrow before mutable borrow.
+
+                                                    let stack_str_opt = err_obj.borrow().get_property(mc, "stack");
+                                                    if let Some(stack_str) = stack_str_opt {
+                                                        let mut lines: Vec<String> = stack_str.lines().map(|s| s.to_string()).collect();
+                                                        if let Some(last_line) = lines.last_mut() {
+                                                            if last_line.contains("<anonymous>") {
+                                                                *last_line = last_line.replace("<anonymous>", &name_str);
+                                                            }
+                                                        }
+                                                        let new_stack = lines.join("\n");
+                                                        let _ = obj_set_key_value(
+                                                            mc,
+                                                            err_obj,
+                                                            &"stack".into(),
+                                                            Value::String(utf8_to_utf16(&new_stack)),
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
@@ -324,13 +512,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     }
                                 }
                             }
-                            _ => Err(raise_eval_error!("Not a function")),
+                            _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                         }
                     } else {
-                        Err(raise_eval_error!("Not a function"))
+                        Err(EvalError::Js(raise_eval_error!("Not a function")))
                     }
                 }
-                _ => Err(raise_eval_error!("Not a function")),
+                _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
             }
         }
         Expr::New(ctor, args) => {
@@ -358,7 +546,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 let mut body_clone = cl.body.clone();
                                 evaluate_statements(mc, &call_env, &mut body_clone)
                             }
-                            _ => Err(raise_eval_error!("Not a constructor")),
+                            _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
                         }
                     } else {
                         if let Some(native_name) = obj_get_key_value(mc, &obj, &"__native_ctor".into())? {
@@ -373,7 +561,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         None
                                     };
 
-                                    return crate::core::js_error::create_error(mc, prototype, msg);
+                                    return Ok(crate::core::js_error::create_error(mc, prototype, msg)?);
                                 }
                             }
                         }
@@ -381,7 +569,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Ok(Value::Object(new_obj))
                     }
                 }
-                _ => Err(raise_eval_error!("Not a constructor")),
+                _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
             }
         }
         Expr::Property(obj_expr, key) => {
@@ -393,7 +581,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     Ok(Value::Undefined)
                 }
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(raise_eval_error!("Cannot read properties of null or undefined"))
+                Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
             } else {
                 Ok(Value::Undefined)
             }
@@ -415,7 +603,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     Ok(Value::Undefined)
                 }
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(raise_eval_error!("Cannot read properties of null or undefined"))
+                Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
             } else {
                 Ok(Value::Undefined)
             }

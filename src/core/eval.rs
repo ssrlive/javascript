@@ -126,6 +126,9 @@ fn hoist_var_declarations<'gc>(
                 // We need to wrap it in a slice to recurse
                 hoist_var_declarations(mc, env, std::slice::from_ref(stmt))?;
             }
+            StatementKind::Export(_, Some(decl)) => {
+                hoist_var_declarations(mc, env, std::slice::from_ref(decl))?;
+            }
             _ => {}
         }
     }
@@ -145,6 +148,39 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     // 2. Hoist Var declarations (recursively)
     hoist_var_declarations(mc, env, statements)?;
 
+    // 3. Hoist Lexical declarations (let, const, class) - top-level only, initialize to Uninitialized (TDZ)
+    for stmt in statements {
+        match &stmt.kind {
+            StatementKind::Let(decls) => {
+                for (name, _) in decls {
+                    env_set(mc, env, name, Value::Uninitialized)?;
+                }
+            }
+            StatementKind::Const(decls) => {
+                for (name, _) in decls {
+                    env_set(mc, env, name, Value::Uninitialized)?;
+                }
+            }
+            StatementKind::Class(name, ..) => {
+                env_set(mc, env, name, Value::Uninitialized)?;
+            }
+            StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
+                let mut names = Vec::new();
+                collect_names_from_destructuring(pattern, &mut names);
+                for name in names {
+                    env_set(mc, env, &name, Value::Uninitialized)?;
+                }
+            }
+            StatementKind::LetDestructuringObject(pattern, _) | StatementKind::ConstDestructuringObject(pattern, _) => {
+                let mut names = Vec::new();
+                collect_names_from_object_destructuring(pattern, &mut names);
+                for name in names {
+                    env_set(mc, env, &name, Value::Uninitialized)?;
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -811,7 +847,11 @@ fn evaluate_var<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, nam
     let mut current_opt = Some(*env);
     while let Some(current_env) = current_opt {
         if let Some(val_ptr) = env_get(&current_env, name) {
-            return Ok(val_ptr.borrow().clone());
+            let val = val_ptr.borrow().clone();
+            if let Value::Uninitialized = val {
+                return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", name)));
+            }
+            return Ok(val);
         }
         current_opt = current_env.borrow().prototype;
     }

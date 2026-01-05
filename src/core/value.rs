@@ -421,7 +421,10 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         if let Some(parent_rc) = parent_opt {
             current = parent_rc;
         } else {
-            return env_set(mc, env, key, val);
+            // Reached global scope (or end of chain) and variable not found.
+            // In strict mode, this is a ReferenceError.
+            // Since our engine is strict-only, we should error here instead of creating a global.
+            return Err(crate::raise_reference_error!(format!("{} is not defined", key)));
         }
     }
 }

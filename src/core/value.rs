@@ -290,6 +290,36 @@ pub enum Value<'gc> {
     Uninitialized,
 }
 
+impl From<f64> for Value<'_> {
+    fn from(n: f64) -> Self {
+        Value::Number(n)
+    }
+}
+
+impl From<bool> for Value<'_> {
+    fn from(b: bool) -> Self {
+        Value::Boolean(b)
+    }
+}
+
+impl From<&str> for Value<'_> {
+    fn from(s: &str) -> Self {
+        Value::String(crate::unicode::utf8_to_utf16(s))
+    }
+}
+
+impl From<String> for Value<'_> {
+    fn from(s: String) -> Self {
+        Value::String(crate::unicode::utf8_to_utf16(&s))
+    }
+}
+
+impl From<&String> for Value<'_> {
+    fn from(s: &String) -> Self {
+        Value::String(crate::unicode::utf8_to_utf16(s))
+    }
+}
+
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
     fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
         match self {

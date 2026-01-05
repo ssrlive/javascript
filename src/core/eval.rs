@@ -1,10 +1,10 @@
 #![allow(dead_code, unused_variables)]
 
 use crate::{
-    JSError, PropertyKey, Value,
+    JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, env_get, env_set,
-        env_set_recursive, is_error, obj_get_key_value, obj_set_key_value, value_to_string,
+        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, create_error, env_get,
+        env_set, env_set_recursive, is_error, new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
     },
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
@@ -62,53 +62,52 @@ fn eval_res<'gc>(
                 *last_value = val;
                 Ok(None)
             }
-            Err(mut e) => {
-                let mut filename = String::new();
-                if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
-                    if let Value::String(s) = &*val_ptr.borrow() {
-                        filename = utf16_to_utf8(s);
-                    }
-                }
-                let frame = format!("at <anonymous> ({}:{}:{})", filename, stmt.line, stmt.column);
-                if let EvalError::Js(js_err) = &mut e {
-                    js_err.inner.stack.push(frame.clone());
-                }
-                if let EvalError::Throw(val, ..) = &mut e
-                    && is_error(val)
-                    && let Value::Object(obj) = val
-                {
-                    let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
-                    let new_stack = format!("{}\n    {}", current_stack, frame);
-                    obj.borrow_mut(mc)
-                        .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
-                }
-                Err(e)
-            }
+            Err(e) => Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
         },
         StatementKind::Let(decls) => {
             for (name, expr_opt) in decls {
                 let val = if let Some(expr) = expr_opt {
                     match evaluate_expr(mc, env, expr) {
                         Ok(v) => v,
-                        Err(mut e) => {
-                            let frame = format!("at <anonymous> (:{}:{})", stmt.line, stmt.column);
-                            if let EvalError::Js(js_err) = &mut e {
-                                js_err.inner.stack.push(frame.clone());
-                            }
-                            if let EvalError::Throw(val, ..) = &mut e
-                                && is_error(val)
-                                && let Value::Object(obj) = val
-                            {
-                                let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
-                                let new_stack = format!("{}\n    {}", current_stack, frame);
-                                obj.borrow_mut(mc)
-                                    .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
-                            }
-                            return Err(e);
-                        }
+                        Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                     }
                 } else {
                     Value::Undefined
+                };
+                env_set(mc, env, name, val)?;
+            }
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Var(decls) => {
+            for (name, expr_opt) in decls {
+                let val = if let Some(expr) = expr_opt {
+                    match evaluate_expr(mc, env, expr) {
+                        Ok(v) => v,
+                        Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
+                    }
+                } else {
+                    Value::Undefined
+                };
+
+                let mut target_env = *env;
+                while !target_env.borrow().is_function_scope {
+                    if let Some(proto) = target_env.borrow().prototype {
+                        target_env = proto;
+                    } else {
+                        break;
+                    }
+                }
+                env_set(mc, &target_env, name, val)?;
+            }
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Const(decls) => {
+            for (name, expr) in decls {
+                let val = match evaluate_expr(mc, env, expr) {
+                    Ok(v) => v,
+                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                 };
                 env_set(mc, env, name, val)?;
             }
@@ -119,22 +118,7 @@ fn eval_res<'gc>(
             let val = if let Some(expr) = expr_opt {
                 match evaluate_expr(mc, env, expr) {
                     Ok(v) => v,
-                    Err(mut e) => {
-                        let frame = format!("at <anonymous> (:{}:{})", stmt.line, stmt.column);
-                        if let EvalError::Js(js_err) = &mut e {
-                            js_err.inner.stack.push(frame.clone());
-                        }
-                        if let EvalError::Throw(val, ..) = &mut e
-                            && is_error(val)
-                            && let Value::Object(obj) = val
-                        {
-                            let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
-                            let new_stack = format!("{}\n    {}", current_stack, frame);
-                            obj.borrow_mut(mc)
-                                .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
-                        }
-                        return Err(e);
-                    }
+                    Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                 }
             } else {
                 Value::Undefined
@@ -171,7 +155,9 @@ fn eval_res<'gc>(
         }
         StatementKind::Block(stmts) => {
             let mut stmts_clone = stmts.clone();
-            let res = evaluate_statements_with_context(mc, env, &mut stmts_clone)?;
+            let block_env = new_js_object_data(mc);
+            block_env.borrow_mut(mc).prototype = Some(*env);
+            let res = evaluate_statements_with_context(mc, &block_env, &mut stmts_clone)?;
             match res {
                 ControlFlow::Normal(val) => {
                     *last_value = val;
@@ -193,7 +179,9 @@ fn eval_res<'gc>(
 
             if is_true {
                 let mut stmts = then_block.clone();
-                let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+                let block_env = new_js_object_data(mc);
+                block_env.borrow_mut(mc).prototype = Some(*env);
+                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -203,7 +191,9 @@ fn eval_res<'gc>(
                 }
             } else if let Some(else_stmts) = else_block {
                 let mut stmts = else_stmts.clone();
-                let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+                let block_env = new_js_object_data(mc);
+                block_env.borrow_mut(mc).prototype = Some(*env);
+                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -223,8 +213,7 @@ fn eval_res<'gc>(
                 Ok(cf) => cf,
                 Err(e) => match e {
                     EvalError::Js(js_err) => {
-                        let msg = js_err.message();
-                        let val = Value::String(utf8_to_utf16(&msg));
+                        let val = js_error_to_value(mc, env, &js_err);
                         ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column)
                     }
                     EvalError::Throw(val, line, column) => ControlFlow::Throw(val, line, column),
@@ -247,8 +236,7 @@ fn eval_res<'gc>(
                         Ok(cf) => result = cf,
                         Err(e) => match e {
                             EvalError::Js(js_err) => {
-                                let msg = js_err.message();
-                                let val = Value::String(utf8_to_utf16(&msg));
+                                let val = js_error_to_value(mc, env, &js_err);
                                 result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
                             }
                             EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
@@ -270,8 +258,7 @@ fn eval_res<'gc>(
                     }
                     Err(e) => match e {
                         EvalError::Js(js_err) => {
-                            let msg = js_err.message();
-                            let val = Value::String(utf8_to_utf16(&msg));
+                            let val = js_error_to_value(mc, env, &js_err);
                             result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
                         }
                         EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
@@ -289,6 +276,34 @@ fn eval_res<'gc>(
         }
         _ => Ok(None),
     }
+}
+
+fn refresh_error_by_additional_stack_frame<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    line: usize,
+    column: usize,
+    mut e: EvalError<'gc>,
+) -> EvalError<'gc> {
+    let mut filename = String::new();
+    if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
+        if let Value::String(s) = &*val_ptr.borrow() {
+            filename = utf16_to_utf8(s);
+        }
+    }
+    let frame = format!("at <anonymous> ({}:{}:{})", filename, line, column);
+    if let EvalError::Js(js_err) = &mut e {
+        js_err.inner.stack.push(frame.clone());
+    }
+    if let EvalError::Throw(val, ..) = &mut e
+        && is_error(val)
+        && let Value::Object(obj) = val
+    {
+        let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+        let new_stack = format!("{}\n    {}", current_stack, frame);
+        obj.borrow_mut(mc).set_property(mc, "stack", new_stack.into());
+    }
+    e
 }
 
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -371,6 +386,34 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         _ => false,
                     };
                     Ok(Value::Boolean(!eq))
+                }
+                BinaryOp::GreaterThan => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Boolean(ln > rn))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!("Binary GreaterThan only for numbers")))
+                    }
+                }
+                BinaryOp::LessThan => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Boolean(ln < rn))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!("Binary LessThan only for numbers")))
+                    }
+                }
+                BinaryOp::GreaterEqual => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Boolean(ln >= rn))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!("Binary GreaterEqual only for numbers")))
+                    }
+                }
+                BinaryOp::LessEqual => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Boolean(ln <= rn))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!("Binary LessEqual only for numbers")))
+                    }
                 }
                 _ => todo!(),
             }
@@ -649,7 +692,7 @@ fn evaluate_var<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, nam
         }
         current_opt = current_env.borrow().prototype;
     }
-    Err(raise_reference_error!(format!("Variable '{}' not found", name)))
+    Err(raise_reference_error!(format!("{} is not defined", name)))
 }
 
 fn evaluate_function_expression<'gc>(
@@ -674,6 +717,47 @@ fn evaluate_function_expression<'gc>(
         obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(&n)))?;
     }
     Ok(Value::Object(func_obj))
+}
+
+fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, js_err: &JSError) -> Value<'gc> {
+    let full_msg = js_err.message();
+
+    let error_proto = if let Some(err_ctor_val) = env_get(env, "Error")
+        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+        && let Ok(Some(proto_val)) = obj_get_key_value(mc, err_ctor, &"prototype".into())
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
+    let err_val = create_error(mc, error_proto, (&full_msg).into()).unwrap_or(Value::Undefined);
+
+    let (name, raw_msg) = match js_err.kind() {
+        JSErrorKind::ReferenceError { message } => ("ReferenceError", message.clone()),
+        JSErrorKind::SyntaxError { message } => ("SyntaxError", message.clone()),
+        JSErrorKind::TypeError { message } => ("TypeError", message.clone()),
+        JSErrorKind::RangeError { message } => ("RangeError", message.clone()),
+        JSErrorKind::VariableNotFound { name } => ("ReferenceError", format!("{} is not defined", name)),
+        JSErrorKind::TokenizationError { message } => ("SyntaxError", message.clone()),
+        JSErrorKind::ParseError { message } => ("SyntaxError", message.clone()),
+        _ => ("Error", full_msg.clone()),
+    };
+
+    if let Value::Object(obj) = &err_val {
+        obj.borrow_mut(mc).set_property(mc, "name", name.into());
+        obj.borrow_mut(mc).set_property(mc, "message", (&raw_msg).into());
+
+        let stack = js_err.stack();
+        let stack_str = if stack.is_empty() {
+            format!("{name}: {raw_msg}")
+        } else {
+            format!("{name}: {raw_msg}\n    {}", stack.join("\n    "))
+        };
+        obj.borrow_mut(mc).set_property(mc, "stack", stack_str.into());
+    }
+    err_val
 }
 
 /*

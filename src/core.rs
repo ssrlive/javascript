@@ -56,6 +56,10 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_console(mc, env)?;
 
+    env_set(mc, env, "undefined", Value::Undefined)?;
+    env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
+    env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
+
     Ok(())
 }
 

@@ -3,8 +3,9 @@
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Statement, StatementKind, create_error, env_get,
-        env_set, env_set_recursive, is_error, new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
+        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement,
+        StatementKind, create_error, env_get, env_set, env_set_recursive, is_error, new_js_object_data, obj_get_key_value,
+        obj_set_key_value, value_to_string,
     },
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
@@ -20,6 +21,131 @@ pub enum ControlFlow<'gc> {
     Throw(Value<'gc>, Option<usize>, Option<usize>), // value, line, column
     Break(Option<String>),
     Continue(Option<String>),
+}
+
+fn collect_names_from_destructuring(pattern: &[DestructuringElement], names: &mut Vec<String>) {
+    for element in pattern {
+        collect_names_from_destructuring_element(element, names);
+    }
+}
+
+fn collect_names_from_destructuring_element(element: &DestructuringElement, names: &mut Vec<String>) {
+    match element {
+        DestructuringElement::Variable(name, _) => names.push(name.clone()),
+        DestructuringElement::Property(_, inner) => collect_names_from_destructuring_element(inner, names),
+        DestructuringElement::Rest(name) => names.push(name.clone()),
+        DestructuringElement::NestedArray(inner) => collect_names_from_destructuring(inner, names),
+        DestructuringElement::NestedObject(inner) => collect_names_from_destructuring(inner, names),
+        DestructuringElement::Empty => {}
+    }
+}
+
+fn collect_names_from_object_destructuring(pattern: &[ObjectDestructuringElement], names: &mut Vec<String>) {
+    for element in pattern {
+        match element {
+            ObjectDestructuringElement::Property { key: _, value } => collect_names_from_destructuring_element(value, names),
+            ObjectDestructuringElement::Rest(name) => names.push(name.clone()),
+        }
+    }
+}
+
+fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<(), EvalError<'gc>> {
+    let mut target_env = *env;
+    while !target_env.borrow().is_function_scope {
+        if let Some(proto) = target_env.borrow().prototype {
+            target_env = proto;
+        } else {
+            break;
+        }
+    }
+    if env_get(&target_env, name).is_none() {
+        env_set(mc, &target_env, name, Value::Undefined)?;
+    }
+    Ok(())
+}
+
+fn hoist_var_declarations<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+) -> Result<(), EvalError<'gc>> {
+    for stmt in statements {
+        match &stmt.kind {
+            StatementKind::Var(decls) => {
+                for (name, _) in decls {
+                    hoist_name(mc, env, name)?;
+                }
+            }
+            StatementKind::VarDestructuringArray(pattern, _) => {
+                let mut names = Vec::new();
+                collect_names_from_destructuring(pattern, &mut names);
+                for name in names {
+                    hoist_name(mc, env, &name)?;
+                }
+            }
+            StatementKind::VarDestructuringObject(pattern, _) => {
+                let mut names = Vec::new();
+                collect_names_from_object_destructuring(pattern, &mut names);
+                for name in names {
+                    hoist_name(mc, env, &name)?;
+                }
+            }
+            StatementKind::Block(stmts) => hoist_var_declarations(mc, env, stmts)?,
+            StatementKind::If(_, then_block, else_block) => {
+                hoist_var_declarations(mc, env, then_block)?;
+                if let Some(else_stmts) = else_block {
+                    hoist_var_declarations(mc, env, else_stmts)?;
+                }
+            }
+            StatementKind::For(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForIn(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOf(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOfDestructuringObject(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOfDestructuringArray(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::While(_, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::DoWhile(body, _) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::TryCatch(try_body, _, catch_body, finally_body) => {
+                hoist_var_declarations(mc, env, try_body)?;
+                if let Some(catch_stmts) = catch_body {
+                    hoist_var_declarations(mc, env, catch_stmts)?;
+                }
+                if let Some(finally_stmts) = finally_body {
+                    hoist_var_declarations(mc, env, finally_stmts)?;
+                }
+            }
+            StatementKind::Switch(_, cases) => {
+                for case in cases {
+                    match case {
+                        crate::core::SwitchCase::Case(_, stmts) => hoist_var_declarations(mc, env, stmts)?,
+                        crate::core::SwitchCase::Default(stmts) => hoist_var_declarations(mc, env, stmts)?,
+                    }
+                }
+            }
+            StatementKind::Label(_, stmt) => {
+                // Label contains a single statement, but it might be a block or loop
+                // We need to wrap it in a slice to recurse
+                hoist_var_declarations(mc, env, std::slice::from_ref(stmt))?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
+    // 1. Hoist FunctionDeclarations (only top-level in this list of statements)
+    for stmt in statements {
+        if let StatementKind::FunctionDeclaration(name, params, body, _) = &stmt.kind {
+            let mut body_clone = body.clone();
+            let func = evaluate_function_expression(mc, env, Some(name.clone()), params, &mut body_clone)?;
+            env_set(mc, env, name, func)?;
+        }
+    }
+
+    // 2. Hoist Var declarations (recursively)
+    hoist_var_declarations(mc, env, statements)?;
+
+    Ok(())
 }
 
 pub fn evaluate_statements<'gc>(
@@ -41,6 +167,7 @@ pub fn evaluate_statements_with_context<'gc>(
     env: &JSObjectDataPtr<'gc>,
     statements: &mut [Statement],
 ) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
+    hoist_declarations(mc, env, statements)?;
     let mut last_value = Value::Undefined;
     for stmt in statements {
         if let Some(cf) = eval_res(mc, stmt, &mut last_value, env)? {
@@ -81,24 +208,22 @@ fn eval_res<'gc>(
         }
         StatementKind::Var(decls) => {
             for (name, expr_opt) in decls {
-                let val = if let Some(expr) = expr_opt {
-                    match evaluate_expr(mc, env, expr) {
+                if let Some(expr) = expr_opt {
+                    let val = match evaluate_expr(mc, env, expr) {
                         Ok(v) => v,
                         Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
-                    }
-                } else {
-                    Value::Undefined
-                };
+                    };
 
-                let mut target_env = *env;
-                while !target_env.borrow().is_function_scope {
-                    if let Some(proto) = target_env.borrow().prototype {
-                        target_env = proto;
-                    } else {
-                        break;
+                    let mut target_env = *env;
+                    while !target_env.borrow().is_function_scope {
+                        if let Some(proto) = target_env.borrow().prototype {
+                            target_env = proto;
+                        } else {
+                            break;
+                        }
                     }
+                    env_set(mc, &target_env, name, val)?;
                 }
-                env_set(mc, &target_env, name, val)?;
             }
             *last_value = Value::Undefined;
             Ok(None)
@@ -126,9 +251,7 @@ fn eval_res<'gc>(
             Ok(Some(ControlFlow::Return(val)))
         }
         StatementKind::FunctionDeclaration(name, params, body, _) => {
-            let mut body_clone = body.clone();
-            let func = evaluate_function_expression(mc, env, Some(name.clone()), params, &mut body_clone)?;
-            env_set(mc, env, name, func)?;
+            // Function declarations are hoisted, so they are already defined.
             Ok(None)
         }
         StatementKind::Throw(expr) => {

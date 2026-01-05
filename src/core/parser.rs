@@ -7,47 +7,16 @@
     unused_imports
 )]
 
-#[derive(Clone, Copy, Debug)]
-pub enum BinaryOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-    LeftShift,
-    RightShift,
-    UnsignedRightShift,
-    LessThan,
-    GreaterThan,
-    LessEqual,
-    GreaterEqual,
-    InstanceOf,
-    In,
-    Equal,
-    StrictEqual,
-    NotEqual,
-    StrictNotEqual,
-    BitAnd,
-    BitXor,
-    BitOr,
-    NullishCoalescing,
-    Mod,
-    Pow,
-}
-
-#[derive(Clone, Debug)]
-pub enum DestructuringElement {
-    Variable(String, Option<Box<Expr>>),
-    Property(String, Box<DestructuringElement>),
-    Rest(String),
-    Empty,
-    NestedArray(Vec<DestructuringElement>),
-    NestedObject(Vec<DestructuringElement>),
-}
-
 use crate::JSError;
 use crate::core::statement::{Statement, StatementKind};
-use crate::core::{TemplatePart, Token, TokenData};
+use crate::core::{BinaryOp, DestructuringElement, Expr, TemplatePart, Token, TokenData};
 use crate::raise_parse_error;
+use crate::{core::value::Value, raise_parse_error_with_token, unicode::utf16_to_utf8};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashSet,
+    rc::Rc,
+};
 
 pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<crate::core::Statement>, JSError> {
     let mut statements = Vec::new();
@@ -369,7 +338,7 @@ pub fn parse_statement(t: &mut [TokenData]) -> Result<Statement, JSError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokenize;
+    use crate::{core::BinaryOp, tokenize};
 
     #[test]
     fn test_comments_and_empty_lines_not_parsed_as_number_zero() {
@@ -420,126 +389,6 @@ pub fn parse_full_expression(tokens: &[TokenData], index: &mut usize) -> Result<
     Ok(left)
 }
 
-#[derive(Clone, Debug)]
-pub enum Expr {
-    Number(f64),
-    StringLit(Vec<u16>),
-    Boolean(bool),
-    Null,
-    Undefined,
-    Var(String, Option<usize>, Option<usize>),
-    Assign(Box<Expr>, Box<Expr>),
-    Binary(Box<Expr>, BinaryOp, Box<Expr>),
-    LogicalAnd(Box<Expr>, Box<Expr>),
-    LogicalOr(Box<Expr>, Box<Expr>),
-    NullishCoalescing(Box<Expr>, Box<Expr>),
-    Mod(Box<Expr>, Box<Expr>),
-    Pow(Box<Expr>, Box<Expr>),
-    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
-    LogicalAndAssign(Box<Expr>, Box<Expr>),
-    LogicalOrAssign(Box<Expr>, Box<Expr>),
-    NullishAssign(Box<Expr>, Box<Expr>),
-    AddAssign(Box<Expr>, Box<Expr>),
-    SubAssign(Box<Expr>, Box<Expr>),
-    PowAssign(Box<Expr>, Box<Expr>),
-    MulAssign(Box<Expr>, Box<Expr>),
-    DivAssign(Box<Expr>, Box<Expr>),
-    ModAssign(Box<Expr>, Box<Expr>),
-    BitXorAssign(Box<Expr>, Box<Expr>),
-    BitAndAssign(Box<Expr>, Box<Expr>),
-    BitOrAssign(Box<Expr>, Box<Expr>),
-    LeftShiftAssign(Box<Expr>, Box<Expr>),
-    RightShiftAssign(Box<Expr>, Box<Expr>),
-    UnsignedRightShiftAssign(Box<Expr>, Box<Expr>),
-    OptionalProperty(Box<Expr>, String),
-    OptionalIndex(Box<Expr>, Box<Expr>),
-    OptionalCall(Box<Expr>, Vec<Expr>),
-    Property(Box<Expr>, String),
-    Index(Box<Expr>, Box<Expr>),
-    BigInt(Vec<u16>),
-    TypeOf(Box<Expr>),
-    Delete(Box<Expr>),
-    Void(Box<Expr>),
-    Await(Box<Expr>),
-    Yield(Option<Box<Expr>>),
-    YieldStar(Box<Expr>),
-    LogicalNot(Box<Expr>),
-    // Class(std::rc::Rc<crate::js_class::ClassDefinition>),
-    New(Box<Expr>, Vec<Expr>),
-    UnaryNeg(Box<Expr>),
-    UnaryPlus(Box<Expr>),
-    BitNot(Box<Expr>),
-    Increment(Box<Expr>),
-    Decrement(Box<Expr>),
-    Spread(Box<Expr>),
-    ArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
-    This,
-    SuperCall(Vec<Expr>),
-    SuperMethod(String, Vec<Expr>),
-    SuperProperty(String),
-    Super,
-    Object(Vec<(Expr, Expr, bool)>),
-    Getter(Box<Expr>),
-    Setter(Box<Expr>),
-    Array(Vec<Option<Expr>>),
-    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
-    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
-    AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
-    PostIncrement(Box<Expr>),
-    PostDecrement(Box<Expr>),
-    TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>),
-    TemplateString(Vec<TemplatePart>),
-    Regex(String, String),
-    Comma(Box<Expr>, Box<Expr>),
-    Function(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
-    Call(Box<Expr>, Vec<Expr>),
-    ValuePlaceholder,
-}
-
-unsafe impl<'gc> gc_arena::Collect<'gc> for BinaryOp {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {}
-}
-
-unsafe impl<'gc> gc_arena::Collect<'gc> for DestructuringElement {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
-        match self {
-            DestructuringElement::Variable(_, e) => {
-                if let Some(e) = e {
-                    e.trace(cc);
-                }
-            }
-            DestructuringElement::Property(_, elem) => {
-                elem.trace(cc);
-            }
-            DestructuringElement::Rest(_) => {}
-            DestructuringElement::Empty => {}
-            DestructuringElement::NestedArray(arr) => {
-                for elem in arr {
-                    elem.trace(cc);
-                }
-            }
-            DestructuringElement::NestedObject(obj) => {
-                for elem in obj {
-                    elem.trace(cc);
-                }
-            }
-        }
-    }
-}
-
-unsafe impl<'gc> gc_arena::Collect<'gc> for Expr {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
-        crate::core::gc::trace_expr(cc, self);
-    }
-}
-
-use crate::{core::value::Value, raise_parse_error_with_token, unicode::utf16_to_utf8};
-use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    rc::Rc,
-};
-
 pub fn raise_parse_error_at(tokens: &[TokenData]) -> JSError {
     if let Some(t) = tokens.first() {
         raise_parse_error_with_token!(t)
@@ -582,7 +431,6 @@ fn flatten_commas(expr: Expr) -> Vec<Expr> {
     }
 }
 
-#[allow(clippy::type_complexity)]
 pub fn parse_parameters(tokens: &[TokenData], index: &mut usize) -> Result<Vec<DestructuringElement>, JSError> {
     let mut params = Vec::new();
     log::trace!(

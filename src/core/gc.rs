@@ -22,7 +22,7 @@ pub fn trace_expr<'gc, T: Trace<'gc>>(context: &mut T, expr: &Expr) {
                     trace_destructuring(cc, e);
                 }
             }
-            _ => {}
+            _ => todo!(),
         }
     }
 
@@ -71,7 +71,7 @@ pub fn trace_expr<'gc, T: Trace<'gc>>(context: &mut T, expr: &Expr) {
                 trace_stmt(context, stmt);
             }
         }
-        _ => {}
+        _ => todo!(),
     }
 }
 
@@ -134,5 +134,6 @@ pub fn trace_stmt<'gc, T: Trace<'gc>>(context: &mut T, stmt: &Statement) {
                 }
             }
         }
+        _ => todo!(),
     }
 }

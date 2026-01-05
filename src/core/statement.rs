@@ -1,4 +1,4 @@
-use crate::core::Expr;
+use crate::core::TemplatePart;
 
 #[derive(Clone, Debug)]
 pub struct Statement {
@@ -14,11 +14,32 @@ pub enum StatementKind {
     Var(Vec<(String, Option<Expr>)>),
     Const(Vec<(String, Expr)>),
     Return(Option<Expr>),
-    Throw(Expr),
-    Block(Vec<Statement>),
-    If(Expr, Vec<Statement>, Option<Vec<Statement>>),
-    FunctionDeclaration(String, Vec<crate::core::DestructuringElement>, Vec<Statement>, bool),
+    Throw(Expr),                                                                              // throw expression
+    Block(Vec<Statement>),                                                                    // block statement `{ ... }`
+    If(Expr, Vec<Statement>, Option<Vec<Statement>>),                                         // condition, then_body, else_body
+    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool),             // name, params, body, is_generator
     TryCatch(Vec<Statement>, Option<String>, Option<Vec<Statement>>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
+    LetDestructuringArray(Vec<DestructuringElement>, Expr),                                   // array destructuring: let [a, b] = [1, 2];
+    VarDestructuringArray(Vec<DestructuringElement>, Expr),                                   // array destructuring: var [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr),                                 // const [a, b] = [1, 2];
+    LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
+    VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: var {a, b} = {a: 1, b: 2};
+    ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
+    Class(String, Option<Expr>, Vec<ClassMember>),                 // name, extends, members
+    Assign(String, Expr),                                          // variable assignment
+    For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
+    ForOf(String, Expr, Vec<Statement>),                           // variable, iterable, body
+    ForIn(String, Expr, Vec<Statement>),                           // variable, object, body
+    ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
+    ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
+    While(Expr, Vec<Statement>),                                   // condition, body
+    DoWhile(Vec<Statement>, Expr),                                 // body, condition
+    Switch(Expr, Vec<SwitchCase>),                                 // expression, cases
+    Break(Option<String>),
+    Continue(Option<String>),
+    Label(String, Box<Statement>),
+    Import(Vec<ImportSpecifier>, String),                 // import specifiers, module name
+    Export(Vec<ExportSpecifier>, Option<Box<Statement>>), // export specifiers, optional inner declaration
 }
 
 impl From<StatementKind> for Statement {
@@ -36,6 +57,211 @@ unsafe impl<'gc> gc_arena::Collect<'gc> for Statement {
 unsafe impl<'gc> gc_arena::Collect<'gc> for StatementKind {
     fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {
         // Handled via Statement trace
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Expr {
+    Number(f64),
+    StringLit(Vec<u16>),
+    Boolean(bool),
+    Null,
+    Undefined,
+    Var(String, Option<usize>, Option<usize>),
+    Assign(Box<Expr>, Box<Expr>),
+    Binary(Box<Expr>, BinaryOp, Box<Expr>),
+    LogicalAnd(Box<Expr>, Box<Expr>),
+    LogicalOr(Box<Expr>, Box<Expr>),
+    NullishCoalescing(Box<Expr>, Box<Expr>),
+    Mod(Box<Expr>, Box<Expr>),
+    Pow(Box<Expr>, Box<Expr>),
+    Conditional(Box<Expr>, Box<Expr>, Box<Expr>),
+    LogicalAndAssign(Box<Expr>, Box<Expr>),
+    LogicalOrAssign(Box<Expr>, Box<Expr>),
+    NullishAssign(Box<Expr>, Box<Expr>),
+    AddAssign(Box<Expr>, Box<Expr>),
+    SubAssign(Box<Expr>, Box<Expr>),
+    PowAssign(Box<Expr>, Box<Expr>),
+    MulAssign(Box<Expr>, Box<Expr>),
+    DivAssign(Box<Expr>, Box<Expr>),
+    ModAssign(Box<Expr>, Box<Expr>),
+    BitXorAssign(Box<Expr>, Box<Expr>),
+    BitAndAssign(Box<Expr>, Box<Expr>),
+    BitOrAssign(Box<Expr>, Box<Expr>),
+    LeftShiftAssign(Box<Expr>, Box<Expr>),
+    RightShiftAssign(Box<Expr>, Box<Expr>),
+    UnsignedRightShiftAssign(Box<Expr>, Box<Expr>),
+    OptionalProperty(Box<Expr>, String),
+    OptionalIndex(Box<Expr>, Box<Expr>),
+    OptionalCall(Box<Expr>, Vec<Expr>),
+    Property(Box<Expr>, String),
+    Index(Box<Expr>, Box<Expr>),
+    BigInt(Vec<u16>),
+    TypeOf(Box<Expr>),
+    Delete(Box<Expr>),
+    Void(Box<Expr>),
+    Await(Box<Expr>),
+    Yield(Option<Box<Expr>>),
+    YieldStar(Box<Expr>),
+    LogicalNot(Box<Expr>),
+    // Class(std::rc::Rc<crate::js_class::ClassDefinition>),
+    New(Box<Expr>, Vec<Expr>),
+    UnaryNeg(Box<Expr>),
+    UnaryPlus(Box<Expr>),
+    BitNot(Box<Expr>),
+    Increment(Box<Expr>),
+    Decrement(Box<Expr>),
+    Spread(Box<Expr>),
+    ArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
+    This,
+    SuperCall(Vec<Expr>),
+    SuperMethod(String, Vec<Expr>),
+    SuperProperty(String),
+    Super,
+    Object(Vec<(Expr, Expr, bool)>),
+    Getter(Box<Expr>),
+    Setter(Box<Expr>),
+    Array(Vec<Option<Expr>>),
+    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
+    PostIncrement(Box<Expr>),
+    PostDecrement(Box<Expr>),
+    TaggedTemplate(Box<Expr>, Vec<Vec<u16>>, Vec<Expr>),
+    TemplateString(Vec<TemplatePart>),
+    Regex(String, String),
+    Comma(Box<Expr>, Box<Expr>),
+    Function(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    Call(Box<Expr>, Vec<Expr>),
+    ValuePlaceholder,
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for Expr {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        crate::core::gc::trace_expr(cc, self);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    LeftShift,
+    RightShift,
+    UnsignedRightShift,
+    LessThan,
+    GreaterThan,
+    LessEqual,
+    GreaterEqual,
+    InstanceOf,
+    In,
+    Equal,
+    StrictEqual,
+    NotEqual,
+    StrictNotEqual,
+    BitAnd,
+    BitXor,
+    BitOr,
+    NullishCoalescing,
+    Mod,
+    Pow,
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for BinaryOp {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {}
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectDestructuringElement {
+    Property { key: String, value: DestructuringElement }, // a: b or a
+    Rest(String),                                          // ...rest
+}
+
+#[derive(Debug, Clone)]
+pub enum ClassMember {
+    Constructor(Vec<DestructuringElement>, Vec<Statement>),           // parameters, body
+    Method(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameters, body
+    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameters, body
+    Property(String, Expr),                                           // name, value
+    StaticProperty(String, Expr),                                     // name, value
+    PrivateProperty(String, Expr),                                    // name, value
+    PrivateStaticProperty(String, Expr),                              // name, value
+    PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    PrivateGetter(String, Vec<Statement>),                            // name, body
+    PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
+    PrivateStaticGetter(String, Vec<Statement>),                      // name, body
+    PrivateStaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
+    StaticBlock(Vec<Statement>),                                      // body
+    Getter(String, Vec<Statement>),                                   // name, body
+    Setter(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameter, body
+    StaticGetter(String, Vec<Statement>),                             // name, body
+    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameter, body
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ClassDefinition {
+    pub name: String,
+    pub extends: Option<Expr>,
+    pub members: Vec<ClassMember>,
+}
+
+#[derive(Clone, Debug)]
+pub enum SwitchCase {
+    Case(Expr, Vec<Statement>), // case value, statements
+    Default(Vec<Statement>),    // default statements
+}
+
+#[derive(Clone, Debug)]
+pub enum ImportSpecifier {
+    Default(String),               // import name from "module"
+    Named(String, Option<String>), // import { name as alias } from "module"
+    Namespace(String),             // import * as name from "module"
+}
+
+#[derive(Clone, Debug)]
+pub enum ExportSpecifier {
+    Named(String, Option<String>), // export { name as alias }
+    Default(Expr),                 // export default value
+}
+
+#[derive(Clone, Debug)]
+pub enum DestructuringElement {
+    Variable(String, Option<Box<Expr>>),
+    Property(String, Box<DestructuringElement>),
+    Rest(String),
+    Empty,
+    NestedArray(Vec<DestructuringElement>),
+    NestedObject(Vec<DestructuringElement>),
+}
+
+unsafe impl<'gc> gc_arena::Collect<'gc> for DestructuringElement {
+    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+        match self {
+            DestructuringElement::Variable(_, e) => {
+                if let Some(e) = e {
+                    e.trace(cc);
+                }
+            }
+            DestructuringElement::Property(_, elem) => {
+                elem.trace(cc);
+            }
+            DestructuringElement::Rest(_) => {}
+            DestructuringElement::Empty => {}
+            DestructuringElement::NestedArray(arr) => {
+                for elem in arr {
+                    elem.trace(cc);
+                }
+            }
+            DestructuringElement::NestedObject(obj) => {
+                for elem in obj {
+                    elem.trace(cc);
+                }
+            }
+        }
     }
 }
 

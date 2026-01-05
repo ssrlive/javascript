@@ -7,6 +7,7 @@ use crate::{
         StatementKind, create_error, env_get, env_set, env_set_recursive, is_error, new_js_object_data, obj_get_key_value,
         obj_set_key_value, value_to_string,
     },
+    js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
@@ -625,6 +626,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             .join(" ");
                         println!("{}", output);
                         Ok(Value::Undefined)
+                    } else if name.starts_with("Math.") {
+                        let method = &name[5..];
+                        Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if name == "console.error" {
                         let output = eval_args
                             .iter()
@@ -838,6 +842,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 }
             }
             Ok(Value::String(result))
+        }
+        Expr::UnaryNeg(expr) => {
+            let val = evaluate_expr(mc, env, expr)?;
+            if let Value::Number(n) = val {
+                Ok(Value::Number(-n))
+            } else {
+                Err(EvalError::Js(raise_eval_error!("Unary Negation only for numbers")))
+            }
         }
         _ => Ok(Value::Undefined),
     }

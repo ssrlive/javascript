@@ -1,6 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::error::JSError;
+use crate::js_math::initialize_math;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 use gc_arena::Mutation as MutationContext;
@@ -55,6 +56,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_error_constructor(mc, env)?;
 
     initialize_console(mc, env)?;
+
+    initialize_math(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;

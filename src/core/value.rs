@@ -160,6 +160,9 @@ impl<'gc> JSObjectData<'gc> {
     pub fn set_non_configurable(&mut self, key: PropertyKey<'gc>) {
         self.non_configurable.insert(key);
     }
+    pub fn set_non_writable(&mut self, key: PropertyKey<'gc>) {
+        self.non_writable.insert(key);
+    }
     pub fn is_const(&self, key: &str) -> bool {
         self.constants.contains(key)
     }

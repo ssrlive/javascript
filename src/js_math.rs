@@ -1,85 +1,93 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_set_key_value};
+use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
+use gc_arena::Mutation as MutationContext;
 
 /// Create the Math object with all mathematical constants and functions
-pub fn make_math_object() -> Result<JSObjectDataPtr, JSError> {
-    let math_obj = new_js_object_data();
-    obj_set_key_value(&math_obj, &"PI".into(), Value::Number(std::f64::consts::PI))?;
-    math_obj.borrow_mut().set_non_configurable("PI".into());
-    math_obj.borrow_mut().set_non_writable("PI".into());
+pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let math_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &math_obj, &"PI".into(), Value::Number(std::f64::consts::PI))?;
+    math_obj.borrow_mut(mc).set_non_configurable("PI".into());
+    math_obj.borrow_mut(mc).set_non_writable("PI".into());
 
-    obj_set_key_value(&math_obj, &"E".into(), Value::Number(std::f64::consts::E))?;
-    math_obj.borrow_mut().set_non_configurable("E".into());
-    math_obj.borrow_mut().set_non_writable("E".into());
+    obj_set_key_value(mc, &math_obj, &"E".into(), Value::Number(std::f64::consts::E))?;
+    math_obj.borrow_mut(mc).set_non_configurable("E".into());
+    math_obj.borrow_mut(mc).set_non_writable("E".into());
 
-    obj_set_key_value(&math_obj, &"LN2".into(), Value::Number(std::f64::consts::LN_2))?;
-    math_obj.borrow_mut().set_non_configurable("LN2".into());
-    math_obj.borrow_mut().set_non_writable("LN2".into());
+    obj_set_key_value(mc, &math_obj, &"LN2".into(), Value::Number(std::f64::consts::LN_2))?;
+    math_obj.borrow_mut(mc).set_non_configurable("LN2".into());
+    math_obj.borrow_mut(mc).set_non_writable("LN2".into());
 
-    obj_set_key_value(&math_obj, &"LN10".into(), Value::Number(std::f64::consts::LN_10))?;
-    math_obj.borrow_mut().set_non_configurable("LN10".into());
-    math_obj.borrow_mut().set_non_writable("LN10".into());
+    obj_set_key_value(mc, &math_obj, &"LN10".into(), Value::Number(std::f64::consts::LN_10))?;
+    math_obj.borrow_mut(mc).set_non_configurable("LN10".into());
+    math_obj.borrow_mut(mc).set_non_writable("LN10".into());
 
-    obj_set_key_value(&math_obj, &"LOG2E".into(), Value::Number(std::f64::consts::LOG2_E))?;
-    math_obj.borrow_mut().set_non_configurable("LOG2E".into());
-    math_obj.borrow_mut().set_non_writable("LOG2E".into());
+    obj_set_key_value(mc, &math_obj, &"LOG2E".into(), Value::Number(std::f64::consts::LOG2_E))?;
+    math_obj.borrow_mut(mc).set_non_configurable("LOG2E".into());
+    math_obj.borrow_mut(mc).set_non_writable("LOG2E".into());
 
-    obj_set_key_value(&math_obj, &"LOG10E".into(), Value::Number(std::f64::consts::LOG10_E))?;
-    math_obj.borrow_mut().set_non_configurable("LOG10E".into());
-    math_obj.borrow_mut().set_non_writable("LOG10E".into());
+    obj_set_key_value(mc, &math_obj, &"LOG10E".into(), Value::Number(std::f64::consts::LOG10_E))?;
+    math_obj.borrow_mut(mc).set_non_configurable("LOG10E".into());
+    math_obj.borrow_mut(mc).set_non_writable("LOG10E".into());
 
-    obj_set_key_value(&math_obj, &"SQRT1_2".into(), Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
-    math_obj.borrow_mut().set_non_configurable("SQRT1_2".into());
-    math_obj.borrow_mut().set_non_writable("SQRT1_2".into());
+    obj_set_key_value(mc, &math_obj, &"SQRT1_2".into(), Value::Number(std::f64::consts::FRAC_1_SQRT_2))?;
+    math_obj.borrow_mut(mc).set_non_configurable("SQRT1_2".into());
+    math_obj.borrow_mut(mc).set_non_writable("SQRT1_2".into());
 
-    obj_set_key_value(&math_obj, &"SQRT2".into(), Value::Number(std::f64::consts::SQRT_2))?;
-    math_obj.borrow_mut().set_non_configurable("SQRT2".into());
-    math_obj.borrow_mut().set_non_writable("SQRT2".into());
+    obj_set_key_value(mc, &math_obj, &"SQRT2".into(), Value::Number(std::f64::consts::SQRT_2))?;
+    math_obj.borrow_mut(mc).set_non_configurable("SQRT2".into());
+    math_obj.borrow_mut(mc).set_non_writable("SQRT2".into());
 
-    obj_set_key_value(&math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;
-    obj_set_key_value(&math_obj, &"ceil".into(), Value::Function("Math.ceil".to_string()))?;
-    obj_set_key_value(&math_obj, &"round".into(), Value::Function("Math.round".to_string()))?;
-    obj_set_key_value(&math_obj, &"abs".into(), Value::Function("Math.abs".to_string()))?;
-    obj_set_key_value(&math_obj, &"sqrt".into(), Value::Function("Math.sqrt".to_string()))?;
-    obj_set_key_value(&math_obj, &"pow".into(), Value::Function("Math.pow".to_string()))?;
-    obj_set_key_value(&math_obj, &"sin".into(), Value::Function("Math.sin".to_string()))?;
-    obj_set_key_value(&math_obj, &"cos".into(), Value::Function("Math.cos".to_string()))?;
-    obj_set_key_value(&math_obj, &"tan".into(), Value::Function("Math.tan".to_string()))?;
-    obj_set_key_value(&math_obj, &"random".into(), Value::Function("Math.random".to_string()))?;
-    obj_set_key_value(&math_obj, &"clz32".into(), Value::Function("Math.clz32".to_string()))?;
-    obj_set_key_value(&math_obj, &"imul".into(), Value::Function("Math.imul".to_string()))?;
-    obj_set_key_value(&math_obj, &"max".into(), Value::Function("Math.max".to_string()))?;
-    obj_set_key_value(&math_obj, &"min".into(), Value::Function("Math.min".to_string()))?;
-    obj_set_key_value(&math_obj, &"asin".into(), Value::Function("Math.asin".to_string()))?;
-    obj_set_key_value(&math_obj, &"acos".into(), Value::Function("Math.acos".to_string()))?;
-    obj_set_key_value(&math_obj, &"atan".into(), Value::Function("Math.atan".to_string()))?;
-    obj_set_key_value(&math_obj, &"atan2".into(), Value::Function("Math.atan2".to_string()))?;
-    obj_set_key_value(&math_obj, &"sinh".into(), Value::Function("Math.sinh".to_string()))?;
-    obj_set_key_value(&math_obj, &"cosh".into(), Value::Function("Math.cosh".to_string()))?;
-    obj_set_key_value(&math_obj, &"tanh".into(), Value::Function("Math.tanh".to_string()))?;
-    obj_set_key_value(&math_obj, &"asinh".into(), Value::Function("Math.asinh".to_string()))?;
-    obj_set_key_value(&math_obj, &"acosh".into(), Value::Function("Math.acosh".to_string()))?;
-    obj_set_key_value(&math_obj, &"atanh".into(), Value::Function("Math.atanh".to_string()))?;
-    obj_set_key_value(&math_obj, &"exp".into(), Value::Function("Math.exp".to_string()))?;
-    obj_set_key_value(&math_obj, &"expm1".into(), Value::Function("Math.expm1".to_string()))?;
-    obj_set_key_value(&math_obj, &"log".into(), Value::Function("Math.log".to_string()))?;
-    obj_set_key_value(&math_obj, &"log10".into(), Value::Function("Math.log10".to_string()))?;
-    obj_set_key_value(&math_obj, &"log1p".into(), Value::Function("Math.log1p".to_string()))?;
-    obj_set_key_value(&math_obj, &"log2".into(), Value::Function("Math.log2".to_string()))?;
-    obj_set_key_value(&math_obj, &"fround".into(), Value::Function("Math.fround".to_string()))?;
-    obj_set_key_value(&math_obj, &"trunc".into(), Value::Function("Math.trunc".to_string()))?;
-    obj_set_key_value(&math_obj, &"cbrt".into(), Value::Function("Math.cbrt".to_string()))?;
-    obj_set_key_value(&math_obj, &"hypot".into(), Value::Function("Math.hypot".to_string()))?;
-    obj_set_key_value(&math_obj, &"sign".into(), Value::Function("Math.sign".to_string()))?;
-    Ok(math_obj)
+    obj_set_key_value(mc, &math_obj, &"floor".into(), Value::Function("Math.floor".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"ceil".into(), Value::Function("Math.ceil".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"round".into(), Value::Function("Math.round".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"abs".into(), Value::Function("Math.abs".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"sqrt".into(), Value::Function("Math.sqrt".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"pow".into(), Value::Function("Math.pow".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"sin".into(), Value::Function("Math.sin".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"cos".into(), Value::Function("Math.cos".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"tan".into(), Value::Function("Math.tan".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"random".into(), Value::Function("Math.random".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"clz32".into(), Value::Function("Math.clz32".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"imul".into(), Value::Function("Math.imul".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"max".into(), Value::Function("Math.max".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"min".into(), Value::Function("Math.min".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"asin".into(), Value::Function("Math.asin".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"acos".into(), Value::Function("Math.acos".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"atan".into(), Value::Function("Math.atan".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"atan2".into(), Value::Function("Math.atan2".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"sinh".into(), Value::Function("Math.sinh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"cosh".into(), Value::Function("Math.cosh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"tanh".into(), Value::Function("Math.tanh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"asinh".into(), Value::Function("Math.asinh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"acosh".into(), Value::Function("Math.acosh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"atanh".into(), Value::Function("Math.atanh".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"exp".into(), Value::Function("Math.exp".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"expm1".into(), Value::Function("Math.expm1".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"log".into(), Value::Function("Math.log".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"log10".into(), Value::Function("Math.log10".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"log1p".into(), Value::Function("Math.log1p".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"log2".into(), Value::Function("Math.log2".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"fround".into(), Value::Function("Math.fround".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"trunc".into(), Value::Function("Math.trunc".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"cbrt".into(), Value::Function("Math.cbrt".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"hypot".into(), Value::Function("Math.hypot".to_string()))?;
+    obj_set_key_value(mc, &math_obj, &"sign".into(), Value::Function("Math.sign".to_string()))?;
+
+    env_set(mc, env, "Math", Value::Object(math_obj))?;
+    Ok(())
 }
 
 /// Handle Math object method calls
-pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_math_call<'gc>(
+    _mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "floor" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.floor()))
                 } else {
@@ -91,7 +99,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "ceil" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.ceil()))
                 } else {
@@ -103,7 +111,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "round" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.round()))
                 } else {
@@ -115,7 +123,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "abs" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.abs()))
                 } else {
@@ -127,7 +135,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "sqrt" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.sqrt()))
                 } else {
@@ -139,10 +147,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "pow" => {
             if args.len() == 2 {
-                let base_val = evaluate_expr(env, &args[0])?;
-                let exp_val = evaluate_expr(env, &args[1])?;
+                let base_val = &args[0];
+                let exp_val = &args[1];
                 if let (Value::Number(base), Value::Number(exp)) = (base_val, exp_val) {
-                    Ok(Value::Number(base.powf(exp)))
+                    Ok(Value::Number(base.powf(*exp)))
                 } else {
                     Err(raise_eval_error!("Math.pow expects two numbers"))
                 }
@@ -152,7 +160,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "sin" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.sin()))
                 } else {
@@ -164,7 +172,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "cos" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.cos()))
                 } else {
@@ -176,7 +184,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "tan" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.tan()))
                 } else {
@@ -204,10 +212,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "clz32" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     // Convert to u32, handling NaN and Infinity
-                    let u32_val = if n.is_nan() || n.is_infinite() { 0u32 } else { (n as i32) as u32 };
+                    let u32_val = if n.is_nan() || n.is_infinite() { 0u32 } else { (*n as i32) as u32 };
                     let leading_zeros = u32_val.leading_zeros();
                     Ok(Value::Number(leading_zeros as f64))
                 } else {
@@ -219,12 +227,12 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "imul" => {
             if args.len() == 2 {
-                let a_val = evaluate_expr(env, &args[0])?;
-                let b_val = evaluate_expr(env, &args[1])?;
+                let a_val = &args[0];
+                let b_val = &args[1];
                 if let (Value::Number(a), Value::Number(b)) = (a_val, b_val) {
                     // Convert to i32 and multiply, then convert back to f64
-                    let a_i32 = a as i32;
-                    let b_i32 = b as i32;
+                    let a_i32 = *a as i32;
+                    let b_i32 = *b as i32;
                     let result_i32 = a_i32.wrapping_mul(b_i32);
                     Ok(Value::Number(result_i32 as f64))
                 } else {
@@ -240,13 +248,13 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
             } else {
                 let mut max_val = f64::NEG_INFINITY;
                 for arg in args {
-                    let arg_val = evaluate_expr(env, arg)?;
+                    let arg_val = arg;
                     if let Value::Number(n) = arg_val {
                         if n.is_nan() {
                             return Ok(Value::Number(f64::NAN));
                         }
-                        if n > max_val {
-                            max_val = n;
+                        if *n > max_val {
+                            max_val = *n;
                         }
                     } else {
                         // If any argument is not a number, return NaN
@@ -262,13 +270,13 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
             } else {
                 let mut min_val = f64::INFINITY;
                 for arg in args {
-                    let arg_val = evaluate_expr(env, arg)?;
+                    let arg_val = arg;
                     if let Value::Number(n) = arg_val {
                         if n.is_nan() {
                             return Ok(Value::Number(f64::NAN));
                         }
-                        if n < min_val {
-                            min_val = n;
+                        if *n < min_val {
+                            min_val = *n;
                         }
                     } else {
                         // If any argument is not a number, return NaN
@@ -280,7 +288,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "asin" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.asin()))
                 } else {
@@ -292,7 +300,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "acos" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.acos()))
                 } else {
@@ -304,7 +312,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "atan" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.atan()))
                 } else {
@@ -316,10 +324,10 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "atan2" => {
             if args.len() == 2 {
-                let y_val = evaluate_expr(env, &args[0])?;
-                let x_val = evaluate_expr(env, &args[1])?;
+                let y_val = &args[0];
+                let x_val = &args[1];
                 if let (Value::Number(y), Value::Number(x)) = (y_val, x_val) {
-                    Ok(Value::Number(y.atan2(x)))
+                    Ok(Value::Number(y.atan2(*x)))
                 } else {
                     Err(raise_eval_error!("Math.atan2 expects two numbers"))
                 }
@@ -329,7 +337,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "sinh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.sinh()))
                 } else {
@@ -341,7 +349,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "cosh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.cosh()))
                 } else {
@@ -353,7 +361,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "tanh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.tanh()))
                 } else {
@@ -365,7 +373,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "asinh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.asinh()))
                 } else {
@@ -377,7 +385,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "acosh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.acosh()))
                 } else {
@@ -389,7 +397,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "atanh" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.atanh()))
                 } else {
@@ -401,7 +409,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "exp" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.exp()))
                 } else {
@@ -413,7 +421,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "expm1" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.exp_m1()))
                 } else {
@@ -425,7 +433,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "log" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.ln()))
                 } else {
@@ -437,7 +445,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "log10" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.log10()))
                 } else {
@@ -449,7 +457,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "log1p" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.ln_1p()))
                 } else {
@@ -461,7 +469,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "log2" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.log2()))
                 } else {
@@ -473,9 +481,9 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "fround" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
-                    Ok(Value::Number((n as f32) as f64))
+                    Ok(Value::Number((*n as f32) as f64))
                 } else {
                     Err(raise_eval_error!("Math.fround expects a number"))
                 }
@@ -485,7 +493,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "trunc" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.trunc()))
                 } else {
@@ -497,7 +505,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "cbrt" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Number(n.cbrt()))
                 } else {
@@ -510,7 +518,7 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         "hypot" => {
             let mut sum_sq = 0.0;
             for arg in args {
-                let arg_val = evaluate_expr(env, arg)?;
+                let arg_val = arg;
                 if let Value::Number(n) = arg_val {
                     sum_sq += n * n;
                 } else {
@@ -521,13 +529,13 @@ pub fn handle_math_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) ->
         }
         "sign" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = &args[0];
                 if let Value::Number(n) = arg_val {
                     if n.is_nan() {
                         Ok(Value::Number(f64::NAN))
-                    } else if n == 0.0 {
-                        Ok(Value::Number(n)) // Preserves signed zero
-                    } else if n > 0.0 {
+                    } else if *n == 0.0 {
+                        Ok(Value::Number(*n)) // Preserves signed zero
+                    } else if *n > 0.0 {
                         Ok(Value::Number(1.0))
                     } else {
                         Ok(Value::Number(-1.0))

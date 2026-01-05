@@ -13,7 +13,7 @@ pub(crate) mod error;
 // pub(crate) mod js_generator;
 // pub(crate) mod js_json;
 // pub(crate) mod js_map;
-// pub(crate) mod js_math;
+pub(crate) mod js_math;
 // pub(crate) mod js_module;
 // pub(crate) mod js_number;
 // pub(crate) mod js_object;

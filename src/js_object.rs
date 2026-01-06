@@ -71,7 +71,7 @@ fn define_property_internal<'gc>(
                             Value::Property { value: Some(v), .. } => v.borrow().clone(),
                             other => other.clone(),
                         };
-                        if !crate::core::values_equal(&existing_val, &new_val_rc.borrow().clone()) {
+                        if !crate::core::values_equal(mc, &existing_val, &new_val_rc.borrow().clone()) {
                             return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
                         }
                     }
@@ -140,7 +140,7 @@ pub fn handle_object_method<'gc>(
             match obj_val {
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
-                    for key in obj.borrow().keys() {
+                    for key in obj.borrow().properties.keys() {
                         if !obj.borrow().is_enumerable(key) {
                             continue;
                         }
@@ -223,7 +223,7 @@ pub fn handle_object_method<'gc>(
             let key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                val @ Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, std::cell::RefCell::new(val))),
+                val @ Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(val))),
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
@@ -284,7 +284,7 @@ pub fn handle_object_method<'gc>(
             // Object.groupBy returns a null-prototype object
             result_obj.borrow_mut(mc).prototype = None;
 
-            let len = get_array_length(&items_obj).unwrap_or(0);
+            let len = get_array_length(mc, &items_obj).unwrap_or(0);
 
             for i in 0..len {
                 if let Some(val_rc) = obj_get_key_value(&items_obj, &i.to_string().into())? {
@@ -301,7 +301,7 @@ pub fn handle_object_method<'gc>(
                     let key = match key_val {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                        Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, std::cell::RefCell::new(key_val))),
+                        Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(key_val))),
                         _ => PropertyKey::String(value_to_string(&key_val)),
                     };
 
@@ -317,7 +317,7 @@ pub fn handle_object_method<'gc>(
                         arr
                     };
 
-                    let current_len = get_array_length(&group_arr).unwrap_or(0);
+                    let current_len = get_array_length(mc, &group_arr).unwrap_or(0);
                     obj_set_key_value(mc, &group_arr, &current_len.to_string().into(), val)?;
                     crate::js_array::set_array_length(mc, &group_arr, current_len + 1)?;
                 }
@@ -343,7 +343,7 @@ pub fn handle_object_method<'gc>(
 
             // Set prototype
             if let Some(proto) = proto_obj {
-                new_obj.borrow_mut(mc).prototype = Some(gc_arena::Gc::downgrade(proto));
+                new_obj.borrow_mut(mc).prototype = Some(proto.clone());
             }
 
             // If properties descriptor is provided, add properties
@@ -640,7 +640,12 @@ pub fn handle_object_method<'gc>(
     }
 }
 
-pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_to_string_method<'gc>(
+    mc: &MutationContext<'gc>,
+    obj_val: &Value,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!(format!(
             "{}.toString() takes no arguments, but {} were provided",
@@ -701,8 +706,8 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
-            if is_array(object) {
-                let current_len = get_array_length(object).unwrap_or(0);
+            if is_array(mc, object) {
+                let current_len = get_array_length(mc, object).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
                     if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
@@ -758,7 +763,7 @@ pub(crate) fn handle_to_string_method(obj_val: &Value, args: &[Expr], env: &JSOb
     }
 }
 
-pub(crate) fn handle_error_to_string_method(obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_error_to_string_method<'gc>(mc: &MutationContext<'gc>, obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!("Error.prototype.toString takes no arguments"));
     }
@@ -883,7 +888,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                             return Ok(Value::Object(obj.clone()));
                         }
                         if func_name == "Object.prototype.toString" {
-                            return crate::js_object::handle_to_string_method(&Value::Object(obj.clone()), args, env);
+                            return crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), args, env);
                         }
 
                         let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
@@ -994,12 +999,13 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             let target_val = crate::core::evaluate_expr(mc, env, &args[0])?;
             match target_val {
                 Value::Object(target_map) => {
-                    let mut current_opt = target_map.borrow().prototype.clone().and_then(|w| w.upgrade(mc));
+                    let mut current_opt: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::core::JSObjectData<'gc>>>> =
+                        target_map.borrow().prototype.clone().and_then(|w| w.upgrade());
                     while let Some(parent) = current_opt {
-                        if gc_arena::Gc::ptr_eq(&parent, object) {
+                        if gc_arena::Gc::ptr_eq(parent, object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
-                        current_opt = parent.borrow().prototype.clone().and_then(|w| w.upgrade(mc));
+                        current_opt = parent.borrow().prototype.clone().and_then(|w| w.upgrade());
                     }
                     Ok(Some(Value::Boolean(false)))
                 }
@@ -1015,6 +1021,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             Ok(Some(Value::Boolean(exists)))
         }
         "Object.prototype.toString" => Ok(Some(crate::js_object::handle_to_string_method(
+            mc,
             &Value::Object(object.clone()),
             args,
             env,
@@ -1026,6 +1033,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             env,
         )?)),
         "Object.prototype.toLocaleString" => Ok(Some(crate::js_object::handle_to_string_method(
+            mc,
             &Value::Object(object.clone()),
             args,
             env,

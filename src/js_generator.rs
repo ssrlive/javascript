@@ -22,7 +22,7 @@ pub fn handle_generator_function_call(
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a new generator object
-    let generator = Rc::new(RefCell::new(crate::core::JSGenerator {
+    let generator = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSGenerator {
         params: params.to_vec(),
         body: body.to_vec(),
         env: env.clone(),
@@ -30,18 +30,18 @@ pub fn handle_generator_function_call(
     }));
 
     // Create a wrapper object for the generator
-    let gen_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+    let gen_obj = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSObjectData::new()));
     // Store the actual generator data
-    gen_obj.borrow_mut().insert(
+    gen_obj.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("__generator__".to_string()),
-        Rc::new(RefCell::new(Value::Generator(generator))),
+        gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Generator(generator))),
     );
 
     Ok(Value::Object(gen_obj))
 }
 
 /// Handle generator instance method calls (like `gen.next()`, `gen.return()`, etc.)
-pub fn handle_generator_instance_method(
+pub fn handle_generator_instance_method<'gc>(mc: &MutationContext<'gc>, 
     generator: &Rc<RefCell<crate::core::JSGenerator>>,
     method: &str,
     args: &[Expr],
@@ -53,7 +53,7 @@ pub fn handle_generator_instance_method(
             let send_value = if args.is_empty() {
                 Value::Undefined
             } else {
-                evaluate_expr(env, &args[0])?
+                evaluate_expr(mc, env, &args[0])?
             };
 
             generator_next(generator, send_value)
@@ -63,7 +63,7 @@ pub fn handle_generator_instance_method(
             let return_value = if args.is_empty() {
                 Value::Undefined
             } else {
-                evaluate_expr(env, &args[0])?
+                evaluate_expr(mc, env, &args[0])?
             };
 
             generator_return(generator, return_value)
@@ -73,7 +73,7 @@ pub fn handle_generator_instance_method(
             let throw_value = if args.is_empty() {
                 Value::Undefined
             } else {
-                evaluate_expr(env, &args[0])?
+                evaluate_expr(mc, env, &args[0])?
             };
 
             generator_throw(generator, throw_value)
@@ -90,7 +90,7 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
         Expr::Yield(_) => {
             if !*replaced {
                 *replaced = true;
-                Expr::Value(send_value.clone())
+                Expr::Var("__gen_throw_val".to_string(), None, None)
             } else {
                 expr.clone()
             }
@@ -98,7 +98,7 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
         Expr::YieldStar(_) => {
             if !*replaced {
                 *replaced = true;
-                Expr::Value(send_value.clone())
+                Expr::Var("__gen_throw_val".to_string(), None, None)
             } else {
                 expr.clone()
             }
@@ -304,7 +304,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
     match &mut stmt.kind {
         StatementKind::Expr(e) => {
             if expr_contains_yield(e) {
-                stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
+                stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                 return true;
             }
             false
@@ -314,7 +314,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
                 if let Some(expr) = expr_opt
                     && expr_contains_yield(expr)
                 {
-                    stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
+                    stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                     return true;
                 }
             }
@@ -323,7 +323,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         StatementKind::Const(decls) => {
             for (_, expr) in decls {
                 if expr_contains_yield(expr) {
-                    stmt.kind = StatementKind::Throw(Expr::Value(throw_value.clone()));
+                    stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                     return true;
                 }
             }
@@ -447,7 +447,7 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
 
 /// Execute generator.next()
 fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value: Value) -> Result<Value, JSError> {
-    let mut gen_obj = generator.borrow_mut();
+    let mut gen_obj = generator.borrow_mut(mc);
 
     match &mut gen_obj.state {
         crate::core::GeneratorState::NotStarted => {
@@ -465,17 +465,18 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 // function-like frame whose prototype is the captured env.
                 if let Some(inner_expr_box) = yield_inner {
                     let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
-                    match crate::core::evaluate_expr(&func_env, &inner_expr_box) {
-                        Ok(val) => return Ok(create_iterator_result(val, false)),
-                        Err(_) => return Ok(create_iterator_result(Value::Undefined, false)),
+            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
+                    match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
+                        Ok(val) => return Ok(create_iterator_result(mc, val, false)),
+                        Err(_) => return Ok(create_iterator_result(mc, Value::Undefined, false)),
                     }
                 }
 
                 // No inner expression -> yield undefined
-                Ok(create_iterator_result(Value::Undefined, false))
+                Ok(create_iterator_result(mc, Value::Undefined, false))
             } else {
                 // Fallback to previous placeholder behavior
-                Ok(create_iterator_result(Value::Number(42.0), false))
+                Ok(create_iterator_result(mc, Value::Number(42.0), false))
             }
         }
         crate::core::GeneratorState::Suspended { pc, stack: _ } => {
@@ -486,7 +487,7 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
             let pc_val = *pc;
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = crate::core::GeneratorState::Completed;
-                return Ok(create_iterator_result(Value::Undefined, true));
+                return Ok(create_iterator_result(mc, Value::Undefined, true));
             }
             // Clone the tail and replace first yield in the first statement
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
@@ -496,29 +497,30 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
             }
 
             let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
+            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
             // Execute the (possibly modified) tail
-            let result = crate::core::evaluate_statements(&func_env, &tail);
+            let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             gen_obj.state = crate::core::GeneratorState::Completed;
             match result {
-                Ok(val) => Ok(create_iterator_result(val, true)),
-                Err(_) => Ok(create_iterator_result(Value::Undefined, true)),
+                Ok(val) => Ok(create_iterator_result(mc, val, true)),
+                Err(_) => Ok(create_iterator_result(mc, Value::Undefined, true)),
             }
         }
         crate::core::GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running")),
-        crate::core::GeneratorState::Completed => Ok(create_iterator_result(Value::Undefined, true)),
+        crate::core::GeneratorState::Completed => Ok(create_iterator_result(mc, Value::Undefined, true)),
     }
 }
 
 /// Execute generator.return()
 fn generator_return(generator: &Rc<RefCell<crate::core::JSGenerator>>, return_value: Value) -> Result<Value, JSError> {
-    let mut gen_obj = generator.borrow_mut();
+    let mut gen_obj = generator.borrow_mut(mc);
     gen_obj.state = crate::core::GeneratorState::Completed;
-    Ok(create_iterator_result(return_value, true))
+    Ok(create_iterator_result(mc, return_value, true))
 }
 
 /// Execute generator.throw()
 fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_value: Value) -> Result<Value, JSError> {
-    let mut gen_obj = generator.borrow_mut();
+    let mut gen_obj = generator.borrow_mut(mc);
     match &mut gen_obj.state {
         crate::core::GeneratorState::NotStarted => {
             // Throwing into a not-started generator throws synchronously
@@ -543,17 +545,18 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
             }
             if !replaced {
                 // fallback: replace the top-level statement
-                tail[0] = StatementKind::Throw(Expr::Value(throw_value.clone())).into();
+                tail[0] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
             }
 
             let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
+            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.
-            let result = crate::core::evaluate_statements(&func_env, &tail);
+            let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             gen_obj.state = crate::core::GeneratorState::Completed;
             match result {
-                Ok(val) => Ok(create_iterator_result(val, true)),
+                Ok(val) => Ok(create_iterator_result(mc, val, true)),
                 Err(e) => Err(e),
             }
         }
@@ -563,18 +566,18 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
 }
 
 /// Create an iterator result object {value: value, done: done}
-fn create_iterator_result(value: Value, done: bool) -> Value {
-    let obj = Rc::new(RefCell::new(crate::core::JSObjectData::default()));
+fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Value<'gc> {
+    let obj = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSObjectData::default()));
 
     // Set value property
-    obj.borrow_mut()
+    obj.borrow_mut(mc)
         .properties
-        .insert(PropertyKey::String("value".to_string()), Rc::new(RefCell::new(value)));
+        .insert(PropertyKey::String("value".to_string()), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(value)));
 
     // Set done property
-    obj.borrow_mut()
+    obj.borrow_mut(mc)
         .properties
-        .insert(PropertyKey::String("done".to_string()), Rc::new(RefCell::new(Value::Boolean(done))));
+        .insert(PropertyKey::String("done".to_string()), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Boolean(done))));
 
     Value::Object(obj)
 }

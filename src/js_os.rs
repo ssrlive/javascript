@@ -1,3 +1,4 @@
+use gc_arena::MutationContext;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -56,13 +57,13 @@ fn get_parent_pid_windows() -> u32 {
 }
 
 /// Handle OS module method calls
-pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_os_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
     if get_own_property(object, &"open".into()).is_some() {
         match method {
             "open" => {
                 if !args.is_empty() {
-                    let filename_val = evaluate_expr(env, &args[0])?;
+                    let filename_val = evaluate_expr(mc, env, &args[0])?;
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
@@ -71,7 +72,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
                     };
                     log::trace!("os.open called with filename={} args={}", filename, args.len());
                     let flags = if args.len() >= 2 {
-                        match evaluate_expr(env, &args[1])? {
+                        match evaluate_expr(mc, env, &args[1])? {
                             Value::Number(n) => n as i32,
                             _ => 0,
                         }
@@ -113,7 +114,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "close" => {
                 if !args.is_empty() {
-                    let fd_val = evaluate_expr(env, &args[0])?;
+                    let fd_val = evaluate_expr(mc, env, &args[0])?;
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
@@ -131,8 +132,8 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "read" => {
                 if args.len() >= 2 {
-                    let fd_val = evaluate_expr(env, &args[0])?;
-                    let size_val = evaluate_expr(env, &args[1])?;
+                    let fd_val = evaluate_expr(mc, env, &args[0])?;
+                    let size_val = evaluate_expr(mc, env, &args[1])?;
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
@@ -159,8 +160,8 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "write" => {
                 if args.len() >= 2 {
-                    let fd_val = evaluate_expr(env, &args[0])?;
-                    let data_val = evaluate_expr(env, &args[1])?;
+                    let fd_val = evaluate_expr(mc, env, &args[0])?;
+                    let data_val = evaluate_expr(mc, env, &args[1])?;
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
@@ -187,9 +188,9 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "seek" => {
                 if args.len() >= 3 {
-                    let fd_val = evaluate_expr(env, &args[0])?;
-                    let offset_val = evaluate_expr(env, &args[1])?;
-                    let whence_val = evaluate_expr(env, &args[2])?;
+                    let fd_val = evaluate_expr(mc, env, &args[0])?;
+                    let offset_val = evaluate_expr(mc, env, &args[1])?;
+                    let whence_val = evaluate_expr(mc, env, &args[2])?;
                     let fd = match fd_val {
                         Value::Number(n) => n as u64,
                         _ => {
@@ -222,7 +223,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "remove" => {
                 if !args.is_empty() {
-                    let filename_val = evaluate_expr(env, &args[0])?;
+                    let filename_val = evaluate_expr(mc, env, &args[0])?;
                     let filename = match filename_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
@@ -238,7 +239,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "mkdir" => {
                 if !args.is_empty() {
-                    let dirname_val = evaluate_expr(env, &args[0])?;
+                    let dirname_val = evaluate_expr(mc, env, &args[0])?;
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
@@ -254,7 +255,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "readdir" => {
                 if !args.is_empty() {
-                    let dirname_val = evaluate_expr(env, &args[0])?;
+                    let dirname_val = evaluate_expr(mc, env, &args[0])?;
                     let dirname = match dirname_val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => {
@@ -263,24 +264,24 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
                     };
                     match std::fs::read_dir(&dirname) {
                         Ok(entries) => {
-                            let obj = crate::js_array::create_array(env)?;
+                            let obj = crate::js_array::create_array(mc, env)?;
                             let mut i = 0;
                             for entry in entries.flatten() {
                                 if let Some(name) = entry.file_name().to_str() {
-                                    obj_set_key_value(&obj, &i.to_string().into(), Value::String(utf8_to_utf16(name)))?;
+                                    obj_set_key_value(mc, &obj, &i.to_string().into(), Value::String(utf8_to_utf16(name)))?;
                                     i += 1;
                                 }
                             }
-                            set_array_length(&obj, i)?;
+                            set_array_length(mc, &obj, i)?;
                             return Ok(Value::Object(obj));
                         }
                         Err(_) => {
-                            let obj = crate::js_array::create_array(env)?;
+                            let obj = crate::js_array::create_array(mc, env)?;
                             return Ok(Value::Object(obj));
                         }
                     }
                 }
-                let obj = crate::js_array::create_array(env)?;
+                let obj = crate::js_array::create_array(mc, env)?;
                 return Ok(Value::Object(obj));
             }
             "getcwd" => {
@@ -320,7 +321,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             "join" => {
                 let mut result = String::new();
                 for (i, arg) in args.iter().enumerate() {
-                    let val = evaluate_expr(env, arg)?;
+                    let val = evaluate_expr(mc, env, arg)?;
                     let part = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -334,7 +335,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "dirname" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -351,7 +352,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "basename" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -368,7 +369,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "extname" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -385,7 +386,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "resolve" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -401,7 +402,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "normalize" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -413,7 +414,7 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
             }
             "isAbsolute" => {
                 if !args.is_empty() {
-                    let val = evaluate_expr(env, &args[0])?;
+                    let val = evaluate_expr(mc, env, &args[0])?;
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
                         _ => "".to_string(),
@@ -431,60 +432,60 @@ pub(crate) fn handle_os_method(object: &JSObjectDataPtr, method: &str, args: &[E
 }
 
 /// Create the OS object with all OS-related functions and constants
-pub fn make_os_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = new_js_object_data();
-    obj_set_key_value(&obj, &"remove".into(), Value::Function("os.remove".to_string()))?;
-    obj_set_key_value(&obj, &"mkdir".into(), Value::Function("os.mkdir".to_string()))?;
-    obj_set_key_value(&obj, &"open".into(), Value::Function("os.open".to_string()))?;
-    obj_set_key_value(&obj, &"write".into(), Value::Function("os.write".to_string()))?;
-    obj_set_key_value(&obj, &"read".into(), Value::Function("os.read".to_string()))?;
-    obj_set_key_value(&obj, &"seek".into(), Value::Function("os.seek".to_string()))?;
-    obj_set_key_value(&obj, &"close".into(), Value::Function("os.close".to_string()))?;
-    obj_set_key_value(&obj, &"readdir".into(), Value::Function("os.readdir".to_string()))?;
-    obj_set_key_value(&obj, &"utimes".into(), Value::Function("os.utimes".to_string()))?;
-    obj_set_key_value(&obj, &"stat".into(), Value::Function("os.stat".to_string()))?;
-    obj_set_key_value(&obj, &"lstat".into(), Value::Function("os.lstat".to_string()))?;
-    obj_set_key_value(&obj, &"symlink".into(), Value::Function("os.symlink".to_string()))?;
-    obj_set_key_value(&obj, &"readlink".into(), Value::Function("os.readlink".to_string()))?;
-    obj_set_key_value(&obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
-    obj_set_key_value(&obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
-    obj_set_key_value(&obj, &"realpath".into(), Value::Function("os.realpath".to_string()))?;
-    obj_set_key_value(&obj, &"exec".into(), Value::Function("os.exec".to_string()))?;
-    obj_set_key_value(&obj, &"pipe".into(), Value::Function("os.pipe".to_string()))?;
-    obj_set_key_value(&obj, &"waitpid".into(), Value::Function("os.waitpid".to_string()))?;
-    obj_set_key_value(&obj, &"kill".into(), Value::Function("os.kill".to_string()))?;
-    obj_set_key_value(&obj, &"isatty".into(), Value::Function("os.isatty".to_string()))?;
-    obj_set_key_value(&obj, &"getpid".into(), Value::Function("os.getpid".to_string()))?;
-    obj_set_key_value(&obj, &"getppid".into(), Value::Function("os.getppid".to_string()))?;
-    obj_set_key_value(&obj, &"O_RDWR".into(), Value::Number(2.0))?;
-    obj_set_key_value(&obj, &"O_CREAT".into(), Value::Number(64.0))?;
-    obj_set_key_value(&obj, &"O_TRUNC".into(), Value::Number(512.0))?;
-    obj_set_key_value(&obj, &"O_RDONLY".into(), Value::Number(0.0))?;
-    obj_set_key_value(&obj, &"S_IFMT".into(), Value::Number(0o170000 as f64))?;
-    obj_set_key_value(&obj, &"S_IFREG".into(), Value::Number(0o100000 as f64))?;
-    obj_set_key_value(&obj, &"S_IFLNK".into(), Value::Number(0o120000 as f64))?;
-    obj_set_key_value(&obj, &"SIGTERM".into(), Value::Number(15.0))?;
+pub fn make_os_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &obj, &"remove".into(), Value::Function("os.remove".to_string()))?;
+    obj_set_key_value(mc, &obj, &"mkdir".into(), Value::Function("os.mkdir".to_string()))?;
+    obj_set_key_value(mc, &obj, &"open".into(), Value::Function("os.open".to_string()))?;
+    obj_set_key_value(mc, &obj, &"write".into(), Value::Function("os.write".to_string()))?;
+    obj_set_key_value(mc, &obj, &"read".into(), Value::Function("os.read".to_string()))?;
+    obj_set_key_value(mc, &obj, &"seek".into(), Value::Function("os.seek".to_string()))?;
+    obj_set_key_value(mc, &obj, &"close".into(), Value::Function("os.close".to_string()))?;
+    obj_set_key_value(mc, &obj, &"readdir".into(), Value::Function("os.readdir".to_string()))?;
+    obj_set_key_value(mc, &obj, &"utimes".into(), Value::Function("os.utimes".to_string()))?;
+    obj_set_key_value(mc, &obj, &"stat".into(), Value::Function("os.stat".to_string()))?;
+    obj_set_key_value(mc, &obj, &"lstat".into(), Value::Function("os.lstat".to_string()))?;
+    obj_set_key_value(mc, &obj, &"symlink".into(), Value::Function("os.symlink".to_string()))?;
+    obj_set_key_value(mc, &obj, &"readlink".into(), Value::Function("os.readlink".to_string()))?;
+    obj_set_key_value(mc, &obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
+    obj_set_key_value(mc, &obj, &"getcwd".into(), Value::Function("os.getcwd".to_string()))?;
+    obj_set_key_value(mc, &obj, &"realpath".into(), Value::Function("os.realpath".to_string()))?;
+    obj_set_key_value(mc, &obj, &"exec".into(), Value::Function("os.exec".to_string()))?;
+    obj_set_key_value(mc, &obj, &"pipe".into(), Value::Function("os.pipe".to_string()))?;
+    obj_set_key_value(mc, &obj, &"waitpid".into(), Value::Function("os.waitpid".to_string()))?;
+    obj_set_key_value(mc, &obj, &"kill".into(), Value::Function("os.kill".to_string()))?;
+    obj_set_key_value(mc, &obj, &"isatty".into(), Value::Function("os.isatty".to_string()))?;
+    obj_set_key_value(mc, &obj, &"getpid".into(), Value::Function("os.getpid".to_string()))?;
+    obj_set_key_value(mc, &obj, &"getppid".into(), Value::Function("os.getppid".to_string()))?;
+    obj_set_key_value(mc, &obj, &"O_RDWR".into(), Value::Number(2.0))?;
+    obj_set_key_value(mc, &obj, &"O_CREAT".into(), Value::Number(64.0))?;
+    obj_set_key_value(mc, &obj, &"O_TRUNC".into(), Value::Number(512.0))?;
+    obj_set_key_value(mc, &obj, &"O_RDONLY".into(), Value::Number(0.0))?;
+    obj_set_key_value(mc, &obj, &"S_IFMT".into(), Value::Number(0o170000 as f64))?;
+    obj_set_key_value(mc, &obj, &"S_IFREG".into(), Value::Number(0o100000 as f64))?;
+    obj_set_key_value(mc, &obj, &"S_IFLNK".into(), Value::Number(0o120000 as f64))?;
+    obj_set_key_value(mc, &obj, &"SIGTERM".into(), Value::Number(15.0))?;
 
     // Add path submodule
     let path_obj = make_path_object()?;
-    obj_set_key_value(&obj, &"path".into(), Value::Object(path_obj))?;
+    obj_set_key_value(mc, &obj, &"path".into(), Value::Object(path_obj))?;
     Ok(obj)
 }
 
 /// Create the OS path object with path-related functions
 pub fn make_path_object() -> Result<JSObjectDataPtr, JSError> {
-    let obj = new_js_object_data();
-    obj_set_key_value(&obj, &"join".into(), Value::Function("os.path.join".to_string()))?;
-    obj_set_key_value(&obj, &"dirname".into(), Value::Function("os.path.dirname".to_string()))?;
-    obj_set_key_value(&obj, &"basename".into(), Value::Function("os.path.basename".to_string()))?;
-    obj_set_key_value(&obj, &"extname".into(), Value::Function("os.path.extname".to_string()))?;
-    obj_set_key_value(&obj, &"resolve".into(), Value::Function("os.path.resolve".to_string()))?;
-    obj_set_key_value(&obj, &"normalize".into(), Value::Function("os.path.normalize".to_string()))?;
-    obj_set_key_value(&obj, &"relative".into(), Value::Function("os.path.relative".to_string()))?;
-    obj_set_key_value(&obj, &"isAbsolute".into(), Value::Function("os.path.isAbsolute".to_string()))?;
+    let obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &obj, &"join".into(), Value::Function("os.path.join".to_string()))?;
+    obj_set_key_value(mc, &obj, &"dirname".into(), Value::Function("os.path.dirname".to_string()))?;
+    obj_set_key_value(mc, &obj, &"basename".into(), Value::Function("os.path.basename".to_string()))?;
+    obj_set_key_value(mc, &obj, &"extname".into(), Value::Function("os.path.extname".to_string()))?;
+    obj_set_key_value(mc, &obj, &"resolve".into(), Value::Function("os.path.resolve".to_string()))?;
+    obj_set_key_value(mc, &obj, &"normalize".into(), Value::Function("os.path.normalize".to_string()))?;
+    obj_set_key_value(mc, &obj, &"relative".into(), Value::Function("os.path.relative".to_string()))?;
+    obj_set_key_value(mc, &obj, &"isAbsolute".into(), Value::Function("os.path.isAbsolute".to_string()))?;
 
     // Platform-specific path separator
     let val = Value::String(std::path::MAIN_SEPARATOR_STR.encode_utf16().collect());
-    obj_set_key_value(&obj, &"sep".into(), val)?;
+    obj_set_key_value(mc, &obj, &"sep".into(), val)?;
     Ok(obj)
 }

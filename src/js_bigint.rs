@@ -9,7 +9,7 @@ pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
     if args.len() != 1 {
         return Err(raise_type_error!("BigInt requires exactly one argument"));
     }
-    let arg_val = evaluate_expr(env, &args[0])?;
+    let arg_val = evaluate_expr(mc, env, &args[0])?;
     match arg_val {
         Value::BigInt(b) => Ok(Value::BigInt(b)),
         Value::Number(n) => {
@@ -49,7 +49,7 @@ pub(crate) fn bigint_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
 }
 
 /// Handle boxed BigInt object methods (toString, valueOf)
-pub fn handle_bigint_object_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_bigint_object_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     if let Some(value_val) = obj_get_key_value(object, &"__value__".into())? {
         if let Value::BigInt(h) = &*value_val.borrow() {
             match method {
@@ -58,7 +58,7 @@ pub fn handle_bigint_object_method(object: &JSObjectDataPtr, method: &str, args:
                         return Ok(Value::String(utf8_to_utf16(&h.to_string())));
                     } else {
                         // radix support: expect a number argument
-                        let arg0 = crate::core::evaluate_expr(env, &args[0])?;
+                        let arg0 = crate::core::evaluate_expr(mc, env, &args[0])?;
                         if let Value::Number(rad) = arg0 {
                             let r = rad as i32;
                             if !(2..=36).contains(&r) {
@@ -90,7 +90,7 @@ pub fn handle_bigint_object_method(object: &JSObjectDataPtr, method: &str, args:
 }
 
 /// Handle static methods on the BigInt constructor (asIntN, asUintN)
-pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_bigint_static_method<'gc>(mc: &MutationContext<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     // Evaluate arguments
     if method != "asIntN" && method != "asUintN" {
         return Err(raise_eval_error!(format!("BigInt has no static method '{}'", method)));
@@ -100,7 +100,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     }
 
     // bits must be a non-negative integer (ToIndex)
-    let bits_val = crate::core::evaluate_expr(env, &args[0])?;
+    let bits_val = crate::core::evaluate_expr(mc, env, &args[0])?;
     let bits = match bits_val {
         Value::Number(n) => {
             if n.is_nan() || n < 0.0 || n.fract() != 0.0 {
@@ -116,7 +116,7 @@ pub fn handle_bigint_static_method(method: &str, args: &[Expr], env: &JSObjectDa
     };
 
     // bigint argument: accept BigInt, Number (integer), String, Boolean, or Object (ToPrimitive)
-    let bigint_val = crate::core::evaluate_expr(env, &args[1])?;
+    let bigint_val = crate::core::evaluate_expr(mc, env, &args[1])?;
     let bi = match bigint_val {
         Value::BigInt(b) => b,
         Value::Number(n) => {

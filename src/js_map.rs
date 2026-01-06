@@ -14,14 +14,14 @@ use std::rc::Rc;
 pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
     let map = Rc::new(RefCell::new(JSMap { entries: Vec::new() }));
 
-    initialize_collection_from_iterable(args, env, "Map", |entry| {
+    initialize_collection_from_iterable(mc, args, env, "Map", |entry| {
         if let Value::Object(entry_obj) = entry
             && let (Some(key_val), Some(value_val)) = (
                 obj_get_key_value(&entry_obj, &"0".into())?,
                 obj_get_key_value(&entry_obj, &"1".into())?,
             )
         {
-            map.borrow_mut()
+            map.borrow_mut(mc)
                 .entries
                 .push((key_val.borrow().clone(), value_val.borrow().clone()));
         }
@@ -29,17 +29,17 @@ pub(crate) fn handle_map_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Re
     })?;
 
     // Create a wrapper object for the Map
-    let map_obj = new_js_object_data();
+    let map_obj = new_js_object_data(mc, );
     // Store the actual map data
     map_obj
-        .borrow_mut()
+        .borrow_mut(mc)
         .insert(PropertyKey::String("__map__".to_string()), Rc::new(RefCell::new(Value::Map(map))));
 
     Ok(Value::Object(map_obj))
 }
 
 /// Handle Map instance method calls
-pub(crate) fn handle_map_instance_method(
+pub(crate) fn handle_map_instance_method<'gc>(mc: &MutationContext<'gc>, 
     map: &Rc<RefCell<JSMap>>,
     method: &str,
     args: &[Expr],
@@ -50,13 +50,13 @@ pub(crate) fn handle_map_instance_method(
             if args.len() != 2 {
                 return Err(raise_eval_error!("Map.prototype.set requires exactly two arguments"));
             }
-            let key = evaluate_expr(env, &args[0])?;
-            let value = evaluate_expr(env, &args[1])?;
+            let key = evaluate_expr(mc, env, &args[0])?;
+            let value = evaluate_expr(mc, env, &args[1])?;
 
             // Remove existing entry with same key
-            map.borrow_mut().entries.retain(|(k, _)| !values_equal(k, &key));
+            map.borrow_mut(mc).entries.retain(|(k, _)| !values_equal(mc, k, &key));
             // Add new entry
-            map.borrow_mut().entries.push((key, value));
+            map.borrow_mut(mc).entries.push((key, value));
 
             Ok(Value::Map(map.clone()))
         }
@@ -64,10 +64,10 @@ pub(crate) fn handle_map_instance_method(
             if args.len() != 1 {
                 return Err(raise_eval_error!("Map.prototype.get requires exactly one argument"));
             }
-            let key = evaluate_expr(env, &args[0])?;
+            let key = evaluate_expr(mc, env, &args[0])?;
 
             for (k, v) in &map.borrow().entries {
-                if values_equal(k, &key) {
+                if values_equal(mc, k, &key) {
                     return Ok(v.clone());
                 }
             }
@@ -77,19 +77,19 @@ pub(crate) fn handle_map_instance_method(
             if args.len() != 1 {
                 return Err(raise_eval_error!("Map.prototype.has requires exactly one argument"));
             }
-            let key = evaluate_expr(env, &args[0])?;
+            let key = evaluate_expr(mc, env, &args[0])?;
 
-            let has_key = map.borrow().entries.iter().any(|(k, _)| values_equal(k, &key));
+            let has_key = map.borrow().entries.iter().any(|(k, _)| values_equal(mc, k, &key));
             Ok(Value::Boolean(has_key))
         }
         "delete" => {
             if args.len() != 1 {
                 return Err(raise_eval_error!("Map.prototype.delete requires exactly one argument"));
             }
-            let key = evaluate_expr(env, &args[0])?;
+            let key = evaluate_expr(mc, env, &args[0])?;
 
             let initial_len = map.borrow().entries.len();
-            map.borrow_mut().entries.retain(|(k, _)| !values_equal(k, &key));
+            map.borrow_mut(mc).entries.retain(|(k, _)| !values_equal(mc, k, &key));
             let deleted = map.borrow().entries.len() < initial_len;
 
             Ok(Value::Boolean(deleted))
@@ -98,7 +98,7 @@ pub(crate) fn handle_map_instance_method(
             if !args.is_empty() {
                 return Err(raise_eval_error!("Map.prototype.clear takes no arguments"));
             }
-            map.borrow_mut().entries.clear();
+            map.borrow_mut(mc).entries.clear();
             Ok(Value::Undefined)
         }
         "size" => {
@@ -112,12 +112,12 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.keys takes no arguments"));
             }
             // Create an array of keys
-            let keys_array = crate::js_array::create_array(env)?;
+            let keys_array = crate::js_array::create_array(mc, env)?;
             for (i, (key, _)) in map.borrow().entries.iter().enumerate() {
-                obj_set_key_value(&keys_array, &i.to_string().into(), key.clone())?;
+                obj_set_key_value(mc, &keys_array, &i.to_string().into(), key.clone())?;
             }
             // Set length
-            set_array_length(&keys_array, map.borrow().entries.len())?;
+            set_array_length(mc, &keys_array, map.borrow().entries.len())?;
             Ok(Value::Object(keys_array))
         }
         "values" => {
@@ -125,12 +125,12 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.values takes no arguments"));
             }
             // Create an array of values
-            let values_array = crate::js_array::create_array(env)?;
+            let values_array = crate::js_array::create_array(mc, env)?;
             for (i, (_, value)) in map.borrow().entries.iter().enumerate() {
-                obj_set_key_value(&values_array, &i.to_string().into(), value.clone())?;
+                obj_set_key_value(mc, &values_array, &i.to_string().into(), value.clone())?;
             }
             // Set length
-            set_array_length(&values_array, map.borrow().entries.len())?;
+            set_array_length(mc, &values_array, map.borrow().entries.len())?;
             Ok(Value::Object(values_array))
         }
         "entries" => {
@@ -138,16 +138,16 @@ pub(crate) fn handle_map_instance_method(
                 return Err(raise_eval_error!("Map.prototype.entries takes no arguments"));
             }
             // Create an array of [key, value] pairs
-            let entries_array = crate::js_array::create_array(env)?;
+            let entries_array = crate::js_array::create_array(mc, env)?;
             for (i, (key, value)) in map.borrow().entries.iter().enumerate() {
-                let entry_array = crate::js_array::create_array(env)?;
-                obj_set_key_value(&entry_array, &"0".into(), key.clone())?;
-                obj_set_key_value(&entry_array, &"1".into(), value.clone())?;
-                set_array_length(&entry_array, 2)?;
-                obj_set_key_value(&entries_array, &i.to_string().into(), Value::Object(entry_array))?;
+                let entry_array = crate::js_array::create_array(mc, env)?;
+                obj_set_key_value(mc, &entry_array, &"0".into(), key.clone())?;
+                obj_set_key_value(mc, &entry_array, &"1".into(), value.clone())?;
+                set_array_length(mc, &entry_array, 2)?;
+                obj_set_key_value(mc, &entries_array, &i.to_string().into(), Value::Object(entry_array))?;
             }
             // Set length
-            set_array_length(&entries_array, map.borrow().entries.len())?;
+            set_array_length(mc, &entries_array, map.borrow().entries.len())?;
             Ok(Value::Object(entries_array))
         }
         _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method))),

@@ -108,13 +108,13 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: Value<'gc>) 
         }
         Value::Object(obj) => {
             if is_array(mc, &obj) {
-                let len = get_array_length(mc, &obj).unwrap_or(obj.borrow(&mc).properties.len());
+                let len = get_array_length(mc, &obj).unwrap_or(obj.borrow().properties.len());
                 log::debug!("js_value_to_json_value: array with properties.len() = {}", len);
                 let mut arr = Vec::new();
                 for i in 0..len {
                     let val_opt = get_own_property(&obj, &i.to_string().into());
                     if let Some(val_rc) = val_opt {
-                        let val_clone = val_rc.borrow(&mc).clone();
+                        let val_clone = val_rc.borrow().clone();
                         if let Some(json_val) = js_value_to_json_value(mc, val_clone) {
                             arr.push(json_val);
                         } else {
@@ -129,11 +129,11 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: Value<'gc>) 
                 Some(serde_json::Value::Array(arr))
             } else {
                 let mut map = serde_json::Map::new();
-                for (key, value) in obj.borrow(&mc).properties.iter() {
+                for (key, value) in obj.borrow().properties.iter() {
                     if let PropertyKey::String(s) = key
                         && s != "length"
                     {
-                        if let Some(json_val) = js_value_to_json_value(mc, value.borrow(&mc).clone()) {
+                        if let Some(json_val) = js_value_to_json_value(mc, value.borrow().clone()) {
                             map.insert(s.clone(), json_val);
                         } else {
                             // If None (undefined, function, etc), skip property

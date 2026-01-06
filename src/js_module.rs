@@ -6,9 +6,9 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, JSError> {
+pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path: Option<&str>) -> Result<Value<'gc>, JSError> {
     // Create a new object for the module
-    let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+    let module_exports = new_js_object_data(mc);
 
     // For demonstration, create a simple module with some exports
     if module_name == "math" {
@@ -16,8 +16,8 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
         let pi = Value::Number(std::f64::consts::PI);
         let e = Value::Number(std::f64::consts::E);
 
-        obj_set_key_value(&module_exports, &"PI".into(), pi)?;
-        obj_set_key_value(&module_exports, &"E".into(), e)?;
+        obj_set_key_value(mc, &module_exports, &"PI".into(), pi)?;
+        obj_set_key_value(mc, &module_exports, &"E".into(), e)?;
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(Rc::new(ClosureData::new(
@@ -30,21 +30,21 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
             &module_exports,
             None,
         )));
-        obj_set_key_value(&module_exports, &"identity".into(), identity_func)?;
+        obj_set_key_value(mc, &module_exports, &"identity".into(), identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
-        obj_set_key_value(&module_exports, &"log".into(), log_func)?;
+        obj_set_key_value(mc, &module_exports, &"log".into(), log_func)?;
     } else if module_name == "std" {
-        let std_obj = crate::js_std::make_std_object()?;
+        let std_obj = crate::js_std::make_std_object(mc)?;
         return Ok(Value::Object(std_obj));
     } else if module_name == "os" {
-        let os_obj = crate::js_os::make_os_object()?;
+        let os_obj = crate::js_os::make_os_object(mc)?;
         return Ok(Value::Object(os_obj));
     } else {
         // Try to load as a file
-        match load_module_from_file(module_name, base_path) {
+        match load_module_from_file(mc, module_name, base_path) {
             Ok(loaded_module) => return Ok(loaded_module),
             Err(_) => {
                 // Default empty module if file loading fails
@@ -56,7 +56,7 @@ pub fn load_module(module_name: &str, base_path: Option<&str>) -> Result<Value, 
     Ok(Value::Object(module_exports))
 }
 
-fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<Value, JSError> {
+fn load_module_from_file<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path: Option<&str>) -> Result<Value<'gc>, JSError> {
     // Resolve the module path
     let module_path = resolve_module_path(module_name, base_path)?;
 
@@ -64,7 +64,7 @@ fn load_module_from_file(module_name: &str, base_path: Option<&str>) -> Result<V
     let content = crate::core::read_script_file(&module_path)?;
 
     // Execute the module and get the final module value
-    execute_module(&content, &module_path)
+    execute_module(mc, &content, &module_path)
 }
 
 fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<String, JSError> {
@@ -109,48 +109,48 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
     }
 }
 
-fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
+fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &str) -> Result<Value<'gc>, JSError> {
     // Create module exports object
-    let module_exports = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
+    let module_exports = new_js_object_data(mc);
 
     // Create a module environment
-    let env = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-    env.borrow_mut().is_function_scope = true;
+    let env = new_js_object_data(mc);
+    env.borrow_mut(mc).is_function_scope = true;
 
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__script_name` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    obj_set_key_value(&env, &"__script_name".into(), val)?;
+    obj_set_key_value(mc, &env, &"__script_name".into(), val)?;
 
     // Add exports object to the environment
-    env.borrow_mut().insert(
+    env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
         Rc::new(RefCell::new(Value::Object(module_exports.clone()))),
     );
 
     // Add module object with exports
-    let module_obj = Rc::new(RefCell::new(crate::core::JSObjectData::new()));
-    module_obj.borrow_mut().insert(
+    let module_obj = new_js_object_data(mc);
+    module_obj.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
         Rc::new(RefCell::new(Value::Object(module_exports.clone()))),
     );
-    env.borrow_mut().insert(
+    env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("module".to_string()),
         Rc::new(RefCell::new(Value::Object(module_obj.clone()))),
     );
 
     // Initialize global constructors
-    crate::core::initialize_global_constructors(&env)?;
+    crate::core::initialize_global_constructors(mc, &env)?;
 
     // Expose `globalThis` binding in module environment as well
-    crate::core::obj_set_key_value(&env, &"globalThis".into(), crate::core::Value::Object(env.clone()))?;
+    crate::core::obj_set_key_value(mc, &env, &"globalThis".into(), crate::core::Value::Object(env.clone()))?;
 
     // Parse and execute the module content
     let mut tokens = crate::core::tokenize(content)?;
     let statements = crate::core::parse_statements(&mut tokens)?;
 
     // Execute statements in module environment
-    crate::core::evaluate_statements(&env, &statements)?;
+    crate::core::evaluate_statements(mc, &env, &mut statements)?;
 
     // Log the exports stored in the provided `module_exports` object at trace level
     log::trace!("Module executed, exports keys:");
@@ -176,7 +176,7 @@ fn execute_module(content: &str, module_path: &str) -> Result<Value, JSError> {
     }
 }
 
-pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value, JSError> {
+pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value<'gc>, JSError> {
     match module_value {
         Value::Object(obj) => match obj_get_key_value(obj, &specifier.into())? {
             Some(val) => Ok(val.borrow().clone()),

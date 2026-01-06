@@ -268,7 +268,13 @@ pub fn handle_number_method<'gc>(
 }
 
 /// Handle Number instance method calls
-pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_number_instance_method<'gc>(
+    mc: &MutationContext<'gc>,
+    n: &f64,
+    method: &str,
+    args: &[Expr],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "toString" => {
             if args.is_empty() {
@@ -299,7 +305,7 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
         }
         "toExponential" => {
             let fraction_digits = if !args.is_empty() {
-                match evaluate_expr(_env, &args[0])? {
+                match evaluate_expr(mc, _env, &args[0])? {
                     Value::Number(d) => Some(d as usize),
                     _ => None,
                 }
@@ -314,7 +320,7 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
         }
         "toFixed" => {
             let digits = if !args.is_empty() {
-                match evaluate_expr(_env, &args[0])? {
+                match evaluate_expr(mc, _env, &args[0])? {
                     Value::Number(d) => d as usize,
                     _ => 0,
                 }
@@ -330,7 +336,7 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
         }
         "toPrecision" => {
             let precision = if !args.is_empty() {
-                match evaluate_expr(_env, &args[0])? {
+                match evaluate_expr(mc, _env, &args[0])? {
                     Value::Number(p) => Some(p as usize),
                     Value::Undefined => None,
                     _ => None,
@@ -376,11 +382,17 @@ pub fn handle_number_instance_method(n: &f64, method: &str, args: &[Expr], _env:
 }
 
 /// Handle Number object method calls (for boxed Number objects)
-pub fn handle_number_object_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_number_object_method<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Handle Number instance methods
     if let Some(value_val) = obj_get_key_value(object, &"__value__".into())? {
         if let Value::Number(n) = *value_val.borrow() {
-            handle_number_instance_method(&n, method, args, env)
+            handle_number_instance_method(mc, &n, method, args, env)
         } else {
             Err(raise_eval_error!("Invalid __value__ for Number instance"))
         }
@@ -390,12 +402,17 @@ pub fn handle_number_object_method(object: &JSObjectDataPtr, method: &str, args:
 }
 
 /// Box a number into a Number object and get a property
-pub fn box_number_and_get_property(n: f64, prop: &str, env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn box_number_and_get_property<'gc>(
+    mc: &MutationContext<'gc>,
+    n: f64,
+    prop: &str,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Box the number into a Number object
-    let number_obj = new_js_object_data();
-    obj_set_key_value(&number_obj, &"__value__".into(), Value::Number(n))?;
+    let number_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &number_obj, &"__value__".into(), Value::Number(n))?;
     // Set prototype to Number.prototype (if available)
-    crate::core::set_internal_prototype_from_constructor(&number_obj, env, "Number")?;
+    crate::core::set_internal_prototype_from_constructor(mc, env, &number_obj, "Number")?;
     // Now look up the property on the boxed object
     if let Some(val) = obj_get_key_value(&number_obj, &prop.into())? {
         Ok(val.borrow().clone())

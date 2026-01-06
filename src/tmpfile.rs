@@ -18,7 +18,7 @@ fn get_next_file_id() -> u64 {
 }
 
 /// Create a temporary file object
-pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
+pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc>, JSError> {
     // Create a real temporary file with a more random suffix
     use std::time::{SystemTime, UNIX_EPOCH};
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -38,19 +38,19 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
             let file_id = get_next_file_id();
             FILE_STORE.lock().unwrap().insert(file_id, file);
 
-            let tmp = new_js_object_data();
-            obj_set_key_value(&tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
-            obj_set_key_value(&tmp, &"__eof".into(), Value::Boolean(false))?;
+            let tmp = new_js_object_data(mc);
+            obj_set_key_value(mc, &tmp, &"__file_id".into(), Value::Number(file_id as f64))?;
+            obj_set_key_value(mc, &tmp, &"__eof".into(), Value::Boolean(false))?;
             // methods
-            obj_set_key_value(&tmp, &"puts".into(), Value::Function("tmp.puts".to_string()))?;
-            obj_set_key_value(&tmp, &"readAsString".into(), Value::Function("tmp.readAsString".to_string()))?;
-            obj_set_key_value(&tmp, &"seek".into(), Value::Function("tmp.seek".to_string()))?;
-            obj_set_key_value(&tmp, &"tell".into(), Value::Function("tmp.tell".to_string()))?;
-            obj_set_key_value(&tmp, &"putByte".into(), Value::Function("tmp.putByte".to_string()))?;
-            obj_set_key_value(&tmp, &"getByte".into(), Value::Function("tmp.getByte".to_string()))?;
-            obj_set_key_value(&tmp, &"getline".into(), Value::Function("tmp.getline".to_string()))?;
-            obj_set_key_value(&tmp, &"eof".into(), Value::Function("tmp.eof".to_string()))?;
-            obj_set_key_value(&tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"puts".into(), Value::Function("tmp.puts".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"readAsString".into(), Value::Function("tmp.readAsString".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"seek".into(), Value::Function("tmp.seek".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"tell".into(), Value::Function("tmp.tell".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"putByte".into(), Value::Function("tmp.putByte".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"getByte".into(), Value::Function("tmp.getByte".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"getline".into(), Value::Function("tmp.getline".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"eof".into(), Value::Function("tmp.eof".to_string()))?;
+            obj_set_key_value(mc, &tmp, &"close".into(), Value::Function("tmp.close".to_string()))?;
             Ok(Value::Object(tmp))
         }
         Err(e) => Err(raise_eval_error!(format!("Failed to create temporary file: {e}"))),
@@ -58,7 +58,7 @@ pub(crate) fn create_tmpfile() -> Result<Value, JSError> {
 }
 
 /// Handle file object method calls
-pub(crate) fn handle_file_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_file_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
     if get_own_property(object, &"__file_id".into()).is_some() {
         let file_id_val = get_own_property(object, &"__file_id".into())
@@ -89,7 +89,7 @@ pub(crate) fn handle_file_method(object: &JSObjectDataPtr, method: &str, args: &
                 // build string to write
                 let mut to_write = String::new();
                 for a in args {
-                    let av = evaluate_expr(env, a)?;
+                    let av = evaluate_expr(mc, env, a)?;
                     match av {
                         Value::String(sv) => to_write.push_str(&utf16_to_utf8(&sv)),
                         Value::Number(n) => to_write.push_str(&n.to_string()),
@@ -123,8 +123,8 @@ pub(crate) fn handle_file_method(object: &JSObjectDataPtr, method: &str, args: &
             "seek" => {
                 // seek(offset, whence)
                 if args.len() >= 2 {
-                    let offv = evaluate_expr(env, &args[0])?;
-                    let whv = evaluate_expr(env, &args[1])?;
+                    let offv = evaluate_expr(mc, env, &args[0])?;
+                    let whv = evaluate_expr(mc, env, &args[1])?;
                     let offset = match offv {
                         Value::Number(n) => n as i64,
                         _ => 0,
@@ -152,7 +152,7 @@ pub(crate) fn handle_file_method(object: &JSObjectDataPtr, method: &str, args: &
             },
             "putByte" => {
                 if !args.is_empty() {
-                    let bv = evaluate_expr(env, &args[0])?;
+                    let bv = evaluate_expr(mc, env, &args[0])?;
                     let byte = match bv {
                         Value::Number(n) => n as u8,
                         _ => 0,

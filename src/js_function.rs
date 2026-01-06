@@ -1,9 +1,9 @@
 use crate::core::{
-    ClosureData, Expr, JSObjectDataPtr, Statement, StatementKind, Value, evaluate_expr, has_own_property_value, prepare_call_env_with_this,
-    prepare_function_call_env,
+    ClosureData, Expr, Gc, JSObjectDataPtr, MutationContext, PromiseState, PropertyKey, Statement, StatementKind, Value, evaluate_expr,
+    get_own_property, has_own_property_value, new_js_object_data, prepare_call_env_with_this, prepare_function_call_env,
 };
 use crate::core::{obj_get_key_value, obj_set_key_value};
-use crate::error::JSError;
+use crate::error::{EvalError, JSError};
 use crate::js_array::handle_array_constructor;
 use crate::js_date::handle_date_constructor;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -56,6 +56,15 @@ fn extract_internal_args<'gc>(
 }
 
 /// Helper function to validate that first N arguments are numbers
+
+fn validate_internal_args(args: &[Value], count: usize) -> Result<(), JSError> {
+    if args.len() != count {
+         let msg = format!("Internal function requires exactly {} arguments, got {}", count, args.len());
+         return Err(raise_type_error!(msg));
+    }
+    Ok(())
+}
+
 fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSError> {
     if args.len() < count {
         return Err(raise_type_error!(format!("Expected at least {count} arguments")));
@@ -79,152 +88,100 @@ pub fn handle_global_function<'gc>(
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
+    // Handle functions that expect unevaluated expressions
     match func_name {
-        "console.error" => crate::js_console::handle_console_method(mc, "error", args, env),
-        "console.log" => crate::js_console::handle_console_method(mc, "log", args, env),
-        "import" => dynamic_import_function(mc, args, env),
-        "std.sprintf" => crate::sprintf::handle_sprintf_call(mc, env, args),
-        "Object.prototype.valueOf" => object_prototype_value_of(mc, args, env),
-        "Object.prototype.toString" => object_prototype_to_string(mc, args, env),
-        "Object.prototype.hasOwnProperty" => handle_object_has_own_property(mc, args, env),
-        "String" => crate::js_string::string_constructor(mc, args, env),
-        "Function" => function_constructor(mc, args, env),
-        "parseInt" => parse_int_function(mc, args, env),
-        "parseFloat" => parse_float_function(mc, args, env),
-        "isNaN" => is_nan_function(mc, args, env),
-        "isFinite" => is_finite_function(mc, args, env),
-        "encodeURIComponent" => encode_uri_component(mc, args, env),
-        "decodeURIComponent" => decode_uri_component(mc, args, env),
-        "Array" => handle_array_constructor(mc, args, env),
-        "Object" => crate::js_class::handle_object_constructor(mc, args, env),
-        "BigInt" => crate::js_bigint::bigint_constructor(mc, args, env),
-        "Number" => crate::js_number::number_constructor(mc, args, env),
-        "Boolean" => boolean_constructor(mc, args, env),
-        "Boolean_toString" => crate::js_class::boolean_prototype_to_string(mc, args, env),
-        "Boolean_valueOf" => crate::js_class::boolean_prototype_value_of(mc, args, env),
-        "Date" => handle_date_constructor(mc, args, env),
-        "Symbol" => symbol_constructor(mc, args, env),
-        "Symbol_valueOf" => symbol_prototype_value_of(mc, args, env),
-        "Symbol_toString" => symbol_prototype_to_string(mc, args, env),
-        "new" => evaluate_new_expression(mc, args, env),
-        "eval" => evalute_eval_function(mc, args, env),
-        "encodeURI" => encode_uri(mc, args, env),
-        "decodeURI" => decode_uri(mc, args, env),
-        "__internal_resolve_promise" => internal_resolve_promise(mc, args, env),
-        "__internal_reject_promise" => internal_reject_promise(mc, args, env),
-        "__internal_promise_allsettled_resolve" => internal_promise_allsettled_resolve(mc, args, env),
-        "__internal_promise_allsettled_reject" => internal_promise_allsettled_reject(mc, args, env),
-        "__internal_allsettled_state_record_fulfilled" => internal_allsettled_state_record_fulfilled(mc, args, env),
-        "__internal_allsettled_state_record_rejected" => internal_allsettled_state_record_rejected(mc, args, env),
-        "__internal_promise_any_resolve" => internal_promise_any_resolve(mc, args, env),
-        "__internal_promise_any_reject" => internal_promise_any_reject(mc, args, env),
-        "__internal_promise_race_resolve" => internal_promise_race_resolve(mc, args, env),
-        "__internal_promise_all_resolve" => internal_promise_all_resolve(mc, args, env),
-        "__internal_promise_all_reject" => internal_promise_all_reject(mc, args, env),
+        "import" => return dynamic_import_function(mc, args, env),
+        "std.sprintf" => return crate::sprintf::handle_sprintf_call(mc, env, args),
+        "Function" => return function_constructor(mc, args, env),
+        "new" => return evaluate_new_expression(mc, args, env),
+        "eval" => return evalute_eval_function(mc, args, env),
+        "Date" => return handle_date_constructor(mc, args, env),
+        "testWithIntlConstructors" => return test_with_intl_constructors(mc, args, env),
+
+        "Object.prototype.valueOf" => return object_prototype_value_of(mc, args, env),
+        "Object.prototype.toString" => return object_prototype_to_string(mc, args, env),
+        "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(mc, args, env),
+        "parseInt" => return parse_int_function(mc, args, env),
+        "parseFloat" => return parse_float_function(mc, args, env),
+        "isNaN" => return is_nan_function(mc, args, env),
+        "isFinite" => return is_finite_function(mc, args, env),
+        "encodeURIComponent" => return encode_uri_component(mc, args, env),
+        "decodeURIComponent" => return decode_uri_component(mc, args, env),
+        "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
+        "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
+        "Number" => return crate::js_number::number_constructor(mc, args, env),
+        "Boolean" => return boolean_constructor(mc, args, env),
+        "Boolean_toString" => return crate::js_class::boolean_prototype_to_string(mc, args, env),
+        "Boolean_valueOf" => return crate::js_class::boolean_prototype_value_of(mc, args, env),
+        "Symbol" => return symbol_constructor(mc, args, env),
+        "Symbol_valueOf" => return symbol_prototype_value_of(mc, args, env),
+        "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
+        "encodeURI" => return encode_uri(mc, args, env),
+        "decodeURI" => return decode_uri(mc, args, env),
+        "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
+        "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
+        "__internal_promise_allsettled_resolve" => return internal_promise_allsettled_resolve(mc, args, env),
+        "__internal_promise_allsettled_reject" => return internal_promise_allsettled_reject(mc, args, env),
+        "__internal_allsettled_state_record_fulfilled" => return internal_allsettled_state_record_fulfilled(mc, args, env),
+        "__internal_allsettled_state_record_rejected" => return internal_allsettled_state_record_rejected(mc, args, env),
+        "__internal_promise_any_resolve" => return internal_promise_any_resolve(mc, args, env),
+        "__internal_promise_any_reject" => return internal_promise_any_reject(mc, args, env),
+        "__internal_promise_race_resolve" => return internal_promise_race_resolve(mc, args, env),
+        "__internal_promise_all_resolve" => return internal_promise_all_resolve(mc, args, env),
+        "__internal_promise_all_reject" => return internal_promise_all_reject(mc, args, env),
+
         "Promise.prototype.then" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
+                let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
                     return crate::js_promise::handle_promise_then(mc, &obj, args, env);
                 }
             }
-            Err(raise_eval_error!("Promise.prototype.then called without a promise receiver"))
+            return Err(raise_eval_error!("Promise.prototype.then called without a promise receiver"));
         }
         "Promise.prototype.catch" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
+                let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
                     return crate::js_promise::handle_promise_catch(mc, &obj, args, env);
                 }
             }
-            Err(raise_eval_error!("Promise.prototype.catch called without a promise receiver"))
-        }
-        name if name.starts_with("Array.prototype.") => {
-            let method = name.trim_start_matches("Array.prototype.");
-            if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
-                match this_val {
-                    Value::Object(obj) => {
-                        return crate::js_array::handle_array_instance_method(mc, &obj, method, args, env);
-                    }
-                    Value::String(s) => {
-                        // Create temporary String object for array methods
-                        let str_obj = crate::core::new_js_object_data(mc);
-                        crate::core::obj_set_key_value(mc, &str_obj, &"__value__".into(), Value::String(s.clone()))?;
-                        crate::core::obj_set_key_value(
-                            mc,
-                            &str_obj,
-                            &"length".into(),
-                            Value::Number(crate::unicode::utf16_len(&s) as f64),
-                        )?;
-                        // Populate indices
-                        let mut i = 0;
-                        while let Some(c) = crate::unicode::utf16_char_at(&s, i) {
-                            let char_str = crate::unicode::utf16_to_utf8(&[c]);
-                            crate::core::obj_set_key_value(
-                                mc,
-                                &str_obj,
-                                &i.to_string().into(),
-                                Value::String(crate::unicode::utf8_to_utf16(&char_str)),
-                            )?;
-                            i += 1;
-                        }
-                        return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env);
-                    }
-                    _ => return Err(raise_type_error!("Array.prototype method called on incompatible receiver")),
-                }
-            }
-            Err(raise_type_error!("Array.prototype method called without this"))
+            return Err(raise_eval_error!("Promise.prototype.catch called without a promise receiver"));
         }
         "Promise.prototype.finally" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
+                let this_val = this_rc.borrow().clone();
                 if let Value::Object(obj) = this_val {
                     return crate::js_promise::handle_promise_finally(mc, &obj, args, env);
                 }
             }
-            Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver"))
+            return Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver"));
         }
-        "testWithIntlConstructors" => test_with_intl_constructors(mc, args, env),
-        "setTimeout" => crate::js_promise::handle_set_timeout(mc, args, env),
-        "clearTimeout" => crate::js_promise::handle_clear_timeout(mc, args, env),
-        "setInterval" => crate::js_promise::handle_set_interval(mc, args, env),
-        "clearInterval" => crate::js_promise::handle_clear_interval(mc, args, env),
+        "setTimeout" => return crate::js_promise::handle_set_timeout(mc, args, env),
+        "clearTimeout" => return crate::js_promise::handle_clear_timeout(mc, args, env),
+        "setInterval" => return crate::js_promise::handle_set_interval(mc, args, env),
+        "clearInterval" => return crate::js_promise::handle_clear_interval(mc, args, env),
 
-        // Basic Function.prototype.call support so builtin methods can be invoked
-        // via `.call` (e.g., Object.prototype.hasOwnProperty.call(obj, 'key'))
         "Function.prototype.call" => {
-            // The function to be invoked is bound as the `this` value on env
             if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
+                let this_val = this_rc.borrow().clone();
                 match this_val {
                     Value::Function(func_name) => {
-                        // Implement forwarding for Object.prototype.* and Array.prototype.* builtins
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
-                            // Need at least receiver arg
                             if args.is_empty() {
                                 return Err(raise_eval_error!("call requires a receiver"));
                             }
-
-                            // For Array.prototype methods, we can't just build a property call expression
-                            // because the receiver might not have the method (e.g. string doesn't have forEach).
-                            // Instead, we should call the global function handler directly with 'this' set to receiver.
-
                             let receiver_val = evaluate_expr(mc, env, &args[0])?;
                             let forwarded_args = args[1..].to_vec();
-
-                            // Create a new call environment with 'this' bound to receiver
                             let call_env = prepare_call_env_with_this(mc, Some(env), receiver_val, None, &[], Some(env))?;
-
                             return handle_global_function(mc, &func_name, &forwarded_args, &call_env);
                         }
-                        Err(raise_eval_error!(format!(
+                        return Err(raise_eval_error!(format!(
                             "Function.prototype.call target not supported: {}",
                             func_name
-                        )))
+                        )));
                     }
                     Value::Closure(data) => {
-                        // Call the closure with `this` set to receiver (first arg)
                         if args.is_empty() {
                             return Err(raise_eval_error!("call requires a receiver"));
                         }
@@ -247,7 +204,6 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
-                        // Create arguments object
                         let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                         crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                         for (i, arg) in evaluated_args.iter().enumerate() {
@@ -255,12 +211,11 @@ pub fn handle_global_function<'gc>(
                         }
                         crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
 
-                        crate::core::evaluate_statements(mc, &func_env, body)
+                        return crate::core::evaluate_statements(mc, &func_env, body);
                     }
                     Value::Object(object) => {
-                        // If this is an object wrapping a closure, extract and call it
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(mc, &object, &"__closure__".into())?
-                            && let Value::Closure(data) = &*cl_rc.borrow(&mc)
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
+                            && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
                                 return Err(raise_eval_error!("call requires a receiver"));
@@ -284,7 +239,6 @@ pub fn handle_global_function<'gc>(
                                 Some(env),
                             )?;
 
-                            // Create arguments object
                             let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                             crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
@@ -294,68 +248,56 @@ pub fn handle_global_function<'gc>(
 
                             return crate::core::evaluate_statements(mc, &func_env, body);
                         }
-
-                        Err(raise_eval_error!("Function.prototype.call called on non-callable"))
+                        return Err(raise_eval_error!("Function.prototype.call called on non-callable"));
                     }
-                    _ => Err(raise_eval_error!("Function.prototype.call called on non-callable")),
+                    _ => return Err(raise_eval_error!("Function.prototype.call called on non-callable")),
                 }
             } else {
-                Err(raise_eval_error!("Function.prototype.call called without this"))
+                return Err(raise_eval_error!("Function.prototype.call called without this"));
             }
         }
 
         "Function.prototype.apply" => {
-            // Minimal apply implementation for Object.prototype.* and Array.prototype.* builtins
             if let Some(this_rc) = crate::core::env_get(env, "this") {
-                let this_val = this_rc.borrow(&mc).clone();
+                let this_val = this_rc.borrow().clone();
                 match this_val {
                     Value::Function(func_name) => {
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
                             if args.is_empty() {
                                 return Err(raise_eval_error!("apply requires a receiver"));
                             }
-                            // Evaluate receiver
                             let receiver_val = evaluate_expr(mc, env, &args[0])?;
-                            // Evaluate arg array (if provided)
                             let mut forwarded_exprs: Vec<Expr> = Vec::new();
                             if args.len() >= 2 {
                                 match evaluate_expr(mc, env, &args[1])? {
                                     Value::Object(arr_obj) if crate::js_array::is_array(mc, &arr_obj) => {
-                                        // Collect numeric indices 0..n
                                         let mut i = 0usize;
                                         loop {
                                             let key = i.to_string();
                                             if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
-                                                forwarded_exprs.push(Expr::Value(val_rc.borrow(&mc).clone()));
+                                                forwarded_exprs.push(Expr::Value(val_rc.borrow().clone()));
                                             } else {
                                                 break;
                                             }
                                             i += 1;
                                         }
                                     }
-                                    _ => {
-                                        // Non-array apply - ignore for now
-                                    }
+                                    _ => {}
                                 }
                             }
-
-                            // Create a new call environment with 'this' bound to receiver
                             let call_env = prepare_call_env_with_this(mc, Some(env), receiver_val, None, &[], Some(env))?;
-
                             return handle_global_function(mc, &func_name, &forwarded_exprs, &call_env);
                         }
-                        Err(raise_eval_error!(format!(
+                        return Err(raise_eval_error!(format!(
                             "Function.prototype.apply target not supported: {}",
                             func_name
-                        )))
+                        )));
                     }
                     Value::Closure(data) => {
-                        // apply to closure target
                         if args.is_empty() {
                             return Err(raise_eval_error!("apply requires a receiver"));
                         }
                         let receiver_val = evaluate_expr(mc, env, &args[0])?;
-                        // Evaluate argument array (if provided)
                         let mut evaluated_args: Vec<Value> = Vec::new();
                         if args.len() >= 2 {
                             match evaluate_expr(mc, env, &args[1])? {
@@ -364,7 +306,7 @@ pub fn handle_global_function<'gc>(
                                     loop {
                                         let key = i.to_string();
                                         if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
-                                            evaluated_args.push(val_rc.borrow(&mc).clone());
+                                            evaluated_args.push(val_rc.borrow().clone());
                                         } else {
                                             break;
                                         }
@@ -387,7 +329,6 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
-                        // Create arguments object
                         let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                         crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                         for (i, arg) in evaluated_args.iter().enumerate() {
@@ -395,16 +336,15 @@ pub fn handle_global_function<'gc>(
                         }
                         crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
 
-                        crate::core::evaluate_statements(mc, &func_env, body)
+                        return crate::core::evaluate_statements(mc, &func_env, body);
                     }
                     Value::Object(object) => {
-                        // object wrapping closure
-                        if args.is_empty() {
-                            return Err(raise_eval_error!("apply requires a receiver"));
-                        }
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(mc, &object, &"__closure__".into())?
-                            && let Value::Closure(data) = &*cl_rc.borrow(&mc)
+                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
+                            && let Value::Closure(data) = &*cl_rc.borrow()
                         {
+                            if args.is_empty() {
+                                return Err(raise_eval_error!("apply requires a receiver"));
+                            }
                             let receiver_val = evaluate_expr(mc, env, &args[0])?;
                             let mut evaluated_args: Vec<Value> = Vec::new();
                             if args.len() >= 2 {
@@ -414,7 +354,7 @@ pub fn handle_global_function<'gc>(
                                         loop {
                                             let key = i.to_string();
                                             if let Some(val_rc) = crate::core::get_own_property(&arr_obj, &key.into()) {
-                                                evaluated_args.push(val_rc.borrow(&mc).clone());
+                                                evaluated_args.push(val_rc.borrow().clone());
                                             } else {
                                                 break;
                                             }
@@ -437,7 +377,6 @@ pub fn handle_global_function<'gc>(
                                 Some(env),
                             )?;
 
-                            // Create arguments object
                             let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                             crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
@@ -447,17 +386,67 @@ pub fn handle_global_function<'gc>(
 
                             return crate::core::evaluate_statements(mc, &func_env, body);
                         }
-
-                        Err(raise_eval_error!("Function.prototype.apply called on non-callable"))
+                        return Err(raise_eval_error!("Function.prototype.apply called on non-callable"));
                     }
-                    _ => Err(raise_eval_error!("Function.prototype.apply called on non-callable")),
+                    _ => return Err(raise_eval_error!("Function.prototype.apply called on non-callable")),
                 }
             } else {
-                Err(raise_eval_error!("Function.prototype.apply called without this"))
+                return Err(raise_eval_error!("Function.prototype.apply called without this"));
             }
         }
+        _ => {}
+    }
 
-        _ => Err(raise_eval_error!(format!("Global function {func_name} is not implemented"))),
+    // Evaluate arguments for others
+    let mut evaluated_args = Vec::with_capacity(args.len());
+    for arg in args {
+        evaluated_args.push(evaluate_expr(mc, env, arg)?);
+    }
+    let args = &evaluated_args;
+
+    match func_name {
+        "console.error" => Ok(crate::js_console::handle_console_method(mc, "error", args, env)?),
+        "console.log" => Ok(crate::js_console::handle_console_method(mc, "log", args, env)?),
+        "String" => crate::js_string::string_constructor(mc, args, env),
+        "Array" => handle_array_constructor(mc, args, env),
+
+        name if name.starts_with("Array.prototype.") => {
+            let method = name.trim_start_matches("Array.prototype.");
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                match this_val {
+                    Value::Object(obj) => {
+                        return crate::js_array::handle_array_instance_method(mc, &obj, method, args, env);
+                    }
+                    Value::String(s) => {
+                        let str_obj = crate::core::new_js_object_data(mc);
+                        crate::core::obj_set_key_value(mc, &str_obj, &"__value__".into(), Value::String(s.clone()))?;
+                        crate::core::obj_set_key_value(
+                            mc,
+                            &str_obj,
+                            &"length".into(),
+                            Value::Number(crate::unicode::utf16_len(&s) as f64),
+                        )?;
+                        let mut i = 0;
+                        while let Some(c) = crate::unicode::utf16_char_at(&s, i) {
+                            let char_str = crate::unicode::utf16_to_utf8(&[c]);
+                            crate::core::obj_set_key_value(
+                                mc,
+                                &str_obj,
+                                &i.to_string().into(),
+                                Value::String(crate::unicode::utf8_to_utf16(&char_str)),
+                            )?;
+                            i += 1;
+                        }
+                        return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env);
+                    }
+                    _ => return Err(raise_type_error!("Array.prototype method called on incompatible receiver")),
+                }
+            }
+            Err(raise_type_error!("Array.prototype method called without this"))
+        }
+
+        _ => Err(raise_eval_error!(format!("Global function {} not found", func_name))),
     }
 }
 
@@ -493,21 +482,21 @@ fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &
     Ok(promise_obj)
 }
 
-fn object_prototype_value_of<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn object_prototype_value_of<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // When the prototype valueOf function is invoked as a global
     // function, `this` is provided in the `env`. Delegate to the
     // same helper used for method calls so boxed primitives and
     // object behavior are consistent.
     if let Some(this_rc) = crate::core::env_get(env, "this") {
-        let this_val = this_rc.borrow(&mc).clone();
+        let this_val = this_rc.borrow().clone();
         return crate::js_object::handle_value_of_method(mc, &this_val, args, env);
     }
     Err(raise_eval_error!("Object.prototype.valueOf called without this"))
 }
 
-fn object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
-        let this_val = this_rc.borrow(&mc).clone();
+        let this_val = this_rc.borrow().clone();
         match this_val {
             Value::Object(_) => return crate::js_object::handle_to_string_method(mc, &this_val, args, env),
             Value::String(_s) => {
@@ -529,21 +518,19 @@ fn object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env
     Err(raise_eval_error!("Object.prototype.toString called without this"))
 }
 
-fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    if evaluated_args.is_empty() {
+    if args.is_empty() {
         return Ok(Value::Number(f64::NAN));
     }
 
-    let input_val = &evaluated_args[0];
+    let input_val = args[0];
     let input_str = match input_val {
         Value::String(s) => crate::unicode::utf16_to_utf8(s),
-        _ => crate::core::value_to_string(mc, input_val),
+        _ => crate::core::value_to_string(input_val),
     };
 
     // 1. Trim leading whitespace
@@ -564,8 +551,8 @@ fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObj
     let mut radix = 10;
     let mut strip_prefix = true;
 
-    if evaluated_args.len() > 1 {
-        let radix_val = &evaluated_args[1];
+    if args.len() > 1 {
+        let radix_val = args[1];
         let r_num = match radix_val {
             Value::Number(n) => *n,
             Value::Boolean(b) => {
@@ -645,21 +632,19 @@ fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObj
     Ok(Value::Number(sign * result))
 }
 
-fn parse_float_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn parse_float_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    if evaluated_args.is_empty() {
+    if args.is_empty() {
         return Ok(Value::Number(f64::NAN));
     }
 
-    let arg_val = &evaluated_args[0];
+    let arg_val = args[0];
     let str_val = match arg_val {
         Value::String(s) => crate::unicode::utf16_to_utf8(s),
-        _ => crate::core::value_to_string(mc, arg_val),
+        _ => crate::core::value_to_string(arg_val),
     };
 
     let trimmed = str_val.trim_start();
@@ -748,14 +733,12 @@ fn parse_float_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
     Ok(Value::Number(f64::NAN))
 }
 
-fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let arg_val = if evaluated_args.is_empty() {
+    let arg_val = if args.is_empty() {
         Value::Undefined
     } else {
         evaluated_args[0].clone()
@@ -776,14 +759,12 @@ fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObject
     }
 }
 
-fn is_finite_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn is_finite_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let arg_val = if evaluated_args.is_empty() {
+    let arg_val = if args.is_empty() {
         Value::Undefined
     } else {
         evaluated_args[0].clone()
@@ -804,32 +785,30 @@ fn is_finite_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObj
     }
 }
 
-fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate arguments
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let body_str = if !evaluated_args.is_empty() {
-        let val = evaluated_args.last().unwrap();
+    let body_str = if !args.is_empty() {
+        let val = args.last().unwrap();
         match val {
             Value::String(s) => utf16_to_utf8(s),
-            _ => crate::core::value_to_string(mc, val),
+            _ => crate::core::value_to_string(val),
         }
     } else {
         "".to_string()
     };
 
     let mut params_str = String::new();
-    if evaluated_args.len() > 1 {
-        for (i, arg) in evaluated_args.iter().take(evaluated_args.len() - 1).enumerate() {
+    if args.len() > 1 {
+        for (i, arg) in args.iter().take(args.len() - 1).enumerate() {
             if i > 0 {
                 params_str.push(',');
             }
             let arg_str = match arg {
                 Value::String(s) => utf16_to_utf8(s),
-                _ => crate::core::value_to_string(mc, arg),
+                _ => crate::core::value_to_string(arg),
             };
             params_str.push_str(&arg_str);
         }
@@ -852,14 +831,12 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
     }
 }
 
-fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let arg_val = if evaluated_args.is_empty() {
+    let arg_val = if args.is_empty() {
         Value::Undefined
     } else {
         evaluated_args[0].clone()
@@ -867,7 +844,7 @@ fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
 
     let str_val = match arg_val {
         Value::String(s) => utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(mc, &arg_val),
+        _ => crate::core::value_to_string(&arg_val),
     };
 
     // Simple URI encoding - replace spaces with %20 and some special chars
@@ -882,14 +859,12 @@ fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
     Ok(Value::String(utf8_to_utf16(&encoded)))
 }
 
-fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let arg_val = if evaluated_args.is_empty() {
+    let arg_val = if args.is_empty() {
         Value::Undefined
     } else {
         evaluated_args[0].clone()
@@ -897,7 +872,7 @@ fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
 
     let str_val = match arg_val {
         Value::String(s) => utf16_to_utf8(&s),
-        _ => crate::core::value_to_string(mc, &arg_val),
+        _ => crate::core::value_to_string(&arg_val),
     };
 
     // Simple URI decoding - replace %20 with spaces and some special chars
@@ -912,18 +887,16 @@ fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSO
     Ok(Value::String(utf8_to_utf16(&decoded)))
 }
 
-fn boolean_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn boolean_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    if evaluated_args.is_empty() {
+    if args.is_empty() {
         return Ok(Value::Boolean(false));
     }
 
-    let arg_val = &evaluated_args[0];
+    let arg_val = args[0];
     let bool_val = match arg_val {
         Value::Boolean(b) => *b,
         Value::Number(n) => *n != 0.0 && !n.is_nan(),
@@ -936,12 +909,12 @@ fn boolean_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSOb
     Ok(Value::Boolean(bool_val))
 }
 
-fn symbol_prototype_value_of<'gc>(mc: &MutationContext<'gc>, _args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn symbol_prototype_value_of<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     let this_val = crate::js_class::evaluate_this(mc, env)?;
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(mc, &obj, &"__value__".into())?
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())?
                 && let Value::Symbol(s) = &*val.borrow()
             {
                 return Ok(Value::Symbol(s.clone()));
@@ -952,12 +925,12 @@ fn symbol_prototype_value_of<'gc>(mc: &MutationContext<'gc>, _args: &[Expr], env
     }
 }
 
-fn symbol_prototype_to_string<'gc>(mc: &MutationContext<'gc>, _args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn symbol_prototype_to_string<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     let this_val = crate::js_class::evaluate_this(mc, env)?;
     let sym = match this_val {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(mc, &obj, &"__value__".into())? {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
                 if let Value::Symbol(s) = &*val.borrow() {
                     s.clone()
                 } else {
@@ -974,21 +947,19 @@ fn symbol_prototype_to_string<'gc>(mc: &MutationContext<'gc>, _args: &[Expr], en
     Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", desc))))
 }
 
-fn symbol_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn symbol_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    let mut evaluated_args = Vec::new();
-    for arg in args {
-        evaluated_args.push(evaluate_expr(mc, env, arg)?);
-    }
+    
+    
 
-    let description = if evaluated_args.is_empty() {
+    let description = if args.is_empty() {
         None
     } else {
-        let arg_val = &evaluated_args[0];
+        let arg_val = args[0];
         match arg_val {
             Value::String(s) => Some(utf16_to_utf8(s)),
             Value::Undefined => None,
-            _ => Some(crate::core::value_to_string(mc, arg_val)),
+            _ => Some(crate::core::value_to_string(arg_val)),
         }
     };
 
@@ -1045,9 +1016,9 @@ fn evalute_eval_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JS
     }
 }
 
-fn encode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn encode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
-        let arg_val = evaluate_expr(mc, env, &args[0])?;
+        let arg_val = args[0].clone();
         match arg_val {
             Value::String(s) => {
                 let str_val = utf16_to_utf8(&s);
@@ -1069,9 +1040,9 @@ fn encode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataP
     }
 }
 
-fn decode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn decode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
-        let arg_val = evaluate_expr(mc, env, &args[0])?;
+        let arg_val = args[0].clone();
         match arg_val {
             Value::String(s) => {
                 let str_val = utf16_to_utf8(&s);
@@ -1093,9 +1064,9 @@ fn decode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataP
     }
 }
 
-fn internal_resolve_promise<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_resolve_promise<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function to resolve a promise - requires 2 args: (promise, value)
-    let args = extract_internal_args(mc, args, env, 2)?;
+    validate_internal_args(args, 2)?;
     log::trace!("__internal_resolve_promise called with value: {:?}", args[1]);
 
     match &args[0] {
@@ -1107,9 +1078,9 @@ fn internal_resolve_promise<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: 
     }
 }
 
-fn internal_reject_promise<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_reject_promise<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function to reject a promise - requires 2 args: (promise, reason)
-    let args = extract_internal_args(mc, args, env, 2)?;
+    validate_internal_args(args, 2)?;
     log::trace!("__internal_reject_promise called with reason: {:?}", args[1]);
 
     match &args[0] {
@@ -1123,11 +1094,11 @@ fn internal_reject_promise<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &
 
 fn internal_promise_allsettled_resolve<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for legacy allSettled - requires 3 args: (idx, value, shared_state)
-    let args = extract_internal_args(mc, args, env, 3)?;
+    validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 1)?;
     crate::js_promise::__internal_promise_allsettled_resolve(mc, numbers[0], args[1].clone(), args[2].clone())?;
     Ok(Value::Undefined)
@@ -1135,11 +1106,11 @@ fn internal_promise_allsettled_resolve<'gc>(
 
 fn internal_promise_allsettled_reject<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for legacy allSettled - requires 3 args: (idx, reason, shared_state)
-    let args = extract_internal_args(mc, args, env, 3)?;
+    validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 1)?;
     crate::js_promise::__internal_promise_allsettled_reject(mc, numbers[0], args[1].clone(), args[2].clone())?;
     Ok(Value::Undefined)
@@ -1147,11 +1118,11 @@ fn internal_promise_allsettled_reject<'gc>(
 
 fn internal_allsettled_state_record_fulfilled<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, value)
-    let args = extract_internal_args(mc, args, env, 3)?;
+    validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_fulfilled called: state_id={}, index={}, value={:?}",
@@ -1165,11 +1136,11 @@ fn internal_allsettled_state_record_fulfilled<'gc>(
 
 fn internal_allsettled_state_record_rejected<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, reason)
-    let args = extract_internal_args(mc, args, env, 3)?;
+    validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_rejected called: state_id={}, index={}, reason={:?}",
@@ -1181,9 +1152,9 @@ fn internal_allsettled_state_record_rejected<'gc>(
     Ok(Value::Undefined)
 }
 
-fn internal_promise_any_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_any_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.any resolve - requires 2 args: (value, result_promise)
-    let args = extract_internal_args(mc, args, env, 2)?;
+    validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(result_promise) => {
             crate::js_promise::__internal_promise_any_resolve(mc, args[0].clone(), result_promise.clone());
@@ -1195,7 +1166,7 @@ fn internal_promise_any_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], e
 
 fn internal_promise_any_reject<'gc>(
     _mc: &MutationContext<'gc>,
-    _args: &[Expr],
+    _args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.any reject - requires 6 args: (idx, reason, rejections, rejected_count, total, result_promise)
@@ -1206,9 +1177,9 @@ fn internal_promise_any_reject<'gc>(
     ))
 }
 
-fn internal_promise_race_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_race_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.race resolve - requires 2 args: (value, result_promise)
-    let args = extract_internal_args(mc, args, env, 2)?;
+    validate_internal_args(args, 2)?;
     match &args[1] {
         Value::Promise(result_promise) => {
             crate::js_promise::__internal_promise_race_resolve(mc, args[0].clone(), result_promise.clone());
@@ -1218,35 +1189,35 @@ fn internal_promise_race_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], 
     }
 }
 
-fn internal_promise_all_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_all_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
-    let args = extract_internal_args(mc, args, env, 3)?;
+    validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 1)?;
     let idx = numbers[0] as usize;
     let value = args[1].clone();
     if let Value::Object(state_obj) = args[2].clone() {
         // Store value in results[idx]
-        if let Some(results_val_rc) = obj_get_key_value(mc, &state_obj, &"results".into())?
-            && let Value::Object(results_obj) = &*results_val_rc.borrow(&mc)
+        if let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
+            && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             obj_set_key_value(mc, results_obj, &idx.to_string().into(), value)?;
         }
         // Increment completed
-        if let Some(completed_val_rc) = obj_get_key_value(mc, &state_obj, &"completed".into())?
-            && let Value::Number(completed) = &*completed_val_rc.borrow(&mc)
+        if let Some(completed_val_rc) = obj_get_key_value(&state_obj, &"completed".into())?
+            && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
             obj_set_key_value(mc, &state_obj, &"completed".into(), Value::Number(new_completed))?;
             // Check if all completed
-            if let Some(total_val_rc) = obj_get_key_value(mc, &state_obj, &"total".into())?
-                && let Value::Number(total) = &*total_val_rc.borrow(&mc)
+            if let Some(total_val_rc) = obj_get_key_value(&state_obj, &"total".into())?
+                && let Value::Number(total) = &*total_val_rc.borrow()
                 && new_completed == *total
             {
                 // Resolve result_promise with results array
-                if let Some(promise_val_rc) = obj_get_key_value(mc, &state_obj, &"result_promise".into())?
-                    && let Value::Promise(result_promise) = &*promise_val_rc.borrow(&mc)
-                    && let Some(results_val_rc) = obj_get_key_value(mc, &state_obj, &"results".into())?
-                    && let Value::Object(results_obj) = &*results_val_rc.borrow(&mc)
+                if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
+                    && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
+                    && let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
+                    && let Value::Object(results_obj) = &*results_val_rc.borrow()
                 {
                     crate::js_promise::resolve_promise(mc, result_promise, Value::Object(results_obj.clone()));
                 }
@@ -1256,14 +1227,14 @@ fn internal_promise_all_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Expr], e
     Ok(Value::Undefined)
 }
 
-fn internal_promise_all_reject<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_all_reject<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.all reject - requires 2 args: (reason, state)
-    let args = extract_internal_args(mc, args, env, 2)?;
+    validate_internal_args(args, 2)?;
     let reason = args[0].clone();
     if let Value::Object(state_obj) = args[1].clone() {
         // Reject result_promise
-        if let Some(promise_val_rc) = obj_get_key_value(mc, &state_obj, &"result_promise".into())?
-            && let Value::Promise(result_promise) = &*promise_val_rc.borrow(&mc)
+        if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
+            && let Value::Promise(result_promise) = &*promise_val_rc.borrow()
         {
             crate::js_promise::reject_promise(mc, result_promise, reason);
         }
@@ -1300,14 +1271,14 @@ fn test_with_intl_constructors<'gc>(mc: &MutationContext<'gc>, args: &[Expr], en
 
 fn handle_object_has_own_property<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // hasOwnProperty should inspect the bound `this` and take one argument
     if args.len() != 1 {
         return Err(raise_eval_error!("hasOwnProperty requires one argument"));
     }
-    let key_val = evaluate_expr(mc, env, &args[0])?;
+    let key_val = args[0].clone();
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
         match this_val {
@@ -1323,7 +1294,7 @@ fn handle_object_has_own_property<'gc>(
                     Value::Boolean(b) => b.to_string(),
                     Value::Undefined => "undefined".to_string(),
                     Value::Symbol(_) => return Ok(Value::Boolean(false)),
-                    other => crate::core::value_to_string(mc, &other),
+                    other => crate::core::value_to_string(&other),
                 };
                 if key_str == "length" {
                     return Ok(Value::Boolean(true));

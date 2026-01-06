@@ -46,7 +46,7 @@ fn initialize_weakset_from_iterable<'gc>(
 
                     // Check if value is an object
                     if let Value::Object(ref obj) = value {
-                        let weak_value = gc_arena::Gc::downgrade(obj);
+                        let weak_value = gc_arena::Gc::downgrade(*obj);
                         weakset.borrow_mut(mc).values.push(weak_value);
                     } else {
                         return Err(raise_eval_error!("WeakSet values must be objects"));
@@ -73,7 +73,7 @@ fn weakset_has_value<'gc>(
     let mut found = false;
     weakset.borrow_mut(mc).values.retain(|v| {
         if let Some(strong_v) = v.upgrade(mc) {
-            if gc_arena::Gc::ptr_eq(value_obj_rc, &strong_v) {
+            if gc_arena::Gc::ptr_eq(*value_obj_rc, strong_v) {
                 found = true;
             }
             true // Keep alive entries
@@ -93,7 +93,7 @@ fn weakset_delete_value<'gc>(
     let mut deleted = false;
     weakset.borrow_mut(mc).values.retain(|v| {
         if let Some(strong_v) = v.upgrade(mc) {
-            if gc_arena::Gc::ptr_eq(value_obj_rc, &strong_v) {
+            if gc_arena::Gc::ptr_eq(*value_obj_rc, strong_v) {
                 deleted = true;
                 false // Remove this entry
             } else {
@@ -127,12 +127,12 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
                 _ => return Err(raise_eval_error!("WeakSet values must be objects")),
             };
 
-            let weak_value = gc_arena::Gc::downgrade(&value_obj_rc);
+            let weak_value = gc_arena::Gc::downgrade(value_obj_rc);
 
             // Remove existing entry with same value (if still alive)
             weakset.borrow_mut(mc).values.retain(|v| {
                 if let Some(strong_v) = v.upgrade(mc) {
-                    !gc_arena::Gc::ptr_eq(&value_obj_rc, &strong_v)
+                    !gc_arena::Gc::ptr_eq(value_obj_rc, strong_v)
                 } else {
                     false // Remove dead entries
                 }

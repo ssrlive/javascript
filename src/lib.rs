@@ -3,11 +3,11 @@
 pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
-// pub(crate) mod js_array;
+pub(crate) mod js_array;
 // pub(crate) mod js_assert;
 // pub(crate) mod js_bigint;
 // pub(crate) mod js_class;
-// pub(crate) mod js_console;
+pub(crate) mod js_console;
 // pub(crate) mod js_date;
 // pub(crate) mod js_function;
 // pub(crate) mod js_generator;
@@ -21,10 +21,10 @@ pub(crate) mod js_math;
 // pub(crate) mod js_promise;
 // pub(crate) mod js_proxy;
 // pub(crate) mod js_reflect;
-// pub(crate) mod js_regexp;
+pub(crate) mod js_regexp;
 // pub(crate) mod js_set;
 // pub(crate) mod js_std;
-// pub(crate) mod js_string;
+pub(crate) mod js_string;
 // pub(crate) mod js_testintl;
 // pub(crate) mod js_typedarray;
 // pub(crate) mod js_weakmap;

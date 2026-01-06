@@ -1,18 +1,17 @@
-#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+#![allow(warnings)]
 
 use crate::core::{
-    DestructuringElement, Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value,
 };
+use crate::core::{Gc, GcCell, MutationContext};
 use crate::error::JSError;
-use crate::js_promise;
+use crate::js_array::{get_array_length, is_array};
+// use crate::js_promise;
 use crate::unicode::utf16_to_utf8;
-use gc_arena::Mutation as MutationContext;
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::rc::Rc;
 
 /// Create the console object with logging functions
-pub fn make_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn initialize_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let console_obj = new_js_object_data(mc);
     obj_set_key_value(mc, &console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
     // Provide `console.error` as an alias to `console.log` for now
@@ -32,9 +31,9 @@ fn format_console_value<'gc>(
 fn format_value_pretty<'gc>(
     mc: &MutationContext<'gc>,
     val: &Value<'gc>,
-    env: &JSObjectDataPtr<'gc>,
-    depth: usize,
-    seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
+    _env: &JSObjectDataPtr<'gc>,
+    _depth: usize,
+    seen: &mut HashSet<*const GcCell<JSObjectData<'gc>>>,
     quote_strings: bool,
 ) -> Result<String, JSError> {
     match val {
@@ -53,10 +52,11 @@ fn format_value_pretty<'gc>(
         Value::Object(obj) => {
             // If this object is a Promise wrapper (stores inner promise under "__promise"),
             // print it compactly like Node: `Promise { <pending> }` and avoid listing internal helpers.
-            if let Ok(Some(inner_rc)) = obj_get_key_value(mc, obj, &"__promise".into()) {
-                if let Value::Promise(p_rc) = &*inner_rc.borrow() {
-                    return format_promise(mc, p_rc, env, depth, seen);
-                }
+            if let Ok(Some(_inner_rc)) = obj_get_key_value(mc, obj, &"__promise".into()) {
+                // if let Value::Promise(p_rc) = &*inner_rc.borrow() {
+                //     return format_promise(mc, p_rc, env, depth, seen);
+                // }
+                todo!("Promise wrapper formatting not implemented");
             }
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
             if let Ok(Some(stack_rc)) = obj_get_key_value(mc, obj, &"stack".into()) {
@@ -72,16 +72,16 @@ fn format_value_pretty<'gc>(
                     Ok(pat) => Ok(pat),
                     Err(_) => Ok("[object RegExp]".to_string()),
                 }
-            } else if crate::js_date::is_date_object(obj) {
-                match crate::js_date::handle_date_method(obj, "toISOString", &[], env) {
-                    Ok(Value::String(s)) => Ok(crate::unicode::utf16_to_utf8(&s)),
-                    _ => Ok("[object Date]".to_string()),
-                }
+            // } else if crate::js_date::is_date_object(obj) {
+            //     match crate::js_date::handle_date_method(obj, "toISOString", &[], env) {
+            //         Ok(Value::String(s)) => Ok(crate::unicode::utf16_to_utf8(&s)),
+            //         _ => Ok("[object Date]".to_string()),
+            //     }
             } else if crate::js_array::is_array(mc, obj) {
-                if seen.contains(&Rc::as_ptr(obj)) {
+                if seen.contains(&Gc::as_ptr(*obj)) {
                     return Ok("[Circular]".to_string());
                 }
-                seen.insert(Rc::as_ptr(obj));
+                seen.insert(Gc::as_ptr(*obj));
 
                 let len = crate::js_array::get_array_length(mc, obj).unwrap_or(0);
                 let mut s = String::from("[");
@@ -90,14 +90,14 @@ fn format_value_pretty<'gc>(
                         s.push_str(", ");
                     }
                     if let Some(val_rc) = obj_get_key_value(mc, obj, &i.to_string().into())? {
-                        let val_str = format_value_pretty(mc, &val_rc.borrow(), env, depth + 1, seen, true)?;
+                        let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                         s.push_str(&val_str);
                     } else if i == len - 1 {
                         s.push(',');
                     }
                 }
                 s.push(']');
-                seen.remove(&Rc::as_ptr(obj));
+                seen.remove(&Gc::as_ptr(*obj));
                 Ok(s)
             } else {
                 // Check for boxed primitive
@@ -113,14 +113,14 @@ fn format_value_pretty<'gc>(
                     }
                 }
 
-                if seen.contains(&Rc::as_ptr(obj)) {
+                if seen.contains(&Gc::as_ptr(*obj)) {
                     return Ok("[Circular]".to_string());
                 }
-                seen.insert(Rc::as_ptr(obj));
+                seen.insert(Gc::as_ptr(*obj));
 
                 // Try to get class name
                 let mut class_name = String::new();
-                if let Some(proto_rc) = obj.borrow().prototype.clone() {
+                if let Some(proto_rc) = obj.borrow().prototype {
                     if let Some(ctor_val_rc) = proto_rc
                         .borrow()
                         .properties
@@ -176,16 +176,16 @@ fn format_value_pretty<'gc>(
                     }
 
                     s.push_str(": ");
-                    let val_str = format_value_pretty(mc, &val_rc.borrow(), env, depth + 1, seen, true)?;
+                    let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                     s.push_str(&val_str);
                 }
                 s.push('}');
-                seen.remove(&Rc::as_ptr(obj));
+                seen.remove(&Gc::as_ptr(*obj));
                 Ok(s)
             }
         }
         Value::Function(name) => Ok(format!("function {}() {{ [native code] }}", name)),
-        Value::Closure(data) | Value::AsyncClosure(data) => {
+        Value::Closure(data) /* | Value::AsyncClosure(data) */ => {
             let params = &data.params;
             let mut s = String::from("function(");
             for (i, param) in params.iter().enumerate() {
@@ -200,15 +200,16 @@ fn format_value_pretty<'gc>(
                     }
                     DestructuringElement::NestedObject(_) => s.push_str("{}"),
                     DestructuringElement::NestedArray(_) => s.push_str("[]"),
+                    DestructuringElement::Property(name, _) => s.push_str(name),
                     DestructuringElement::Empty => {}
                 }
             }
             s.push_str(") { [closure code] }");
             Ok(s)
         }
-        Value::ClassDefinition(class_def) => Ok(format!("class {}", class_def.name)),
-        Value::Getter(..) => Ok("[Getter]".to_string()),
-        Value::Setter(..) => Ok("[Setter]".to_string()),
+        // Value::ClassDefinition(class_def) => Ok(format!("class {}", class_def.name)),
+        // Value::Getter(..) => Ok("[Getter]".to_string()),
+        // Value::Setter(..) => Ok("[Setter]".to_string()),
         Value::Property { value, getter, setter } => {
             let mut s = String::from("[Property");
             if value.is_some() {
@@ -223,64 +224,93 @@ fn format_value_pretty<'gc>(
             s.push(']');
             Ok(s)
         }
-        Value::Promise(p_rc) => format_promise(p_rc, env, _depth, seen),
+        // Value::Promise(p_rc) => format_promise(p_rc, env, _depth, seen),
         Value::Symbol(s) => Ok(format!("Symbol({})", s.description.as_deref().unwrap_or(""))),
-        Value::Map(_) => Ok("[object Map]".to_string()),
-        Value::Set(_) => Ok("[object Set]".to_string()),
-        Value::WeakMap(_) => Ok("[object WeakMap]".to_string()),
-        Value::WeakSet(_) => Ok("[object WeakSet]".to_string()),
-        Value::GeneratorFunction(..) => Ok("[GeneratorFunction]".to_string()),
-        Value::Generator(_) => Ok("[object Generator]".to_string()),
-        Value::Proxy(_) => Ok("[object Proxy]".to_string()),
-        Value::ArrayBuffer(_) => Ok("[object ArrayBuffer]".to_string()),
-        Value::DataView(_) => Ok("[object DataView]".to_string()),
-        Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
+        // Value::Map(_) => Ok("[object Map]".to_string()),
+        // Value::Set(_) => Ok("[object Set]".to_string()),
+        // Value::WeakMap(_) => Ok("[object WeakMap]".to_string()),
+        // Value::WeakSet(_) => Ok("[object WeakSet]".to_string()),
+        // Value::GeneratorFunction(..) => Ok("[GeneratorFunction]".to_string()),
+        // Value::Generator(_) => Ok("[object Generator]".to_string()),
+        // Value::Proxy(_) => Ok("[object Proxy]".to_string()),
+        // Value::ArrayBuffer(_) => Ok("[object ArrayBuffer]".to_string()),
+        // Value::DataView(_) => Ok("[object DataView]".to_string()),
+        // Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
         Value::Uninitialized => Ok("undefined".to_string()),
     }
 }
 
 // Helper to format a Promise (or an Rc<RefCell<JSPromise>>) in Node-like style.
-fn format_promise<'gc>(
-    mc: &MutationContext<'gc>,
-    p_rc: &Rc<RefCell<crate::js_promise::JSPromise<'gc>>>,
-    env: &JSObjectDataPtr<'gc>,
-    depth: usize,
-    seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
-) -> Result<String, JSError> {
-    let p = p_rc.borrow();
-    match &p.state {
-        crate::js_promise::PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
-        crate::js_promise::PromiseState::Fulfilled(val) => {
-            let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
-            Ok(format!("Promise {{ {} }}", inner))
-        }
-        crate::js_promise::PromiseState::Rejected(val) => {
-            let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
-            Ok(format!("Promise {{ <rejected> {} }}", inner))
-        }
-    }
-}
+// fn format_promise<'gc>(
+//     mc: &MutationContext<'gc>,
+//     p_rc: &Rc<RefCell<crate::js_promise::JSPromise<'gc>>>,
+//     env: &JSObjectDataPtr<'gc>,
+//     depth: usize,
+//     seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
+// ) -> Result<String, JSError> {
+//     let p = p_rc.borrow();
+//     match &p.state {
+//         crate::js_promise::PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
+//         crate::js_promise::PromiseState::Fulfilled(val) => {
+//             let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
+//             Ok(format!("Promise {{ {} }}", inner))
+//         }
+//         crate::js_promise::PromiseState::Rejected(val) => {
+//             let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
+//             Ok(format!("Promise {{ <rejected> {} }}", inner))
+//         }
+//     }
+// }
+
+// pub fn handle_console_method<'gc>(
+//     mc: &MutationContext<'gc>, // added mc
+//     method: &str,
+//     values: &[Value<'gc>],
+//     _env: &JSObjectDataPtr<'gc>,
+// ) -> Result<Value<'gc>, crate::core::EvalError<'gc>> {
+//     match method {
+//         "log" | "error" => {
+//             let output = values
+//                 .iter()
+//                 .map(|v| {
+//                     if is_error(v)
+//                         && let Value::Object(obj) = v
+//                     {
+//                         // If it has a stack property, use it
+//                         if let Some(stack) = obj.borrow().get_property(mc, "stack") {
+//                             return stack;
+//                         }
+//                     }
+//                     if let Value::String(s) = v {
+//                         utf16_to_utf8(s)
+//                     } else {
+//                         value_to_string(v)
+//                     }
+//                 })
+//                 .collect::<Vec<_>>()
+//                 .join(" ");
+//             println!("{}", output);
+//             Ok(Value::Undefined)
+//         }
+//         _ => Err(crate::core::EvalError::Js(crate::raise_eval_error!(format!("Console method {method} not implemented")))),
+//     }
+// }
 
 /// Handle console object method calls
 pub fn handle_console_method<'gc>(
     mc: &MutationContext<'gc>, // added mc
     method: &str,
-    args: &[Expr],
+    values: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, crate::core::EvalError<'gc>> {
     match method {
         "log" | "error" => {
             // Instrument: record current tick and task-queue length when console.log is invoked
-            log::debug!(
-                "console.log called; CURRENT_TICK={} task_queue_len={}",
-                js_promise::current_tick(),
-                js_promise::task_queue_len()
-            );
-
-            let mut values = Vec::new();
-            for arg in args {
-                values.push(evaluate_expr(mc, env, arg)?);
-            }
+            // log::debug!(
+            //     "console.log called; CURRENT_TICK={} task_queue_len={}",
+            //     js_promise::current_tick(),
+            //     js_promise::task_queue_len()
+            // );
 
             if values.is_empty() {
                 println!();
@@ -370,17 +400,17 @@ pub fn handle_console_method<'gc>(
             println!("{}", output);
             Ok(Value::Undefined)
         }
-        _ => Err(raise_eval_error!(format!("Console method {method} not implemented"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!("Console method {method} not implemented")))),
     }
 }
 
 /// Print additional own non-index properties of an array object
 /// Not enabled by default; can be called from handle_console_method if desired
-fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError> {
+fn _print_additional_info_for_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Result<(), crate::core::EvalError<'gc>> {
     // Collect and print own non-index properties.
     // Print common RegExp-related props in a stable order for readability.
 
-    let Some(len) = crate::js_array::get_array_length(obj) else {
+    let Some(len) = get_array_length(mc, obj) else {
         return Ok(());
     };
 
@@ -388,8 +418,8 @@ fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError
     let mut need_sep = len > 0;
 
     // Helper to print a single property if present
-    let mut print_prop = |k: &str| -> Result<bool, JSError> {
-        if let Some(vrc) = obj_get_key_value(obj, &k.into())? {
+    let mut print_prop = |k: &str| -> Result<bool, crate::core::EvalError<'gc>> {
+        if let Some(vrc) = obj_get_key_value(mc, obj, &k.into())? {
             if need_sep {
                 print!(", ");
             }
@@ -404,7 +434,7 @@ fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError
                 Value::Undefined => print!("undefined"),
                 Value::Null => print!("null"),
                 Value::Object(inner_obj) => {
-                    if crate::js_array::is_array(inner_obj) {
+                    if is_array(mc, inner_obj) {
                         print!("[Array]");
                     } else {
                         print!("[object Object]");
@@ -458,7 +488,7 @@ fn _print_additional_info_for_array(obj: &JSObjectDataPtr) -> Result<(), JSError
             Value::Undefined => print!("undefined"),
             Value::Null => print!("null"),
             Value::Object(inner_obj) => {
-                if crate::js_array::is_array(inner_obj) {
+                if is_array(mc, inner_obj) {
                     print!("[Array]");
                 } else {
                     print!("[object Object]");

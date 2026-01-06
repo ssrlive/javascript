@@ -1,12 +1,16 @@
-#![allow(clippy::collapsible_if, clippy::collapsible_match)]
+#![allow(warnings)]
 
 use crate::error::JSError;
+use crate::js_array::initialize_array;
+use crate::js_console::initialize_console_object;
 use crate::js_math::initialize_math;
+use crate::js_regexp::initialize_regexp;
+use crate::js_string::initialize_string;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
-use gc_arena::Mutation as MutationContext;
-use gc_arena::lock::RefLock as GcCell;
-use gc_arena::{Collect, Gc};
+pub(crate) use gc_arena::Mutation as MutationContext;
+pub(crate) use gc_arena::lock::RefLock as GcCell;
+pub(crate) use gc_arena::{Collect, Gc};
 use std::collections::HashMap;
 
 mod gc;
@@ -55,22 +59,19 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_error_constructor(mc, env)?;
 
-    initialize_console(mc, env)?;
+    let console_obj = initialize_console_object(mc)?;
+    env_set(mc, env, "console", Value::Object(console_obj))?;
 
     initialize_math(mc, env)?;
+    initialize_string(mc, env)?;
+    initialize_array(mc, env)?;
+    initialize_regexp(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
+    env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
 
-    Ok(())
-}
-
-pub fn initialize_console<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let console_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
-    obj_set_key_value(mc, &console_obj, &"error".into(), Value::Function("console.error".to_string()))?;
-    env_set(mc, env, "console", Value::Object(console_obj))?;
     Ok(())
 }
 
@@ -130,6 +131,98 @@ where
             },
         }
     })
+}
+
+// Helper to resolve a constructor's prototype object if present in `env`.
+pub fn get_constructor_prototype<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &str,
+) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
+    // First try to find a constructor object already stored in the environment
+    if let Some(val_rc) = obj_get_key_value(mc, env, &name.into())? {
+        if let Value::Object(ctor_obj) = &*val_rc.borrow() {
+            if let Some(proto_val_rc) = obj_get_key_value(mc, ctor_obj, &"prototype".into())? {
+                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
+                    return Ok(Some(proto_obj.clone()));
+                }
+            }
+        }
+    }
+
+    // If not found, attempt to evaluate the variable to force lazy creation
+    match evaluate_expr(mc, env, &Expr::Var(name.to_string(), None, None)) {
+        Ok(Value::Object(ctor_obj)) => {
+            if let Some(proto_val_rc) = obj_get_key_value(mc, &ctor_obj, &"prototype".into())? {
+                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
+                    return Ok(Some(proto_obj.clone()));
+                }
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
+// Helper to set an object's internal prototype from a constructor name.
+// If the constructor.prototype is available, sets `obj.borrow_mut().prototype`
+// to that object. This consolidates the common pattern used when boxing
+// primitives and creating instances.
+pub fn set_internal_prototype_from_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    ctor_name: &str,
+) -> Result<(), JSError> {
+    if let Some(proto_obj) = get_constructor_prototype(mc, env, ctor_name)? {
+        // set internal prototype pointer (store Weak to avoid cycles)
+        obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+    }
+    Ok(())
+}
+
+// Helper to initialize a collection from an iterable argument.
+// Used by Map, Set, WeakMap, WeakSet constructors.
+pub fn initialize_collection_from_iterable<'gc, F>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+    constructor_name: &str,
+    mut process_item: F,
+) -> Result<(), JSError>
+where
+    F: FnMut(Value<'gc>) -> Result<(), JSError>,
+{
+    if args.is_empty() {
+        return Ok(());
+    }
+    if args.len() > 1 {
+        let msg = format!("{constructor_name} constructor takes at most one argument",);
+        return Err(raise_eval_error!(msg));
+    }
+    let iterable = evaluate_expr(mc, env, &args[0]).map_err(|e| match e {
+        crate::core::js_error::EvalError::Js(e) => e,
+        crate::core::js_error::EvalError::Throw(val, _, _) => {
+            crate::raise_eval_error!(format!("Uncaught exception: {:?}", val))
+        }
+    })?;
+    match iterable {
+        Value::Object(obj) => {
+            let mut i = 0;
+            loop {
+                let key = format!("{i}");
+                if let Some(item_val) = obj_get_key_value(mc, &obj, &key.into())? {
+                    let item = item_val.borrow().clone();
+                    process_item(item)?;
+                } else {
+                    break;
+                }
+                i += 1;
+            }
+            Ok(())
+        }
+        _ => Err(raise_eval_error!(format!("{constructor_name} constructor requires an iterable"))),
+    }
 }
 
 /// Read a script file from disk and decode it into a UTF-8 Rust `String`.

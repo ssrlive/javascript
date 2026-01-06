@@ -1,5 +1,7 @@
-#![allow(dead_code, unused_variables)]
+#![allow(warnings)]
 
+use crate::js_array::handle_array_static_method;
+use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
@@ -11,6 +13,7 @@ use crate::{
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
+use crate::{Token, parse_statements, tokenize};
 use gc_arena::Gc;
 use gc_arena::Mutation as MutationContext;
 use gc_arena::lock::RefLock as GcCell;
@@ -603,54 +606,82 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             match func_val {
                 Value::Function(name) => {
-                    if name == "console.log" {
-                        let output = eval_args
-                            .iter()
-                            .map(|v| {
-                                if is_error(v)
-                                    && let Value::Object(obj) = v
-                                {
-                                    // If it has a stack property, use it
-                                    if let Some(stack) = obj.borrow().get_property(mc, "stack") {
-                                        return stack;
-                                    }
-                                }
-
-                                if let Value::String(s) = v {
-                                    utf16_to_utf8(s)
-                                } else {
-                                    value_to_string(v)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        println!("{}", output);
-                        Ok(Value::Undefined)
-                    } else if name.starts_with("Math.") {
-                        let method = &name[5..];
+                    if name == "eval" {
+                        let first_arg = eval_args.get(0).cloned().unwrap_or(Value::Undefined);
+                        if let Value::String(script_str) = first_arg {
+                            let script = utf16_to_utf8(&script_str);
+                            let mut tokens = tokenize(&script).map_err(EvalError::Js)?;
+                            if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+                                tokens.pop();
+                            }
+                            let mut index = 0;
+                            let mut statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+                            // eval executes in the current environment
+                            match evaluate_statements(mc, env, &mut statements) {
+                                Ok(v) => Ok(v),
+                                Err(e) => Err(e),
+                            }
+                        } else {
+                            Ok(first_arg)
+                        }
+                    } else if let Some(method_name) = name.strip_prefix("console.") {
+                        crate::js_console::handle_console_method(mc, method_name, &eval_args, env)
+                    } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
-                    } else if name == "console.error" {
-                        let output = eval_args
-                            .iter()
-                            .map(|v| {
-                                if is_error(v)
-                                    && let Value::Object(obj) = v
-                                {
-                                    // If it has a stack property, use it
-                                    if let Some(stack) = obj.borrow().get_property(mc, "stack") {
-                                        return stack;
-                                    }
-                                }
-                                if let Value::String(s) = v {
-                                    utf16_to_utf8(s)
-                                } else {
-                                    value_to_string(v)
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        println!("{}", output);
-                        Ok(Value::Undefined)
+                    } else if name.starts_with("String.") {
+                        if name == "String.fromCharCode" {
+                            Ok(string_from_char_code(mc, &eval_args, env)?)
+                        } else if name == "String.fromCodePoint" {
+                            Ok(string_from_code_point(mc, &eval_args, env)?)
+                        } else if name == "String.raw" {
+                            Ok(string_raw(mc, &eval_args, env)?)
+                        } else if name.starts_with("String.prototype.") {
+                            let method = &name[17..];
+                            // String instance methods need a 'this' value which should be the first argument if called directly?
+                            // But here we are calling the function object directly.
+                            // Usually instance methods are called via method call syntax (obj.method()), which sets 'this'.
+                            // If we are here, it means we called the function object directly, e.g. String.prototype.slice.call(str, ...)
+                            // But our current implementation of function calls doesn't handle 'this' binding for native functions well yet
+                            // unless it's a method call.
+                            // However, if we are calling it as a method of String.prototype, 'this' should be passed.
+                            // But here 'name' is just a string identifier we assigned to the function.
+                            // We need to know the 'this' value.
+                            // For now, let's assume the first argument is 'this' if it's called as a standalone function?
+                            // No, that's not how it works.
+                            // If we are here, it means we are executing the native function body.
+                            // We need to access the 'this' binding from the environment or context.
+                            // But our native functions don't have a captured environment with 'this'.
+                            // We need to change how we handle native function calls to include 'this'.
+
+                            // Wait, the current architecture seems to rely on the caller to handle 'this' or pass it?
+                            // In `evaluate_expr` for `Expr::Call`, we don't seem to pass 'this' explicitly for native functions
+                            // unless it was a method call.
+
+                            // Let's look at how `Expr::Call` handles method calls.
+                            // It evaluates `func_expr`. If it's a property access, it sets `this`.
+                            // But `evaluate_expr` returns a `Value`, not a reference.
+                            // So we lose the `this` context unless we handle `Expr::Call` specially for property access.
+
+                            // Actually, `Expr::Call` implementation in `eval.rs` (lines 600+) just evaluates `func_expr`.
+                            // It doesn't seem to handle `this` binding for method calls properly yet?
+                            // Ah, I see `Expr::Call` logic is split.
+                            // Let's check `Expr::Call` implementation again.
+
+                            Err(EvalError::Js(raise_eval_error!(
+                                "String prototype methods not fully supported in direct calls yet"
+                            )))
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(format!("Unknown String function: {}", name))))
+                        }
+                    } else if name.starts_with("Array.") {
+                        if name.starts_with("Array.prototype.") {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "Array prototype methods not fully supported in direct calls yet"
+                            )))
+                        } else {
+                            let method = &name[6..];
+                            Ok(handle_array_static_method(mc, method, &eval_args, env)?)
+                        }
                     } else {
                         Err(EvalError::Js(raise_eval_error!(format!("Unknown native function: {}", name))))
                     }

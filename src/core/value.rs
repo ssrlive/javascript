@@ -375,6 +375,32 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     }
 }
 
+pub fn value_to_sort_string<'gc>(val: &Value<'gc>) -> String {
+    match val {
+        Value::Undefined => "undefined".to_string(),
+        Value::Null => "null".to_string(),
+        _ => value_to_string(val),
+    }
+}
+
+pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value<'gc>) -> bool {
+    match (v1, v2) {
+        (Value::Number(n1), Value::Number(n2)) => {
+            if n1.is_nan() && n2.is_nan() {
+                true
+            } else {
+                n1 == n2
+            }
+        }
+        (Value::String(s1), Value::String(s2)) => s1 == s2,
+        (Value::Boolean(b1), Value::Boolean(b2)) => b1 == b2,
+        (Value::Undefined, Value::Undefined) => true,
+        (Value::Null, Value::Null) => true,
+        (Value::Object(o1), Value::Object(o2)) => Gc::ptr_eq(*o1, *o2),
+        _ => false,
+    }
+}
+
 pub fn obj_get_key_value<'gc>(
     _mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
@@ -390,6 +416,10 @@ pub fn obj_get_key_value<'gc>(
     Ok(None)
 }
 
+pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>) -> Option<GcPtr<'gc, Value<'gc>>> {
+    obj.borrow().properties.get(key).cloned()
+}
+
 pub fn obj_set_key_value<'gc>(
     mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
@@ -398,6 +428,16 @@ pub fn obj_set_key_value<'gc>(
 ) -> Result<(), JSError> {
     let val_ptr = Gc::new(mc, GcCell::new(val));
     obj.borrow_mut(mc).insert(key.clone(), val_ptr);
+    Ok(())
+}
+
+pub fn obj_set_rc<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    key: &PropertyKey<'gc>,
+    val: GcPtr<'gc, Value<'gc>>,
+) -> Result<(), JSError> {
+    obj.borrow_mut(mc).insert(key.clone(), val);
     Ok(())
 }
 

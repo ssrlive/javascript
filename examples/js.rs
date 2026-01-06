@@ -53,20 +53,20 @@ fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> 
     match evaluate_script(&script_content, script_path.as_ref()) {
         Ok(result) => println!("{result}"),
         Err(err) => {
-            if let Some(file_path) = script_path.as_ref() {
-                if let Some(line) = err.js_line() {
-                    eprintln!("{}:{}", file_path.display(), line);
-                    let lines: Vec<&str> = script_content.lines().collect();
-                    if line > 0 && line <= lines.len() {
-                        eprintln!("{}", lines[line - 1]);
-                        if let Some(col) = err.js_column() {
-                            if col > 0 {
-                                eprintln!("{}^", " ".repeat(col - 1));
-                            }
-                        }
+            if let Some(file_path) = script_path.as_ref()
+                && let Some(line) = err.js_line()
+            {
+                eprintln!("{}:{}", file_path.display(), line);
+                let lines: Vec<&str> = script_content.lines().collect();
+                if line > 0 && line <= lines.len() {
+                    eprintln!("{}", lines[line - 1]);
+                    if let Some(col) = err.js_column()
+                        && col > 0
+                    {
+                        eprintln!("{}^", " ".repeat(col - 1));
                     }
-                    eprintln!();
                 }
+                eprintln!();
             }
 
             eprintln!("{}", err.message());

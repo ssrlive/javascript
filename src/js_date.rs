@@ -2,6 +2,7 @@ use crate::core::{Expr, JSObjectDataPtr, Value, ValuePtr, evaluate_expr, get_own
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike, Utc};
+use gc_arena::Mutation as MutationContext;
 
 /// Check if an object is a Date object
 pub fn is_date_object(obj: &JSObjectDataPtr) -> bool {
@@ -173,7 +174,11 @@ fn construct_date_from_components(components: &[f64]) -> Option<f64> {
 }
 
 /// Handle Date constructor calls
-pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_date_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let timestamp = if args.is_empty() {
@@ -182,7 +187,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
         duration.as_millis() as f64
     } else if args.len() == 1 {
         // new Date(dateString) or new Date(timestamp)
-        let arg_val = evaluate_expr(env, &args[0])?;
+        let arg_val = evaluate_expr(mc, env, &args[0])?;
         match arg_val {
             Value::String(s) => {
                 let date_str = utf16_to_utf8(&s);
@@ -204,7 +209,7 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
         // new Date(year, month, day, hours, minutes, seconds, milliseconds)
         let mut components = Vec::new();
         for arg in args {
-            let arg_val = evaluate_expr(env, arg)?;
+            let arg_val = evaluate_expr(mc, env, arg)?;
             match arg_val {
                 Value::Number(n) => components.push(n),
                 _ => {
@@ -221,17 +226,23 @@ pub(crate) fn handle_date_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     };
 
     // Create a Date object with timestamp
-    let date_obj = new_js_object_data();
+    let date_obj = new_js_object_data(mc);
     set_time_stamp_value(&date_obj, timestamp)?;
 
     // Set prototype
-    crate::core::set_internal_prototype_from_constructor(&date_obj, env, "Date")?;
+    crate::core::set_internal_prototype_from_constructor(mc, &date_obj, env, "Date")?;
 
     Ok(Value::Object(date_obj))
 }
 
 /// Handle Date instance method calls
-pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_date_method<'gc>(
+    mc: &MutationContext<'gc>,
+    obj: &JSObjectDataPtr<'gc>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "toString" => {
             if !args.is_empty() {
@@ -390,7 +401,7 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
                 .single()
                 .ok_or_else(|| raise_type_error!("Utc::timestamp_millis_opt::single failed"))?;
             // Evaluate arguments
-            let year_val = evaluate_expr(env, &args[0])?;
+            let year_val = evaluate_expr(mc, env, &args[0])?;
             let year = if let Value::Number(y) = year_val {
                 y as i32
             } else {
@@ -398,7 +409,7 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
             };
 
             let month = if args.len() >= 2 {
-                let month_val = evaluate_expr(env, &args[1])?;
+                let month_val = evaluate_expr(mc, env, &args[1])?;
                 match month_val {
                     Value::Number(m) => m as u32,
                     _ => return Err(raise_type_error!("Date.setFullYear() month must be a number")),
@@ -408,7 +419,7 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
             };
 
             let day = if args.len() >= 3 {
-                let day_val = evaluate_expr(env, &args[2])?;
+                let day_val = evaluate_expr(mc, env, &args[2])?;
                 if let Value::Number(d) = day_val {
                     d as u32
                 } else {
@@ -440,7 +451,7 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
             }
 
             // Evaluate the time argument
-            let time_val = evaluate_expr(env, &args[0])?;
+            let time_val = evaluate_expr(mc, env, &args[0])?;
             let Value::Number(time) = time_val else {
                 return Err(raise_type_error!("Date.setTime() argument must be a number"));
             };
@@ -454,7 +465,7 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
                 return Err(raise_type_error!("Date.setDate() takes exactly 1 argument"));
             }
             // Evaluate the day argument
-            let day_val = evaluate_expr(env, &args[0])?;
+            let day_val = evaluate_expr(mc, env, &args[0])?;
             let Value::Number(day_n) = day_val else {
                 return Err(raise_type_error!("Date.setDate() argument must be a number"));
             };
@@ -597,7 +608,12 @@ pub(crate) fn handle_date_method(obj: &JSObjectDataPtr, method: &str, args: &[Ex
 }
 
 /// Handle Date static method calls
-pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_date_static_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Expr],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "now" => {
             if !args.is_empty() {
@@ -612,7 +628,7 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
                 return Err(raise_type_error!("Date.parse() takes exactly 1 argument"));
             }
             // Evaluate the argument
-            let arg_val = evaluate_expr(_env, &args[0])?;
+            let arg_val = evaluate_expr(mc, _env, &args[0])?;
             if let Value::String(s) = arg_val {
                 let date_str = utf16_to_utf8(&s);
                 if let Some(timestamp) = parse_date_string(&date_str) {
@@ -632,7 +648,7 @@ pub(crate) fn handle_date_static_method(method: &str, args: &[Expr], _env: &JSOb
             // Evaluate and coerce args to numbers
             let eval_num = |i: usize, default: f64| -> Result<f64, JSError> {
                 if i < args.len() {
-                    match evaluate_expr(_env, &args[i])? {
+                    match evaluate_expr(mc, _env, &args[i])? {
                         Value::Number(n) => Ok(n),
                         _ => Ok(f64::NAN),
                     }

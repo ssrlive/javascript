@@ -1,8 +1,54 @@
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
+#![allow(clippy::collapsible_if, clippy::collapsible_match, dead_code, unused_variables, unused_imports)]
+
+use crate::core::{
+    EvalError, Expr, JSObjectDataPtr, MutationContext, Value, env_set, evaluate_expr, get_own_property, new_js_object_data,
+    obj_get_key_value, obj_set_key_value,
+};
 use crate::error::JSError;
-use crate::js_array::set_array_length;
+use crate::js_array::{create_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use crate::{raise_eval_error, raise_syntax_error, raise_type_error};
 use regress::Regex;
+
+pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let regexp_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &regexp_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &regexp_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("RegExp")))?;
+
+    // Get Object.prototype
+    let object_proto = if let Some(obj_val) = obj_get_key_value(mc, env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(mc, obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
+    let regexp_proto = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        regexp_proto.borrow_mut(mc).prototype = Some(proto);
+    }
+
+    obj_set_key_value(mc, &regexp_ctor, &"prototype".into(), Value::Object(regexp_proto))?;
+    obj_set_key_value(mc, &regexp_proto, &"constructor".into(), Value::Object(regexp_ctor))?;
+
+    // Register instance methods
+    let methods = vec!["exec", "test", "toString"];
+
+    for method in methods {
+        obj_set_key_value(
+            mc,
+            &regexp_proto,
+            &method.into(),
+            Value::Function(format!("RegExp.prototype.{}", method)),
+        )?;
+    }
+
+    env_set(mc, env, "RegExp", Value::Object(regexp_ctor))?;
+    Ok(())
+}
 
 pub fn internal_get_regex_pattern(obj: &JSObjectDataPtr) -> Result<Vec<u16>, JSError> {
     match get_own_property(obj, &"__regex".into()) {
@@ -32,7 +78,7 @@ pub fn get_regex_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
 }
 
 pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSError> {
-    let pat = crate::js_regexp::get_regex_pattern(obj)?;
+    let pat = get_regex_pattern(obj)?;
     let flags = match get_own_property(obj, &"__flags".into()) {
         Some(val) => match &*val.borrow() {
             Value::String(s) => utf16_to_utf8(s),
@@ -48,33 +94,37 @@ pub fn get_regex_literal_pattern(obj: &JSObjectDataPtr) -> Result<String, JSErro
 }
 
 /// Handle RegExp constructor calls
-pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_regexp_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let (pattern, flags) = if args.is_empty() {
         // new RegExp() - empty regex
         ("".to_string(), "".to_string())
     } else if args.len() == 1 {
         // new RegExp(pattern)
-        let pattern_val = evaluate_expr(env, &args[0])?;
+        let pattern_val = args[0].clone();
         let pattern = match pattern_val {
             Value::String(s) => utf16_to_utf8(&s),
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(raise_type_error!("Invalid RegExp pattern"));
+                return Err(EvalError::Js(raise_type_error!("Invalid RegExp pattern")));
             }
         };
         (pattern, "".to_string())
     } else {
         // new RegExp(pattern, flags)
-        let pattern_val = evaluate_expr(env, &args[0])?;
-        let flags_val = evaluate_expr(env, &args[1])?;
+        let pattern_val = args[0].clone();
+        let flags_val = args[1].clone();
 
         let pattern = match pattern_val {
             Value::String(s) => utf16_to_utf8(&s),
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(raise_type_error!("Invalid RegExp pattern"));
+                return Err(EvalError::Js(raise_type_error!("Invalid RegExp pattern")));
             }
         };
 
@@ -83,7 +133,7 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             Value::Number(n) => n.to_string(),
             Value::Boolean(b) => b.to_string(),
             _ => {
-                return Err(raise_type_error!("Invalid RegExp flags"));
+                return Err(EvalError::Js(raise_type_error!("Invalid RegExp flags")));
             }
         };
 
@@ -115,13 +165,15 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
             'd' => has_indices = true,
             'v' => unicode_sets = true,
             _ => {
-                return Err(raise_syntax_error!(format!("Invalid RegExp flag: {flag}")));
+                return Err(EvalError::Js(raise_syntax_error!(format!("Invalid RegExp flag: {flag}"))));
             }
         }
     }
 
     if unicode && unicode_sets {
-        return Err(raise_syntax_error!("Invalid RegExp flags: cannot use both 'u' and 'v'"));
+        return Err(EvalError::Js(raise_syntax_error!(
+            "Invalid RegExp flags: cannot use both 'u' and 'v'"
+        )));
     }
 
     // Combine inline flags so fancy-regex can parse features like backreferences
@@ -153,42 +205,53 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
     }
 
     if let Err(e) = create_regex_from_utf16(&pattern_u16, &regress_flags) {
-        return Err(raise_syntax_error!(format!("Invalid RegExp: {}", e)));
+        return Err(EvalError::Js(raise_syntax_error!(format!("Invalid RegExp: {}", e))));
     }
 
     // Create RegExp object
-    let regexp_obj = new_js_object_data();
+    let regexp_obj = new_js_object_data(mc);
 
     // Store regex and flags as properties
-    obj_set_key_value(&regexp_obj, &"__regex".into(), Value::String(utf8_to_utf16(&pattern)))?;
-    obj_set_key_value(&regexp_obj, &"__flags".into(), Value::String(utf8_to_utf16(&flags)))?;
-    obj_set_key_value(&regexp_obj, &"__global".into(), Value::Boolean(global))?;
-    obj_set_key_value(&regexp_obj, &"__ignoreCase".into(), Value::Boolean(ignore_case))?;
-    obj_set_key_value(&regexp_obj, &"__multiline".into(), Value::Boolean(multiline))?;
-    obj_set_key_value(&regexp_obj, &"__dotAll".into(), Value::Boolean(dot_matches_new_line))?;
-    obj_set_key_value(&regexp_obj, &"__unicode".into(), Value::Boolean(unicode))?;
-    obj_set_key_value(&regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
-    obj_set_key_value(&regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
-    obj_set_key_value(&regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
-    obj_set_key_value(&regexp_obj, &"__hasIndices".into(), Value::Boolean(has_indices))?;
-    obj_set_key_value(&regexp_obj, &"__unicodeSets".into(), Value::Boolean(unicode_sets))?;
+    obj_set_key_value(mc, &regexp_obj, &"__regex".into(), Value::String(utf8_to_utf16(&pattern)))?;
+    obj_set_key_value(mc, &regexp_obj, &"__flags".into(), Value::String(utf8_to_utf16(&flags)))?;
+    obj_set_key_value(mc, &regexp_obj, &"__global".into(), Value::Boolean(global))?;
+    obj_set_key_value(mc, &regexp_obj, &"__ignoreCase".into(), Value::Boolean(ignore_case))?;
+    obj_set_key_value(mc, &regexp_obj, &"__multiline".into(), Value::Boolean(multiline))?;
+    obj_set_key_value(mc, &regexp_obj, &"__dotAll".into(), Value::Boolean(dot_matches_new_line))?;
+    obj_set_key_value(mc, &regexp_obj, &"__unicode".into(), Value::Boolean(unicode))?;
+    obj_set_key_value(mc, &regexp_obj, &"__sticky".into(), Value::Boolean(sticky))?;
+    obj_set_key_value(mc, &regexp_obj, &"__swapGreed".into(), Value::Boolean(swap_greed))?;
+    obj_set_key_value(mc, &regexp_obj, &"__crlf".into(), Value::Boolean(crlf))?;
+    obj_set_key_value(mc, &regexp_obj, &"__hasIndices".into(), Value::Boolean(has_indices))?;
+    obj_set_key_value(mc, &regexp_obj, &"__unicodeSets".into(), Value::Boolean(unicode_sets))?;
 
     // Expose user-visible properties
-    obj_set_key_value(&regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
-    obj_set_key_value(&regexp_obj, &"global".into(), Value::Boolean(global))?;
-    obj_set_key_value(&regexp_obj, &"ignoreCase".into(), Value::Boolean(ignore_case))?;
-    obj_set_key_value(&regexp_obj, &"multiline".into(), Value::Boolean(multiline))?;
-    obj_set_key_value(&regexp_obj, &"dotAll".into(), Value::Boolean(dot_matches_new_line))?;
-    obj_set_key_value(&regexp_obj, &"unicode".into(), Value::Boolean(unicode))?;
-    obj_set_key_value(&regexp_obj, &"sticky".into(), Value::Boolean(sticky))?;
-    obj_set_key_value(&regexp_obj, &"hasIndices".into(), Value::Boolean(has_indices))?;
-    obj_set_key_value(&regexp_obj, &"unicodeSets".into(), Value::Boolean(unicode_sets))?;
-    obj_set_key_value(&regexp_obj, &"flags".into(), Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
+    obj_set_key_value(mc, &regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
+    obj_set_key_value(mc, &regexp_obj, &"global".into(), Value::Boolean(global))?;
+    obj_set_key_value(mc, &regexp_obj, &"ignoreCase".into(), Value::Boolean(ignore_case))?;
+    obj_set_key_value(mc, &regexp_obj, &"multiline".into(), Value::Boolean(multiline))?;
+    obj_set_key_value(mc, &regexp_obj, &"dotAll".into(), Value::Boolean(dot_matches_new_line))?;
+    obj_set_key_value(mc, &regexp_obj, &"unicode".into(), Value::Boolean(unicode))?;
+    obj_set_key_value(mc, &regexp_obj, &"sticky".into(), Value::Boolean(sticky))?;
+    obj_set_key_value(mc, &regexp_obj, &"hasIndices".into(), Value::Boolean(has_indices))?;
+    obj_set_key_value(mc, &regexp_obj, &"unicodeSets".into(), Value::Boolean(unicode_sets))?;
+    obj_set_key_value(mc, &regexp_obj, &"flags".into(), Value::String(utf8_to_utf16(&flags)))?; // This should be a getter on prototype, but for now...
 
     // Add methods
-    obj_set_key_value(&regexp_obj, &"exec".into(), Value::Function("RegExp.prototype.exec".to_string()))?;
-    obj_set_key_value(&regexp_obj, &"test".into(), Value::Function("RegExp.prototype.test".to_string()))?;
     obj_set_key_value(
+        mc,
+        &regexp_obj,
+        &"exec".into(),
+        Value::Function("RegExp.prototype.exec".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &regexp_obj,
+        &"test".into(),
+        Value::Function("RegExp.prototype.test".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
         &regexp_obj,
         &"toString".into(),
         Value::Function("RegExp.prototype.toString".to_string()),
@@ -198,14 +261,20 @@ pub(crate) fn handle_regexp_constructor(args: &[Expr], env: &JSObjectDataPtr) ->
 }
 
 /// Handle RegExp instance method calls
-pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn handle_regexp_method<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "exec" => {
             if args.is_empty() {
-                return Err(raise_type_error!("RegExp.prototype.exec requires a string argument"));
+                return Err(EvalError::Js(raise_type_error!("RegExp.prototype.exec requires a string argument")));
             }
 
-            let input_val = evaluate_expr(env, &args[0])?;
+            let input_val = args[0].clone();
             let input_u16 = match input_val {
                 Value::String(s) => s,
                 _ => {
@@ -218,7 +287,7 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
                             // Simple toString for object
                             "[object Object]".to_string()
                         }
-                        _ => return Err(raise_type_error!("RegExp.prototype.exec requires a string argument")),
+                        _ => return Err(EvalError::Js(raise_type_error!("RegExp.prototype.exec requires a string argument"))),
                     };
                     utf8_to_utf16(&s)
                 }
@@ -293,23 +362,19 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
                     };
 
                     // Construct result array
-                    let result_array = crate::js_array::create_array(env)?;
+                    let result_array = create_array(mc, env)?;
 
                     let full_match_u16 = input_u16[orig_start..orig_end].to_vec();
-                    obj_set_key_value(&result_array, &"0".into(), Value::String(full_match_u16))?;
+                    obj_set_key_value(mc, &result_array, &"0".into(), Value::String(full_match_u16))?;
 
-                    let indices_array = if has_indices {
-                        Some(crate::js_array::create_array(env)?)
-                    } else {
-                        None
-                    };
+                    let indices_array = if has_indices { Some(create_array(mc, env)?) } else { None };
 
                     if let Some(indices) = &indices_array {
-                        let match_indices = crate::js_array::create_array(env)?;
-                        obj_set_key_value(&match_indices, &"0".into(), Value::Number(orig_start as f64))?;
-                        obj_set_key_value(&match_indices, &"1".into(), Value::Number(orig_end as f64))?;
-                        set_array_length(&match_indices, 2)?;
-                        obj_set_key_value(indices, &"0".into(), Value::Object(match_indices))?;
+                        let match_indices = create_array(mc, env)?;
+                        obj_set_key_value(mc, &match_indices, &"0".into(), Value::Number(orig_start as f64))?;
+                        obj_set_key_value(mc, &match_indices, &"1".into(), Value::Number(orig_end as f64))?;
+                        set_array_length(mc, &match_indices, 2)?;
+                        obj_set_key_value(mc, indices, &"0".into(), Value::Object(match_indices))?;
                     }
 
                     let mut group_index = 1;
@@ -321,42 +386,42 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
                                 (range.start, range.end)
                             };
                             let cap_str = input_u16[cs..ce].to_vec();
-                            obj_set_key_value(&result_array, &group_index.to_string().into(), Value::String(cap_str))?;
+                            obj_set_key_value(mc, &result_array, &group_index.to_string().into(), Value::String(cap_str))?;
 
                             if let Some(indices) = &indices_array {
-                                let group_indices = crate::js_array::create_array(env)?;
-                                obj_set_key_value(&group_indices, &"0".into(), Value::Number(cs as f64))?;
-                                obj_set_key_value(&group_indices, &"1".into(), Value::Number(ce as f64))?;
-                                set_array_length(&group_indices, 2)?;
-                                obj_set_key_value(indices, &group_index.to_string().into(), Value::Object(group_indices))?;
+                                let group_indices = create_array(mc, env)?;
+                                obj_set_key_value(mc, &group_indices, &"0".into(), Value::Number(cs as f64))?;
+                                obj_set_key_value(mc, &group_indices, &"1".into(), Value::Number(ce as f64))?;
+                                set_array_length(mc, &group_indices, 2)?;
+                                obj_set_key_value(mc, indices, &group_index.to_string().into(), Value::Object(group_indices))?;
                             }
                         } else {
-                            obj_set_key_value(&result_array, &group_index.to_string().into(), Value::Undefined)?;
+                            obj_set_key_value(mc, &result_array, &group_index.to_string().into(), Value::Undefined)?;
                             if let Some(indices) = &indices_array {
-                                obj_set_key_value(indices, &group_index.to_string().into(), Value::Undefined)?;
+                                obj_set_key_value(mc, indices, &group_index.to_string().into(), Value::Undefined)?;
                             }
                         }
                         group_index += 1;
                     }
-                    set_array_length(&result_array, group_index)?;
+                    set_array_length(mc, &result_array, group_index)?;
 
-                    obj_set_key_value(&result_array, &"index".into(), Value::Number(orig_start as f64))?;
-                    obj_set_key_value(&result_array, &"input".into(), Value::String(input_u16.clone()))?;
-                    obj_set_key_value(&result_array, &"groups".into(), Value::Undefined)?;
+                    obj_set_key_value(mc, &result_array, &"index".into(), Value::Number(orig_start as f64))?;
+                    obj_set_key_value(mc, &result_array, &"input".into(), Value::String(input_u16.clone()))?;
+                    obj_set_key_value(mc, &result_array, &"groups".into(), Value::Undefined)?;
 
                     if let Some(indices) = indices_array {
-                        obj_set_key_value(&result_array, &"indices".into(), Value::Object(indices))?;
+                        obj_set_key_value(mc, &result_array, &"indices".into(), Value::Object(indices))?;
                     }
 
                     if use_last {
-                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
+                        obj_set_key_value(mc, object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
                     }
 
                     Ok(Value::Object(result_array))
                 }
                 None => {
                     if global {
-                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(0.0))?;
+                        obj_set_key_value(mc, object, &"lastIndex".into(), Value::Number(0.0))?;
                     }
                     Ok(Value::Null)
                 }
@@ -364,10 +429,10 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
         }
         "test" => {
             if args.is_empty() {
-                return Err(raise_type_error!("RegExp.prototype.test requires a string argument"));
+                return Err(EvalError::Js(raise_type_error!("RegExp.prototype.test requires a string argument")));
             }
 
-            let input_val = evaluate_expr(env, &args[0])?;
+            let input_val = args[0].clone();
             let input_u16 = match input_val {
                 Value::String(s) => s,
                 _ => {
@@ -377,7 +442,7 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
                         Value::Undefined => "undefined".to_string(),
                         Value::Null => "null".to_string(),
                         Value::Object(_) => "[object Object]".to_string(),
-                        _ => return Err(raise_type_error!("RegExp.prototype.test requires a string argument")),
+                        _ => return Err(EvalError::Js(raise_type_error!("RegExp.prototype.test requires a string argument"))),
                     };
                     utf8_to_utf16(&s)
                 }
@@ -431,13 +496,13 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
                     if use_last {
                         let end = m.range.end;
                         let orig_end = if mapping { map_index_back(&input_u16, end) } else { end };
-                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
+                        obj_set_key_value(mc, object, &"lastIndex".into(), Value::Number(orig_end as f64))?;
                     }
                     Ok(Value::Boolean(true))
                 }
                 None => {
                     if global {
-                        obj_set_key_value(object, &"lastIndex".into(), Value::Number(0.0))?;
+                        obj_set_key_value(mc, object, &"lastIndex".into(), Value::Number(0.0))?;
                     }
                     Ok(Value::Boolean(false))
                 }
@@ -458,7 +523,9 @@ pub(crate) fn handle_regexp_method(object: &JSObjectDataPtr, method: &str, args:
             let result = format!("/{}/{}", pattern, flags);
             Ok(Value::String(utf8_to_utf16(&result)))
         }
-        _ => Err(raise_eval_error!(format!("RegExp.prototype.{method} is not implemented"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!(
+            "RegExp.prototype.{method} is not implemented"
+        )))),
     }
 }
 

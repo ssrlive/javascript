@@ -6,28 +6,34 @@ use crate::core::{
 use crate::error::JSError;
 use crate::js_promise;
 use crate::unicode::utf16_to_utf8;
+use gc_arena::Mutation as MutationContext;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::rc::Rc;
 
 /// Create the console object with logging functions
-pub fn make_console_object() -> Result<JSObjectDataPtr, JSError> {
-    let console_obj = new_js_object_data();
-    obj_set_key_value(&console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
+pub fn make_console_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let console_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &console_obj, &"log".into(), Value::Function("console.log".to_string()))?;
     // Provide `console.error` as an alias to `console.log` for now
-    obj_set_key_value(&console_obj, &"error".into(), Value::Function("console.error".to_string()))?;
+    obj_set_key_value(mc, &console_obj, &"error".into(), Value::Function("console.error".to_string()))?;
     Ok(console_obj)
 }
 
-fn format_console_value(val: &Value, env: &JSObjectDataPtr) -> Result<String, JSError> {
+fn format_console_value<'gc>(
+    mc: &MutationContext<'gc>, // added mc
+    val: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<String, JSError> {
     let mut seen = HashSet::new();
-    format_value_pretty(val, env, 0, &mut seen, false)
+    format_value_pretty(mc, val, env, 0, &mut seen, false)
 }
 
-fn format_value_pretty(
-    val: &Value,
-    env: &JSObjectDataPtr,
-    _depth: usize,
+fn format_value_pretty<'gc>(
+    mc: &MutationContext<'gc>,
+    val: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    depth: usize,
     seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
     quote_strings: bool,
 ) -> Result<String, JSError> {
@@ -47,13 +53,13 @@ fn format_value_pretty(
         Value::Object(obj) => {
             // If this object is a Promise wrapper (stores inner promise under "__promise"),
             // print it compactly like Node: `Promise { <pending> }` and avoid listing internal helpers.
-            if let Ok(Some(inner_rc)) = obj_get_key_value(obj, &"__promise".into()) {
+            if let Ok(Some(inner_rc)) = obj_get_key_value(mc, obj, &"__promise".into()) {
                 if let Value::Promise(p_rc) = &*inner_rc.borrow() {
-                    return format_promise(p_rc, env, _depth, seen);
+                    return format_promise(mc, p_rc, env, depth, seen);
                 }
             }
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
-            if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
+            if let Ok(Some(stack_rc)) = obj_get_key_value(mc, obj, &"stack".into()) {
                 if let Value::String(s) = &*stack_rc.borrow() {
                     let s_utf8 = crate::unicode::utf16_to_utf8(s);
                     if !s_utf8.is_empty() {
@@ -71,20 +77,20 @@ fn format_value_pretty(
                     Ok(Value::String(s)) => Ok(crate::unicode::utf16_to_utf8(&s)),
                     _ => Ok("[object Date]".to_string()),
                 }
-            } else if crate::js_array::is_array(obj) {
+            } else if crate::js_array::is_array(mc, obj) {
                 if seen.contains(&Rc::as_ptr(obj)) {
                     return Ok("[Circular]".to_string());
                 }
                 seen.insert(Rc::as_ptr(obj));
 
-                let len = crate::js_array::get_array_length(obj).unwrap_or(0);
+                let len = crate::js_array::get_array_length(mc, obj).unwrap_or(0);
                 let mut s = String::from("[");
                 for i in 0..len {
                     if i > 0 {
                         s.push_str(", ");
                     }
-                    if let Some(val_rc) = obj_get_key_value(obj, &i.to_string().into())? {
-                        let val_str = format_value_pretty(&val_rc.borrow(), env, _depth + 1, seen, true)?;
+                    if let Some(val_rc) = obj_get_key_value(mc, obj, &i.to_string().into())? {
+                        let val_str = format_value_pretty(mc, &val_rc.borrow(), env, depth + 1, seen, true)?;
                         s.push_str(&val_str);
                     } else if i == len - 1 {
                         s.push(',');
@@ -95,7 +101,7 @@ fn format_value_pretty(
                 Ok(s)
             } else {
                 // Check for boxed primitive
-                if let Some(val_rc) = obj_get_key_value(obj, &"__value__".into())? {
+                if let Some(val_rc) = obj_get_key_value(mc, obj, &"__value__".into())? {
                     let val = val_rc.borrow();
                     match *val {
                         Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
@@ -114,7 +120,7 @@ fn format_value_pretty(
 
                 // Try to get class name
                 let mut class_name = String::new();
-                if let Some(proto_rc) = obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                if let Some(proto_rc) = obj.borrow().prototype.clone() {
                     if let Some(ctor_val_rc) = proto_rc
                         .borrow()
                         .properties
@@ -170,7 +176,7 @@ fn format_value_pretty(
                     }
 
                     s.push_str(": ");
-                    let val_str = format_value_pretty(&val_rc.borrow(), env, _depth + 1, seen, true)?;
+                    let val_str = format_value_pretty(mc, &val_rc.borrow(), env, depth + 1, seen, true)?;
                     s.push_str(&val_str);
                 }
                 s.push('}');
@@ -234,28 +240,34 @@ fn format_value_pretty(
 }
 
 // Helper to format a Promise (or an Rc<RefCell<JSPromise>>) in Node-like style.
-fn format_promise(
-    p_rc: &Rc<RefCell<crate::js_promise::JSPromise>>,
-    env: &JSObjectDataPtr,
-    _depth: usize,
+fn format_promise<'gc>(
+    mc: &MutationContext<'gc>,
+    p_rc: &Rc<RefCell<crate::js_promise::JSPromise<'gc>>>,
+    env: &JSObjectDataPtr<'gc>,
+    depth: usize,
     seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
 ) -> Result<String, JSError> {
     let p = p_rc.borrow();
     match &p.state {
         crate::js_promise::PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
         crate::js_promise::PromiseState::Fulfilled(val) => {
-            let inner = format_value_pretty(val, env, _depth + 1, seen, false)?;
+            let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
             Ok(format!("Promise {{ {} }}", inner))
         }
         crate::js_promise::PromiseState::Rejected(val) => {
-            let inner = format_value_pretty(val, env, _depth + 1, seen, false)?;
+            let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
             Ok(format!("Promise {{ <rejected> {} }}", inner))
         }
     }
 }
 
 /// Handle console object method calls
-pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_console_method<'gc>(
+    mc: &MutationContext<'gc>, // added mc
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "log" | "error" => {
             // Instrument: record current tick and task-queue length when console.log is invoked
@@ -267,7 +279,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
             let mut values = Vec::new();
             for arg in args {
-                values.push(evaluate_expr(env, arg)?);
+                values.push(evaluate_expr(mc, env, arg)?);
             }
 
             if values.is_empty() {
@@ -295,7 +307,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                         if arg_idx < values.len() {
                                             let val = &values[arg_idx];
                                             match next_char {
-                                                's' => output.push_str(&format_console_value(val, env)?),
+                                                's' => output.push_str(&format_console_value(mc, val, env)?),
                                                 'd' | 'i' => {
                                                     if let Value::Number(n) = val {
                                                         output.push_str(&format!("{:.0}", n));
@@ -311,7 +323,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                                                     }
                                                 }
                                                 'o' | 'O' => {
-                                                    output.push_str(&format_console_value(val, env)?);
+                                                    output.push_str(&format_console_value(mc, val, env)?);
                                                 }
                                                 'c' => {
                                                     // Ignore CSS
@@ -343,7 +355,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
 
             if !formatted {
                 // Just print first arg
-                output.push_str(&format_console_value(&values[0], env)?);
+                output.push_str(&format_console_value(mc, &values[0], env)?);
                 arg_idx = 0;
             }
 
@@ -352,7 +364,7 @@ pub fn handle_console_method(method: &str, args: &[Expr], env: &JSObjectDataPtr)
                 if !output.is_empty() {
                     output.push(' ');
                 }
-                output.push_str(&format_console_value(values_i, env)?);
+                output.push_str(&format_console_value(mc, values_i, env)?);
             }
 
             println!("{}", output);

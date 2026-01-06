@@ -3,71 +3,89 @@
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use gc_arena::Mutation as MutationContext;
 
 /// Create the Number object with all number constants and functions
-pub fn make_number_object() -> Result<JSObjectDataPtr, JSError> {
-    let number_obj = new_js_object_data();
-    obj_set_key_value(&number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
-    obj_set_key_value(&number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
-    obj_set_key_value(&number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
-    obj_set_key_value(&number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
-    obj_set_key_value(&number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;
-    obj_set_key_value(&number_obj, &"EPSILON".into(), Value::Number(f64::EPSILON))?;
-    obj_set_key_value(&number_obj, &"MAX_SAFE_INTEGER".into(), Value::Number(9007199254740991.0))?;
-    obj_set_key_value(&number_obj, &"MIN_SAFE_INTEGER".into(), Value::Number(-9007199254740991.0))?;
-    obj_set_key_value(&number_obj, &"isNaN".into(), Value::Function("Number.isNaN".to_string()))?;
-    obj_set_key_value(&number_obj, &"isFinite".into(), Value::Function("Number.isFinite".to_string()))?;
-    obj_set_key_value(&number_obj, &"isInteger".into(), Value::Function("Number.isInteger".to_string()))?;
+pub fn make_number_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let number_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
+    obj_set_key_value(mc, &number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
+    obj_set_key_value(mc, &number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
+    obj_set_key_value(mc, &number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
+    obj_set_key_value(mc, &number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;
+    obj_set_key_value(mc, &number_obj, &"EPSILON".into(), Value::Number(f64::EPSILON))?;
+    obj_set_key_value(mc, &number_obj, &"MAX_SAFE_INTEGER".into(), Value::Number(9007199254740991.0))?;
+    obj_set_key_value(mc, &number_obj, &"MIN_SAFE_INTEGER".into(), Value::Number(-9007199254740991.0))?;
+    obj_set_key_value(mc, &number_obj, &"isNaN".into(), Value::Function("Number.isNaN".to_string()))?;
+    obj_set_key_value(mc, &number_obj, &"isFinite".into(), Value::Function("Number.isFinite".to_string()))?;
     obj_set_key_value(
+        mc,
+        &number_obj,
+        &"isInteger".into(),
+        Value::Function("Number.isInteger".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
         &number_obj,
         &"isSafeInteger".into(),
         Value::Function("Number.isSafeInteger".to_string()),
     )?;
-    obj_set_key_value(&number_obj, &"parseFloat".into(), Value::Function("Number.parseFloat".to_string()))?;
-    obj_set_key_value(&number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
-    // Create Number.prototype
-    let number_prototype = new_js_object_data();
     obj_set_key_value(
+        mc,
+        &number_obj,
+        &"parseFloat".into(),
+        Value::Function("Number.parseFloat".to_string()),
+    )?;
+    obj_set_key_value(mc, &number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
+    // Create Number.prototype
+    let number_prototype = new_js_object_data(mc);
+    obj_set_key_value(
+        mc,
         &number_prototype,
         &"toString".into(),
         Value::Function("Number.prototype.toString".to_string()),
     )?;
     obj_set_key_value(
+        mc,
         &number_prototype,
         &"valueOf".into(),
         Value::Function("Number.prototype.valueOf".to_string()),
     )?;
     obj_set_key_value(
+        mc,
         &number_prototype,
         &"toLocaleString".into(),
         Value::Function("Number.prototype.toLocaleString".to_string()),
     )?;
     obj_set_key_value(
+        mc,
         &number_prototype,
         &"toExponential".into(),
         Value::Function("Number.prototype.toExponential".to_string()),
     )?;
     obj_set_key_value(
+        mc,
         &number_prototype,
         &"toFixed".into(),
         Value::Function("Number.prototype.toFixed".to_string()),
     )?;
     obj_set_key_value(
+        mc,
         &number_prototype,
         &"toPrecision".into(),
         Value::Function("Number.prototype.toPrecision".to_string()),
     )?;
 
     // Set prototype on Number constructor
-    obj_set_key_value(&number_obj, &"prototype".into(), Value::Object(number_prototype))?;
+    obj_set_key_value(mc, &number_obj, &"prototype".into(), Value::Object(number_prototype))?;
 
     Ok(number_obj)
 }
 
-pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub(crate) fn number_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Number constructor
     if args.len() == 1 {
-        let arg_val = evaluate_expr(env, &args[0])?;
+        let arg_val = evaluate_expr(mc, env, &args[0])?;
         match arg_val {
             Value::Number(n) => Ok(Value::Number(n)),
             Value::String(s) => {
@@ -80,7 +98,7 @@ pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
             Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
             Value::Object(obj) => {
                 // Try ToPrimitive with 'number' hint
-                let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+                let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
                 match prim {
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {
@@ -102,11 +120,16 @@ pub(crate) fn number_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result
 }
 
 /// Handle Number object method calls
-pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_number_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "isNaN" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.is_nan()))
                 } else {
@@ -118,7 +141,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "isFinite" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.is_finite()))
                 } else {
@@ -130,7 +153,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "isInteger" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.fract() == 0.0 && n.is_finite()))
                 } else {
@@ -142,7 +165,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "isSafeInteger" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 if let Value::Number(n) = arg_val {
                     let is_int = n.fract() == 0.0 && n.is_finite();
                     let is_safe = (-9007199254740991.0..=9007199254740991.0).contains(&n);
@@ -156,7 +179,7 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "parseFloat" => {
             if args.len() == 1 {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 match arg_val {
                     Value::String(s) => {
                         let str_val = utf16_to_utf8(&s);
@@ -174,9 +197,9 @@ pub fn handle_number_method(method: &str, args: &[Expr], env: &JSObjectDataPtr) 
         }
         "parseInt" => {
             if !args.is_empty() {
-                let arg_val = evaluate_expr(env, &args[0])?;
+                let arg_val = evaluate_expr(mc, env, &args[0])?;
                 let radix = if args.len() >= 2 {
-                    let radix_val = evaluate_expr(env, &args[1])?;
+                    let radix_val = evaluate_expr(mc, env, &args[1])?;
                     if let Value::Number(r) = radix_val { r as u32 } else { 10 }
                 } else {
                     10

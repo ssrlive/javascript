@@ -3,11 +3,11 @@ use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use std::rc::Rc;
+use gc_arena::Mutation as MutationContext;
 
 /// Create the testIntl object with testing functions
-pub fn make_testintl_object() -> Result<JSObjectDataPtr, JSError> {
-    let testintl_obj = new_js_object_data();
+pub fn make_testintl_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let testintl_obj = new_js_object_data(mc);
     obj_set_key_value(
         &testintl_obj,
         &"testWithIntlConstructors".into(),
@@ -17,13 +17,17 @@ pub fn make_testintl_object() -> Result<JSObjectDataPtr, JSError> {
 }
 
 /// Create a mock Intl constructor that can be instantiated
-pub fn create_mock_intl_constructor() -> Result<Value, JSError> {
+pub fn create_mock_intl_constructor<'gc>() -> Result<Value<'gc>, JSError> {
     // Create a special constructor function that will be recognized by evaluate_new
     Ok(Value::Function("MockIntlConstructor".to_string()))
 }
 
 /// Create a mock Intl instance with resolvedOptions method
-pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn create_mock_intl_instance<'gc>(
+    mc: &MutationContext<'gc>,
+    locale_arg: Option<String>,
+    env: &crate::core::JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // If the global JS helper `isCanonicalizedStructurallyValidLanguageTag` is
     // present, use it to validate the locale (this keeps validation logic in
     // JS where the test data lives). If the helper returns false, throw.
@@ -41,7 +45,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         // can find top-level helpers like `isCanonicalizedStructurallyValidLanguageTag`.
         let mut global_env = env.clone();
         loop {
-            let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
+            let next = global_env.borrow().prototype.clone();
             if let Some(parent) = next {
                 global_env = parent;
             } else {
@@ -49,7 +53,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
             }
         }
 
-        match crate::core::evaluate_expr(&global_env, &call_expr) {
+        match crate::core::evaluate_expr(mc, &global_env, &call_expr) {
             Ok(CoreValue::Boolean(true)) => {
                 // input is canonicalized and structurally valid — nothing to do
             }
@@ -64,7 +68,7 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                 // Use the global environment for the canonicalize helper as well
                 let mut global_env = env.clone();
                 loop {
-                    let next = global_env.borrow().prototype.clone().and_then(|w| w.upgrade());
+                    let next = global_env.borrow().prototype.clone();
                     if let Some(parent) = next {
                         global_env = parent;
                     } else {
@@ -75,10 +79,11 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                 // Ensure the canonicalize helper exists at the global scope before
                 // calling it. If not present, skip calling and log for
                 // diagnostics rather than causing an evaluation error.
-                let helper_lookup = crate::core::evaluate_expr(&global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
+                let helper_lookup =
+                    crate::core::evaluate_expr(mc, &global_env, &Expr::Var("canonicalizeLanguageTag".to_string(), None, None));
                 match helper_lookup {
                     Ok(crate::core::Value::Closure(_)) | Ok(crate::core::Value::AsyncClosure(_)) | Ok(crate::core::Value::Function(_)) => {
-                        match crate::core::evaluate_expr(&global_env, &canon_call) {
+                        match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                             Ok(CoreValue::String(canon_utf16)) => {
                                 let canon = utf16_to_utf8(&canon_utf16);
                                 log::debug!(
@@ -113,10 +118,10 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
                             log::debug!(
                                 "create_mock_intl_instance: env[{}] ptr={:p} keys=[{}]",
                                 depth,
-                                Rc::as_ptr(&cur),
+                                gc_arena::Gc::as_ptr(&cur),
                                 keys_vec.join(",")
                             );
-                            cur_env = cur.borrow().prototype.clone().and_then(|w| w.upgrade());
+                            cur_env = cur.borrow().prototype.clone();
                             depth += 1;
                         }
                     }
@@ -135,10 +140,13 @@ pub fn create_mock_intl_instance(locale_arg: Option<String>, env: &crate::core::
         }
     }
 
-    let instance = new_js_object_data();
+    let instance = new_js_object_data(mc);
 
     // Add resolvedOptions method
-    let resolved_options = Value::Closure(Rc::new(crate::core::ClosureData::new(&[], &[], &new_js_object_data(), None)));
+    let resolved_options = Value::Closure(gc_arena::Gc::new(
+        mc,
+        crate::core::ClosureData::new(&[], &[], &new_js_object_data(mc), None),
+    ));
     obj_set_key_value(&instance, &"resolvedOptions".into(), resolved_options)?;
 
     // Store the locale that was passed to the constructor

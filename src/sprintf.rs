@@ -2,24 +2,29 @@ use crate::core::JSObjectDataPtr;
 use crate::core::{Expr, Value, evaluate_expr};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use gc_arena::Mutation as MutationContext;
 
-pub(crate) fn handle_sprintf_call(env: &JSObjectDataPtr, args: &[Expr]) -> Result<Value, JSError> {
+pub(crate) fn handle_sprintf_call<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    args: &[Expr],
+) -> Result<Value<'gc>, JSError> {
     log::trace!("handle_sprintf_call called with {} args", args.len());
     if args.is_empty() {
         return Ok(Value::String(utf8_to_utf16("")));
     }
-    let format_val = evaluate_expr(env, &args[0])?;
+    let format_val = evaluate_expr(mc, env, &args[0])?;
     let format_str = match format_val {
         Value::String(s) => utf16_to_utf8(&s),
         _ => {
             return Err(raise_eval_error!("sprintf format must be a string"));
         }
     };
-    let result = sprintf_impl(env, &format_str, &args[1..])?;
+    let result = sprintf_impl(mc, env, &format_str, &args[1..])?;
     Ok(Value::String(utf8_to_utf16(&result)))
 }
 
-pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Result<String, JSError> {
+pub fn sprintf_impl<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, format: &str, args: &[Expr]) -> Result<String, JSError> {
     let mut result = String::new();
     let mut arg_index = 0;
     let mut chars = format.chars().peekable();
@@ -55,7 +60,7 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
                 if ch == '*' {
                     chars.next();
                     if arg_index < args.len() {
-                        let width_val = evaluate_expr(env, &args[arg_index])?;
+                        let width_val = evaluate_expr(mc, env, &args[arg_index])?;
                         if let Value::Number(n) = width_val {
                             width = Some(n as usize);
                         }
@@ -84,7 +89,7 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
                     if ch == '*' {
                         chars.next();
                         if arg_index < args.len() {
-                            let prec_val = evaluate_expr(env, &args[arg_index])?;
+                            let prec_val = evaluate_expr(mc, env, &args[arg_index])?;
                             if let Value::Number(n) = prec_val {
                                 precision = Some(n as usize);
                             }
@@ -122,7 +127,7 @@ pub fn sprintf_impl(env: &JSObjectDataPtr, format: &str, args: &[Expr]) -> Resul
                 }
 
                 // Get the argument value
-                let arg_val = evaluate_expr(env, &args[arg_index])?;
+                let arg_val = evaluate_expr(mc, env, &args[arg_index])?;
 
                 match specifier {
                     'd' | 'i' => {

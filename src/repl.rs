@@ -71,7 +71,7 @@ impl Repl {
                 },
             })
         /*
-        match evaluate_statements(&self.env, &statements) {
+        match evaluate_statements(mc, &self.env, &statements) {
             Ok(v) => {
                 // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
                 if let Value::Object(obj) = &v

@@ -1,4 +1,6 @@
 {
+    console.log("=== Date tests ===");
+    
     const today = new Date();
     const endYear = new Date(2000, 11, 31, 23, 59, 59, 999); // Set date and month
     endYear.setFullYear(today.getFullYear()); // Set year to this year

@@ -1,6 +1,7 @@
 #![allow(warnings)]
 
 use crate::js_array::handle_array_static_method;
+use crate::js_date::{handle_date_method, handle_date_static_method};
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
@@ -191,7 +192,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 pub fn evaluate_statements<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    statements: &mut [Statement],
+    statements: &[Statement],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match evaluate_statements_with_context(mc, env, statements)? {
         ControlFlow::Normal(val) => Ok(val),
@@ -205,7 +206,7 @@ pub fn evaluate_statements<'gc>(
 pub fn evaluate_statements_with_context<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    statements: &mut [Statement],
+    statements: &[Statement],
 ) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
     hoist_declarations(mc, env, statements)?;
     let mut last_value = Value::Undefined;
@@ -299,13 +300,13 @@ fn eval_res<'gc>(
             if let Value::Object(obj) = val {
                 if is_error(&val) {
                     let mut filename = String::new();
-                    if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
+                    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filename".into()) {
                         if let Value::String(s) = &*val_ptr.borrow() {
                             filename = utf16_to_utf8(s);
                         }
                     }
                     let frame = format!("at <anonymous> ({}:{}:{})", filename, stmt.line, stmt.column);
-                    let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+                    let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
                     let new_stack = format!("{}\n    {}", current_stack, frame);
                     obj.borrow_mut(mc)
                         .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
@@ -449,7 +450,7 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     mut e: EvalError<'gc>,
 ) -> EvalError<'gc> {
     let mut filename = String::new();
-    if let Ok(Some(val_ptr)) = obj_get_key_value(mc, env, &"__filename".into()) {
+    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filename".into()) {
         if let Value::String(s) = &*val_ptr.borrow() {
             filename = utf16_to_utf8(s);
         }
@@ -462,7 +463,7 @@ fn refresh_error_by_additional_stack_frame<'gc>(
         && is_error(val)
         && let Value::Object(obj) = val
     {
-        let current_stack = obj.borrow().get_property(mc, "stack").unwrap_or_default();
+        let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
         let new_stack = format!("{}\n    {}", current_stack, frame);
         obj.borrow_mut(mc).set_property(mc, "stack", new_stack.into());
     }
@@ -482,6 +483,35 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Ok(val)
             } else {
                 Err(EvalError::Js(raise_eval_error!("Only simple assignment implemented")))
+            }
+        }
+        Expr::AddAssign(target, value_expr) => {
+            let val = evaluate_expr(mc, env, value_expr)?;
+            if let Expr::Var(name, _, _) = &**target {
+                let current = evaluate_var(mc, env, name)?;
+                let new_val = match (current, val) {
+                    (Value::Number(ln), Value::Number(rn)) => Value::Number(ln + rn),
+                    (Value::String(ls), Value::String(rs)) => {
+                        let mut res = ls.clone();
+                        res.extend(rs);
+                        Value::String(res)
+                    }
+                    (Value::String(ls), other) => {
+                        let mut res = ls.clone();
+                        res.extend(utf8_to_utf16(&value_to_string(&other)));
+                        Value::String(res)
+                    }
+                    (other, Value::String(rs)) => {
+                        let mut res = utf8_to_utf16(&value_to_string(&other));
+                        res.extend(rs);
+                        Value::String(res)
+                    }
+                    _ => return Err(EvalError::Js(raise_eval_error!("AddAssign types invalid"))),
+                };
+                env_set_recursive(mc, env, name, new_val.clone())?;
+                Ok(new_val)
+            } else {
+                Err(EvalError::Js(raise_eval_error!("AddAssign only for variables")))
             }
         }
         Expr::Binary(left, op, right) => {
@@ -578,6 +608,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Err(EvalError::Js(raise_eval_error!("Binary LessEqual only for numbers")))
                     }
                 }
+                BinaryOp::Mod => {
+                    if let (Value::Number(ln), Value::Number(rn)) = (l_val, r_val) {
+                        Ok(Value::Number(ln % rn))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!("Binary Mod only for numbers")))
+                    }
+                }
                 _ => todo!(),
             }
         }
@@ -593,12 +630,47 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             };
             Ok(Value::Boolean(!b))
         }
+        Expr::Conditional(cond, then_expr, else_expr) => {
+            let val = evaluate_expr(mc, env, cond)?;
+            let is_true = match val {
+                Value::Boolean(b) => b,
+                Value::Number(n) => n != 0.0 && !n.is_nan(),
+                Value::String(s) => !s.is_empty(),
+                Value::Null | Value::Undefined => false,
+                Value::Object(_) => true,
+                _ => false,
+            };
+
+            if is_true {
+                evaluate_expr(mc, env, then_expr)
+            } else {
+                evaluate_expr(mc, env, else_expr)
+            }
+        }
         Expr::Function(name, params, body) => {
             let mut body_clone = body.clone();
             Ok(evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)?)
         }
         Expr::Call(func_expr, args) => {
-            let func_val = evaluate_expr(mc, env, func_expr)?;
+            let (func_val, this_val) = match &**func_expr {
+                Expr::Property(obj_expr, key) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    let f_val = if let Value::Object(obj) = &obj_val {
+                        if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        }
+                    } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                        return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
+                    } else {
+                        Value::Undefined
+                    };
+                    (f_val, Some(obj_val))
+                }
+                _ => (evaluate_expr(mc, env, func_expr)?, None),
+            };
+
             let mut eval_args = Vec::new();
             for arg in args {
                 eval_args.push(evaluate_expr(mc, env, arg)?);
@@ -628,6 +700,16 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         crate::js_console::handle_console_method(mc, method_name, &eval_args, env)
                     } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("Date.prototype.") {
+                        if let Some(this_obj) = this_val {
+                            Ok(handle_date_method(mc, &this_obj, method, &eval_args, env).map_err(EvalError::Js)?)
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "TypeError: Date method called on incompatible receiver"
+                            )))
+                        }
+                    } else if let Some(method) = name.strip_prefix("Date.") {
+                        Ok(handle_date_static_method(method, &eval_args)?)
                     } else if name.starts_with("String.") {
                         if name == "String.fromCharCode" {
                             Ok(string_from_char_code(mc, &eval_args, env)?)
@@ -687,7 +769,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                 }
                 Value::Object(obj) => {
-                    if let Some(cl_ptr) = obj_get_key_value(mc, &obj, &"__closure__".into())? {
+                    if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
                         match &*cl_ptr.borrow() {
                             Value::Closure(cl) => {
                                 let call_env = crate::core::new_js_object_data(mc);
@@ -707,7 +789,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         // Avoid borrowing obj while modifying err_obj if they might be related or if obj is already borrowed?
                                         // obj is the function object.
                                         // We need its name.
-                                        let name_opt = obj.borrow().get_name(mc);
+                                        let name_opt = obj.borrow().get_property("name");
 
                                         if let Some(name_str) = name_opt {
                                             if let EvalError::Js(js_err) = &mut e {
@@ -726,7 +808,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                                     // while err_obj.borrow().get_property borrowed it immutably.
                                                     // We need to drop the immutable borrow before mutable borrow.
 
-                                                    let stack_str_opt = err_obj.borrow().get_property(mc, "stack");
+                                                    let stack_str_opt = err_obj.borrow().get_property("stack");
                                                     if let Some(stack_str) = stack_str_opt {
                                                         let mut lines: Vec<String> = stack_str.lines().map(|s| s.to_string()).collect();
                                                         if let Some(last_line) = lines.last_mut() {
@@ -751,6 +833,17 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             }
                             _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                         }
+                    } else if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
+                        match &*native_name.borrow() {
+                            Value::String(name) => {
+                                if name == &crate::unicode::utf8_to_utf16("String") {
+                                    Ok(crate::js_string::string_constructor(mc, &eval_args, env)?)
+                                } else {
+                                    Err(EvalError::Js(raise_eval_error!("Not a function")))
+                                }
+                            }
+                            _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
+                        }
                     } else {
                         Err(EvalError::Js(raise_eval_error!("Not a function")))
                     }
@@ -767,7 +860,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             match func_val {
                 Value::Object(obj) => {
-                    if let Some(cl_ptr) = obj_get_key_value(mc, &obj, &"__closure__".into())? {
+                    if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
                         match &*cl_ptr.borrow() {
                             Value::Closure(cl) => {
                                 let call_env = crate::core::new_js_object_data(mc);
@@ -786,11 +879,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
                         }
                     } else {
-                        if let Some(native_name) = obj_get_key_value(mc, &obj, &"__native_ctor".into())? {
+                        if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
                             if let Value::String(name) = &*native_name.borrow() {
                                 if name == &crate::unicode::utf8_to_utf16("Error") {
                                     let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                                    let prototype = if let Some(proto_val) = obj_get_key_value(mc, &obj, &"prototype".into())?
+                                    let prototype = if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
                                         && let Value::Object(proto_obj) = &*proto_val.borrow()
                                     {
                                         Some(*proto_obj)
@@ -799,6 +892,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     };
 
                                     return Ok(crate::core::js_error::create_error(mc, prototype, msg)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("Date") {
+                                    return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
                                 }
                             }
                         }
@@ -812,7 +907,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
-                if let Some(val) = obj_get_key_value(mc, &obj, &key.as_str().into())? {
+                if let Some(val) = obj_get_key_value(&obj, &key.as_str().into())? {
                     Ok(val.borrow().clone())
                 } else {
                     Ok(Value::Undefined)
@@ -834,7 +929,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     _ => PropertyKey::String(value_to_string(&key_val)),
                 };
 
-                if let Some(val) = obj_get_key_value(mc, &obj, &key)? {
+                if let Some(val) = obj_get_key_value(&obj, &key)? {
                     Ok(val.borrow().clone())
                 } else {
                     Ok(Value::Undefined)
@@ -930,7 +1025,7 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
     let error_proto = if let Some(err_ctor_val) = env_get(env, "Error")
         && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = obj_get_key_value(mc, err_ctor, &"prototype".into())
+        && let Ok(Some(proto_val)) = obj_get_key_value(err_ctor, &"prototype".into())
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)

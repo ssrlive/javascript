@@ -19,9 +19,9 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     obj_set_key_value(mc, &array_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Array")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(mc, env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(mc, obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -136,7 +136,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             match iterable {
                 // Value::Set(set) => {
                 //     // Handle Set iteration
-                //     for val in &set.borrow(&mc).values {
+                //     for val in &set.borrow().values {
                 //         if let Some(ref fn_val) = map_fn {
                 //             if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                 //                 let args = vec![val.clone(), val.clone()]; // Set iterator yields value as key
@@ -154,20 +154,20 @@ pub(crate) fn handle_array_static_method<'gc>(
                 // }
                 Value::Object(object) => {
                     // let maybe_set = {
-                    //     let borrow = object.borrow(&mc);
+                    //     let borrow = object.borrow();
                     //     borrow.get(&PropertyKey::String("__set__".to_string()))
                     // };
 
                     // let maybe_map = if maybe_set.is_none() {
-                    //     let borrow = object.borrow(&mc);
+                    //     let borrow = object.borrow();
                     //     borrow.get(&PropertyKey::String("__map__".to_string()))
                     // } else {
                     //     None
                     // };
 
                     // if let Some(set_val) = maybe_set {
-                    //     if let Value::Set(set) = &*set_val.borrow(&mc) {
-                    //         for (i, val) in set.borrow(&mc).values.iter().enumerate() {
+                    //     if let Value::Set(set) = &*set_val.borrow() {
+                    //         for (i, val) in set.borrow().values.iter().enumerate() {
                     //             if let Some(ref fn_val) = map_fn {
                     //                 if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
                     //                     let args = vec![val.clone(), Value::Number(i as f64)];
@@ -184,8 +184,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                     //         }
                     //     }
                     // } else if let Some(map_val) = maybe_map {
-                    //     if let Value::Map(map) = &*map_val.borrow(&mc) {
-                    //         for (i, (key, val)) in map.borrow(&mc).entries.iter().enumerate() {
+                    //     if let Value::Map(map) = &*map_val.borrow() {
+                    //         for (i, (key, val)) in map.borrow().entries.iter().enumerate() {
                     //             let entry_obj = create_array(mc, env)?;
                     //             set_array_length(mc, &entry_obj, 2)?;
                     //             obj_set_key_value(mc, &entry_obj, &"0".into(), key.clone())?;
@@ -211,7 +211,7 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                     if let Some(len) = get_array_length(mc, &object) {
                         for i in 0..len {
-                            let val_opt = obj_get_key_value(mc, &object, &i.to_string().into())?;
+                            let val_opt = obj_get_key_value(&object, &i.to_string().into())?;
                             let element = if let Some(val) = val_opt {
                                 val.borrow().clone()
                             } else {
@@ -355,7 +355,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if k < 0 || k >= len {
                 Ok(Value::Undefined)
             } else {
-                let val_opt = obj_get_key_value(mc, object, &k.to_string().into())?;
+                let val_opt = obj_get_key_value(object, &k.to_string().into())?;
                 Ok(val_opt.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
             }
         }
@@ -395,7 +395,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let current_len = get_array_length(mc, object).unwrap_or(0);
             if current_len > 0 {
                 let last_idx = (current_len - 1).to_string();
-                let val = object.borrow_mut(&mc).properties.shift_remove(&PropertyKey::from(last_idx));
+                let val = object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(last_idx));
                 set_array_length(mc, object, current_len - 1)?;
                 Ok(val.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
             } else {
@@ -425,7 +425,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&utf16_to_utf8(s)),
@@ -452,7 +452,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let current_len = get_array_length(mc, object).unwrap_or(0);
 
             let end = if args.len() >= 2 {
-                // match evaluate_expr(env, &args[1])? {
+                // match evaluate_expr(mc, env, &args[1])? {
                 match args[1].clone() {
                     Value::Number(n) => n as isize,
                     _ => current_len as isize,
@@ -471,7 +471,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             let mut idx = 0;
             for i in start..end {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     obj_set_key_value(mc, &new_array, &idx.to_string().into(), val.borrow().clone())?;
                     idx += 1;
                 }
@@ -487,7 +487,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         //     // Map params: (element, index, array)
                         //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
@@ -514,7 +514,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 set_array_length(mc, &new_array, current_len)?;
 
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
                         //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
@@ -541,7 +541,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let new_array = create_array(mc, env)?;
                 let mut idx = 0;
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
                         //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
@@ -574,9 +574,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "reduce" => {
             if !args.is_empty() {
-                // let callback_val = evaluate_expr(env, &args[0])?;
+                // let callback_val = evaluate_expr(mc, env, &args[0])?;
                 // let initial_value = if args.len() >= 2 {
-                //     Some(evaluate_expr(env, &args[1])?)
+                //     Some(evaluate_expr(mc, env, &args[1])?)
                 // } else {
                 //     None
                 // };
@@ -594,7 +594,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 let mut accumulator: Value = if let Some(ref val) = initial_value {
                     val.clone()
-                } else if let Some(val) = obj_get_key_value(mc, object, &"0".into())? {
+                } else if let Some(val) = obj_get_key_value(object, &"0".into())? {
                     val.borrow().clone()
                 } else {
                     Value::Undefined
@@ -602,7 +602,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
-                    if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         //     // build args for callback: first acc, then current element
                         //     let args = vec![
@@ -627,9 +627,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
         }
         "reduceRight" => {
             if !args.is_empty() {
-                // let callback_val = evaluate_expr(env, &args[0])?;
+                // let callback_val = evaluate_expr(mc, env, &args[0])?;
                 // let initial_value = if args.len() >= 2 {
-                //     Some(evaluate_expr(env, &args[1])?)
+                //     Some(evaluate_expr(mc, env, &args[1])?)
                 // } else {
                 //     None
                 // };
@@ -656,7 +656,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let mut found = false;
                     accumulator = Value::Undefined; // Placeholder
                     for i in (0..current_len).rev() {
-                        if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                        if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                             accumulator = val.borrow().clone();
                             start_idx_rev = current_len - i;
                             found = true;
@@ -682,7 +682,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let start_loop = current_len.saturating_sub(start_idx_rev);
 
                 for i in (0..start_loop).rev() {
-                    if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                         //     // build args for callback: first acc, then current element
                         //     let args = vec![
@@ -711,7 +711,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -750,7 +750,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -788,7 +788,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -826,7 +826,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -866,7 +866,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut new_index = 0;
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     obj_set_key_value(mc, &result, &new_index.to_string().into(), val.borrow().clone())?;
                     new_index += 1;
                 }
@@ -880,7 +880,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         // If argument is an array-like object, copy its elements
                         let arg_len = get_array_length(mc, &arg_obj).unwrap_or(0);
                         for i in 0..arg_len {
-                            if let Some(val) = obj_get_key_value(mc, &arg_obj, &i.to_string().into())? {
+                            if let Some(val) = obj_get_key_value(&arg_obj, &i.to_string().into())? {
                                 obj_set_rc(mc, &result, &new_index.to_string().into(), val.clone())?;
                                 new_index += 1;
                             }
@@ -921,7 +921,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())?
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Number(i as f64));
@@ -954,7 +954,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())?
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Boolean(true));
@@ -973,7 +973,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // object storage model.
             let mut elements: Vec<(String, Value<'gc>)> = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     elements.push((i.to_string(), val.borrow().clone()));
                 }
             }
@@ -1037,8 +1037,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let left_key = left.to_string();
                 let right_key = right.to_string();
 
-                let left_val = obj_get_key_value(mc, object, &left_key.clone().into())?.map(|v| v.borrow().clone());
-                let right_val = obj_get_key_value(mc, object, &right_key.clone().into())?.map(|v| v.borrow().clone());
+                let left_val = obj_get_key_value(object, &left_key.clone().into())?.map(|v| v.borrow().clone());
+                let right_val = obj_get_key_value(object, &right_key.clone().into())?.map(|v| v.borrow().clone());
 
                 if let Some(val) = right_val {
                     obj_set_key_value(mc, object, &left_key.clone().into(), val)?;
@@ -1089,7 +1089,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Collect elements to be deleted
             let mut deleted_elements = Vec::new();
             for i in start..(start + delete_count).min(current_len) {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     deleted_elements.push(val.borrow().clone());
                 }
             }
@@ -1106,7 +1106,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut tail_elements = Vec::new();
             let shift_start = start + delete_count;
             for i in shift_start..current_len {
-                let val_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
+                let val_opt = obj_get_key_value(object, &i.to_string().into())?;
                 tail_elements.push(val_opt.map(|v| v.borrow().clone()));
             }
 
@@ -1148,9 +1148,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if current_len > 0 {
                 // Get the first element
                 // Fallback: mutate the local object copy
-                let first_element = obj_get_key_value(mc, object, &"0".into())?.map(|v| v.borrow().clone());
+                let first_element = obj_get_key_value(object, &"0".into())?.map(|v| v.borrow().clone());
                 for i in 1..current_len {
-                    let val_rc_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
+                    let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
                     if let Some(val_rc) = val_rc_opt {
                         obj_set_rc(mc, object, &(i - 1).to_string().into(), val_rc);
                     } else {
@@ -1179,7 +1179,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Fallback: mutate local copy (shift right by number of new elements)
             for i in (0..current_len).rev() {
                 let dest = (i + args.len()).to_string();
-                let val_rc_opt = obj_get_key_value(mc, object, &i.to_string().into())?;
+                let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
                 if let Some(val_rc) = val_rc_opt {
                     obj_set_rc(mc, object, &dest.into(), val_rc);
                 } else {
@@ -1265,7 +1265,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             // Search from from_index backwards
             for i in (0..=from_index).rev() {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())?
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Number(i as f64));
@@ -1283,7 +1283,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if i > 0 {
                     result.push(',');
                 }
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&utf16_to_utf8(s)),
@@ -1326,7 +1326,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut result = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
                     //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
                     //     let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params), &args, Some(env))?;
@@ -1400,7 +1400,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut temp_values = Vec::new();
             for i in start..end.min(current_len) {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     temp_values.push(val.borrow().clone());
                 }
             }
@@ -1420,7 +1420,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let result = create_array(mc, env)?;
             set_array_length(mc, &result, length)?;
             for i in 0..length {
-                if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
                     // Create entry [i, value]
                     let entry = create_array(mc, env)?;
                     obj_set_key_value(mc, &entry, &"0".into(), Value::Number(i as f64))?;
@@ -1443,7 +1443,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                         // Search from the end
                         for i in (0..current_len).rev() {
-                            if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                            if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -1486,7 +1486,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                         // Search from the end
                         for i in (0..current_len).rev() {
-                            if let Some(value) = obj_get_key_value(mc, object, &i.to_string().into())? {
+                            if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
                                 let element = value.borrow().clone();
                                 let index_val = Value::Number(i as f64);
 
@@ -1533,7 +1533,7 @@ fn flatten_array<'gc>(
     let current_len = get_array_length(mc, object).unwrap_or(0);
 
     for i in 0..current_len {
-        if let Some(val) = obj_get_key_value(mc, object, &i.to_string().into())? {
+        if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
             let value = val.borrow().clone();
             flatten_single_value(mc, value, result, depth)?;
         }
@@ -1592,7 +1592,7 @@ pub(crate) fn get_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDat
 
 pub(crate) fn set_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
     obj_set_key_value(mc, obj, &"length".into(), Value::Number(new_length as f64))?;
-    obj.borrow_mut(&mc).non_enumerable.insert("length".into());
+    obj.borrow_mut(mc).non_enumerable.insert("length".into());
     Ok(())
 }
 
@@ -1601,7 +1601,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     set_array_length(mc, &arr, 0)?;
 
     obj_set_key_value(mc, &arr, &"__is_array".into(), Value::Boolean(true))?;
-    arr.borrow_mut(&mc).non_enumerable.insert("__is_array".into());
+    arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
 
     // Set prototype
     let mut root_env_opt = Some(env.clone());

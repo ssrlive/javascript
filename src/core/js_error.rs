@@ -16,6 +16,24 @@ impl<'gc> From<JSError> for EvalError<'gc> {
     }
 }
 
+impl<'gc> From<EvalError<'gc>> for JSError {
+    fn from(e: EvalError<'gc>) -> Self {
+        match e {
+            EvalError::Js(j) => j,
+            EvalError::Throw(v, l, _c) => {
+                let msg = value_to_string(&v);
+                let line = l.unwrap_or(0);
+                crate::JSError::new(
+                    crate::error::JSErrorKind::Throw(msg),
+                    "unknown".to_string(),
+                    line,
+                    "unknown".to_string(),
+                )
+            }
+        }
+    }
+}
+
 impl<'gc> EvalError<'gc> {
     #[allow(dead_code)]
     pub fn message(&self) -> String {
@@ -37,9 +55,9 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     // However, in the current core.rs, Object is initialized right before Error.
     // We can try to retrieve Object from env.
 
-    let object_proto = if let Some(obj_val) = obj_get_key_value(mc, env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(mc, obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)

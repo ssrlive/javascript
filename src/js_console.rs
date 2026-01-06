@@ -52,14 +52,14 @@ fn format_value_pretty<'gc>(
         Value::Object(obj) => {
             // If this object is a Promise wrapper (stores inner promise under "__promise"),
             // print it compactly like Node: `Promise { <pending> }` and avoid listing internal helpers.
-            if let Ok(Some(_inner_rc)) = obj_get_key_value(mc, obj, &"__promise".into()) {
+            if let Ok(Some(_inner_rc)) = obj_get_key_value(obj, &"__promise".into()) {
                 // if let Value::Promise(p_rc) = &*inner_rc.borrow() {
                 //     return format_promise(mc, p_rc, env, depth, seen);
                 // }
                 todo!("Promise wrapper formatting not implemented");
             }
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
-            if let Ok(Some(stack_rc)) = obj_get_key_value(mc, obj, &"stack".into()) {
+            if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
                 if let Value::String(s) = &*stack_rc.borrow() {
                     let s_utf8 = crate::unicode::utf16_to_utf8(s);
                     if !s_utf8.is_empty() {
@@ -72,11 +72,22 @@ fn format_value_pretty<'gc>(
                     Ok(pat) => Ok(pat),
                     Err(_) => Ok("[object RegExp]".to_string()),
                 }
-            // } else if crate::js_date::is_date_object(obj) {
-            //     match crate::js_date::handle_date_method(obj, "toISOString", &[], env) {
-            //         Ok(Value::String(s)) => Ok(crate::unicode::utf16_to_utf8(&s)),
-            //         _ => Ok("[object Date]".to_string()),
-            //     }
+            } else if crate::js_date::is_date_object(obj) {
+                // Call toISOString logic manually or directly
+                use chrono::{TimeZone, Utc};
+                match crate::js_date::internal_get_time_stamp_value(obj) {
+                    Some(ts_ptr) => {
+                        if let Value::Number(ts) = &*ts_ptr.borrow() {
+                            if let Some(dt) = Utc.timestamp_millis_opt(*ts as i64).single() {
+                                return Ok(dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+                            } else {
+                                return Ok("Invalid Date".to_string());
+                            }
+                        }
+                        Ok("Invalid Date".to_string())
+                    }
+                    None => Ok("[object Date]".to_string()),
+                }
             } else if crate::js_array::is_array(mc, obj) {
                 if seen.contains(&Gc::as_ptr(*obj)) {
                     return Ok("[Circular]".to_string());
@@ -89,7 +100,7 @@ fn format_value_pretty<'gc>(
                     if i > 0 {
                         s.push_str(", ");
                     }
-                    if let Some(val_rc) = obj_get_key_value(mc, obj, &i.to_string().into())? {
+                    if let Some(val_rc) = obj_get_key_value(obj, &i.to_string().into())? {
                         let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                         s.push_str(&val_str);
                     } else if i == len - 1 {
@@ -101,7 +112,7 @@ fn format_value_pretty<'gc>(
                 Ok(s)
             } else {
                 // Check for boxed primitive
-                if let Some(val_rc) = obj_get_key_value(mc, obj, &"__value__".into())? {
+                if let Some(val_rc) = obj_get_key_value(obj, &"__value__".into())? {
                     let val = val_rc.borrow();
                     match *val {
                         Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
@@ -237,6 +248,8 @@ fn format_value_pretty<'gc>(
         // Value::DataView(_) => Ok("[object DataView]".to_string()),
         // Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),
         Value::Uninitialized => Ok("undefined".to_string()),
+            _ => Ok("...".to_string()),
+            _ => Ok("...".to_string()),
     }
 }
 
@@ -419,7 +432,7 @@ fn _print_additional_info_for_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObje
 
     // Helper to print a single property if present
     let mut print_prop = |k: &str| -> Result<bool, crate::core::EvalError<'gc>> {
-        if let Some(vrc) = obj_get_key_value(mc, obj, &k.into())? {
+        if let Some(vrc) = obj_get_key_value(obj, &k.into())? {
             if need_sep {
                 print!(", ");
             }

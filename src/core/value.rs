@@ -31,13 +31,13 @@ pub struct JSSet<'gc> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakMap<'gc> {
-    pub entries: Vec<(gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
+    pub entries: Vec<(gc_arena::GcWeak<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakSet<'gc> {
-    pub values: Vec<gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>>,
+    pub values: Vec<gc_arena::GcWeak<'gc, GcCell<JSObjectData<'gc>>>>,
 }
 
 #[derive(Clone, Collect)]
@@ -172,7 +172,7 @@ impl<'gc> JSObjectData<'gc> {
         self.insert(key.into(), val_ptr);
     }
 
-    pub fn get_property(&self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
+    pub fn get_property(&self, key: impl Into<PropertyKey<'gc>>) -> Option<String> {
         let key = key.into();
         if let Some(val_ptr) = self.properties.get(&key) {
             if let Value::String(s) = &*val_ptr.borrow() {
@@ -181,17 +181,13 @@ impl<'gc> JSObjectData<'gc> {
             return None;
         }
         if let Some(proto) = &self.prototype {
-            if let Ok(Some(val_ptr)) = obj_get_key_value(mc, proto, &key) {
+            if let Ok(Some(val_ptr)) = obj_get_key_value(proto, &key) {
                 if let Value::String(s) = &*val_ptr.borrow() {
                     return Some(utf16_to_utf8(s));
                 }
             }
         }
         None
-    }
-
-    pub fn get_name(&self, mc: &MutationContext<'gc>) -> Option<String> {
-        self.get_property(mc, "name")
     }
 
     pub fn get_message(&self) -> Option<String> {
@@ -240,6 +236,36 @@ impl<'gc> JSObjectData<'gc> {
         }
         None
     }
+
+    pub fn is_configurable(&self, key: &PropertyKey<'gc>) -> bool {
+        !self.non_configurable.contains(key)
+    }
+
+    pub fn is_writable(&self, key: &PropertyKey<'gc>) -> bool {
+        !self.non_writable.contains(key)
+    }
+
+    pub fn is_enumerable(&self, key: &PropertyKey<'gc>) -> bool {
+        !self.non_enumerable.contains(key)
+    }
+}
+
+impl<'gc> ClosureData<'gc> {
+    pub fn new(
+        params: &[DestructuringElement],
+        body: &[Statement],
+        env: &JSObjectDataPtr<'gc>,
+        home_object: Option<JSObjectDataPtr<'gc>>,
+    ) -> Self {
+        ClosureData {
+            params: params.to_vec(),
+            body: body.to_vec(),
+            env: *env,
+            home_object: GcCell::new(home_object),
+            captured_envs: Vec::new(),
+            bound_this: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Collect)]
@@ -263,6 +289,20 @@ pub struct ClosureData<'gc> {
 #[collect(no_drop)]
 pub struct JSPromise<'gc> {
     pub state: PromiseState<'gc>,
+    pub value: Option<Value<'gc>>,
+    pub on_fulfilled: Vec<(Value<'gc>, GcPtr<'gc, JSPromise<'gc>>, Option<JSObjectDataPtr<'gc>>)>,
+    pub on_rejected: Vec<(Value<'gc>, GcPtr<'gc, JSPromise<'gc>>, Option<JSObjectDataPtr<'gc>>)>,
+}
+
+impl<'gc> JSPromise<'gc> {
+    pub fn new() -> Self {
+        Self {
+            state: PromiseState::Pending,
+            value: None,
+            on_fulfilled: Vec::new(),
+            on_rejected: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Collect)]
@@ -284,6 +324,29 @@ pub enum Value<'gc> {
     Object(JSObjectDataPtr<'gc>),
     Function(String),
     Closure(Gc<'gc, ClosureData<'gc>>),
+    AsyncClosure(Gc<'gc, ClosureData<'gc>>),
+    GeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
+    ClassDefinition(Gc<'gc, ClosureData<'gc>>),
+    // Getter/Setter legacy variants - keeping structures as implied by usage
+    Getter(Vec<Statement>, JSObjectDataPtr<'gc>, Option<Box<Value<'gc>>>),
+    Setter(
+        Vec<DestructuringElement>,
+        Vec<Statement>,
+        JSObjectDataPtr<'gc>,
+        Option<Box<Value<'gc>>>,
+    ),
+
+    Promise(GcPtr<'gc, JSPromise<'gc>>),
+    Map(GcPtr<'gc, JSMap<'gc>>),
+    Set(GcPtr<'gc, JSSet<'gc>>),
+    WeakMap(GcPtr<'gc, JSWeakMap<'gc>>),
+    WeakSet(GcPtr<'gc, JSWeakSet<'gc>>),
+    Generator(GcPtr<'gc, JSGenerator<'gc>>),
+    Proxy(Gc<'gc, JSProxy<'gc>>),
+    ArrayBuffer(GcPtr<'gc, JSArrayBuffer>),
+    DataView(Gc<'gc, JSDataView<'gc>>),
+    TypedArray(Gc<'gc, JSTypedArray<'gc>>),
+
     Property {
         value: Option<GcPtr<'gc, Value<'gc>>>,
         getter: Option<Box<Value<'gc>>>,
@@ -328,6 +391,41 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
         match self {
             Value::Object(obj) => obj.trace(cc),
             Value::Closure(cl) => cl.trace(cc),
+            Value::AsyncClosure(cl) => cl.trace(cc),
+            Value::GeneratorFunction(_, cl) => cl.trace(cc),
+            Value::ClassDefinition(cl) => cl.trace(cc),
+            Value::Getter(body, env, v) => {
+                for s in body {
+                    s.trace(cc);
+                }
+                env.trace(cc);
+                if let Some(val) = v {
+                    val.trace(cc);
+                }
+            }
+            Value::Setter(param, body, env, v) => {
+                for p in param {
+                    p.trace(cc);
+                }
+                for s in body {
+                    s.trace(cc);
+                }
+                env.trace(cc);
+                if let Some(val) = v {
+                    val.trace(cc);
+                }
+            }
+            Value::Promise(p) => p.trace(cc),
+            Value::Map(m) => m.trace(cc),
+            Value::Set(s) => s.trace(cc),
+            Value::WeakMap(m) => m.trace(cc),
+            Value::WeakSet(s) => s.trace(cc),
+            Value::Generator(g) => g.trace(cc),
+            Value::Proxy(p) => p.trace(cc),
+            Value::ArrayBuffer(b) => b.trace(cc),
+            Value::DataView(d) => d.trace(cc),
+            Value::TypedArray(t) => t.trace(cc),
+
             Value::Property { value, getter, setter } => {
                 if let Some(v) = value {
                     (*v.borrow()).trace(cc);
@@ -371,6 +469,22 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         }
         Value::Function(name) => format!("function {}", name),
         Value::Closure(..) => "function".to_string(),
+        Value::AsyncClosure(..) => "async function".to_string(),
+        Value::GeneratorFunction(name, ..) => format!("function* {}", name.as_deref().unwrap_or("")),
+        Value::ClassDefinition(..) => "class".to_string(),
+        Value::Getter(..) => "[Getter]".to_string(),
+        Value::Setter(..) => "[Setter]".to_string(),
+        Value::Promise(_) => "[object Promise]".to_string(),
+        Value::Map(_) => "[object Map]".to_string(),
+        Value::Set(_) => "[object Set]".to_string(),
+        Value::WeakMap(_) => "[object WeakMap]".to_string(),
+        Value::WeakSet(_) => "[object WeakSet]".to_string(),
+        Value::Generator(_) => "[object Generator]".to_string(),
+        Value::Proxy(_) => "[object Proxy]".to_string(),
+        Value::ArrayBuffer(_) => "[object ArrayBuffer]".to_string(),
+        Value::DataView(_) => "[object DataView]".to_string(),
+        Value::TypedArray(_) => "[object TypedArray]".to_string(),
+        Value::Property { .. } => "[Property]".to_string(),
         _ => "[unknown]".to_string(),
     }
 }
@@ -397,15 +511,29 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
         (Value::Undefined, Value::Undefined) => true,
         (Value::Null, Value::Null) => true,
         (Value::Object(o1), Value::Object(o2)) => Gc::ptr_eq(*o1, *o2),
+        (Value::Closure(c1), Value::Closure(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::AsyncClosure(c1), Value::AsyncClosure(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::GeneratorFunction(_, c1), Value::GeneratorFunction(_, c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::ClassDefinition(c1), Value::ClassDefinition(c2)) => Gc::ptr_eq(*c1, *c2),
+        (Value::Promise(p1), Value::Promise(p2)) => Gc::ptr_eq(*p1, *p2),
+        (Value::Map(m1), Value::Map(m2)) => Gc::ptr_eq(*m1, *m2),
+        (Value::Set(s1), Value::Set(s2)) => Gc::ptr_eq(*s1, *s2),
+        (Value::WeakMap(m1), Value::WeakMap(m2)) => Gc::ptr_eq(*m1, *m2),
+        (Value::WeakSet(s1), Value::WeakSet(s2)) => Gc::ptr_eq(*s1, *s2),
+        (Value::Generator(g1), Value::Generator(g2)) => Gc::ptr_eq(*g1, *g2),
+        (Value::Proxy(p1), Value::Proxy(p2)) => Gc::ptr_eq(*p1, *p2),
+        (Value::ArrayBuffer(b1), Value::ArrayBuffer(b2)) => Gc::ptr_eq(*b1, *b2),
+        (Value::DataView(d1), Value::DataView(d2)) => Gc::ptr_eq(*d1, *d2),
+        (Value::TypedArray(t1), Value::TypedArray(t2)) => Gc::ptr_eq(*t1, *t2),
+        // Getter/Setter equality is tricky if they have Vecs.
+        // But usually we just check reference equality if they were allocated, but here they are variants.
+        // But the previous implementation didn't check them.
+        // Assuming strict equality for these internal variants isn't common in user code comparisons (usually they are hidden).
         _ => false,
     }
 }
 
-pub fn obj_get_key_value<'gc>(
-    _mc: &MutationContext<'gc>,
-    obj: &JSObjectDataPtr<'gc>,
-    key: &PropertyKey<'gc>,
-) -> Result<Option<GcPtr<'gc, Value<'gc>>>, JSError> {
+pub fn obj_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>) -> Result<Option<GcPtr<'gc, Value<'gc>>>, JSError> {
     let mut current = Some(*obj);
     while let Some(cur) = current {
         if let Some(val) = cur.borrow().properties.get(key) {

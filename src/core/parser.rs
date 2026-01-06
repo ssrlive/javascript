@@ -802,7 +802,7 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             if let Some(Token::Identifier(id)) = tokens.get(pos).map(|t| &t.token) {
                 if id == "get" || id == "set" {
                     if let Some(Token::PrivateIdentifier(name)) = tokens.get(pos + 1).map(|t| &t.token) {
-                        current_private_names.borrow_mut().insert(name.clone());
+                        current_private_names.borrow_mut(mc).insert(name.clone());
                     }
                     // Advance past 'get'/'set' and the following name (if any)
                     pos += 1;
@@ -843,7 +843,7 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
 
             // Private identifier starting a member (private method/property)
             if let Some(Token::PrivateIdentifier(name)) = tokens.get(pos).map(|t| &t.token) {
-                current_private_names.borrow_mut().insert(name.clone());
+                current_private_names.borrow_mut(mc).insert(name.clone());
                 pos += 1;
                 // If this is a method, skip params and body
                 if pos < tokens.len() && matches!(tokens[pos].token, Token::LParen) {
@@ -1163,7 +1163,7 @@ pub fn parse_class_body(tokens: &mut Vec<TokenData>) -> Result<Vec<ClassMember>,
             declared_private_names.insert(name.clone());
             // Also record in the current private-name set for validation inside
             // method bodies parsed subsequently.
-            current_private_names.borrow_mut().insert(name.clone());
+            current_private_names.borrow_mut(mc).insert(name.clone());
 
             *index += 1;
             if matches!(tokens[*index].token, Token::LParen) {

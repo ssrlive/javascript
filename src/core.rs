@@ -1,8 +1,7 @@
-#![allow(warnings)]
-
 use crate::error::JSError;
 use crate::js_array::initialize_array;
 use crate::js_console::initialize_console_object;
+use crate::js_date::initialize_date;
 use crate::js_math::initialize_math;
 use crate::js_regexp::initialize_regexp;
 use crate::js_string::initialize_string;
@@ -66,6 +65,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
     initialize_regexp(mc, env)?;
+    // Initialize Date constructor and prototype
+    initialize_date(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
@@ -117,7 +118,7 @@ where
                         err.set_js_location(l, c);
                     }
                     if let Value::Object(obj) = &val {
-                        if let Some(stack_str) = obj.borrow().get_property(mc, "stack") {
+                        if let Some(stack_str) = obj.borrow().get_property("stack") {
                             let lines: Vec<String> = stack_str
                                 .lines()
                                 .map(|s| s.trim().to_string())
@@ -140,9 +141,9 @@ pub fn get_constructor_prototype<'gc>(
     name: &str,
 ) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
     // First try to find a constructor object already stored in the environment
-    if let Some(val_rc) = obj_get_key_value(mc, env, &name.into())? {
+    if let Some(val_rc) = obj_get_key_value(env, &name.into())? {
         if let Value::Object(ctor_obj) = &*val_rc.borrow() {
-            if let Some(proto_val_rc) = obj_get_key_value(mc, ctor_obj, &"prototype".into())? {
+            if let Some(proto_val_rc) = obj_get_key_value(ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -153,7 +154,7 @@ pub fn get_constructor_prototype<'gc>(
     // If not found, attempt to evaluate the variable to force lazy creation
     match evaluate_expr(mc, env, &Expr::Var(name.to_string(), None, None)) {
         Ok(Value::Object(ctor_obj)) => {
-            if let Some(proto_val_rc) = obj_get_key_value(mc, &ctor_obj, &"prototype".into())? {
+            if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
                     return Ok(Some(proto_obj.clone()));
                 }
@@ -165,7 +166,7 @@ pub fn get_constructor_prototype<'gc>(
 }
 
 // Helper to set an object's internal prototype from a constructor name.
-// If the constructor.prototype is available, sets `obj.borrow_mut().prototype`
+// If the constructor.prototype is available, sets `obj.borrow_mut(mc).prototype`
 // to that object. This consolidates the common pattern used when boxing
 // primitives and creating instances.
 pub fn set_internal_prototype_from_constructor<'gc>(
@@ -183,6 +184,7 @@ pub fn set_internal_prototype_from_constructor<'gc>(
 
 // Helper to initialize a collection from an iterable argument.
 // Used by Map, Set, WeakMap, WeakSet constructors.
+#[allow(dead_code)]
 pub fn initialize_collection_from_iterable<'gc, F>(
     mc: &MutationContext<'gc>,
     args: &[Expr],
@@ -211,7 +213,7 @@ where
             let mut i = 0;
             loop {
                 let key = format!("{i}");
-                if let Some(item_val) = obj_get_key_value(mc, &obj, &key.into())? {
+                if let Some(item_val) = obj_get_key_value(&obj, &key.into())? {
                     let item = item_val.borrow().clone();
                     process_item(item)?;
                 } else {

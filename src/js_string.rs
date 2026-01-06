@@ -22,9 +22,9 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &string_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("String")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(mc, env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(mc, obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -142,31 +142,31 @@ pub(crate) fn string_constructor<'gc>(
                 //     },
                 //     _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
                 // }
-                todo!()
+                Ok(Value::String(utf8_to_utf16("[object Object]")))
             }
             Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
             Value::Closure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
-            // Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
-            // Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
-            // Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
+            Value::AsyncClosure(_) => Ok(Value::String(utf8_to_utf16("[AsyncFunction]"))),
+            Value::ClassDefinition(_) => Ok(Value::String(utf8_to_utf16("[Class]"))),
+            Value::Getter(..) => Ok(Value::String(utf8_to_utf16("[Getter]"))),
+            Value::Setter(..) => Ok(Value::String(utf8_to_utf16("[Setter]"))),
             Value::Property { .. } => Ok(Value::String(utf8_to_utf16("[property]"))),
-            // Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
-            Value::Symbol(_symbol_data) => todo!(),
-            // Value::Symbol(symbol_data) => match &symbol_data.borrow().description {
-            //     Some(d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({d})")))),
-            //     None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
-            // },
+            Value::Promise(_) => Ok(Value::String(utf8_to_utf16("[object Promise]"))),
+            Value::Symbol(symbol_data) => {
+                let desc = symbol_data.description.as_deref().unwrap_or("");
+                Ok(Value::String(utf8_to_utf16(&format!("Symbol({desc})"))))
+            }
             Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
-            // Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
-            // Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
-            // Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
-            // Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
-            // Value::GeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
-            // Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
-            // Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
-            // Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
-            // Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
-            // Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
+            Value::Map(_) => Ok(Value::String(utf8_to_utf16("[object Map]"))),
+            Value::Set(_) => Ok(Value::String(utf8_to_utf16("[object Set]"))),
+            Value::WeakMap(_) => Ok(Value::String(utf8_to_utf16("[object WeakMap]"))),
+            Value::WeakSet(_) => Ok(Value::String(utf8_to_utf16("[object WeakSet]"))),
+            Value::GeneratorFunction(..) => Ok(Value::String(utf8_to_utf16("[GeneratorFunction]"))),
+            Value::Generator(_) => Ok(Value::String(utf8_to_utf16("[object Generator]"))),
+            Value::Proxy(_) => Ok(Value::String(utf8_to_utf16("[object Proxy]"))),
+            Value::ArrayBuffer(_) => Ok(Value::String(utf8_to_utf16("[object ArrayBuffer]"))),
+            Value::DataView(_) => Ok(Value::String(utf8_to_utf16("[object DataView]"))),
+            Value::TypedArray(_) => Ok(Value::String(utf8_to_utf16("[object TypedArray]"))),
             Value::Uninitialized => Ok(Value::String(utf8_to_utf16("undefined"))),
         }
     } else {
@@ -799,38 +799,38 @@ fn string_match_method<'gc>(
                 Value::String(su) => utf16_to_utf8(su),
                 _ => crate::core::value_to_string(&search_val),
             };
-            match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pattern))], env)? {
+            match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pattern))])? {
                 Value::Object(o) => o,
                 _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from argument"))),
             }
         }
     } else if let Value::String(su) = &search_val {
-        match handle_regexp_constructor(mc, &[Value::String(su.clone())], env)? {
+        match handle_regexp_constructor(mc, &[Value::String(su.clone())])? {
             Value::Object(o) => o,
             _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from string"))),
         }
     } else if let Value::Undefined = search_val {
         // new RegExp() default
-        match handle_regexp_constructor(mc, &[], env)? {
+        match handle_regexp_constructor(mc, &[])? {
             Value::Object(o) => o,
             _ => return Err(EvalError::Js(raise_eval_error!("failed to construct default RegExp"))),
         }
     } else if let Value::Number(n) = search_val {
         let pat = n.to_string();
-        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))], env)? {
+        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
             _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from number"))),
         }
     } else if let Value::Boolean(b) = search_val {
         let pat = b.to_string();
-        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))], env)? {
+        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
             _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from bool"))),
         }
     } else {
         // Fallback: coerce to string using value_to_string
         let pat = crate::core::value_to_string(&search_val);
-        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))], env)? {
+        match handle_regexp_constructor(mc, &[Value::String(utf8_to_utf16(&pat))])? {
             Value::Object(o) => o,
             _ => return Err(EvalError::Js(raise_eval_error!("failed to construct RegExp from arg"))),
         }
@@ -861,7 +861,7 @@ fn string_match_method<'gc>(
         loop {
             match handle_regexp_method(mc, &regexp_obj, "exec", &exec_args, env)? {
                 Value::Object(arr) => {
-                    if let Some(val_rc) = obj_get_key_value(mc, &arr, &"0".into())? {
+                    if let Some(val_rc) = obj_get_key_value(&arr, &"0".into())? {
                         match &*val_rc.borrow() {
                             Value::String(u16s) => matches.push(utf16_to_utf8(u16s)),
                             _ => matches.push("".to_string()),
@@ -1293,7 +1293,7 @@ fn string_search_method<'gc>(
             }
             Value::String(p) => {
                 let re_args = vec![Value::String(p.clone())];
-                let val = handle_regexp_constructor(mc, &re_args, env)?;
+                let val = handle_regexp_constructor(mc, &re_args)?;
                 if let Value::Object(obj) = val {
                     (obj, String::new())
                 } else {
@@ -1303,7 +1303,7 @@ fn string_search_method<'gc>(
             v => {
                 let p = utf8_to_utf16(&value_to_string(&v));
                 let re_args = vec![Value::String(p)];
-                let val = handle_regexp_constructor(mc, &re_args, env)?;
+                let val = handle_regexp_constructor(mc, &re_args)?;
                 if let Value::Object(obj) = val {
                     (obj, String::new())
                 } else {
@@ -1313,7 +1313,7 @@ fn string_search_method<'gc>(
         }
     } else {
         let re_args = vec![Value::String(Vec::new())];
-        let val = handle_regexp_constructor(mc, &re_args, env)?;
+        let val = handle_regexp_constructor(mc, &re_args)?;
         if let Value::Object(obj) = val {
             (obj, String::new())
         } else {
@@ -1331,7 +1331,7 @@ fn string_search_method<'gc>(
     };
 
     let re_args = vec![Value::String(pattern), Value::String(utf8_to_utf16(&flags_str))];
-    let matcher_val = handle_regexp_constructor(mc, &re_args, env)?;
+    let matcher_val = handle_regexp_constructor(mc, &re_args)?;
     let matcher_obj = if let Value::Object(o) = matcher_val {
         o
     } else {
@@ -1345,7 +1345,7 @@ fn string_search_method<'gc>(
 
     match res {
         Value::Object(match_obj) => {
-            if let Some(idx_val) = obj_get_key_value(mc, &match_obj, &"index".into())? {
+            if let Some(idx_val) = obj_get_key_value(&match_obj, &"index".into())? {
                 Ok(idx_val.borrow().clone())
             } else {
                 Ok(Value::Number(-1.0))
@@ -1381,7 +1381,7 @@ fn string_match_all_method<'gc>(
             }
             Value::String(p) => {
                 let re_args = vec![Value::String(p.clone()), Value::String(utf8_to_utf16("g"))];
-                let val = handle_regexp_constructor(mc, &re_args, env)?;
+                let val = handle_regexp_constructor(mc, &re_args)?;
                 if let Value::Object(obj) = val {
                     (obj, String::from("g"))
                 } else {
@@ -1395,7 +1395,7 @@ fn string_match_all_method<'gc>(
                     v => utf8_to_utf16(&value_to_string(&v)),
                 };
                 let re_args = vec![Value::String(p), Value::String(utf8_to_utf16("g"))];
-                let val = handle_regexp_constructor(mc, &re_args, env)?;
+                let val = handle_regexp_constructor(mc, &re_args)?;
                 if let Value::Object(obj) = val {
                     (obj, String::from("g"))
                 } else {
@@ -1405,7 +1405,7 @@ fn string_match_all_method<'gc>(
         }
     } else {
         let re_args = vec![Value::String(Vec::new()), Value::String(utf8_to_utf16("g"))];
-        let val = handle_regexp_constructor(mc, &re_args, env)?;
+        let val = handle_regexp_constructor(mc, &re_args)?;
         if let Value::Object(obj) = val {
             (obj, String::from("g"))
         } else {
@@ -1416,7 +1416,7 @@ fn string_match_all_method<'gc>(
     let pattern = internal_get_regex_pattern(&regexp_obj)?;
     let flags_u16 = utf8_to_utf16(&flags);
     let re_args = vec![Value::String(pattern), Value::String(flags_u16)];
-    let matcher_val = handle_regexp_constructor(mc, &re_args, env)?;
+    let matcher_val = handle_regexp_constructor(mc, &re_args)?;
     let matcher_obj = if let Value::Object(o) = matcher_val {
         o
     } else {
@@ -1435,10 +1435,10 @@ fn string_match_all_method<'gc>(
             Value::Object(match_obj) => {
                 matches.push(Value::Object(match_obj.clone()));
 
-                if let Some(m0) = obj_get_key_value(mc, &match_obj, &"0".into())? {
+                if let Some(m0) = obj_get_key_value(&match_obj, &"0".into())? {
                     if let Value::String(s) = &*m0.borrow() {
                         if s.is_empty() {
-                            if let Some(li) = obj_get_key_value(mc, &matcher_obj, &"lastIndex".into())? {
+                            if let Some(li) = obj_get_key_value(&matcher_obj, &"lastIndex".into())? {
                                 if let Value::Number(n) = *li.borrow() {
                                     obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
                                 }

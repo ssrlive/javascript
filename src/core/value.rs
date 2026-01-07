@@ -1,20 +1,14 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match, dead_code)]
 
-use gc_arena::Mutation as MutationContext;
-use gc_arena::collect::Trace;
-use gc_arena::lock::RefLock as GcCell;
-use gc_arena::{Collect, Gc};
-use num_bigint::BigInt;
-use std::sync::{Arc, Mutex};
-
+use crate::core::{Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext};
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
     core::{DestructuringElement, PropertyKey, Statement, is_error},
     raise_type_error,
 };
-
-pub type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
+use num_bigint::BigInt;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
@@ -31,13 +25,13 @@ pub struct JSSet<'gc> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakMap<'gc> {
-    pub entries: Vec<(gc_arena::GcWeak<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
+    pub entries: Vec<(GcWeak<'gc, GcCell<JSObjectData<'gc>>>, Value<'gc>)>,
 }
 
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSWeakSet<'gc> {
-    pub values: Vec<gc_arena::GcWeak<'gc, GcCell<JSObjectData<'gc>>>>,
+    pub values: Vec<GcWeak<'gc, GcCell<JSObjectData<'gc>>>>,
 }
 
 #[derive(Clone, Collect)]
@@ -108,7 +102,7 @@ pub enum GeneratorState<'gc> {
 }
 
 pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
-pub type JSObjectDataWeakPtr<'gc> = gc_arena::Gc<'gc, GcCell<JSObjectData<'gc>>>;
+pub type JSObjectDataWeakPtr<'gc> = Gc<'gc, GcCell<JSObjectData<'gc>>>;
 
 #[inline]
 pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc> {
@@ -126,8 +120,8 @@ pub struct JSObjectData<'gc> {
     pub is_function_scope: bool,
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for JSObjectData<'gc> {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         for (k, v) in &self.properties {
             k.trace(cc);
             (*v.borrow()).trace(cc);
@@ -387,7 +381,7 @@ impl From<&String> for Value<'_> {
 }
 
 unsafe impl<'gc> Collect<'gc> for Value<'gc> {
-    fn trace<T: Trace<'gc>>(&self, cc: &mut T) {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         match self {
             Value::Object(obj) => obj.trace(cc),
             Value::Closure(cl) => cl.trace(cc),
@@ -580,6 +574,25 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     let val_ptr = Gc::new(mc, GcCell::new(val));
     env.borrow_mut(mc).insert(PropertyKey::String(key.to_string()), val_ptr);
     Ok(())
+}
+
+// Helper: Check whether the given object has an own property corresponding to a
+// given JS `Value` (as passed to hasOwnProperty / propertyIsEnumerable). This
+// centralizes conversion from various `Value` variants (String/Number/Boolean/
+// Undefined/Symbol/other) to a `PropertyKey` and calls `get_own_property`.
+// Returns true if an own property exists.
+pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'gc>) -> bool {
+    match key_val {
+        Value::String(s) => get_own_property(obj, &utf16_to_utf8(s).into()).is_some(),
+        Value::Number(n) => get_own_property(obj, &n.to_string().into()).is_some(),
+        Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
+        Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
+        Value::Symbol(sd) => {
+            let sym_key = PropertyKey::Symbol(sd.clone());
+            get_own_property(obj, &sym_key).is_some()
+        }
+        other => get_own_property(obj, &value_to_string(other).into()).is_some(),
+    }
 }
 
 pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {

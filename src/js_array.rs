@@ -1,12 +1,12 @@
 #![allow(warnings)]
 
+use crate::core::MutationContext;
 use crate::{
     core::{JSObjectDataPtr, PropertyKey, env_set, js_error::EvalError, new_js_object_data},
     error::JSError,
     raise_eval_error, raise_range_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
-use gc_arena::Mutation as MutationContext;
 
 use crate::core::{
     Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,

@@ -1,4 +1,5 @@
 use crate::core::TemplatePart;
+use crate::core::{Collect, GcTrace};
 
 #[derive(Clone, Debug)]
 pub struct Statement {
@@ -48,14 +49,14 @@ impl From<StatementKind> for Statement {
     }
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for Statement {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+unsafe impl<'gc> Collect<'gc> for Statement {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         crate::core::gc::trace_stmt(cc, self);
     }
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for StatementKind {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {
+unsafe impl<'gc> Collect<'gc> for StatementKind {
+    fn trace<T: GcTrace<'gc>>(&self, _cc: &mut T) {
         // Handled via Statement trace
     }
 }
@@ -136,8 +137,8 @@ pub enum Expr {
     ValuePlaceholder,
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for Expr {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+unsafe impl<'gc> Collect<'gc> for Expr {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         crate::core::gc::trace_expr(cc, self);
     }
 }
@@ -169,8 +170,8 @@ pub enum BinaryOp {
     Pow,
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for BinaryOp {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, _cc: &mut T) {}
+unsafe impl<'gc> Collect<'gc> for BinaryOp {
+    fn trace<T: GcTrace<'gc>>(&self, _cc: &mut T) {}
 }
 
 #[derive(Debug, Clone)]
@@ -238,8 +239,8 @@ pub enum DestructuringElement {
     NestedObject(Vec<DestructuringElement>),
 }
 
-unsafe impl<'gc> gc_arena::Collect<'gc> for DestructuringElement {
-    fn trace<T: gc_arena::collect::Trace<'gc>>(&self, cc: &mut T) {
+unsafe impl<'gc> Collect<'gc> for DestructuringElement {
+    fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         match self {
             DestructuringElement::Variable(_, e) => {
                 if let Some(e) = e {

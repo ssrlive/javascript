@@ -1,5 +1,5 @@
+use crate::core::{Collect, GcTrace};
 use crate::{JSError, raise_tokenize_error};
-use gc_arena::{Collect, collect::Trace};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
 
@@ -195,7 +195,7 @@ pub struct TokenData {
 unsafe impl<'gc> Collect<'gc> for TokenData {
     const NEEDS_TRACE: bool = false;
 
-    fn trace<'a, T: Trace<'gc>>(&self, _cc: &mut T) {
+    fn trace<'a, T: GcTrace<'gc>>(&self, _cc: &mut T) {
         // do not trace token to break cycle
     }
 }

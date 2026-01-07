@@ -1,14 +1,10 @@
+use crate::core::{Collect, GcTrace};
 use crate::core::{DestructuringElement, Expr, Statement, StatementKind};
-use gc_arena::collect::Trace;
-use gc_arena::lock::RefLock as GcCell;
-use gc_arena::{Collect, Gc};
-
-pub type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 
 // Manual implementation of trace to avoid cycles in derive
-pub fn trace_expr<'gc, T: Trace<'gc>>(context: &mut T, expr: &Expr) {
+pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
     // helper to find and trace any Expr defaults nested in destructuring elements
-    fn trace_destructuring<'gc, T: Trace<'gc>>(cc: &mut T, d: &DestructuringElement) {
+    fn trace_destructuring<'gc, T: GcTrace<'gc>>(cc: &mut T, d: &DestructuringElement) {
         match d {
             DestructuringElement::Variable(_, Some(e)) => trace_expr(cc, e),
             DestructuringElement::Property(_, inner) => trace_destructuring(cc, inner),
@@ -75,7 +71,7 @@ pub fn trace_expr<'gc, T: Trace<'gc>>(context: &mut T, expr: &Expr) {
     }
 }
 
-pub fn trace_stmt<'gc, T: Trace<'gc>>(context: &mut T, stmt: &Statement) {
+pub fn trace_stmt<'gc, T: GcTrace<'gc>>(context: &mut T, stmt: &Statement) {
     match &stmt.kind {
         StatementKind::Expr(e) => trace_expr(context, e),
         StatementKind::Let(decls) | StatementKind::Var(decls) => {

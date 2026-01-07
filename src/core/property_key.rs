@@ -1,12 +1,11 @@
-use crate::core::Value;
-use crate::core::gc::GcPtr;
-use gc_arena::Collect;
+use crate::core::SymbolData;
+use crate::core::{Collect, Gc};
 
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub enum PropertyKey<'gc> {
     String(String),
-    Symbol(GcPtr<'gc, Value<'gc>>),
+    Symbol(Gc<'gc, SymbolData>),
 }
 
 impl<'gc> From<&str> for PropertyKey<'gc> {
@@ -31,13 +30,7 @@ impl<'gc> PartialEq for PropertyKey<'gc> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (PropertyKey::String(s1), PropertyKey::String(s2)) => s1 == s2,
-            (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => {
-                if let (Value::Symbol(s1), Value::Symbol(s2)) = (&*sym1.borrow(), &*sym2.borrow()) {
-                    gc_arena::Gc::ptr_eq(*s1, *s2)
-                } else {
-                    false
-                }
-            }
+            (PropertyKey::Symbol(sym1), PropertyKey::Symbol(sym2)) => Gc::ptr_eq(*sym1, *sym2),
             _ => false,
         }
     }
@@ -54,9 +47,7 @@ impl<'gc> std::hash::Hash for PropertyKey<'gc> {
             }
             PropertyKey::Symbol(sym) => {
                 1u8.hash(state);
-                if let Value::Symbol(s) = &*sym.borrow() {
-                    gc_arena::Gc::as_ptr(*s).hash(state);
-                }
+                Gc::as_ptr(*sym).hash(state);
             }
         }
     }
@@ -66,7 +57,7 @@ impl<'gc> std::fmt::Display for PropertyKey<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PropertyKey::String(s) => write!(f, "{}", s),
-            PropertyKey::Symbol(ptr) => write!(f, "[symbol {:p}]", gc_arena::Gc::as_ptr(*ptr)),
+            PropertyKey::Symbol(sym) => write!(f, "[symbol {:p}]", Gc::as_ptr(*sym)),
         }
     }
 }
@@ -75,7 +66,7 @@ impl<'gc> AsRef<str> for PropertyKey<'gc> {
     fn as_ref(&self) -> &str {
         match self {
             PropertyKey::String(s) => s,
-            PropertyKey::Symbol(_ptr) => todo!("Cannot convert Symbol to &str"),
+            PropertyKey::Symbol(_sym) => todo!("Cannot convert Symbol to &str"),
         }
     }
 }

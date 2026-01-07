@@ -4,11 +4,11 @@ use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
     new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use gc_arena::Mutation as MutationContext;
 use std::rc::Rc;
 
 fn define_property_internal<'gc>(
@@ -443,12 +443,12 @@ pub fn handle_object_method<'gc>(
                                 if let Some((gbody, genv, _)) = getter {
                                     // expose getter as function (Closure) on descriptor
                                     let closure_data = ClosureData::new(&Vec::new(), gbody, genv, None);
-                                    obj_set_key_value(mc, &desc_obj, &"get".into(), Value::Closure(gc_arena::Gc::new(mc, closure_data)))?;
+                                    obj_set_key_value(mc, &desc_obj, &"get".into(), Value::Closure(Gc::new(mc, closure_data)))?;
                                 }
                                 if let Some((sparams, sbody, senv, _)) = setter {
                                     // expose setter as function (Closure) on descriptor
                                     let closure_data = ClosureData::new(sparams, sbody, senv, None);
-                                    obj_set_key_value(mc, &desc_obj, &"set".into(), Value::Closure(gc_arena::Gc::new(mc, closure_data)))?;
+                                    obj_set_key_value(mc, &desc_obj, &"set".into(), Value::Closure(Gc::new(mc, closure_data)))?;
                                 }
                                 // flags: enumerable depends on object's non-enumerable set
                                 let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
@@ -942,7 +942,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Function(name) => Ok(Value::Function(name.clone())),
         Value::Closure(data) | Value::AsyncClosure(data) => {
             let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
-            Ok(Value::Closure(gc_arena::Gc::new(mc, closure_data)))
+            Ok(Value::Closure(Gc::new(mc, closure_data)))
         }
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
         Value::Getter(body, env, _) => Ok(Value::Getter(body.clone(), env.clone(), None)),
@@ -960,7 +960,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
         Value::GeneratorFunction(_, data) => {
             let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
-            Ok(Value::GeneratorFunction(None, gc_arena::Gc::new(mc, closure_data)))
+            Ok(Value::GeneratorFunction(None, Gc::new(mc, closure_data)))
         }
         Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
         Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),
@@ -999,10 +999,10 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             let target_val = crate::core::evaluate_expr(mc, env, &args[0])?;
             match target_val {
                 Value::Object(target_map) => {
-                    let mut current_opt: Option<gc_arena::Gc<'gc, gc_arena::lock::RefLock<crate::core::JSObjectData<'gc>>>> =
+                    let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> =
                         target_map.borrow().prototype.clone().and_then(|w| w.upgrade());
                     while let Some(parent) = current_opt {
-                        if gc_arena::Gc::ptr_eq(parent, object) {
+                        if Gc::ptr_eq(parent, object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
                         current_opt = parent.borrow().prototype.clone().and_then(|w| w.upgrade());

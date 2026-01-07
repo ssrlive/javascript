@@ -1,3 +1,4 @@
+use crate::core::{Gc, GcCell};
 use crate::{
     JSError,
     core::{
@@ -5,7 +6,6 @@ use crate::{
         parse_statements, tokenize,
     },
 };
-use gc_arena::{Gc, lock::RefLock as GcCell};
 use std::collections::HashMap;
 
 /// A small persistent REPL environment wrapper.

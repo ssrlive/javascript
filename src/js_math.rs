@@ -1,6 +1,6 @@
+use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
-use gc_arena::Mutation as MutationContext;
 
 /// Create the Math object with all mathematical constants and functions
 pub fn initialize_math<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {

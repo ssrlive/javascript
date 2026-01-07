@@ -7,9 +7,12 @@ use crate::js_regexp::initialize_regexp;
 use crate::js_string::initialize_string;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
+pub(crate) use gc_arena::GcWeak;
 pub(crate) use gc_arena::Mutation as MutationContext;
+pub(crate) use gc_arena::collect::Trace as GcTrace;
 pub(crate) use gc_arena::lock::RefLock as GcCell;
 pub(crate) use gc_arena::{Collect, Gc};
+pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 use std::collections::HashMap;
 
 mod gc;
@@ -41,7 +44,7 @@ pub use js_error::*;
 #[collect(no_drop)]
 pub struct JsRoot<'gc> {
     pub global_env: JSObjectDataPtr<'gc>,
-    pub well_known_symbols: Gc<'gc, GcCell<HashMap<String, gc::GcPtr<'gc, Value<'gc>>>>>,
+    pub well_known_symbols: Gc<'gc, GcCell<HashMap<String, GcPtr<'gc, Value<'gc>>>>>,
 }
 
 pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;

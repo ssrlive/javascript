@@ -1,5 +1,6 @@
 #![allow(warnings)]
 
+use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::handle_array_static_method;
 use crate::js_date::{handle_date_method, handle_date_static_method};
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
@@ -15,9 +16,6 @@ use crate::{
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 use crate::{Token, parse_statements, tokenize};
-use gc_arena::Gc;
-use gc_arena::Mutation as MutationContext;
-use gc_arena::lock::RefLock as GcCell;
 
 #[derive(Clone, Debug)]
 pub enum ControlFlow<'gc> {
@@ -291,7 +289,7 @@ fn eval_res<'gc>(
             };
             Ok(Some(ControlFlow::Return(val)))
         }
-        StatementKind::FunctionDeclaration(name, params, body, _) => {
+        StatementKind::FunctionDeclaration(_name, _params, _body, _) => {
             // Function declarations are hoisted, so they are already defined.
             Ok(None)
         }

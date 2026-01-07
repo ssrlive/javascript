@@ -1,3 +1,5 @@
+use crate::core::JSSet;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::{
     core::{
         Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, initialize_collection_from_iterable, new_js_object_data,
@@ -9,11 +11,13 @@ use crate::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::core::JSSet;
-
 /// Handle Set constructor calls
-pub(crate) fn handle_set_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
-    let set = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSSet { values: Vec::new() }));
+pub(crate) fn handle_set_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    let set = Gc::new(mc, GcCell::new(JSSet { values: Vec::new() }));
 
     initialize_collection_from_iterable(mc, args, env, "Set", |value| {
         // Check if value already exists
@@ -27,15 +31,22 @@ pub(crate) fn handle_set_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Exp
     // Create a wrapper object for the Set
     let set_obj = new_js_object_data(mc);
     // Store the actual set data
-    set_obj
-        .borrow_mut(mc)
-        .insert(PropertyKey::String("__set__".to_string()), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Set(set))));
+    set_obj.borrow_mut(mc).insert(
+        PropertyKey::String("__set__".to_string()),
+        Gc::new(mc, GcCell::new(Value::Set(set))),
+    );
 
     Ok(Value::Object(set_obj))
 }
 
 /// Handle Set instance method calls
-pub(crate) fn handle_set_instance_method<'gc>(mc: &MutationContext<'gc>, set: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSSet<'gc>>>, method: &str, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_set_instance_method<'gc>(
+    mc: &MutationContext<'gc>,
+    set: &Gc<'gc, GcCell<JSSet<'gc>>>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "add" => {
             if args.len() != 1 {

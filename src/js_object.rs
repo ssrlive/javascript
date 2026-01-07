@@ -223,7 +223,7 @@ pub fn handle_object_method<'gc>(
             let key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                val @ Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(val))),
+                Value::Symbol(sd) => PropertyKey::Symbol(sd),
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
@@ -301,7 +301,7 @@ pub fn handle_object_method<'gc>(
                     let key = match key_val {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::BigInt(b) => PropertyKey::String(b.to_string()),
-                        Value::Symbol(_) => PropertyKey::Symbol(gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(key_val))),
+                        Value::Symbol(sd) => PropertyKey::Symbol(sd),
                         _ => PropertyKey::String(value_to_string(&key_val)),
                     };
 
@@ -379,11 +379,9 @@ pub fn handle_object_method<'gc>(
                     let result_obj = crate::js_array::create_array(mc, env)?;
                     let mut idx = 0;
                     for (key, _value) in obj.borrow().properties.iter() {
-                        if let PropertyKey::Symbol(sym) = key
-                            && let Value::Symbol(symbol_data) = &*sym.borrow()
-                        {
+                        if let PropertyKey::Symbol(sym) = key {
                             // push symbol primitive into result array
-                            obj_set_key_value(mc, &result_obj, &idx.to_string().into(), Value::Symbol(symbol_data.clone()))?;
+                            obj_set_key_value(mc, &result_obj, &idx.to_string().into(), Value::Symbol(sym.clone()))?;
                             idx += 1;
                         }
                     }
@@ -728,11 +726,13 @@ pub(crate) fn handle_to_string_method<'gc>(
 
             // If this object contains a Symbol.toStringTag property, honor it
             if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
-                let key = PropertyKey::Symbol(tag_sym_rc.clone());
-                if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
-                    && let Value::String(s) = &*tag_val_rc.borrow()
-                {
-                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
+                if let Value::Symbol(sd) = &*tag_sym_rc.borrow() {
+                    let key = PropertyKey::Symbol(sd.clone());
+                    if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
+                        && let Value::String(s) = &*tag_val_rc.borrow()
+                    {
+                        return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
+                    }
                 }
             }
 

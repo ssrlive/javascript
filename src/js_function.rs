@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use crate::core::{
     ClosureData, Expr, Gc, JSObjectDataPtr, MutationContext, PromiseState, PropertyKey, Statement, StatementKind, Value, evaluate_expr,
     get_own_property, has_own_property_value, new_js_object_data, prepare_call_env_with_this, prepare_function_call_env,
@@ -59,8 +61,8 @@ fn extract_internal_args<'gc>(
 
 fn validate_internal_args(args: &[Value], count: usize) -> Result<(), JSError> {
     if args.len() != count {
-         let msg = format!("Internal function requires exactly {} arguments, got {}", count, args.len());
-         return Err(raise_type_error!(msg));
+        let msg = format!("Internal function requires exactly {} arguments, got {}", count, args.len());
+        return Err(raise_type_error!(msg));
     }
     Ok(())
 }
@@ -482,7 +484,11 @@ fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &
     Ok(promise_obj)
 }
 
-fn object_prototype_value_of<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn object_prototype_value_of<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // When the prototype valueOf function is invoked as a global
     // function, `this` is provided in the `env`. Delegate to the
     // same helper used for method calls so boxed primitives and
@@ -494,7 +500,11 @@ fn object_prototype_value_of<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]
     Err(raise_eval_error!("Object.prototype.valueOf called without this"))
 }
 
-fn object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn object_prototype_to_string<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     if let Some(this_rc) = crate::core::env_get(env, "this") {
         let this_val = this_rc.borrow().clone();
         match this_val {
@@ -520,8 +530,6 @@ fn object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>
 
 fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     if args.is_empty() {
         return Ok(Value::Number(f64::NAN));
@@ -634,8 +642,6 @@ fn parse_int_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: 
 
 fn parse_float_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     if args.is_empty() {
         return Ok(Value::Number(f64::NAN));
@@ -735,8 +741,6 @@ fn parse_float_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
 
 fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     let arg_val = if args.is_empty() {
         Value::Undefined
@@ -761,8 +765,6 @@ fn is_nan_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JS
 
 fn is_finite_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     let arg_val = if args.is_empty() {
         Value::Undefined
@@ -787,8 +789,6 @@ fn is_finite_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: 
 
 fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate arguments
-    
-    
 
     let body_str = if !args.is_empty() {
         let val = args.last().unwrap();
@@ -833,8 +833,6 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
 
 fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     let arg_val = if args.is_empty() {
         Value::Undefined
@@ -861,8 +859,6 @@ fn encode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
 
 fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     let arg_val = if args.is_empty() {
         Value::Undefined
@@ -889,8 +885,6 @@ fn decode_uri_component<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
 
 fn boolean_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     if args.is_empty() {
         return Ok(Value::Boolean(false));
@@ -909,7 +903,11 @@ fn boolean_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env:
     Ok(Value::Boolean(bool_val))
 }
 
-fn symbol_prototype_value_of<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn symbol_prototype_value_of<'gc>(
+    mc: &MutationContext<'gc>,
+    _args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     let this_val = crate::js_class::evaluate_this(mc, env)?;
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
@@ -925,7 +923,11 @@ fn symbol_prototype_value_of<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc>
     }
 }
 
-fn symbol_prototype_to_string<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn symbol_prototype_to_string<'gc>(
+    mc: &MutationContext<'gc>,
+    _args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     let this_val = crate::js_class::evaluate_this(mc, env)?;
     let sym = match this_val {
         Value::Symbol(s) => s,
@@ -949,8 +951,6 @@ fn symbol_prototype_to_string<'gc>(mc: &MutationContext<'gc>, _args: &[Value<'gc
 
 fn symbol_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Evaluate all arguments for side effects
-    
-    
 
     let description = if args.is_empty() {
         None
@@ -1064,7 +1064,11 @@ fn decode_uri<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjec
     }
 }
 
-fn internal_resolve_promise<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_resolve_promise<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Internal function to resolve a promise - requires 2 args: (promise, value)
     validate_internal_args(args, 2)?;
     log::trace!("__internal_resolve_promise called with value: {:?}", args[1]);
@@ -1152,7 +1156,11 @@ fn internal_allsettled_state_record_rejected<'gc>(
     Ok(Value::Undefined)
 }
 
-fn internal_promise_any_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_any_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.any resolve - requires 2 args: (value, result_promise)
     validate_internal_args(args, 2)?;
     match &args[1] {
@@ -1177,7 +1185,11 @@ fn internal_promise_any_reject<'gc>(
     ))
 }
 
-fn internal_promise_race_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_race_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.race resolve - requires 2 args: (value, result_promise)
     validate_internal_args(args, 2)?;
     match &args[1] {
@@ -1189,7 +1201,11 @@ fn internal_promise_race_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'
     }
 }
 
-fn internal_promise_all_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_all_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
     validate_internal_args(args, 3)?;
     let numbers = validate_number_args(&args, 1)?;
@@ -1227,7 +1243,11 @@ fn internal_promise_all_resolve<'gc>(mc: &MutationContext<'gc>, args: &[Value<'g
     Ok(Value::Undefined)
 }
 
-fn internal_promise_all_reject<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+fn internal_promise_all_reject<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.all reject - requires 2 args: (reason, state)
     validate_internal_args(args, 2)?;
     let reason = args[0].clone();
@@ -1243,6 +1263,7 @@ fn internal_promise_all_reject<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc
 }
 
 fn test_with_intl_constructors<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+    /*
     // testWithIntlConstructors function - used for testing Intl constructors
     if args.len() != 1 {
         return Err(raise_type_error!("testWithIntlConstructors requires exactly 1 argument"));
@@ -1267,6 +1288,8 @@ fn test_with_intl_constructors<'gc>(mc: &MutationContext<'gc>, args: &[Expr], en
     crate::core::evaluate_statements(mc, &func_env, &callback_func.1)?;
 
     Ok(Value::Undefined)
+    // */
+    todo!("testWithIntlConstructors is not yet implemented");
 }
 
 fn handle_object_has_own_property<'gc>(

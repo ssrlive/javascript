@@ -1,4 +1,4 @@
-use gc_arena::MutationContext;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -57,7 +57,13 @@ fn get_parent_pid_windows() -> u32 {
 }
 
 /// Handle OS module method calls
-pub(crate) fn handle_os_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_os_method<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // If this object looks like the `os` module (we used 'open' as marker)
     if get_own_property(object, &"open".into()).is_some() {
         match method {

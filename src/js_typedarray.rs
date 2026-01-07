@@ -1,3 +1,4 @@
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -36,7 +37,9 @@ pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
 
     obj_set_key_value(mc, &obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
     obj_set_key_value(mc, &obj, &"store".into(), Value::Function("Atomics.store".to_string()))?;
-    obj_set_key_value(mc, &obj,
+    obj_set_key_value(
+        mc,
+        &obj,
         &"compareExchange".into(),
         Value::Function("Atomics.compareExchange".to_string()),
     )?;
@@ -354,11 +357,18 @@ pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
 
     // Add methods to prototype
     obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("ArrayBuffer".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"byteLength".into(),
         Value::Function("ArrayBuffer.prototype.byteLength".to_string()),
     )?;
-    obj_set_key_value(mc, &proto, &"slice".into(), Value::Function("ArrayBuffer.prototype.slice".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"slice".into(),
+        Value::Function("ArrayBuffer.prototype.slice".to_string()),
+    )?;
 
     Ok(proto)
 }
@@ -381,73 +391,120 @@ pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
     let proto = new_js_object_data(mc);
 
     obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("DataView".to_string()))?;
-    obj_set_key_value(mc, &proto, &"buffer".into(), Value::Function("DataView.prototype.buffer".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"buffer".into(),
+        Value::Function("DataView.prototype.buffer".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &proto,
         &"byteLength".into(),
         Value::Function("DataView.prototype.byteLength".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"byteOffset".into(),
         Value::Function("DataView.prototype.byteOffset".to_string()),
     )?;
 
     // DataView methods for different data types
-    obj_set_key_value(mc, &proto, &"getInt8".into(), Value::Function("DataView.prototype.getInt8".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"getInt8".into(),
+        Value::Function("DataView.prototype.getInt8".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getUint8".into(),
         Value::Function("DataView.prototype.getUint8".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getInt16".into(),
         Value::Function("DataView.prototype.getInt16".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getUint16".into(),
         Value::Function("DataView.prototype.getUint16".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getInt32".into(),
         Value::Function("DataView.prototype.getInt32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getUint32".into(),
         Value::Function("DataView.prototype.getUint32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getFloat32".into(),
         Value::Function("DataView.prototype.getFloat32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"getFloat64".into(),
         Value::Function("DataView.prototype.getFloat64".to_string()),
     )?;
 
-    obj_set_key_value(mc, &proto, &"setInt8".into(), Value::Function("DataView.prototype.setInt8".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"setInt8".into(),
+        Value::Function("DataView.prototype.setInt8".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setUint8".into(),
         Value::Function("DataView.prototype.setUint8".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setInt16".into(),
         Value::Function("DataView.prototype.setInt16".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setUint16".into(),
         Value::Function("DataView.prototype.setUint16".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setInt32".into(),
         Value::Function("DataView.prototype.setInt32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setUint32".into(),
         Value::Function("DataView.prototype.setUint32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setFloat32".into(),
         Value::Function("DataView.prototype.setFloat32".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"setFloat64".into(),
         Value::Function("DataView.prototype.setFloat64".to_string()),
     )?;
@@ -533,20 +590,36 @@ fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JS
     obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("TypedArray".to_string()))?;
 
     // TypedArray properties and methods
-    obj_set_key_value(mc, &proto, &"buffer".into(), Value::Function("TypedArray.prototype.buffer".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"buffer".into(),
+        Value::Function("TypedArray.prototype.buffer".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &proto,
         &"byteLength".into(),
         Value::Function("TypedArray.prototype.byteLength".to_string()),
     )?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"byteOffset".into(),
         Value::Function("TypedArray.prototype.byteOffset".to_string()),
     )?;
-    obj_set_key_value(mc, &proto, &"length".into(), Value::Function("TypedArray.prototype.length".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"length".into(),
+        Value::Function("TypedArray.prototype.length".to_string()),
+    )?;
 
     // Array methods that TypedArrays inherit
     obj_set_key_value(mc, &proto, &"set".into(), Value::Function("TypedArray.prototype.set".to_string()))?;
-    obj_set_key_value(mc, &proto,
+    obj_set_key_value(
+        mc,
+        &proto,
         &"subarray".into(),
         Value::Function("TypedArray.prototype.subarray".to_string()),
     )?;
@@ -568,11 +641,14 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     };
 
     // Create ArrayBuffer instance
-    let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-        data: Arc::new(Mutex::new(vec![0; length])),
-        detached: false,
-        shared: false,
-    }));
+    let buffer = Gc::new(
+        mc,
+        GcCell::new(JSArrayBuffer {
+            data: Arc::new(Mutex::new(vec![0; length])),
+            detached: false,
+            shared: false,
+        }),
+    );
 
     // Create the ArrayBuffer object
     let obj = new_js_object_data(mc);
@@ -599,11 +675,14 @@ pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr
     };
 
     // Create SharedArrayBuffer instance (mark shared: true)
-    let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-        data: Arc::new(Mutex::new(vec![0; length])),
-        detached: false,
-        shared: true,
-    }));
+    let buffer = Gc::new(
+        mc,
+        GcCell::new(JSArrayBuffer {
+            data: Arc::new(Mutex::new(vec![0; length])),
+            detached: false,
+            shared: true,
+        }),
+    );
 
     // Create the SharedArrayBuffer object wrapper
     let obj = new_js_object_data(mc);
@@ -665,11 +744,14 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     }
 
     // Create DataView instance
-    let data_view = gc_arena::Gc::new(mc, JSDataView {
-        buffer,
-        byte_offset,
-        byte_length,
-    });
+    let data_view = Gc::new(
+        mc,
+        JSDataView {
+            buffer,
+            byte_offset,
+            byte_length,
+        },
+    );
 
     // Create the DataView object
     let obj = new_js_object_data(mc);
@@ -718,11 +800,14 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 
     let (buffer, byte_offset, length) = if args.is_empty() {
         // new TypedArray() - create empty array
-        let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-            data: Arc::new(Mutex::new(vec![])),
-            detached: false,
-            shared: false,
-        }));
+        let buffer = Gc::new(
+            mc,
+            GcCell::new(JSArrayBuffer {
+                data: Arc::new(Mutex::new(vec![])),
+                detached: false,
+                shared: false,
+            }),
+        );
         (buffer, 0, 0)
     } else if args.len() == 1 {
         let arg_val = evaluate_expr(mc, env, &args[0])?;
@@ -730,11 +815,14 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
             Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => {
                 // new TypedArray(length)
                 let length = n as usize;
-                let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-                    data: Arc::new(Mutex::new(vec![0; length * element_size])),
-                    detached: false,
-                    shared: false,
-                }));
+                let buffer = Gc::new(
+                    mc,
+                    GcCell::new(JSArrayBuffer {
+                        data: Arc::new(Mutex::new(vec![0; length * element_size])),
+                        detached: false,
+                        shared: false,
+                    }),
+                );
                 (buffer, 0, length)
             }
             Value::Object(obj) => {
@@ -743,11 +831,14 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.length;
-                        let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-                            data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
-                            detached: false,
-                            shared: false,
-                        }));
+                        let buffer = Gc::new(
+                            mc,
+                            GcCell::new(JSArrayBuffer {
+                                data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
+                                detached: false,
+                                shared: false,
+                            }),
+                        );
                         // TODO: Copy data from source TypedArray
                         (buffer, 0, src_length)
                     } else {
@@ -837,12 +928,15 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
     obj.borrow_mut(mc).prototype = Some(proto.clone());
 
     // Create TypedArray instance
-    let typed_array = gc_arena::Gc::new(mc, JSTypedArray {
-        kind,
-        buffer,
-        byte_offset,
-        length,
-    });
+    let typed_array = Gc::new(
+        mc,
+        JSTypedArray {
+            kind,
+            buffer,
+            byte_offset,
+            length,
+        },
+    );
 
     obj_set_key_value(mc, &obj, &"__typedarray".into(), Value::TypedArray(typed_array))?;
 
@@ -850,7 +944,13 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 }
 
 /// Handle DataView instance method calls
-pub fn handle_dataview_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_dataview_method<'gc>(
+    mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr,
+    method: &str,
+    args: &[Expr],
+    env: &JSObjectDataPtr,
+) -> Result<Value, JSError> {
     // Get the DataView from the object
     let dv_val = obj_get_key_value(object, &"__dataview".into())?;
     let data_view_rc = if let Some(dv_val) = dv_val {
@@ -1280,11 +1380,14 @@ mod atomics_thread_tests {
     #[test]
     fn atomics_wait_notify_multithreaded() {
         // Create a shared ArrayBuffer (shared = true)
-        let buffer = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSArrayBuffer {
-            data: Arc::new(Mutex::new(vec![0u8; 16])),
-            detached: false,
-            shared: true,
-        }));
+        let buffer = Gc::new(
+            mc,
+            GcCell::new(JSArrayBuffer {
+                data: Arc::new(Mutex::new(vec![0u8; 16])),
+                detached: false,
+                shared: true,
+            }),
+        );
 
         // Create a typed array view (Int32Array) referencing the same buffer
         let _ = Rc::new(RefCell::new(JSTypedArray {
@@ -1378,13 +1481,9 @@ mod atomics_thread_tests {
     }
 }
 
-
-
+use std::borrow::Borrow;
 use std::io::Cursor;
 use std::io::{Read, Write};
-use std::borrow::Borrow;
-
-
 
 impl<'gc> JSDataView<'gc> {
     fn check_bounds(&self, offset: usize, size: usize) -> Result<usize, JSError> {
@@ -1416,40 +1515,60 @@ impl<'gc> JSDataView<'gc> {
         let idx = self.check_bounds(offset, 2)?;
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
-        let bytes = [data[idx], data[idx+1]];
-        Ok(if little_endian { i16::from_le_bytes(bytes) } else { i16::from_be_bytes(bytes) })
+        let bytes = [data[idx], data[idx + 1]];
+        Ok(if little_endian {
+            i16::from_le_bytes(bytes)
+        } else {
+            i16::from_be_bytes(bytes)
+        })
     }
 
     pub fn get_uint16(&self, offset: usize, little_endian: bool) -> Result<u16, JSError> {
         let idx = self.check_bounds(offset, 2)?;
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
-        let bytes = [data[idx], data[idx+1]];
-        Ok(if little_endian { u16::from_le_bytes(bytes) } else { u16::from_be_bytes(bytes) })
+        let bytes = [data[idx], data[idx + 1]];
+        Ok(if little_endian {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        })
     }
 
     pub fn get_int32(&self, offset: usize, little_endian: bool) -> Result<i32, JSError> {
         let idx = self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
-        let bytes = [data[idx], data[idx+1], data[idx+2], data[idx+3]];
-        Ok(if little_endian { i32::from_le_bytes(bytes) } else { i32::from_be_bytes(bytes) })
+        let bytes = [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]];
+        Ok(if little_endian {
+            i32::from_le_bytes(bytes)
+        } else {
+            i32::from_be_bytes(bytes)
+        })
     }
 
     pub fn get_uint32(&self, offset: usize, little_endian: bool) -> Result<u32, JSError> {
         let idx = self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
-        let bytes = [data[idx], data[idx+1], data[idx+2], data[idx+3]];
-        Ok(if little_endian { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) })
+        let bytes = [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]];
+        Ok(if little_endian {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        })
     }
 
     pub fn get_float32(&self, offset: usize, little_endian: bool) -> Result<f32, JSError> {
         let idx = self.check_bounds(offset, 4)?;
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
-        let bytes = [data[idx], data[idx+1], data[idx+2], data[idx+3]];
-        Ok(if little_endian { f32::from_le_bytes(bytes) } else { f32::from_be_bytes(bytes) })
+        let bytes = [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]];
+        Ok(if little_endian {
+            f32::from_le_bytes(bytes)
+        } else {
+            f32::from_be_bytes(bytes)
+        })
     }
 
     pub fn get_float64(&self, offset: usize, little_endian: bool) -> Result<f64, JSError> {
@@ -1457,10 +1576,20 @@ impl<'gc> JSDataView<'gc> {
         let buffer = self.buffer.borrow();
         let data = buffer.data.lock().unwrap();
         let bytes = [
-            data[idx], data[idx+1], data[idx+2], data[idx+3],
-            data[idx+4], data[idx+5], data[idx+6], data[idx+7]
+            data[idx],
+            data[idx + 1],
+            data[idx + 2],
+            data[idx + 3],
+            data[idx + 4],
+            data[idx + 5],
+            data[idx + 6],
+            data[idx + 7],
         ];
-        Ok(if little_endian { f64::from_le_bytes(bytes) } else { f64::from_be_bytes(bytes) })
+        Ok(if little_endian {
+            f64::from_le_bytes(bytes)
+        } else {
+            f64::from_be_bytes(bytes)
+        })
     }
 
     pub fn set_int8(&self, offset: usize, value: i8) -> Result<(), JSError> {
@@ -1485,7 +1614,7 @@ impl<'gc> JSDataView<'gc> {
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
         data[idx] = bytes[0];
-        data[idx+1] = bytes[1];
+        data[idx + 1] = bytes[1];
         Ok(())
     }
 
@@ -1495,7 +1624,7 @@ impl<'gc> JSDataView<'gc> {
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
         data[idx] = bytes[0];
-        data[idx+1] = bytes[1];
+        data[idx + 1] = bytes[1];
         Ok(())
     }
 
@@ -1504,7 +1633,9 @@ impl<'gc> JSDataView<'gc> {
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
-        for i in 0..4 { data[idx+i] = bytes[i]; }
+        for i in 0..4 {
+            data[idx + i] = bytes[i];
+        }
         Ok(())
     }
 
@@ -1513,7 +1644,9 @@ impl<'gc> JSDataView<'gc> {
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
-        for i in 0..4 { data[idx+i] = bytes[i]; }
+        for i in 0..4 {
+            data[idx + i] = bytes[i];
+        }
         Ok(())
     }
 
@@ -1522,7 +1655,9 @@ impl<'gc> JSDataView<'gc> {
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
-        for i in 0..4 { data[idx+i] = bytes[i]; }
+        for i in 0..4 {
+            data[idx + i] = bytes[i];
+        }
         Ok(())
     }
 
@@ -1531,7 +1666,9 @@ impl<'gc> JSDataView<'gc> {
         let bytes = if little_endian { value.to_le_bytes() } else { value.to_be_bytes() };
         let buffer = self.buffer.borrow();
         let mut data = buffer.data.lock().unwrap();
-        for i in 0..8 { data[idx+i] = bytes[i]; }
+        for i in 0..8 {
+            data[idx + i] = bytes[i];
+        }
         Ok(())
     }
 }
@@ -1553,47 +1690,47 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         let data = buffer.data.lock().unwrap();
 
         if byte_offset + size > data.len() {
-             return Ok(f64::NAN); // Undefined -> NaN for number?
+            return Ok(f64::NAN); // Undefined -> NaN for number?
         }
-        
+
         // Very basic implementation:
         match self.kind {
             crate::core::TypedArrayType::Int8 => {
                 let bytes = [data[byte_offset]];
                 Ok(i8::from_ne_bytes(bytes) as f64)
-            },
+            }
             crate::core::TypedArrayType::Uint8 | crate::core::TypedArrayType::Uint8Clamped => {
                 let bytes = [data[byte_offset]];
                 Ok(u8::from_ne_bytes(bytes) as f64)
-            },
+            }
             crate::core::TypedArrayType::Int16 => {
-                let bytes = [data[byte_offset], data[byte_offset+1]];
+                let bytes = [data[byte_offset], data[byte_offset + 1]];
                 Ok(i16::from_le_bytes(bytes) as f64) // Assume LE for now
-            },
+            }
             crate::core::TypedArrayType::Uint16 => {
-                let bytes = [data[byte_offset], data[byte_offset+1]];
+                let bytes = [data[byte_offset], data[byte_offset + 1]];
                 Ok(u16::from_le_bytes(bytes) as f64)
-            },
+            }
             crate::core::TypedArrayType::Int32 => {
-                 let mut b = [0u8; 4];
-                 b.copy_from_slice(&data[byte_offset..byte_offset+4]);
-                 Ok(i32::from_le_bytes(b) as f64)
-            },
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                Ok(i32::from_le_bytes(b) as f64)
+            }
             crate::core::TypedArrayType::Uint32 => {
-                 let mut b = [0u8; 4];
-                 b.copy_from_slice(&data[byte_offset..byte_offset+4]);
-                 Ok(u32::from_le_bytes(b) as f64)
-            },
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                Ok(u32::from_le_bytes(b) as f64)
+            }
             crate::core::TypedArrayType::Float32 => {
-                 let mut b = [0u8; 4];
-                 b.copy_from_slice(&data[byte_offset..byte_offset+4]);
-                 Ok(f32::from_le_bytes(b) as f64)
-            },
+                let mut b = [0u8; 4];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
+                Ok(f32::from_le_bytes(b) as f64)
+            }
             crate::core::TypedArrayType::Float64 => {
-                 let mut b = [0u8; 8];
-                 b.copy_from_slice(&data[byte_offset..byte_offset+8]);
-                 Ok(f64::from_le_bytes(b))
-            },
+                let mut b = [0u8; 8];
+                b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
+                Ok(f64::from_le_bytes(b))
+            }
             _ => Ok(0.0), // BigInt not supported in this helper yet
         }
     }
@@ -1612,38 +1749,38 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
             crate::core::TypedArrayType::Int8 => {
                 let b = (val as i8).to_le_bytes();
                 data[byte_offset] = b[0];
-            },
+            }
             crate::core::TypedArrayType::Uint8 | crate::core::TypedArrayType::Uint8Clamped => {
                 let b = (val as u8).to_le_bytes();
                 data[byte_offset] = b[0];
-            },
+            }
             crate::core::TypedArrayType::Int16 => {
                 let b = (val as i16).to_le_bytes();
                 data[byte_offset] = b[0];
-                data[byte_offset+1] = b[1];
-            },
+                data[byte_offset + 1] = b[1];
+            }
             crate::core::TypedArrayType::Uint16 => {
                 let b = (val as u16).to_le_bytes();
                 data[byte_offset] = b[0];
-                data[byte_offset+1] = b[1];
-            },
+                data[byte_offset + 1] = b[1];
+            }
             crate::core::TypedArrayType::Int32 => {
                 let b = (val as i32).to_le_bytes();
-                data[byte_offset..byte_offset+4].copy_from_slice(&b);
-            },
+                data[byte_offset..byte_offset + 4].copy_from_slice(&b);
+            }
             crate::core::TypedArrayType::Uint32 => {
                 let b = (val as u32).to_le_bytes();
-                data[byte_offset..byte_offset+4].copy_from_slice(&b);
-            },
+                data[byte_offset..byte_offset + 4].copy_from_slice(&b);
+            }
             crate::core::TypedArrayType::Float32 => {
                 let b = (val as f32).to_le_bytes();
-                data[byte_offset..byte_offset+4].copy_from_slice(&b);
-            },
+                data[byte_offset..byte_offset + 4].copy_from_slice(&b);
+            }
             crate::core::TypedArrayType::Float64 => {
                 let b = val.to_le_bytes();
-                data[byte_offset..byte_offset+8].copy_from_slice(&b);
-            },
-            _ => {},
+                data[byte_offset..byte_offset + 8].copy_from_slice(&b);
+            }
+            _ => {}
         }
         Ok(())
     }

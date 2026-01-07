@@ -1,3 +1,5 @@
+use crate::core::JSProxy;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::{
     core::{
         Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
@@ -9,11 +11,12 @@ use crate::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::core::JSProxy;
-use gc_arena::MutationContext;
-
 /// Handle Proxy constructor calls
-pub(crate) fn handle_proxy_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_proxy_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     if args.len() != 2 {
         return Err(raise_eval_error!(
             "Proxy constructor requires exactly two arguments: target and handler"
@@ -24,23 +27,32 @@ pub(crate) fn handle_proxy_constructor<'gc>(mc: &MutationContext<'gc>, args: &[E
     let handler = evaluate_expr(mc, env, &args[1])?;
 
     // Create the proxy
-    let proxy = gc_arena::Gc::new(mc, JSProxy { target: Box::new(target), handler: Box::new(handler),
-        revoked: false,
-    });
+    let proxy = Gc::new(
+        mc,
+        JSProxy {
+            target: Box::new(target),
+            handler: Box::new(handler),
+            revoked: false,
+        },
+    );
 
     // Create a wrapper object for the Proxy
     let proxy_obj = new_js_object_data(mc);
     // Store the actual proxy data
     proxy_obj.borrow_mut(mc).insert(
         PropertyKey::String("__proxy__".to_string()),
-        gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Proxy(proxy))),
+        Gc::new(mc, GcCell::new(Value::Proxy(proxy))),
     );
 
     Ok(Value::Object(proxy_obj))
 }
 
 /// Handle Proxy.revocable static method
-pub(crate) fn handle_proxy_revocable<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_proxy_revocable<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Expr],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     if args.len() != 2 {
         return Err(raise_eval_error!(
             "Proxy.revocable requires exactly two arguments: target and handler"
@@ -51,9 +63,14 @@ pub(crate) fn handle_proxy_revocable<'gc>(mc: &MutationContext<'gc>, args: &[Exp
     let handler = evaluate_expr(mc, env, &args[1])?;
 
     // Create the proxy
-    let proxy = gc_arena::Gc::new(mc, JSProxy { target: Box::new(target.clone()), handler: Box::new(handler.clone()),
-        revoked: false,
-    });
+    let proxy = Gc::new(
+        mc,
+        JSProxy {
+            target: Box::new(target.clone()),
+            handler: Box::new(handler.clone()),
+            revoked: false,
+        },
+    );
 
     // Create the revoke function as a closure that captures the proxy
     let revoke_proxy_ref = proxy.clone();
@@ -68,16 +85,16 @@ pub(crate) fn handle_proxy_revocable<'gc>(mc: &MutationContext<'gc>, args: &[Exp
     let revoke_env = new_js_object_data(mc);
     revoke_env
         .borrow_mut(mc)
-        .insert("__revoke_proxy".into(), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Proxy(revoke_proxy_ref))));
+        .insert("__revoke_proxy".into(), Gc::new(mc, GcCell::new(Value::Proxy(revoke_proxy_ref))));
 
-    let revoke_func = Value::Closure(gc_arena::Gc::new(mc, crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
+    let revoke_func = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data(mc);
     // Store the actual proxy data
     proxy_wrapper.borrow_mut(mc).insert(
         PropertyKey::String("__proxy__".to_string()),
-        gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Proxy(proxy))),
+        Gc::new(mc, GcCell::new(Value::Proxy(proxy))),
     );
 
     // Create the revocable result object
@@ -89,7 +106,13 @@ pub(crate) fn handle_proxy_revocable<'gc>(mc: &MutationContext<'gc>, args: &[Exp
 }
 
 /// Apply a proxy trap if available, otherwise fall back to default behavior
-pub(crate) fn apply_proxy_trap<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSProxy<'gc>>>, trap_name: &str, args: Vec<Value<'gc>>, default_fn: impl FnOnce() -> Result<Value<'gc>, JSError>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn apply_proxy_trap<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    trap_name: &str,
+    args: Vec<Value<'gc>>,
+    default_fn: impl FnOnce() -> Result<Value<'gc>, JSError>,
+) -> Result<Value<'gc>, JSError> {
     let proxy_borrow = proxy.borrow();
     if proxy_borrow.revoked {
         return Err(raise_eval_error!("Cannot perform operation on a revoked proxy"));
@@ -121,8 +144,14 @@ pub(crate) fn apply_proxy_trap<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena:
 }
 
 /// Get property from proxy target, applying get trap if available
-pub(crate) fn proxy_get_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSProxy<'gc>>>, key: &PropertyKey<'gc>) -> Result<Option<Value<'gc>>, JSError> {
-    let result = apply_proxy_trap(mc, proxy,
+pub(crate) fn proxy_get_property<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    key: &PropertyKey<'gc>,
+) -> Result<Option<Value<'gc>>, JSError> {
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
         "get",
         vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
         || {
@@ -140,12 +169,22 @@ pub(crate) fn proxy_get_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_aren
         },
     )?;
 
-    match result { Value::Undefined => Ok(None), val => Ok(Some(val)), }
+    match result {
+        Value::Undefined => Ok(None),
+        val => Ok(Some(val)),
+    }
 }
 
 /// Set property on proxy target, applying set trap if available
-pub(crate) fn proxy_set_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSProxy<'gc>>>, key: &PropertyKey<'gc>, value: Value<'gc>) -> Result<bool, JSError> {
-    let result = apply_proxy_trap(mc, proxy,
+pub(crate) fn proxy_set_property<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    key: &PropertyKey<'gc>,
+    value: Value<'gc>,
+) -> Result<bool, JSError> {
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
         "set",
         vec![(*proxy.borrow().target).clone(), property_key_to_value(key), value.clone()],
         || {
@@ -167,8 +206,14 @@ pub(crate) fn proxy_set_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_aren
 }
 
 /// Check if property exists on proxy target, applying has trap if available
-pub(crate) fn _proxy_has_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSProxy<'gc>>>, key: &PropertyKey<'gc>) -> Result<bool, JSError> {
-    let result = apply_proxy_trap(mc, proxy,
+pub(crate) fn _proxy_has_property<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    key: &PropertyKey<'gc>,
+) -> Result<bool, JSError> {
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
         "has",
         vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
         || {
@@ -187,8 +232,14 @@ pub(crate) fn _proxy_has_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_are
 }
 
 /// Delete property from proxy target, applying deleteProperty trap if available
-pub(crate) fn proxy_delete_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSProxy<'gc>>>, key: &PropertyKey<'gc>) -> Result<bool, JSError> {
-    let result = apply_proxy_trap(mc, proxy,
+pub(crate) fn proxy_delete_property<'gc>(
+    mc: &MutationContext<'gc>,
+    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    key: &PropertyKey<'gc>,
+) -> Result<bool, JSError> {
+    let result = apply_proxy_trap(
+        mc,
+        proxy,
         "deleteProperty",
         vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
         || {
@@ -215,6 +266,6 @@ pub(crate) fn proxy_delete_property<'gc>(mc: &MutationContext<'gc>, proxy: &gc_a
 fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
     match key {
         PropertyKey::String(s) => Value::String(utf8_to_utf16(s)),
-        PropertyKey::Symbol(sym_rc) => sym_rc.borrow().clone(),
+        PropertyKey::Symbol(sd) => Value::Symbol(sd.clone()),
     }
 }

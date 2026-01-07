@@ -1,12 +1,11 @@
+use crate::core::JSWeakSet;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::{
     core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
-use gc_arena::Mutation as MutationContext;
 use std::rc::Rc;
-
-use crate::core::JSWeakSet;
 
 /// Handle WeakSet constructor calls
 pub(crate) fn handle_weakset_constructor<'gc>(
@@ -14,7 +13,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let weakset = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSWeakSet { values: Vec::new() }));
+    let weakset = Gc::new(mc, GcCell::new(JSWeakSet { values: Vec::new() }));
 
     if !args.is_empty() {
         if args.len() == 1 {
@@ -31,7 +30,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
 /// Initialize WeakSet from an iterable
 fn initialize_weakset_from_iterable<'gc>(
     mc: &MutationContext<'gc>,
-    weakset: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakSet<'gc>>>,
+    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -46,7 +45,7 @@ fn initialize_weakset_from_iterable<'gc>(
 
                     // Check if value is an object
                     if let Value::Object(ref obj) = value {
-                        let weak_value = gc_arena::Gc::downgrade(*obj);
+                        let weak_value = Gc::downgrade(*obj);
                         weakset.borrow_mut(mc).values.push(weak_value);
                     } else {
                         return Err(raise_eval_error!("WeakSet values must be objects"));
@@ -67,13 +66,13 @@ fn initialize_weakset_from_iterable<'gc>(
 /// Check if WeakSet has a value and clean up dead entries
 fn weakset_has_value<'gc>(
     mc: &MutationContext<'gc>,
-    weakset: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakSet<'gc>>>,
+    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     value_obj_rc: &JSObjectDataPtr<'gc>,
 ) -> bool {
     let mut found = false;
     weakset.borrow_mut(mc).values.retain(|v| {
         if let Some(strong_v) = v.upgrade(mc) {
-            if gc_arena::Gc::ptr_eq(*value_obj_rc, strong_v) {
+            if Gc::ptr_eq(*value_obj_rc, strong_v) {
                 found = true;
             }
             true // Keep alive entries
@@ -87,13 +86,13 @@ fn weakset_has_value<'gc>(
 /// Delete a value from WeakSet and clean up dead entries
 fn weakset_delete_value<'gc>(
     mc: &MutationContext<'gc>,
-    weakset: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakSet<'gc>>>,
+    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     value_obj_rc: &JSObjectDataPtr<'gc>,
 ) -> bool {
     let mut deleted = false;
     weakset.borrow_mut(mc).values.retain(|v| {
         if let Some(strong_v) = v.upgrade(mc) {
-            if gc_arena::Gc::ptr_eq(*value_obj_rc, strong_v) {
+            if Gc::ptr_eq(*value_obj_rc, strong_v) {
                 deleted = true;
                 false // Remove this entry
             } else {
@@ -109,7 +108,7 @@ fn weakset_delete_value<'gc>(
 /// Handle WeakSet instance method calls
 pub(crate) fn handle_weakset_instance_method<'gc>(
     mc: &MutationContext<'gc>,
-    weakset: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakSet<'gc>>>,
+    weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
@@ -127,12 +126,12 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
                 _ => return Err(raise_eval_error!("WeakSet values must be objects")),
             };
 
-            let weak_value = gc_arena::Gc::downgrade(value_obj_rc);
+            let weak_value = Gc::downgrade(value_obj_rc);
 
             // Remove existing entry with same value (if still alive)
             weakset.borrow_mut(mc).values.retain(|v| {
                 if let Some(strong_v) = v.upgrade(mc) {
-                    !gc_arena::Gc::ptr_eq(value_obj_rc, strong_v)
+                    !Gc::ptr_eq(value_obj_rc, strong_v)
                 } else {
                     false // Remove dead entries
                 }

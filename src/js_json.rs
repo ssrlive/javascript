@@ -1,8 +1,8 @@
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use gc_arena::Mutation as MutationContext;
 
 pub fn handle_json_method<'gc>(
     mc: &MutationContext<'gc>,

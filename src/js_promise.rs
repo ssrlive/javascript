@@ -27,10 +27,9 @@ use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, JSPromise, PromiseState, Statement, StatementKind, Value, env_set,
     evaluate_expr, evaluate_statements, extract_closure_from_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Gc, GcCell, MutationContext};
 
-// use gc_arena::{Gc, MutationContext};
-// use gc_arena::lock::RefLock;
 // use crate::core::{JSPromise, PromiseState, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 
@@ -54,7 +53,7 @@ use std::time::{Duration, Instant};
 /// Tasks represent deferred callback execution to maintain JavaScript's
 /// asynchronous behavior where promise callbacks are always executed
 /// asynchronously, even when the promise is already settled.
-#[derive(Clone, Debug, gc_arena::Collect)]
+#[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 enum SettledResult<'gc> {
     Fulfilled(Value<'gc>),
@@ -65,21 +64,13 @@ enum SettledResult<'gc> {
 enum Task<'gc> {
     /// Task to execute fulfilled callbacks with the resolved value
     Resolution {
-        promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-        callbacks: Vec<(
-            Value<'gc>,
-            gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-            Option<JSObjectDataPtr<'gc>>,
-        )>,
+        promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
+        callbacks: Vec<(Value<'gc>, Gc<'gc, GcCell<JSPromise<'gc>>>, Option<JSObjectDataPtr<'gc>>)>,
     },
     /// Task to execute rejected callbacks with the rejection reason
     Rejection {
-        promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-        callbacks: Vec<(
-            Value<'gc>,
-            gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-            Option<JSObjectDataPtr<'gc>>,
-        )>,
+        promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
+        callbacks: Vec<(Value<'gc>, Gc<'gc, GcCell<JSPromise<'gc>>>, Option<JSObjectDataPtr<'gc>>)>,
     },
     /// Task to execute a setTimeout callback
     Timeout {
@@ -98,7 +89,7 @@ enum Task<'gc> {
     },
     /// Task to check for unhandled rejection after potential handler attachment
     UnhandledCheck {
-        promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+        promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
         reason: Value<'gc>,
     },
     // Previously this variant represented a queued unhandled-check task.
@@ -123,9 +114,7 @@ pub fn peek_unhandled_rejection<'gc>() -> Option<Value<'gc>> {
 /// Return the number of pending unhandled checks awaiting processing.
 pub fn pending_unhandled_count<'gc>() -> usize {
     // Count entries in the pending-unhandled list
-    PENDING_UNHANDLED_CHECKS.with(
-        |q: &std::cell::RefCell<Vec<(gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, Value<'gc>, usize)>>| q.borrow().len(),
-    )
+    PENDING_UNHANDLED_CHECKS.with(|q: &std::cell::RefCell<Vec<(Gc<'gc, GcCell<JSPromise<'gc>>>, Value<'gc>, usize)>>| q.borrow().len())
 }
 
 /// Return the current number of queued tasks in the global task queue.
@@ -158,7 +147,7 @@ pub fn current_tick() -> usize {
     /// idle tick; an entry is treated as unhandled when
     /// `CURRENT_TICK >= insertion_tick + UNHANDLED_GRACE`.
     #[allow(clippy::type_complexity)]
-    // static PENDING_UNHANDLED_CHECKS: RefCell<Vec<(gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, Value, usize)>> = const { RefCell::new(Vec::new()) };
+    // static PENDING_UNHANDLED_CHECKS: RefCell<Vec<(Gc<'gc, GcCell<JSPromise<'gc>>>, Value, usize)>> = const { RefCell::new(Vec::new()) };
 } */
 
 /// Tracks how many nested invocations of the promise event loop are active.
@@ -215,7 +204,7 @@ fn process_task<'gc>(task: Task<'gc>) -> Result<(), JSError> {
                     log::trace!(
                         "[promise] invoking callback - params_len={} captured_env_ptr={:p}",
                         params.len(),
-                        gc_arena::Gc::as_ptr(*captured_env)
+                        Gc::as_ptr(*captured_env)
                     );
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
                     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, caller_env_opt.as_ref())?;
@@ -332,7 +321,7 @@ fn process_task<'gc>(task: Task<'gc>) -> Result<(), JSError> {
             }
         }
         Task::UnhandledCheck { promise, reason } => {
-            log::trace!("Processing UnhandledCheck task for promise ptr={:p}", gc_arena::Gc::as_ptr(promise));
+            log::trace!("Processing UnhandledCheck task for promise ptr={:p}", Gc::as_ptr(promise));
             // Check if the promise still has no rejection handlers
             let promise_borrow = promise.borrow();
             if promise_borrow.on_rejected.is_empty() {
@@ -340,11 +329,11 @@ fn process_task<'gc>(task: Task<'gc>) -> Result<(), JSError> {
                 let insertion_tick = CURRENT_TICK.load(Ordering::SeqCst);
                 log::trace!(
                     "UnhandledCheck: adding to PENDING_UNHANDLED_CHECKS for promise ptr={:p} insertion_tick={}",
-                    gc_arena::Gc::as_ptr(promise),
+                    Gc::as_ptr(promise),
                     insertion_tick
                 );
                 PENDING_UNHANDLED_CHECKS.with(
-                    |pending: &std::cell::RefCell<Vec<(gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, Value<'gc>, usize)>>| {
+                    |pending: &std::cell::RefCell<Vec<(Gc<'gc, GcCell<JSPromise<'gc>>>, Value<'gc>, usize)>>| {
                         pending.borrow_mut().push((promise.clone(), reason, insertion_tick));
                     },
                 );
@@ -457,7 +446,7 @@ pub fn run_event_loop() -> Result<PollResult, JSError> {
         let current = CURRENT_TICK.fetch_add(1, Ordering::SeqCst) + 1;
         log::debug!("CURRENT_TICK advanced from {} to {}", prev_tick, current);
         PENDING_UNHANDLED_CHECKS.with(
-            |pending: &std::cell::RefCell<Vec<(gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, Value<'gc>, usize)>>| {
+            |pending: &std::cell::RefCell<Vec<(Gc<'gc, GcCell<JSPromise<'gc>>>, Value<'gc>, usize)>>| {
                 let mut pending_borrow = pending.borrow_mut();
                 if !pending_borrow.is_empty() {
                     log::trace!(
@@ -465,10 +454,10 @@ pub fn run_event_loop() -> Result<PollResult, JSError> {
                         pending_borrow.len(),
                         current
                     );
-                    let mut new_pending: Vec<(gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, Value, usize)> = Vec::new();
+                    let mut new_pending: Vec<(Gc<'gc, GcCell<JSPromise<'gc>>>, Value, usize)> = Vec::new();
                     // Drain current list and decide whether to record or re-queue
                     for (promise, reason, insertion_tick) in pending_borrow.drain(..) {
-                        let promise_ptr = gc_arena::Gc::as_ptr(promise);
+                        let promise_ptr = Gc::as_ptr(promise);
                         log::trace!(
                             "pending entry: promise ptr={:p} insertion_tick={} expires_at={}",
                             promise_ptr,
@@ -539,34 +528,22 @@ pub fn run_event_loop() -> Result<PollResult, JSError> {
 /// * `completed` - Number of promises that have settled (fulfilled or rejected)
 /// * `total` - Total number of promises being tracked
 /// * `result_promise` - The main Promise.allSettled promise to resolve when all settle
-#[derive(Clone, Debug, gc_arena::Collect)]
+#[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
 pub struct AllSettledState<'gc> {
     pub results: Vec<Option<SettledResult>>,
     pub completed: usize,
     pub total: usize,
-    pub result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+    pub result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     pub env: JSObjectDataPtr,
 }
 
-fn create_resolve_function_direct<'gc>(
-    mc: &MutationContext<'gc>,
-    promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-) -> Value<'gc> {
-    Value::Object(gc_arena::Gc::new(
-        mc,
-        gc_arena::lock::RefLock::new(crate::core::JSObjectData::new()),
-    ))
+fn create_resolve_function_direct<'gc>(mc: &MutationContext<'gc>, promise: Gc<'gc, GcCell<JSPromise<'gc>>>) -> Value<'gc> {
+    Value::Object(Gc::new(mc, GcCell::new(crate::core::JSObjectData::new())))
 }
 
-fn create_reject_function_direct<'gc>(
-    mc: &MutationContext<'gc>,
-    promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
-) -> Value<'gc> {
-    Value::Object(gc_arena::Gc::new(
-        mc,
-        gc_arena::lock::RefLock::new(crate::core::JSObjectData::new()),
-    ))
+fn create_reject_function_direct<'gc>(mc: &MutationContext<'gc>, promise: Gc<'gc, GcCell<JSPromise<'gc>>>) -> Value<'gc> {
+    Value::Object(Gc::new(mc, GcCell::new(crate::core::JSObjectData::new())))
 }
 
 impl<'gc> AllSettledState<'gc> {
@@ -576,7 +553,7 @@ impl<'gc> AllSettledState<'gc> {
     /// * `total` - Number of promises to track
     /// * `result_promise` - The promise to resolve when all promises settle
     /// * `env` - The environment to create arrays in
-    pub fn new(total: usize, result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, env: JSObjectDataPtr) -> Self {
+    pub fn new(total: usize, result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>, env: JSObjectDataPtr) -> Self {
         AllSettledState {
             results: vec![None; total],
             completed: 0,
@@ -731,7 +708,7 @@ pub fn handle_promise_constructor_direct(args: &[crate::core::Expr], env: &JSObj
     };
 
     // Create the promise directly
-    let promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+    let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
     let promise_obj = make_promise_object()?;
     obj_set_key_value(mc, &promise_obj, &"__promise".into(), Value::Promise(promise.clone()))?;
 
@@ -802,12 +779,12 @@ fn perform_promise_then<'gc>(
 
 pub fn handle_promise_then_direct<'gc>(
     mc: &MutationContext<'gc>,
-    promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+    promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     args: &[Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a new promise for chaining
-    let new_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
     obj_set_key_value(mc, &new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
@@ -849,7 +826,7 @@ pub fn handle_promise_then_direct<'gc>(
             },
             None,
         );
-        let pass_through_fulfill = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+        let pass_through_fulfill = Value::Closure(Gc::new(mc, closure_data));
         promise_borrow
             .on_fulfilled
             .push((pass_through_fulfill, new_promise.clone(), Some(env.clone())));
@@ -878,7 +855,7 @@ pub fn handle_promise_then_direct<'gc>(
             None,
         );
 
-        let pass_through_reject = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+        let pass_through_reject = Value::Closure(Gc::new(mc, closure_data));
         promise_borrow
             .on_rejected
             .push((pass_through_reject, new_promise.clone(), Some(env.clone())));
@@ -964,12 +941,12 @@ pub fn handle_promise_catch(promise_obj: &JSObjectDataPtr, args: &[crate::core::
 /// # Returns
 /// * `Result<Value, JSError>` - New promise for chaining or error
 pub fn handle_promise_catch_direct(
-    promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+    promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     args: &[crate::core::Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a new promise for chaining
-    let new_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
     obj_set_key_value(mc, &new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
@@ -1000,7 +977,7 @@ pub fn handle_promise_catch_direct(
         None,
     );
 
-    let pass_through_fulfill = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+    let pass_through_fulfill = Value::Closure(Gc::new(mc, closure_data));
     promise_borrow
         .on_fulfilled
         .push((pass_through_fulfill, new_promise.clone(), Some(env.clone())));
@@ -1027,7 +1004,7 @@ pub fn handle_promise_catch_direct(
             },
             None,
         );
-        let pass_through_reject = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+        let pass_through_reject = Value::Closure(Gc::new(mc, closure_data));
         promise_borrow
             .on_rejected
             .push((pass_through_reject, new_promise.clone(), Some(env.clone())));
@@ -1105,12 +1082,12 @@ pub fn handle_promise_finally(promise_obj: &JSObjectDataPtr, args: &[crate::core
 /// # Returns
 /// * `Result<Value, JSError>` - New promise for chaining or error
 pub fn handle_promise_finally_direct(
-    promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+    promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
     args: &[crate::core::Expr],
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a new promise for chaining
-    let new_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
     let new_promise_obj = make_promise_object()?;
     obj_set_key_value(mc, &new_promise_obj, &"__promise".into(), Value::Promise(new_promise.clone()))?;
 
@@ -1138,14 +1115,14 @@ pub fn handle_promise_finally_direct(
             } else {
                 // No-op if no callback provided
                 let closure_data = ClosureData::new(&[], &[], &new_env, None);
-                let noop = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+                let noop = Value::Closure(Gc::new(mc, closure_data));
                 obj_set_key_value(mc, &new_env, &"finally_func".into(), noop)?;
             }
             new_env
         },
         None,
     );
-    let finally_callback = Value::Closure(gc_arena::Gc::new(mc, closure_data));
+    let finally_callback = Value::Closure(Gc::new(mc, closure_data));
 
     // Add the same callback to both fulfilled and rejected lists
     let mut promise_borrow = promise.borrow_mut(mc);
@@ -1192,7 +1169,7 @@ pub fn handle_promise_finally_direct(
 /// - Sets promise state to Fulfilled and stores the value
 /// - Queues all on_fulfilled callbacks for async execution
 /// - Clears the callback list after queuing
-pub fn resolve_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, value: Value) {
+pub fn resolve_promise<'gc>(mc: &MutationContext<'gc>, promise: &Gc<'gc, GcCell<JSPromise<'gc>>>, value: Value) {
     log::trace!("resolve_promise called");
     let mut promise_borrow = promise.borrow_mut(mc);
     if let PromiseState::Pending = promise_borrow.state {
@@ -1204,7 +1181,7 @@ pub fn resolve_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'g
             // Adopt the state of the other promise
             let current_promise = promise.clone();
 
-            let then_callback = Value::Closure(gc_arena::Gc::new(
+            let then_callback = Value::Closure(Gc::new(
                 mc,
                 ClosureData::new(
                     &[DestructuringElement::Variable("val".to_string(), None)],
@@ -1224,7 +1201,7 @@ pub fn resolve_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'g
                 ),
             ));
 
-            let catch_callback = Value::Closure(gc_arena::Gc::new(
+            let catch_callback = Value::Closure(Gc::new(
                 mc,
                 ClosureData::new(
                     &[DestructuringElement::Variable("reason".to_string(), None)],
@@ -1300,7 +1277,7 @@ pub fn resolve_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'g
 /// - Sets promise state to Rejected and stores the reason
 /// - Queues all on_rejected callbacks for async execution
 /// - Clears the callback list after queuing
-pub fn reject_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>, reason: Value) {
+pub fn reject_promise<'gc>(mc: &MutationContext<'gc>, promise: &Gc<'gc, GcCell<JSPromise<'gc>>>, reason: Value) {
     let mut promise_borrow = promise.borrow_mut();
     // Helpful debug logging for rejected promises (especially when rejecting
     // with JS Error-like objects) to help track unhandled rejections.
@@ -1308,7 +1285,7 @@ pub fn reject_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'gc
         if let Ok(Some(ctor_rc)) = obj_get_key_value(obj, &"constructor".into()) {
             log::debug!("reject_promise: rejecting with object whose constructor = {:?}", ctor_rc.borrow());
         } else {
-            log::debug!("reject_promise: rejecting with object ptr={:p}", gc_arena::Gc::as_ptr(*obj));
+            log::debug!("reject_promise: rejecting with object ptr={:p}", Gc::as_ptr(*obj));
         }
     } else {
         log::debug!("reject_promise: rejecting with value={}", value_to_string(&reason));
@@ -1331,7 +1308,7 @@ pub fn reject_promise<'gc>(mc: &MutationContext<'gc>, promise: &gc_arena::Gc<'gc
             // after potential handler attachment (avoids race with synchronous .then/.catch)
             log::trace!(
                 "reject_promise: queuing UnhandledCheck task for promise ptr={:p}",
-                gc_arena::Gc::as_ptr(promise)
+                Gc::as_ptr(*promise)
             );
             queue_task(Task::UnhandledCheck {
                 promise: promise.clone(),
@@ -1411,7 +1388,7 @@ pub fn handle_promise_static_method<'gc>(
             };
 
             // Create a new promise that resolves when all promises resolve
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
             obj_set_key_value(mc, &result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
@@ -1475,7 +1452,7 @@ pub fn handle_promise_static_method<'gc>(
                                     }
                                     PromiseState::Pending => {
                                         // Promise still pending, attach callbacks
-                                        let then_callback = Value::Closure(gc_arena::Gc::new(
+                                        let then_callback = Value::Closure(Gc::new(
                                             mc,
                                             ClosureData::new(
                                                 &[DestructuringElement::Variable("value".to_string(), None)],
@@ -1501,7 +1478,7 @@ pub fn handle_promise_static_method<'gc>(
                                             ),
                                         ));
 
-                                        let catch_callback = Value::Closure(gc_arena::Gc::new(
+                                        let catch_callback = Value::Closure(Gc::new(
                                             mc,
                                             ClosureData::new(
                                                 &[DestructuringElement::Variable("reason".to_string(), None)],
@@ -1644,7 +1621,7 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
             obj_set_key_value(mc, &result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
@@ -1656,20 +1633,18 @@ pub fn handle_promise_static_method<'gc>(
             }
 
             // Create dedicated state structure for coordination
-            let state = gc_arena::Gc::new(
+            let state = Gc::new(
                 mc,
-                gc_arena::lock::RefLock::new(AllSettledState::new(num_promises, result_promise.clone(), env.clone())),
+                GcCell::new(AllSettledState::new(num_promises, result_promise.clone(), env.clone())),
             );
 
             // Store state in global storage and get its index
-            let state_index = ALLSETTLED_STATES.with(
-                |states: &std::cell::RefCell<Vec<gc_arena::Gc<'gc, gc_arena::lock::RefLock<AllSettledState<'gc>>>>>| {
-                    let mut states_borrow = states.borrow_mut(mc);
-                    let index = states_borrow.len();
-                    states_borrow.push(state.clone());
-                    index
-                },
-            );
+            let state_index = ALLSETTLED_STATES.with(|states: &std::cell::RefCell<Vec<Gc<'gc, GcCell<AllSettledState<'gc>>>>>| {
+                let mut states_borrow = states.borrow_mut(mc);
+                let index = states_borrow.len();
+                states_borrow.push(state.clone());
+                index
+            });
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 match promise_val {
@@ -1754,7 +1729,7 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
             obj_set_key_value(mc, &result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
@@ -1785,7 +1760,7 @@ pub fn handle_promise_static_method<'gc>(
                     Value::Object(obj) => {
                         if let Some(promise_rc) = obj_get_key_value(&obj, &"__promise".into())? {
                             if let Value::Promise(_p) = &*promise_rc.borrow() {
-                                let then_callback = Value::Closure(gc_arena::Gc::new(
+                                let then_callback = Value::Closure(Gc::new(
                                     mc,
                                     ClosureData::new(
                                         &[DestructuringElement::Variable("value".to_string(), None)],
@@ -1810,7 +1785,7 @@ pub fn handle_promise_static_method<'gc>(
                                     ),
                                 ));
 
-                                let catch_callback = Value::Closure(gc_arena::Gc::new(
+                                let catch_callback = Value::Closure(Gc::new(
                                     mc,
                                     ClosureData::new(
                                         &[DestructuringElement::Variable("reason".to_string(), None)],
@@ -1895,7 +1870,7 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             let result_promise_obj = make_promise_object()?;
             obj_set_key_value(mc, &result_promise_obj, &"__promise".into(), Value::Promise(result_promise.clone()))?;
 
@@ -1921,7 +1896,7 @@ pub fn handle_promise_static_method<'gc>(
                                     }
                                     PromiseState::Pending => {
                                         // Promise still pending, attach callbacks
-                                        let then_callback = Value::Closure(gc_arena::Gc::new(
+                                        let then_callback = Value::Closure(Gc::new(
                                             mc,
                                             ClosureData::new(
                                                 &[DestructuringElement::Variable("value".to_string(), None)],
@@ -1946,7 +1921,7 @@ pub fn handle_promise_static_method<'gc>(
                                             ),
                                         ));
 
-                                        let catch_callback = Value::Closure(gc_arena::Gc::new(
+                                        let catch_callback = Value::Closure(Gc::new(
                                             mc,
                                             ClosureData::new(
                                                 &[DestructuringElement::Variable("reason".to_string(), None)],
@@ -2026,7 +2001,7 @@ pub fn handle_promise_static_method<'gc>(
             }
 
             // Otherwise create a new resolved promise holding the value
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             {
                 let mut p = result_promise.borrow_mut(mc);
                 p.state = PromiseState::Fulfilled(value.clone());
@@ -2044,7 +2019,7 @@ pub fn handle_promise_static_method<'gc>(
                 evaluate_expr(mc, env, &args[0])?
             };
 
-            let result_promise = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSPromise::new()));
+            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
             {
                 let mut p = result_promise.borrow_mut(mc);
                 p.state = PromiseState::Rejected(reason.clone());
@@ -2196,7 +2171,7 @@ pub fn __internal_promise_allsettled_reject(idx: f64, reason: Value, shared_stat
 /// # Arguments
 /// * `value` - The resolved value from the first fulfilled promise
 /// * `result_promise` - The main Promise.any promise to resolve
-pub fn __internal_promise_any_resolve(value: Value, result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>) {
+pub fn __internal_promise_any_resolve(value: Value, result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>) {
     resolve_promise(mc, result_promise, value);
 }
 
@@ -2223,7 +2198,7 @@ pub fn __internal_promise_any_reject<'gc>(
     rejections: Gc<'gc, RefLock<Vec<Option<Value>>>>,
     rejected_count: Gc<'gc, RefLock<usize>>,
     total: usize,
-    result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>,
+    result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>,
 ) -> Result<(), JSError> {
     let idx = idx as usize;
     rejections.borrow_mut()[idx] = Some(reason);
@@ -2262,7 +2237,7 @@ pub fn __internal_promise_any_reject<'gc>(
 /// # Arguments
 /// * `value` - The resolved/rejected value from the first settled promise
 /// * `result_promise` - The main Promise.race promise to resolve/reject
-pub fn __internal_promise_race_resolve(value: Value, result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>) {
+pub fn __internal_promise_race_resolve(value: Value, result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>) {
     resolve_promise(mc, result_promise, value);
 }
 
@@ -2274,7 +2249,7 @@ pub fn __internal_promise_race_resolve(value: Value, result_promise: gc_arena::G
 /// # Arguments
 /// * `reason` - The rejection reason from the first rejected promise
 /// * `result_promise` - The main Promise.race promise to reject
-pub fn __internal_promise_race_reject(reason: Value, result_promise: gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSPromise<'gc>>>) {
+pub fn __internal_promise_race_reject(reason: Value, result_promise: Gc<'gc, GcCell<JSPromise<'gc>>>) {
     reject_promise(mc, &result_promise, reason);
 }
 
@@ -2292,19 +2267,17 @@ pub fn __internal_allsettled_state_record_fulfilled(state_index: f64, index: f64
     let state_index = state_index as usize;
     let index = index as usize;
 
-    ALLSETTLED_STATES.with(
-        |states: &std::cell::RefCell<Vec<gc_arena::Gc<'gc, gc_arena::lock::RefLock<AllSettledState<'gc>>>>>| {
-            let states_borrow = states.borrow();
-            if state_index < states_borrow.len() {
-                let state = &states_borrow[state_index];
-                log::trace!("Recording fulfilled for index {} in state {}", index, state_index);
-                state.borrow_mut(mc).record_fulfilled(index, value)?;
-            } else {
-                log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
-            }
-            Ok::<(), JSError>(())
-        },
-    )?;
+    ALLSETTLED_STATES.with(|states: &std::cell::RefCell<Vec<Gc<'gc, GcCell<AllSettledState<'gc>>>>>| {
+        let states_borrow = states.borrow();
+        if state_index < states_borrow.len() {
+            let state = &states_borrow[state_index];
+            log::trace!("Recording fulfilled for index {} in state {}", index, state_index);
+            state.borrow_mut(mc).record_fulfilled(index, value)?;
+        } else {
+            log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
+        }
+        Ok::<(), JSError>(())
+    })?;
     Ok(())
 }
 
@@ -2322,19 +2295,17 @@ pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64,
     let state_index = state_index as usize;
     let index = index as usize;
 
-    ALLSETTLED_STATES.with(
-        |states: &std::cell::RefCell<Vec<gc_arena::Gc<'gc, gc_arena::lock::RefLock<AllSettledState<'gc>>>>>| {
-            let states_borrow = states.borrow();
-            if state_index < states_borrow.len() {
-                let state = &states_borrow[state_index];
-                log::trace!("Recording rejected for index {} in state {}", index, state_index);
-                state.borrow_mut(mc).record_rejected(index, reason)?;
-            } else {
-                log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
-            }
-            Ok::<(), JSError>(())
-        },
-    )?;
+    ALLSETTLED_STATES.with(|states: &std::cell::RefCell<Vec<Gc<'gc, GcCell<AllSettledState<'gc>>>>>| {
+        let states_borrow = states.borrow();
+        if state_index < states_borrow.len() {
+            let state = &states_borrow[state_index];
+            log::trace!("Recording rejected for index {} in state {}", index, state_index);
+            state.borrow_mut(mc).record_rejected(index, reason)?;
+        } else {
+            log::trace!("Invalid state_index {} (len={})", state_index, states_borrow.len());
+        }
+        Ok::<(), JSError>(())
+    })?;
     Ok(())
 }
 
@@ -2350,7 +2321,7 @@ pub fn __internal_allsettled_state_record_rejected(state_index: f64, index: f64,
 /// # Returns
 /// A Value::Closure that can be used as a then callback
 fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value {
-    Value::Closure(gc_arena::Gc::new(
+    Value::Closure(Gc::new(
         mc,
         ClosureData::new(
             &[DestructuringElement::Variable("value".to_string(), None)],
@@ -2380,7 +2351,7 @@ fn create_allsettled_resolve_callback(state_index: usize, index: usize) -> Value
 /// # Returns
 /// A Value::Closure that can be used as a catch callback
 fn create_allsettled_reject_callback(state_index: usize, index: usize) -> Value {
-    Value::Closure(gc_arena::Gc::new(
+    Value::Closure(Gc::new(
         mc,
         ClosureData::new(
             &[DestructuringElement::Variable("reason".to_string(), None)],

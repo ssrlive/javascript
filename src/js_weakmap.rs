@@ -1,11 +1,10 @@
+use crate::core::JSWeakMap;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::{
     core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
-use gc_arena::Mutation as MutationContext;
-
-use crate::core::JSWeakMap;
 
 /// Handle WeakMap constructor calls
 pub(crate) fn handle_weakmap_constructor<'gc>(
@@ -13,7 +12,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let weakmap = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(JSWeakMap { entries: Vec::new() }));
+    let weakmap = Gc::new(mc, GcCell::new(JSWeakMap { entries: Vec::new() }));
 
     if !args.is_empty() {
         if args.len() == 1 {
@@ -30,7 +29,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
 /// Initialize WeakMap from an iterable
 fn initialize_weakmap_from_iterable<'gc>(
     mc: &MutationContext<'gc>,
-    weakmap: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakMap<'gc>>>,
+    weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
@@ -55,7 +54,7 @@ fn initialize_weakmap_from_iterable<'gc>(
                         if let Value::Object(ref obj) = key_obj {
                             // Note: JSWeakMap currently holds strong references (Gc), so this is effectively a Map.
                             // Real WeakMap behavior requires ephemeron support in gc-arena.
-                            weakmap.borrow_mut(mc).entries.push((gc_arena::Gc::downgrade(*obj), value_obj));
+                            weakmap.borrow_mut(mc).entries.push((Gc::downgrade(*obj), value_obj));
                         } else {
                             return Err(raise_eval_error!("WeakMap keys must be objects"));
                         }
@@ -74,10 +73,10 @@ fn initialize_weakmap_from_iterable<'gc>(
 }
 
 /// Check if WeakMap has a key
-fn weakmap_has_key<'gc>(weakmap: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakMap<'gc>>>, key_obj_rc: &JSObjectDataPtr<'gc>) -> bool {
+fn weakmap_has_key<'gc>(weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key_obj_rc: &JSObjectDataPtr<'gc>) -> bool {
     let weakmap = weakmap.borrow();
     for (k, _) in &weakmap.entries {
-        if k.upgrade(mc).map_or(false, |p| gc_arena::Gc::ptr_eq(p, *key_obj_rc)) {
+        if k.upgrade(mc).map_or(false, |p| Gc::ptr_eq(p, *key_obj_rc)) {
             return true;
         }
     }
@@ -87,19 +86,21 @@ fn weakmap_has_key<'gc>(weakmap: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWe
 /// Delete a key from WeakMap
 fn weakmap_delete_key<'gc>(
     mc: &MutationContext<'gc>,
-    weakmap: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakMap<'gc>>>,
+    weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     key_obj_rc: &JSObjectDataPtr<'gc>,
 ) -> bool {
     let mut weakmap_mut = weakmap.borrow_mut(mc);
     let len_before = weakmap_mut.entries.len();
-    weakmap_mut.entries.retain(|(k, _)| !k.upgrade(mc).map_or(false, |p| gc_arena::Gc::ptr_eq(p, *key_obj_rc)));
+    weakmap_mut
+        .entries
+        .retain(|(k, _)| !k.upgrade(mc).map_or(false, |p| Gc::ptr_eq(p, *key_obj_rc)));
     weakmap_mut.entries.len() < len_before
 }
 
 /// Handle WeakMap instance method calls
 pub(crate) fn handle_weakmap_instance_method<'gc>(
     mc: &MutationContext<'gc>,
-    weakmap: &gc_arena::Gc<'gc, gc_arena::lock::RefLock<JSWeakMap<'gc>>>,
+    weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     method: &str,
     args: &[Expr],
     env: &JSObjectDataPtr<'gc>,
@@ -122,10 +123,10 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             weakmap
                 .borrow_mut(mc)
                 .entries
-                .retain(|(k, _)| !k.upgrade(mc).map_or(false, |p| gc_arena::Gc::ptr_eq(p, key_obj_rc)));
+                .retain(|(k, _)| !k.upgrade(mc).map_or(false, |p| Gc::ptr_eq(p, key_obj_rc)));
 
             // Add new entry
-            weakmap.borrow_mut(mc).entries.push((gc_arena::Gc::downgrade(key_obj_rc), value));
+            weakmap.borrow_mut(mc).entries.push((Gc::downgrade(key_obj_rc), value));
 
             Ok(Value::WeakMap(weakmap.clone()))
         }
@@ -142,7 +143,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
             let weakmap_ref = weakmap.borrow();
             for (k, v) in &weakmap_ref.entries {
-                if k.upgrade(mc).map_or(false, |p| gc_arena::Gc::ptr_eq(p, *key_obj_rc)) {
+                if k.upgrade(mc).map_or(false, |p| Gc::ptr_eq(p, *key_obj_rc)) {
                     return Ok(v.clone());
                 }
             }

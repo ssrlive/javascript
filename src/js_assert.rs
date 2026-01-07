@@ -1,8 +1,8 @@
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value};
 use crate::core::{evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value, prepare_function_call_env};
 use crate::error::JSError;
 use crate::unicode::utf16_to_utf8;
-use gc_arena::Mutation as MutationContext;
 
 /// Handle assert object method calls
 pub fn handle_assert_method<'gc>(

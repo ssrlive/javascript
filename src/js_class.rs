@@ -1,5 +1,5 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
-use gc_arena::MutationContext;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 
 use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Statement, Value, evaluate_expr, evaluate_statements, new_js_object_data,

@@ -1,3 +1,4 @@
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::{
     core::{
         DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr, prepare_function_call_env,
@@ -22,26 +23,30 @@ pub fn handle_generator_function_call(
     env: &JSObjectDataPtr,
 ) -> Result<Value, JSError> {
     // Create a new generator object
-    let generator = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSGenerator {
-        params: params.to_vec(),
-        body: body.to_vec(),
-        env: env.clone(),
-        state: crate::core::GeneratorState::NotStarted,
-    }));
+    let generator = Gc::new(
+        mc,
+        GcCell::new(crate::core::JSGenerator {
+            params: params.to_vec(),
+            body: body.to_vec(),
+            env: env.clone(),
+            state: crate::core::GeneratorState::NotStarted,
+        }),
+    );
 
     // Create a wrapper object for the generator
-    let gen_obj = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSObjectData::new()));
+    let gen_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
     // Store the actual generator data
     gen_obj.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("__generator__".to_string()),
-        gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Generator(generator))),
+        Gc::new(mc, GcCell::new(Value::Generator(generator))),
     );
 
     Ok(Value::Object(gen_obj))
 }
 
 /// Handle generator instance method calls (like `gen.next()`, `gen.return()`, etc.)
-pub fn handle_generator_instance_method<'gc>(mc: &MutationContext<'gc>, 
+pub fn handle_generator_instance_method<'gc>(
+    mc: &MutationContext<'gc>,
     generator: &Rc<RefCell<crate::core::JSGenerator>>,
     method: &str,
     args: &[Expr],
@@ -465,7 +470,7 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 // function-like frame whose prototype is the captured env.
                 if let Some(inner_expr_box) = yield_inner {
                     let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
-            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
+                    crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => return Ok(create_iterator_result(mc, val, false)),
                         Err(_) => return Ok(create_iterator_result(mc, Value::Undefined, false)),
@@ -567,17 +572,18 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
 
 /// Create an iterator result object {value: value, done: done}
 fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Value<'gc> {
-    let obj = gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(crate::core::JSObjectData::default()));
+    let obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::default()));
 
     // Set value property
     obj.borrow_mut(mc)
         .properties
-        .insert(PropertyKey::String("value".to_string()), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(value)));
+        .insert(PropertyKey::String("value".to_string()), Gc::new(mc, GcCell::new(value)));
 
     // Set done property
-    obj.borrow_mut(mc)
-        .properties
-        .insert(PropertyKey::String("done".to_string()), gc_arena::Gc::new(mc, gc_arena::lock::RefLock::new(Value::Boolean(done))));
+    obj.borrow_mut(mc).properties.insert(
+        PropertyKey::String("done".to_string()),
+        Gc::new(mc, GcCell::new(Value::Boolean(done))),
+    );
 
     Value::Object(obj)
 }

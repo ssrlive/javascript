@@ -1,8 +1,8 @@
 use crate::core::JSObjectDataPtr;
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, Value, evaluate_expr};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use gc_arena::Mutation as MutationContext;
 
 pub(crate) fn handle_sprintf_call<'gc>(
     mc: &MutationContext<'gc>,

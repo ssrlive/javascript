@@ -3,6 +3,7 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::handle_array_static_method;
 use crate::js_date::{handle_date_method, handle_date_static_method};
+use crate::js_os::handle_os_method;
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
@@ -696,6 +697,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         }
                     } else if let Some(method_name) = name.strip_prefix("console.") {
                         crate::js_console::handle_console_method(mc, method_name, &eval_args, env)
+                    } else if let Some(method) = name.strip_prefix("os.path.") {
+                        let this_val = this_val.clone().unwrap_or(Value::Object(*env));
+                        Ok(handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("os.") {
+                        let this_val = this_val.clone().unwrap_or(Value::Object(*env));
+                        Ok(handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Date.prototype.") {

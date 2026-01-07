@@ -3,6 +3,7 @@ use crate::js_array::initialize_array;
 use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_math::initialize_math;
+use crate::js_os::initialize_os_module;
 use crate::js_regexp::initialize_regexp;
 use crate::js_string::initialize_string;
 use crate::raise_eval_error;
@@ -70,6 +71,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
+    initialize_os_module(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;

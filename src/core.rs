@@ -1,5 +1,6 @@
 use crate::error::JSError;
 use crate::js_array::initialize_array;
+use crate::js_bigint::initialize_bigint;
 use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_math::initialize_math;
@@ -72,6 +73,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
     initialize_os_module(mc, env)?;
+    initialize_bigint(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;

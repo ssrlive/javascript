@@ -445,6 +445,74 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
         }
     }
 }
+// Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
+pub fn to_primitive<'gc>(val: &Value<'gc>, _hint: &str, _env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+    match val {
+        Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => Ok(val.clone()),
+        Value::Object(_object) => {
+            /*
+            // Prefer explicit [Symbol.toPrimitive] if present and callable
+            if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
+                let key = PropertyKey::Symbol(tp_sym.clone());
+                if let Some(method_rc) = obj_get_key_value(object, &key)? {
+                    let method_val = method_rc.borrow().clone();
+                    // Accept direct closures or function-objects that wrap a closure
+                    if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
+                        // Pass hint as first param if the function declares params
+                        let args = vec![Value::String(utf8_to_utf16(hint))];
+                        let func_env = prepare_function_call_env(
+                            Some(&captured_env),
+                            Some(Value::Object(object.clone())),
+                            Some(&params),
+                            &args,
+                            None,
+                            None,
+                        )?;
+                        let result = evaluate_statements(&func_env, &body)?;
+                        match result {
+                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
+                                return Ok(result);
+                            }
+                            _ => {
+                                return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
+                            }
+                        }
+                    } else {
+                        // Not a closure/minimally supported callable - fall through to default algorithm
+                    }
+                }
+            }
+
+            // Default algorithm: order depends on hint
+            if hint == "string" {
+                // toString -> valueOf
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                    return Ok(to_s);
+                }
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
+                if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                    return Ok(val_of);
+                }
+            } else {
+                // number or default: valueOf -> toString
+                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
+                if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                    return Ok(val_of);
+                }
+                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
+                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                    return Ok(to_s);
+                }
+            }
+
+            Err(raise_type_error!("Cannot convert object to primitive"))
+            // */
+            todo!("to_primitive not yet implemented for objects");
+        }
+        _ => Ok(val.clone()),
+    }
+}
 
 pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     match val {

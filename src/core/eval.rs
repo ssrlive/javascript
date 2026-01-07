@@ -2,6 +2,7 @@
 
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::handle_array_static_method;
+use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method};
 use crate::js_os::handle_os_method;
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
@@ -469,6 +470,34 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     e
 }
 
+fn get_primitive_prototype_property<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    obj_val: &Value<'gc>,
+    key: &PropertyKey<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let proto_name = match obj_val {
+        Value::BigInt(_) => "BigInt",
+        Value::Number(_) => "Number",
+        Value::String(_) => "String",
+        Value::Boolean(_) => "Boolean",
+        _ => return Ok(Value::Undefined),
+    };
+
+    if let Ok(ctor) = evaluate_var(mc, env, proto_name) {
+        if let Value::Object(ctor_obj) = ctor {
+            if let Some(proto_ref) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
+                if let Value::Object(proto) = &*proto_ref.borrow() {
+                    if let Some(val) = obj_get_key_value(proto, key)? {
+                        return Ok(val.borrow().clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
@@ -663,7 +692,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     } else if matches!(obj_val, Value::Undefined | Value::Null) {
                         return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
                     } else {
-                        Value::Undefined
+                        get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
                     };
                     (f_val, Some(obj_val))
                 }
@@ -703,6 +732,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     } else if let Some(method) = name.strip_prefix("os.") {
                         let this_val = this_val.clone().unwrap_or(Value::Object(*env));
                         Ok(handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("BigInt.prototype.") {
+                        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                        Ok(crate::js_bigint::handle_bigint_object_method(this_v, method, &eval_args).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("BigInt.") {
+                        Ok(crate::js_bigint::handle_bigint_static_method(method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Date.prototype.") {
@@ -843,6 +877,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             Value::String(name) => {
                                 if name == &crate::unicode::utf8_to_utf16("String") {
                                     Ok(crate::js_string::string_constructor(mc, &eval_args, env)?)
+                                } else if name == &crate::unicode::utf8_to_utf16("BigInt") {
+                                    Ok(bigint_constructor(&eval_args, env)?)
                                 } else {
                                     Err(EvalError::Js(raise_eval_error!("Not a function")))
                                 }
@@ -911,39 +947,44 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
-            if let Value::Object(obj) = obj_val {
-                if let Some(val) = obj_get_key_value(&obj, &key.as_str().into())? {
-                    Ok(val.borrow().clone())
+
+            if let Value::Object(obj) = &obj_val {
+                if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                    return Ok(val.borrow().clone());
                 } else {
-                    Ok(Value::Undefined)
+                    return Ok(Value::Undefined);
                 }
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
-            } else {
-                Ok(Value::Undefined)
             }
+
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
+            }
+
+            get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())
         }
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let key_val = evaluate_expr(mc, env, key_expr)?;
 
-            if let Value::Object(obj) = obj_val {
-                let key = match key_val {
-                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                    Value::Number(n) => PropertyKey::String(n.to_string()),
-                    _ => PropertyKey::String(value_to_string(&key_val)),
-                };
+            let key = match key_val {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                _ => PropertyKey::String(value_to_string(&key_val)),
+            };
 
-                if let Some(val) = obj_get_key_value(&obj, &key)? {
-                    Ok(val.borrow().clone())
+            if let Value::Object(obj) = &obj_val {
+                if let Some(val) = obj_get_key_value(obj, &key)? {
+                    return Ok(val.borrow().clone());
                 } else {
-                    Ok(Value::Undefined)
+                    return Ok(Value::Undefined);
                 }
-            } else if matches!(obj_val, Value::Undefined | Value::Null) {
-                Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
-            } else {
-                Ok(Value::Undefined)
             }
+
+            if matches!(obj_val, Value::Undefined | Value::Null) {
+                return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
+            }
+
+            get_primitive_prototype_property(mc, env, &obj_val, &key)
         }
         Expr::TemplateString(parts) => {
             let mut result = Vec::new();

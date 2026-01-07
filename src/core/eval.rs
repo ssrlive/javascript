@@ -4,6 +4,7 @@ use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::handle_array_static_method;
 use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method};
+use crate::js_number::{handle_number_instance_method, handle_number_prototype_method, handle_number_static_method, number_constructor};
 use crate::js_os::handle_os_method;
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
@@ -503,6 +504,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Number(n) => Ok(Value::Number(*n)),
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
+        Expr::Null => Ok(Value::Null),
+        Expr::Undefined => Ok(Value::Undefined),
         Expr::Var(name, _, _) => Ok(evaluate_var(mc, env, name)?),
         Expr::Assign(target, value_expr) => {
             let val = evaluate_expr(mc, env, value_expr)?;
@@ -737,6 +740,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Ok(crate::js_bigint::handle_bigint_object_method(this_v, method, &eval_args).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("BigInt.") {
                         Ok(crate::js_bigint::handle_bigint_static_method(method, &eval_args, env).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("Number.prototype.") {
+                        Ok(handle_number_prototype_method(this_val.clone(), method, &eval_args).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("Number.") {
+                        Ok(handle_number_static_method(method, &eval_args).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Date.prototype.") {
@@ -877,6 +884,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             Value::String(name) => {
                                 if name == &crate::unicode::utf8_to_utf16("String") {
                                     Ok(crate::js_string::string_constructor(mc, &eval_args, env)?)
+                                } else if name == &crate::unicode::utf8_to_utf16("Number") {
+                                    Ok(number_constructor(&eval_args, env).map_err(EvalError::Js)?)
                                 } else if name == &crate::unicode::utf8_to_utf16("BigInt") {
                                     Ok(bigint_constructor(&eval_args, env)?)
                                 } else {
@@ -933,6 +942,21 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     };
 
                                     return Ok(crate::core::js_error::create_error(mc, prototype, msg)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("Number") {
+                                    let val = match number_constructor(&eval_args, env).map_err(EvalError::Js)? {
+                                        Value::Number(n) => n,
+                                        _ => f64::NAN,
+                                    };
+                                    let new_obj = crate::core::new_js_object_data(mc);
+                                    obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Number(val))?;
+
+                                    if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                                        && let Value::Object(proto_obj) = &*proto_val.borrow()
+                                    {
+                                        new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                                    }
+
+                                    return Ok(Value::Object(new_obj));
                                 } else if name == &crate::unicode::utf8_to_utf16("Date") {
                                     return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
                                 }
@@ -1022,6 +1046,50 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             } else {
                 Err(EvalError::Js(raise_eval_error!("Unary Negation only for numbers")))
             }
+        }
+        Expr::TypeOf(expr) => {
+            // typeof handles ReferenceError for undeclared variables
+            let val_result = evaluate_expr(mc, env, expr);
+            let val = match val_result {
+                Ok(v) => v,
+                Err(e) => {
+                    // Check if it is a ReferenceError (simplistic check for now, assuming EvalError could be it)
+                    // Ideally we check if the error kind is ReferenceError.
+                    // For now, if evaluation fails, return undefined (as string "undefined")
+                    // This covers `typeof nonExistentVar` -> "undefined"
+                    Value::Undefined
+                }
+            };
+
+            let type_str = match val {
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                Value::Boolean(_) => "boolean",
+                Value::Undefined | Value::Uninitialized => "undefined",
+                Value::Null => "object",
+                Value::Symbol(_) => "symbol",
+                Value::BigInt(_) => "bigint",
+                Value::Function(_)
+                | Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::GeneratorFunction(..)
+                | Value::ClassDefinition(_) => "function",
+                Value::Object(obj) => {
+                    if obj_get_key_value(&obj, &"__closure__".into()).unwrap_or(None).is_some() {
+                        "function"
+                    } else if let Some(is_ctor) = obj_get_key_value(&obj, &"__is_constructor".into()).unwrap_or(None) {
+                        if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
+                            "function"
+                        } else {
+                            "object"
+                        }
+                    } else {
+                        "object"
+                    }
+                }
+                _ => "undefined",
+            };
+            Ok(Value::String(utf8_to_utf16(type_str)))
         }
         _ => Ok(Value::Undefined),
     }

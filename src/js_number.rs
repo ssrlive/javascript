@@ -1,13 +1,23 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
+use crate::core::MutationContext;
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
+use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
+pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let number_obj = make_number_object(mc, env)?;
+    env_set(mc, env, "Number", Value::Object(number_obj))?;
+    Ok(())
+}
+
 /// Create the Number object with all number constants and functions
-pub fn make_number_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let number_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &number_obj, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &number_obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("Number")))?;
+
     obj_set_key_value(mc, &number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
     obj_set_key_value(mc, &number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
     obj_set_key_value(mc, &number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
@@ -37,8 +47,24 @@ pub fn make_number_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectData
         Value::Function("Number.parseFloat".to_string()),
     )?;
     obj_set_key_value(mc, &number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
+
+    // Get Object.prototype
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
     // Create Number.prototype
     let number_prototype = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        number_prototype.borrow_mut(mc).prototype = Some(proto);
+    }
+
     obj_set_key_value(
         mc,
         &number_prototype,
@@ -82,12 +108,11 @@ pub fn make_number_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectData
     Ok(number_obj)
 }
 
-pub(crate) fn number_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn number_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Number constructor
-    if args.len() == 1 {
-        let arg_val = evaluate_expr(mc, env, &args[0])?;
+    if let Some(arg_val) = args.first() {
         match arg_val {
-            Value::Number(n) => Ok(Value::Number(n)),
+            Value::Number(n) => Ok(Value::Number(*n)),
             Value::String(s) => {
                 let str_val = utf16_to_utf8(&s);
                 match str_val.trim().parse::<f64>() {
@@ -95,10 +120,12 @@ pub(crate) fn number_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], 
                     Err(_) => Ok(Value::Number(f64::NAN)),
                 }
             }
-            Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
+            Value::Boolean(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
+            Value::Null => Ok(Value::Number(0.0)),
+            Value::Undefined => Ok(Value::Number(f64::NAN)),
             Value::Object(obj) => {
                 // Try ToPrimitive with 'number' hint
-                let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
+                let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
                 match prim {
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {
@@ -120,16 +147,10 @@ pub(crate) fn number_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Expr], 
 }
 
 /// Handle Number object method calls
-pub fn handle_number_method<'gc>(
-    mc: &MutationContext<'gc>,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     match method {
         "isNaN" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if let Some(arg_val) = args.first() {
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.is_nan()))
                 } else {
@@ -140,8 +161,7 @@ pub fn handle_number_method<'gc>(
             }
         }
         "isFinite" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if let Some(arg_val) = args.first() {
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.is_finite()))
                 } else {
@@ -152,8 +172,7 @@ pub fn handle_number_method<'gc>(
             }
         }
         "isInteger" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if let Some(arg_val) = args.first() {
                 if let Value::Number(n) = arg_val {
                     Ok(Value::Boolean(n.fract() == 0.0 && n.is_finite()))
                 } else {
@@ -164,11 +183,10 @@ pub fn handle_number_method<'gc>(
             }
         }
         "isSafeInteger" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if let Some(arg_val) = args.first() {
                 if let Value::Number(n) = arg_val {
                     let is_int = n.fract() == 0.0 && n.is_finite();
-                    let is_safe = (-9007199254740991.0..=9007199254740991.0).contains(&n);
+                    let is_safe = (-9007199254740991.0..=9007199254740991.0).contains(n);
                     Ok(Value::Boolean(is_int && is_safe))
                 } else {
                     Ok(Value::Boolean(false))
@@ -178,8 +196,7 @@ pub fn handle_number_method<'gc>(
             }
         }
         "parseFloat" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if let Some(arg_val) = args.first() {
                 match arg_val {
                     Value::String(s) => {
                         let str_val = utf16_to_utf8(&s);
@@ -188,7 +205,7 @@ pub fn handle_number_method<'gc>(
                             Err(_) => Ok(Value::Number(f64::NAN)),
                         }
                     }
-                    Value::Number(n) => Ok(Value::Number(n)),
+                    Value::Number(n) => Ok(Value::Number(*n)),
                     _ => Ok(Value::Number(f64::NAN)),
                 }
             } else {
@@ -197,10 +214,9 @@ pub fn handle_number_method<'gc>(
         }
         "parseInt" => {
             if !args.is_empty() {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+                let arg_val = &args[0];
                 let radix = if args.len() >= 2 {
-                    let radix_val = evaluate_expr(mc, env, &args[1])?;
-                    if let Value::Number(r) = radix_val { r as u32 } else { 10 }
+                    if let Value::Number(r) = &args[1] { *r as u32 } else { 10 }
                 } else {
                     10
                 };
@@ -268,13 +284,7 @@ pub fn handle_number_method<'gc>(
 }
 
 /// Handle Number instance method calls
-pub fn handle_number_instance_method<'gc>(
-    mc: &MutationContext<'gc>,
-    n: &f64,
-    method: &str,
-    args: &[Expr],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     match method {
         "toString" => {
             if args.is_empty() {
@@ -305,8 +315,8 @@ pub fn handle_number_instance_method<'gc>(
         }
         "toExponential" => {
             let fraction_digits = if !args.is_empty() {
-                match evaluate_expr(mc, _env, &args[0])? {
-                    Value::Number(d) => Some(d as usize),
+                match &args[0] {
+                    Value::Number(d) => Some(*d as usize),
                     _ => None,
                 }
             } else {
@@ -320,8 +330,8 @@ pub fn handle_number_instance_method<'gc>(
         }
         "toFixed" => {
             let digits = if !args.is_empty() {
-                match evaluate_expr(mc, _env, &args[0])? {
-                    Value::Number(d) => d as usize,
+                match &args[0] {
+                    Value::Number(d) => *d as usize,
                     _ => 0,
                 }
             } else {
@@ -336,8 +346,8 @@ pub fn handle_number_instance_method<'gc>(
         }
         "toPrecision" => {
             let precision = if !args.is_empty() {
-                match evaluate_expr(mc, _env, &args[0])? {
-                    Value::Number(p) => Some(p as usize),
+                match &args[0] {
+                    Value::Number(p) => Some(*p as usize),
                     Value::Undefined => None,
                     _ => None,
                 }
@@ -381,42 +391,23 @@ pub fn handle_number_instance_method<'gc>(
     }
 }
 
-/// Handle Number object method calls (for boxed Number objects)
-pub fn handle_number_object_method<'gc>(
-    mc: &MutationContext<'gc>,
-    object: &JSObjectDataPtr<'gc>,
-    method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // Handle Number instance methods
-    if let Some(value_val) = obj_get_key_value(object, &"__value__".into())? {
-        if let Value::Number(n) = *value_val.borrow() {
-            handle_number_instance_method(mc, &n, method, args, env)
+/// Handle Number prototype method calls
+pub fn handle_number_prototype_method<'gc>(this_val: Option<Value<'gc>>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+    if let Some(Value::Number(n)) = this_val {
+        handle_number_instance_method(&n, method, args)
+    } else if let Some(Value::Object(obj)) = this_val {
+        if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Value::Number(n) = &*val.borrow() {
+                handle_number_instance_method(n, method, args)
+            } else {
+                Err(raise_eval_error!("TypeError: Number.prototype method called on non-number object"))
+            }
         } else {
-            Err(raise_eval_error!("Invalid __value__ for Number instance"))
+            Err(raise_eval_error!(
+                "TypeError: Number.prototype method called on incompatible receiver"
+            ))
         }
     } else {
-        Err(raise_eval_error!("__value__ not found on Number instance"))
-    }
-}
-
-/// Box a number into a Number object and get a property
-pub fn box_number_and_get_property<'gc>(
-    mc: &MutationContext<'gc>,
-    n: f64,
-    prop: &str,
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
-    // Box the number into a Number object
-    let number_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &number_obj, &"__value__".into(), Value::Number(n))?;
-    // Set prototype to Number.prototype (if available)
-    crate::core::set_internal_prototype_from_constructor(mc, env, &number_obj, "Number")?;
-    // Now look up the property on the boxed object
-    if let Some(val) = obj_get_key_value(&number_obj, &prop.into())? {
-        Ok(val.borrow().clone())
-    } else {
-        Ok(Value::Undefined)
+        Err(raise_eval_error!("TypeError: Number.prototype method called on non-number"))
     }
 }

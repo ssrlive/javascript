@@ -4,6 +4,7 @@ use crate::js_bigint::initialize_bigint;
 use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_math::initialize_math;
+use crate::js_number::initialize_number_module;
 use crate::js_os::initialize_os_module;
 use crate::js_regexp::initialize_regexp;
 use crate::js_string::initialize_string;
@@ -65,6 +66,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     let console_obj = initialize_console_object(mc)?;
     env_set(mc, env, "console", Value::Object(console_obj))?;
+
+    initialize_number_module(mc, env)?;
 
     initialize_math(mc, env)?;
     initialize_string(mc, env)?;

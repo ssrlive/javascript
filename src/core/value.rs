@@ -441,6 +441,12 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Value::Number(n) => write!(f, "Number({})", n),
+            Value::String(s) => write!(f, "String({:?})", utf16_to_utf8(s)),
+            Value::Boolean(b) => write!(f, "Boolean({})", b),
+            Value::Null => write!(f, "Null"),
+            Value::Undefined => write!(f, "Undefined"),
+            Value::Object(_) => write!(f, "Object"),
+            Value::Function(s) => write!(f, "Function({})", s),
             _ => write!(f, "[value]"),
         }
     }

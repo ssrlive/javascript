@@ -9,9 +9,9 @@ use crate::js_string::{string_from_char_code, string_from_code_point, string_raw
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, ObjectDestructuringElement, Statement,
-        StatementKind, create_error, env_get, env_set, env_set_recursive, is_error, new_js_object_data, obj_get_key_value,
-        obj_set_key_value, value_to_string,
+        BinaryOp, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
+        ObjectDestructuringElement, Statement, StatementKind, create_error, env_get, env_set, env_set_recursive, is_error,
+        new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -169,6 +169,22 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
             StatementKind::Class(name, ..) => {
                 env_set(mc, env, name, Value::Uninitialized)?;
             }
+            StatementKind::Import(specifiers, _) => {
+                for spec in specifiers {
+                    match spec {
+                        ImportSpecifier::Default(name) => {
+                            env_set(mc, env, name, Value::Uninitialized)?;
+                        }
+                        ImportSpecifier::Named(name, alias) => {
+                            let binding_name = alias.as_ref().unwrap_or(name);
+                            env_set(mc, env, binding_name, Value::Uninitialized)?;
+                        }
+                        ImportSpecifier::Namespace(name) => {
+                            env_set(mc, env, name, Value::Uninitialized)?;
+                        }
+                    }
+                }
+            }
             StatementKind::LetDestructuringArray(pattern, _) | StatementKind::ConstDestructuringArray(pattern, _) => {
                 let mut names = Vec::new();
                 collect_names_from_destructuring(pattern, &mut names);
@@ -277,6 +293,123 @@ fn eval_res<'gc>(
                 };
                 env_set(mc, env, name, val)?;
             }
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Import(specifiers, source) => {
+            // Try to deduce base path from env or use current dir
+            let base_path = if let Some(cell) = env_get(env, "__script_name") {
+                if let Value::String(s) = cell.borrow().clone() {
+                    Some(crate::unicode::utf16_to_utf8(&s))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let exports = crate::js_module::load_module(mc, source, base_path.as_deref())
+                .map_err(|e| EvalError::Throw(Value::String(utf8_to_utf16(&e.message())), Some(stmt.line), Some(stmt.column)))?;
+
+            if let Value::Object(exports_obj) = exports {
+                for spec in specifiers {
+                    match spec {
+                        ImportSpecifier::Named(name, alias) => {
+                            let binding_name = alias.as_ref().unwrap_or(name);
+
+                            let val_ptr_res = obj_get_key_value(&exports_obj, &name.into());
+                            let val = if let Ok(Some(cell)) = val_ptr_res {
+                                cell.borrow().clone()
+                            } else {
+                                Value::Undefined
+                            };
+                            env_set(mc, env, binding_name, val)?;
+                        }
+                        ImportSpecifier::Default(name) => {
+                            let val_ptr_res = obj_get_key_value(&exports_obj, &"default".into());
+                            let val = if let Ok(Some(cell)) = val_ptr_res {
+                                cell.borrow().clone()
+                            } else {
+                                Value::Undefined
+                            };
+                            env_set(mc, env, name, val)?;
+                        }
+                        ImportSpecifier::Namespace(name) => {
+                            env_set(mc, env, name, Value::Object(exports_obj))?;
+                        }
+                    }
+                }
+            }
+            *last_value = Value::Undefined;
+            Ok(None)
+        }
+        StatementKind::Export(specifiers, inner_stmt) => {
+            // 1. Evaluate inner statement if present, to bind variables in current env
+            if let Some(stmt) = inner_stmt {
+                // Recursively evaluate inner statement
+                // Note: inner_stmt is a Box<Statement>. We need to call eval_res or evaluate_statements on it.
+                // Since evaluate_statements expects a slice, we can wrap it.
+                let mut stmts = vec![*stmt.clone()];
+                match evaluate_statements(mc, env, &mut stmts) {
+                    Ok(_) => {} // Declarations are hoisted or executed, binding should be in env
+                    Err(e) => return Err(e),
+                }
+
+                // If inner stmt was a declaration, we need to export the declared names.
+                // For now, we handle named exports via specifiers only for `export { ... }`.
+                // For `export var x = 1`, the parser should have produced specifiers?
+                // My parser implementation for export var/function didn't produce specifiers, just inner_stmt.
+                // So we need to look at inner_stmt kind to determine what to export.
+
+                match &stmt.kind {
+                    StatementKind::Var(decls) | StatementKind::Let(decls) => {
+                        for (name, _) in decls {
+                            if let Some(cell) = env_get(env, name) {
+                                let val = cell.borrow().clone();
+                                crate::core::eval::export_value(mc, env, name, val)?;
+                            }
+                        }
+                    }
+                    StatementKind::Const(decls) => {
+                        for (name, _) in decls {
+                            if let Some(cell) = env_get(env, name) {
+                                let val = cell.borrow().clone();
+                                crate::core::eval::export_value(mc, env, name, val)?;
+                            }
+                        }
+                    }
+                    StatementKind::FunctionDeclaration(name, _, _, _) => {
+                        if let Some(cell) = env_get(env, name) {
+                            let val = cell.borrow().clone();
+                            crate::core::eval::export_value(mc, env, name, val)?;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // 2. Handle explicit specifiers
+            for spec in specifiers {
+                match spec {
+                    crate::core::statement::ExportSpecifier::Named(name, alias) => {
+                        // export { name as alias }
+                        // value should be in env
+                        if let Some(cell) = env_get(env, name) {
+                            let val = cell.borrow().clone();
+                            let export_name = alias.as_ref().unwrap_or(name);
+                            crate::core::eval::export_value(mc, env, export_name, val)?;
+                        } else {
+                            return Err(EvalError::Js(raise_reference_error!(format!("{} is not defined", name))));
+                        }
+                    }
+                    crate::core::statement::ExportSpecifier::Default(expr) => {
+                        // export default expr
+                        let val = evaluate_expr(mc, env, expr)?;
+                        crate::core::eval::export_value(mc, env, "default", val)?;
+                    }
+                }
+            }
+
             *last_value = Value::Undefined;
             Ok(None)
         }
@@ -440,6 +573,28 @@ fn eval_res<'gc>(
         }
         _ => Ok(None),
     }
+}
+
+pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str, val: Value<'gc>) -> Result<(), EvalError<'gc>> {
+    if let Some(exports_cell) = env_get(env, "exports") {
+        let exports = exports_cell.borrow().clone();
+        if let Value::Object(exports_obj) = exports {
+            obj_set_key_value(mc, &exports_obj, &name.into(), val).map_err(|e| EvalError::Js(e))?;
+            return Ok(());
+        }
+    }
+
+    if let Some(module_cell) = env_get(env, "module") {
+        let module = module_cell.borrow().clone();
+        if let Value::Object(module_obj) = module {
+            if let Ok(Some(exports_val)) = obj_get_key_value(&module_obj, &"exports".into()) {
+                if let Value::Object(exports_obj) = &*exports_val.borrow() {
+                    obj_set_key_value(mc, exports_obj, &name.into(), val).map_err(|e| EvalError::Js(e))?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn refresh_error_by_additional_stack_frame<'gc>(
@@ -987,7 +1142,24 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Err(EvalError::Js(raise_eval_error!("Not a function")))
                     }
                 }
-                _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
+                Value::Closure(cl) => {
+                    let call_env = crate::core::new_js_object_data(mc);
+                    call_env.borrow_mut(mc).prototype = Some(cl.env);
+                    call_env.borrow_mut(mc).is_function_scope = true;
+
+                    for (i, param) in cl.params.iter().enumerate() {
+                        if let DestructuringElement::Variable(name, _) = param {
+                            let arg_val = eval_args.get(i).cloned().unwrap_or(Value::Undefined);
+                            env_set(mc, &call_env, name, arg_val)?;
+                        }
+                    }
+                    let mut body_clone = cl.body.clone();
+                    match evaluate_statements(mc, &call_env, &mut body_clone) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => Err(EvalError::Js(raise_eval_error!(format!("Value {func_val:?} is not callable yet")))),
             }
         }
         Expr::New(ctor, args) => {
@@ -1179,6 +1351,40 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 _ => "undefined",
             };
             Ok(Value::String(utf8_to_utf16(type_str)))
+        }
+        Expr::LogicalAnd(left, right) => {
+            let lhs = evaluate_expr(mc, env, left)?;
+            let is_truthy = match &lhs {
+                Value::Boolean(b) => *b,
+                Value::Number(n) => *n != 0.0 && !n.is_nan(),
+                Value::String(s) => !s.is_empty(),
+                Value::Null | Value::Undefined => false,
+                Value::Object(_)
+                | Value::Function(_)
+                | Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::GeneratorFunction(..)
+                | Value::ClassDefinition(_) => true,
+                _ => false,
+            };
+            if !is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
+        }
+        Expr::LogicalOr(left, right) => {
+            let lhs = evaluate_expr(mc, env, left)?;
+            let is_truthy = match &lhs {
+                Value::Boolean(b) => *b,
+                Value::Number(n) => *n != 0.0 && !n.is_nan(),
+                Value::String(s) => !s.is_empty(),
+                Value::Null | Value::Undefined => false,
+                Value::Object(_)
+                | Value::Function(_)
+                | Value::Closure(_)
+                | Value::AsyncClosure(_)
+                | Value::GeneratorFunction(..)
+                | Value::ClassDefinition(_) => true,
+                _ => false,
+            };
+            if is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
         }
         _ => Ok(Value::Undefined),
     }

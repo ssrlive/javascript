@@ -37,6 +37,9 @@ pub fn trace_expr<'gc, T: GcTrace<'gc>>(context: &mut T, expr: &Expr) {
                 trace_expr(context, arg);
             }
         }
+        Expr::DynamicImport(a) => {
+            trace_expr(context, a);
+        }
         Expr::Function(_, _, body) => {
             for stmt in body {
                 trace_stmt(context, stmt);

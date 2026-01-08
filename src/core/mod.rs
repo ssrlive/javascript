@@ -120,7 +120,10 @@ where
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
         if let Some(p) = script_path.as_ref() {
             let p_str = p.as_ref().to_string_lossy().to_string();
+            // Store __filename
             obj_set_key_value(mc, &root.global_env, &"__filename".into(), Value::String(utf8_to_utf16(&p_str)))?;
+            // Store __script_name for import resolution
+            obj_set_key_value(mc, &root.global_env, &"__script_name".into(), Value::String(utf8_to_utf16(&p_str)))?;
         }
         match evaluate_statements(mc, &root.global_env, &mut statements) {
             Ok(result) => Ok(value_to_string(&result)),

@@ -1,10 +1,10 @@
 use crate::{
     JSError, Value,
     core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, obj_get_key_value, obj_set_key_value},
+    core::{Gc, GcCell, MutationContext},
+    new_js_object_data,
 };
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
 
 pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path: Option<&str>) -> Result<Value<'gc>, JSError> {
     // Create a new object for the module
@@ -20,17 +20,21 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
         obj_set_key_value(mc, &module_exports, &"E".into(), e)?;
 
         // Add a simple function (just return the input for now)
-        let identity_func = Value::Closure(Rc::new(ClosureData::new(
-            &[DestructuringElement::Variable("x".to_string(), None)],
-            &[Statement {
-                kind: StatementKind::Return(Some(Expr::Var("x".to_string(), None, None))),
-                line: 0,
-                column: 0,
-            }],
-            &module_exports,
-            None,
-        )));
-        obj_set_key_value(mc, &module_exports, &"identity".into(), identity_func)?;
+        let identity_func = Value::Closure(Gc::new(
+            mc,
+            ClosureData::new(
+                &[DestructuringElement::Variable("x".to_string(), None)],
+                &[Statement {
+                    kind: StatementKind::Return(Some(Expr::Var("x".to_string(), None, None))),
+                    line: 0,
+                    column: 0,
+                }],
+                &module_exports,
+                None,
+            ),
+        ));
+        obj_set_key_value(mc, &module_exports, &"identity".into(), identity_func.clone())?;
+        obj_set_key_value(mc, &module_exports, &"default".into(), identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
@@ -43,10 +47,15 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
             return Ok(Value::Object(std_obj));
         }
         #[cfg(not(feature = "std"))]
-        return Err(raise_eval_error!("Module 'std' is not built-in (feature disabled)."));
+        return Err(crate::raise_eval_error!("Module 'std' is not built-in (feature disabled)."));
     } else if module_name == "os" {
-        // Removed hardcoded os module. os functionality should be injected.
-        return Err(raise_eval_error!(
+        #[cfg(feature = "os")]
+        {
+            let os_obj = crate::js_os::make_os_object(mc)?;
+            return Ok(Value::Object(os_obj));
+        }
+        #[cfg(not(feature = "os"))]
+        return Err(crate::raise_eval_error!(
             "Module 'os' is not built-in. Please provide it via host environment."
         ));
     } else {
@@ -88,7 +97,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
         } else {
             // Use current working directory as base when no base_path is provided
             std::env::current_dir()
-                .map_err(|e| raise_eval_error!(format!("Failed to get current directory: {e}")))?
+                .map_err(|e| crate::raise_eval_error!(format!("Failed to get current directory: {e}")))?
                 .join(module_name)
         };
 
@@ -100,7 +109,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
         // Canonicalize the path
         match full_path.canonicalize() {
             Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
-            Err(_) => Err(raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
+            Err(_) => Err(crate::raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
         }
     } else {
         // For now, treat relative paths as relative to current directory
@@ -111,7 +120,7 @@ fn resolve_module_path(module_name: &str, base_path: Option<&str>) -> Result<Str
 
         match full_path.canonicalize() {
             Ok(canonical) => Ok(canonical.to_string_lossy().to_string()),
-            Err(_) => Err(raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
+            Err(_) => Err(crate::raise_eval_error!(format!("Module file not found: {}", full_path.display()))),
         }
     }
 }
@@ -132,43 +141,44 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     // Add exports object to the environment
     env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        Rc::new(RefCell::new(Value::Object(module_exports.clone()))),
+        Gc::new(mc, GcCell::new(Value::Object(module_exports))),
     );
 
     // Add module object with exports
     let module_obj = new_js_object_data(mc);
     module_obj.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        Rc::new(RefCell::new(Value::Object(module_exports.clone()))),
+        Gc::new(mc, GcCell::new(Value::Object(module_exports))),
     );
     env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("module".to_string()),
-        Rc::new(RefCell::new(Value::Object(module_obj.clone()))),
+        Gc::new(mc, GcCell::new(Value::Object(module_obj))),
     );
 
     // Initialize global constructors
     crate::core::initialize_global_constructors(mc, &env)?;
 
     // Expose `globalThis` binding in module environment as well
-    crate::core::obj_set_key_value(mc, &env, &"globalThis".into(), crate::core::Value::Object(env.clone()))?;
+    crate::core::obj_set_key_value(mc, &env, &"globalThis".into(), crate::core::Value::Object(env))?;
 
     // Parse and execute the module content
-    let mut tokens = crate::core::tokenize(content)?;
-    let statements = crate::core::parse_statements(&mut tokens)?;
+    let tokens = crate::core::tokenize(content)?;
+    let mut index = 0;
+    let mut statements = crate::core::parse_statements(&tokens, &mut index)?;
 
     // Execute statements in module environment
     crate::core::evaluate_statements(mc, &env, &mut statements)?;
 
     // Log the exports stored in the provided `module_exports` object at trace level
     log::trace!("Module executed, exports keys:");
-    for key in module_exports.borrow().keys() {
+    for key in module_exports.borrow().properties.keys() {
         log::trace!(" - {}", key);
     }
 
     // Check if module.exports was reassigned (CommonJS style)
     if let Some(module_exports_val) = obj_get_key_value(&module_obj, &"exports".into())? {
         match &*module_exports_val.borrow() {
-            Value::Object(obj) if Rc::ptr_eq(obj, &module_exports) => {
+            Value::Object(obj) if Gc::ptr_eq(*obj, module_exports) => {
                 // exports was not reassigned, return the exports object
                 Ok(Value::Object(module_exports))
             }
@@ -183,18 +193,18 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     }
 }
 
-pub fn import_from_module(module_value: &Value, specifier: &str) -> Result<Value<'gc>, JSError> {
+pub fn import_from_module<'gc>(module_value: &Value<'gc>, specifier: &str) -> Result<Value<'gc>, JSError> {
     match module_value {
         Value::Object(obj) => match obj_get_key_value(obj, &specifier.into())? {
             Some(val) => Ok(val.borrow().clone()),
-            None => Err(raise_eval_error!(format!("Export '{}' not found in module", specifier))),
+            None => Err(crate::raise_eval_error!(format!("Export '{}' not found in module", specifier))),
         },
-        _ => Err(raise_eval_error!("Module is not an object")),
+        _ => Err(crate::raise_eval_error!("Module is not an object")),
     }
 }
 
 #[allow(dead_code)]
-pub fn get_module_default_export(module_value: &Value) -> Value {
+pub fn get_module_default_export<'gc>(module_value: &Value<'gc>) -> Value<'gc> {
     match module_value {
         Value::Object(_) => {
             // For object modules, try to get default export, otherwise return the module itself

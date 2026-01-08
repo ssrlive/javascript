@@ -341,7 +341,7 @@ pub(crate) fn handle_os_method<'gc>(
                 }
                 return Ok(Value::String(utf8_to_utf16(&result)));
             }
-            "dirname" => {
+            "dirname" | "path.dirname" => {
                 if let Some(val) = args.get(0) {
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -357,7 +357,7 @@ pub(crate) fn handle_os_method<'gc>(
                 }
                 return Ok(Value::String(utf8_to_utf16(".")));
             }
-            "basename" => {
+            "basename" | "path.basename" => {
                 if let Some(val) = args.get(0) {
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -373,7 +373,7 @@ pub(crate) fn handle_os_method<'gc>(
                 }
                 return Ok(Value::String(utf8_to_utf16("")));
             }
-            "extname" => {
+            "extname" | "path.extname" => {
                 if let Some(val) = args.get(0) {
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -389,7 +389,7 @@ pub(crate) fn handle_os_method<'gc>(
                 }
                 return Ok(Value::String(utf8_to_utf16("")));
             }
-            "resolve" => {
+            "resolve" | "path.resolve" => {
                 if let Some(val) = args.get(0) {
                     let path = match val {
                         Value::String(s) => utf16_to_utf8(&s),
@@ -440,7 +440,7 @@ pub fn initialize_os_module<'gc>(mc: &MutationContext<'gc>, global_obj: &JSObjec
 }
 
 /// Create the OS object with all OS-related functions and constants
-fn make_os_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+pub fn make_os_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
     obj_set_key_value(mc, &obj, &"remove".into(), Value::Function("os.remove".to_string()))?;
     obj_set_key_value(mc, &obj, &"mkdir".into(), Value::Function("os.mkdir".to_string()))?;

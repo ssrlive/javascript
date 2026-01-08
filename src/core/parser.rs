@@ -8,7 +8,7 @@
 )]
 
 use crate::JSError;
-use crate::core::statement::{Statement, StatementKind};
+use crate::core::statement::{ExportSpecifier, ImportSpecifier, Statement, StatementKind};
 use crate::core::{BinaryOp, DestructuringElement, Expr, TemplatePart, Token, TokenData};
 use crate::raise_parse_error;
 use crate::{core::value::Value, raise_parse_error_with_token, unicode::utf16_to_utf8};
@@ -41,6 +41,8 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
     let column = start_token.column;
 
     match start_token.token {
+        Token::Import if !matches!(t.get(*index + 1).map(|d| &d.token), Some(Token::LParen)) => parse_import_statement(t, index),
+        Token::Export => parse_export_statement(t, index),
         Token::Function => parse_function_declaration(t, index),
         Token::If => parse_if_statement(t, index),
         Token::Return => parse_return_statement(t, index),
@@ -289,6 +291,211 @@ fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
     Ok(Statement {
         kind: StatementKind::Const(const_decls),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume import
+
+    let mut specifiers = Vec::new();
+    let mut source = String::new();
+
+    // import "module-name";
+    if let Token::StringLit(s) = &t[*index].token {
+        source = utf16_to_utf8(s);
+        *index += 1;
+    } else {
+        // import { ... } from "..." or import * as name from "..." or import default from "..."
+
+        // check for default import
+        if let Token::Identifier(name) = &t[*index].token {
+            specifiers.push(ImportSpecifier::Default(name.clone()));
+            *index += 1;
+            if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+                *index += 1;
+            }
+        }
+
+        if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
+            *index += 1;
+            if *index < t.len() {
+                let is_as = match &t[*index].token {
+                    Token::Identifier(s) if s == "as" => true,
+                    Token::As => true,
+                    _ => false,
+                };
+
+                if is_as {
+                    *index += 1;
+                    if let Token::Identifier(name) = &t[*index].token {
+                        specifiers.push(ImportSpecifier::Namespace(name.clone()));
+                        *index += 1;
+                    } else {
+                        return Err(raise_parse_error!("Expected identifier after '* as'"));
+                    }
+                } else {
+                    return Err(raise_parse_error!("Expected 'as' after '*'"));
+                }
+            }
+        }
+
+        if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
+            *index += 1;
+            loop {
+                if *index < t.len() && matches!(t[*index].token, Token::RBrace) {
+                    *index += 1;
+                    break;
+                }
+
+                let imported_name = if let Token::Identifier(n) = &t[*index].token {
+                    n.clone()
+                } else if matches!(t[*index].token, Token::Default) {
+                    "default".to_string()
+                } else {
+                    return Err(raise_parse_error!("Expected identifier in named import"));
+                };
+                *index += 1;
+
+                let mut local_name = None;
+                if *index < t.len() {
+                    let is_as = match &t[*index].token {
+                        Token::Identifier(s) if s == "as" => true,
+                        Token::As => true,
+                        _ => false,
+                    };
+
+                    if is_as {
+                        *index += 1; // consume as
+                        if let Token::Identifier(alias) = &t[*index].token {
+                            local_name = Some(alias.clone());
+                            *index += 1;
+                        } else {
+                            return Err(raise_parse_error!("Expected identifier after 'as'"));
+                        }
+                    }
+                }
+
+                specifiers.push(ImportSpecifier::Named(imported_name, local_name));
+
+                if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+                    *index += 1;
+                }
+            }
+        }
+
+        if *index < t.len() {
+            let is_from = if let Token::Identifier(ref from_kw) = t[*index].token {
+                from_kw == "from"
+            } else {
+                false
+            };
+
+            if is_from {
+                *index += 1;
+            } else {
+                return Err(raise_parse_error!("Expected 'from'"));
+            }
+        }
+
+        if *index < t.len() {
+            if let Token::StringLit(s) = &t[*index].token {
+                source = utf16_to_utf8(s);
+                *index += 1;
+            } else {
+                return Err(raise_parse_error!("Expected module specifier"));
+            }
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: StatementKind::Import(specifiers, source),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume export
+
+    let mut specifiers = Vec::new();
+    let mut inner_stmt = None;
+
+    if *index < t.len() && matches!(t[*index].token, Token::Default) {
+        *index += 1; // consume default
+        // export default expression;
+        let expr = parse_assignment(t, index)?;
+        specifiers.push(ExportSpecifier::Default(expr));
+        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+            *index += 1;
+        }
+    } else if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
+        *index += 1; // consume {
+        loop {
+            if *index < t.len() && matches!(t[*index].token, Token::RBrace) {
+                *index += 1;
+                break;
+            }
+
+            let name = if let Token::Identifier(n) = &t[*index].token {
+                n.clone()
+            } else {
+                return Err(raise_parse_error!("Expected identifier in export specifier"));
+            };
+            *index += 1;
+
+            let mut alias = None;
+            if *index < t.len() {
+                let is_as = match &t[*index].token {
+                    Token::Identifier(s) if s == "as" => true,
+                    Token::As => true,
+                    _ => false,
+                };
+                if is_as {
+                    *index += 1;
+                    if let Token::Identifier(a) = &t[*index].token {
+                        alias = Some(a.clone());
+                        *index += 1;
+                    } else {
+                        return Err(raise_parse_error!("Expected identifier after as"));
+                    }
+                }
+            }
+
+            specifiers.push(ExportSpecifier::Named(name, alias));
+
+            if *index < t.len() && matches!(t[*index].token, Token::Comma) {
+                *index += 1;
+            }
+        }
+        if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+            *index += 1;
+        }
+    } else {
+        // export var ... or export function ...
+        let stmt = match t[*index].token {
+            Token::Var => parse_var_statement(t, index)?,
+            Token::Let => parse_let_statement(t, index)?,
+            Token::Const => parse_const_statement(t, index)?,
+            Token::Function => parse_function_declaration(t, index)?,
+            Token::Class => {
+                // TODO: parse_class_declaration
+                return Err(raise_parse_error!("Export class not implemented"));
+            }
+            _ => return Err(raise_parse_error!("Unexpected token in export statement")),
+        };
+        inner_stmt = Some(Box::new(stmt));
+    }
+
+    Ok(Statement {
+        kind: StatementKind::Export(specifiers, inner_stmt),
         line: t[start].line,
         column: t[start].column,
     })
@@ -1435,7 +1642,20 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             // it can be used in contexts like `#name in obj`.
             Expr::StringLit(crate::unicode::utf8_to_utf16(&format!("#{}", name)))
         }
-        Token::Import => Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column)),
+        Token::Import => {
+            if *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
+                // Dynamic import
+                *index += 1; // consume '('
+                let arg = parse_assignment(tokens, index)?;
+                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                    return Err(raise_parse_error!("Expected ')' after import(...)"));
+                }
+                *index += 1; // consume ')'
+                Expr::DynamicImport(Box::new(arg))
+            } else {
+                Expr::Var("import".to_string(), Some(token_data.line), Some(token_data.column))
+            }
+        }
         Token::Regex(pattern, flags) => Expr::Regex(pattern.clone(), flags.clone()),
         Token::This => Expr::This,
         Token::Super => {

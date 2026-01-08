@@ -134,6 +134,7 @@ pub enum Expr {
     Comma(Box<Expr>, Box<Expr>),
     Function(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
     Call(Box<Expr>, Vec<Expr>),
+    DynamicImport(Box<Expr>),
     ValuePlaceholder,
 }
 

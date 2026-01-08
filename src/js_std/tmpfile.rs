@@ -1,9 +1,12 @@
+#![cfg(feature = "std")]
+
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{LazyLock, Mutex};
 
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
+use crate::core::MutationContext;
+use crate::core::{JSObjectDataPtr, Value, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
@@ -58,7 +61,7 @@ pub(crate) fn create_tmpfile<'gc>(mc: &MutationContext<'gc>) -> Result<Value<'gc
 }
 
 /// Handle file object method calls
-pub(crate) fn handle_file_method<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_file_method<'gc>(object: &JSObjectDataPtr<'gc>, method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
     // If this object is a file-like object (we use '__file_id' as marker)
     if get_own_property(object, &"__file_id".into()).is_some() {
         let file_id_val = get_own_property(object, &"__file_id".into())
@@ -88,8 +91,7 @@ pub(crate) fn handle_file_method<'gc>(mc: &MutationContext<'gc>, object: &JSObje
                 }
                 // build string to write
                 let mut to_write = String::new();
-                for a in args {
-                    let av = evaluate_expr(mc, env, a)?;
+                for av in args {
                     match av {
                         Value::String(sv) => to_write.push_str(&utf16_to_utf8(&sv)),
                         Value::Number(n) => to_write.push_str(&n.to_string()),
@@ -123,14 +125,14 @@ pub(crate) fn handle_file_method<'gc>(mc: &MutationContext<'gc>, object: &JSObje
             "seek" => {
                 // seek(offset, whence)
                 if args.len() >= 2 {
-                    let offv = evaluate_expr(mc, env, &args[0])?;
-                    let whv = evaluate_expr(mc, env, &args[1])?;
+                    let offv = &args[0];
+                    let whv = &args[1];
                     let offset = match offv {
-                        Value::Number(n) => n as i64,
+                        Value::Number(n) => *n as i64,
                         _ => 0,
                     };
                     let whence = match whv {
-                        Value::Number(n) => n as i32,
+                        Value::Number(n) => *n as i32,
                         _ => 0,
                     };
                     let seek_from = match whence {
@@ -152,9 +154,9 @@ pub(crate) fn handle_file_method<'gc>(mc: &MutationContext<'gc>, object: &JSObje
             },
             "putByte" => {
                 if !args.is_empty() {
-                    let bv = evaluate_expr(mc, env, &args[0])?;
+                    let bv = &args[0];
                     let byte = match bv {
-                        Value::Number(n) => n as u8,
+                        Value::Number(n) => *n as u8,
                         _ => 0,
                     };
                     // write byte to file

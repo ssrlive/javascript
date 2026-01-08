@@ -37,11 +37,18 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
         let log_func = Value::Function("console.log".to_string());
         obj_set_key_value(mc, &module_exports, &"log".into(), log_func)?;
     } else if module_name == "std" {
-        let std_obj = crate::js_std::make_std_object(mc)?;
-        return Ok(Value::Object(std_obj));
+        #[cfg(feature = "std")]
+        {
+            let std_obj = crate::js_std::make_std_object(mc)?;
+            return Ok(Value::Object(std_obj));
+        }
+        #[cfg(not(feature = "std"))]
+        return Err(raise_eval_error!("Module 'std' is not built-in (feature disabled)."));
     } else if module_name == "os" {
-        let os_obj = crate::js_os::make_os_object(mc)?;
-        return Ok(Value::Object(os_obj));
+        // Removed hardcoded os module. os functionality should be injected.
+        return Err(raise_eval_error!(
+            "Module 'os' is not built-in. Please provide it via host environment."
+        ));
     } else {
         // Try to load as a file
         match load_module_from_file(mc, module_name, base_path) {

@@ -1,3 +1,9 @@
+#![cfg(feature = "std")]
+
+pub(crate) mod sprintf;
+pub(crate) mod tmpfile;
+
+use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 
@@ -5,6 +11,13 @@ use crate::error::JSError;
 #[allow(dead_code)]
 fn utf8_to_utf16_local(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
+}
+
+pub fn initialize_std_module<'gc>(mc: &MutationContext<'gc>, global_obj: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let std_obj = make_std_object(mc)?;
+    // Optionally expose it globally, or just rely on module system import
+    obj_set_key_value(mc, global_obj, &"std".into(), Value::Object(std_obj))?;
+    Ok(())
 }
 
 pub fn make_std_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {

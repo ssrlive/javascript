@@ -1,3 +1,5 @@
+#![cfg(feature = "os")]
+
 use crate::core::MutationContext;
 use std::collections::HashMap;
 use std::fs::File;
@@ -325,7 +327,7 @@ pub(crate) fn handle_os_method<'gc>(
     // If this object looks like the `os.path` module
     if get_own_property(&object, &"join".into()).is_some() {
         match method {
-            "join" => {
+            "join" | "path.join" => {
                 let mut result = String::new();
                 for (i, val) in args.iter().enumerate() {
                     let part = match val {

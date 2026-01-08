@@ -5,7 +5,6 @@ use crate::js_array::handle_array_static_method;
 use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method};
 use crate::js_number::{handle_number_instance_method, handle_number_prototype_method, handle_number_static_method, number_constructor};
-use crate::js_os::handle_os_method;
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
@@ -678,6 +677,58 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 evaluate_expr(mc, env, else_expr)
             }
         }
+        Expr::Object(properties) => {
+            let obj = crate::core::new_js_object_data(mc);
+            if let Some(obj_val) = env_get(env, "Object") {
+                if let Value::Object(obj_ctor) = &*obj_val.borrow() {
+                    if let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())? {
+                        if let Value::Object(proto) = &*proto_val.borrow() {
+                            obj.borrow_mut(mc).prototype = Some(*proto);
+                        }
+                    }
+                }
+            }
+
+            for (key_expr, val_expr, is_computed) in properties {
+                let key_val = evaluate_expr(mc, env, key_expr)?;
+                let val = evaluate_expr(mc, env, val_expr)?;
+
+                let key_str = match key_val {
+                    Value::String(s) => utf16_to_utf8(&s),
+                    Value::Number(n) => n.to_string(),
+                    Value::Boolean(b) => b.to_string(),
+                    Value::BigInt(b) => b.to_string(),
+                    Value::Undefined => "undefined".to_string(),
+                    Value::Null => "null".to_string(),
+                    _ => "object".to_string(),
+                };
+                obj_set_key_value(mc, &obj, &PropertyKey::from(key_str), val)?;
+            }
+            Ok(Value::Object(obj))
+        }
+        Expr::Array(elements) => {
+            let arr_obj = crate::core::new_js_object_data(mc);
+            if let Some(arr_val) = env_get(env, "Array") {
+                if let Value::Object(arr_ctor) = &*arr_val.borrow() {
+                    if let Some(proto_val) = obj_get_key_value(arr_ctor, &"prototype".into())? {
+                        if let Value::Object(proto) = &*proto_val.borrow() {
+                            arr_obj.borrow_mut(mc).prototype = Some(*proto);
+                        }
+                    }
+                }
+            }
+
+            let mut len = 0;
+            for (i, elem_opt) in elements.iter().enumerate() {
+                if let Some(elem) = elem_opt {
+                    let val = evaluate_expr(mc, env, elem)?;
+                    obj_set_key_value(mc, &arr_obj, &i.to_string().into(), val)?;
+                }
+                len = i + 1;
+            }
+            obj_set_key_value(mc, &arr_obj, &"length".into(), Value::Number(len as f64))?;
+            Ok(Value::Object(arr_obj))
+        }
         Expr::Function(name, params, body) => {
             let mut body_clone = body.clone();
             Ok(evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)?)
@@ -729,12 +780,50 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         }
                     } else if let Some(method_name) = name.strip_prefix("console.") {
                         crate::js_console::handle_console_method(mc, method_name, &eval_args, env)
-                    } else if let Some(method) = name.strip_prefix("os.path.") {
-                        let this_val = this_val.clone().unwrap_or(Value::Object(*env));
-                        Ok(handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("os.") {
-                        let this_val = this_val.clone().unwrap_or(Value::Object(*env));
-                        Ok(handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
+                        #[cfg(feature = "os")]
+                        {
+                            let this_val = this_val.clone().unwrap_or(Value::Object(*env));
+                            Ok(crate::js_os::handle_os_method(mc, this_val, method, &eval_args, env).map_err(EvalError::Js)?)
+                        }
+                        #[cfg(not(feature = "os"))]
+                        {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "os module not enabled. Recompile with --features os"
+                            )))
+                        }
+                    } else if let Some(method) = name.strip_prefix("std.") {
+                        #[cfg(feature = "std")]
+                        {
+                            match method {
+                                "sprintf" => Ok(crate::js_std::sprintf::handle_sprintf_call(&eval_args).map_err(EvalError::Js)?),
+                                "tmpfile" => Ok(crate::js_std::tmpfile::create_tmpfile(mc).map_err(EvalError::Js)?),
+                                _ => Err(EvalError::Js(raise_eval_error!(format!("std method '{}' not implemented", method)))),
+                            }
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "std module not enabled. Recompile with --features std"
+                            )))
+                        }
+                    } else if let Some(method) = name.strip_prefix("tmp.") {
+                        #[cfg(feature = "std")]
+                        {
+                            if let Some(Value::Object(this_obj)) = this_val {
+                                Ok(crate::js_std::tmpfile::handle_file_method(&this_obj, method, &eval_args).map_err(EvalError::Js)?)
+                            } else {
+                                Err(EvalError::Js(raise_eval_error!(
+                                    "TypeError: tmp method called on incompatible receiver"
+                                )))
+                            }
+                        }
+                        #[cfg(not(feature = "std"))]
+                        {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "std module (tmpfile) not enabled. Recompile with --features std"
+                            )))
+                        }
                     } else if let Some(method) = name.strip_prefix("BigInt.prototype.") {
                         let this_v = this_val.clone().unwrap_or(Value::Undefined);
                         Ok(crate::js_bigint::handle_bigint_object_method(this_v, method, &eval_args).map_err(EvalError::Js)?)

@@ -1,0 +1,2 @@
+[alias]
+run-js = "run --example js --features=os,std --"

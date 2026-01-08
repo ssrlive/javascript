@@ -5,7 +5,6 @@ use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_math::initialize_math;
 use crate::js_number::initialize_number_module;
-use crate::js_os::initialize_os_module;
 use crate::js_regexp::initialize_regexp;
 use crate::js_string::initialize_string;
 use crate::raise_eval_error;
@@ -75,13 +74,18 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
-    initialize_os_module(mc, env)?;
     initialize_bigint(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
     env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
+
+    #[cfg(feature = "os")]
+    crate::js_os::initialize_os_module(mc, env)?;
+
+    #[cfg(feature = "std")]
+    crate::js_std::initialize_std_module(mc, env)?;
 
     Ok(())
 }

@@ -1651,9 +1651,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
                     // Parse key
                     let mut is_shorthand_candidate = false;
-                    let key_expr = if let Some(Token::Identifier(name)) = tokens.first().map(|t| t.token.clone()) {
+                    let key_expr = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                         // Check for concise method: Identifier + (
-                        if !is_getter && !is_setter && tokens.len() >= 2 && matches!(tokens[1].token, Token::LParen) {
+                        if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
                             // Concise method
                             *index += 1; // consume name
                             *index += 1; // consume (
@@ -1693,16 +1693,16 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         is_shorthand_candidate = true;
                         *index += 1;
                         Expr::StringLit(crate::unicode::utf8_to_utf16(&name))
-                    } else if let Some(Token::Number(n)) = tokens.first().map(|t| t.token.clone()) {
+                    } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
                         // Numeric property keys are allowed in object literals (they become strings)
                         *index += 1;
                         // Format as integer if whole number, otherwise use default representation
                         let s = if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() };
                         Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
-                    } else if let Some(Token::StringLit(s)) = tokens.first().map(|t| t.token.clone()) {
+                    } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                         *index += 1;
                         Expr::StringLit(s)
-                    } else if let Some(Token::Default) = tokens.first().map(|t| t.token.clone()) {
+                    } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
                         // allow the reserved word `default` as an object property key
                         *index += 1;
                         Expr::StringLit(crate::unicode::utf8_to_utf16("default"))

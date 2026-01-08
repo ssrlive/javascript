@@ -12,6 +12,11 @@ readme = "README.md"
 keywords = ["javascript", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
+[features]
+# default = ["os", "std"]
+os = ["libc", "windows-sys"]
+std = []
+
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "40c2710" }
@@ -24,10 +29,10 @@ serde_json = "1.0.145"
 thiserror = "2.0.17"
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.178"
+libc = { version = "0.2.178", optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", optional = true, features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
 
 [dev-dependencies]
 clap = { version = "4.5.53", features = ["derive", "cargo"] }
@@ -39,6 +44,7 @@ rustyline = "17.0.2"
 [[example]]
 name = "js"
 path = "examples/js.rs"
+required-features = ["os", "std"]
 
 [[bench]]
 name = "promise_benchmarks"

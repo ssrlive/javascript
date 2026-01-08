@@ -93,7 +93,6 @@ pub fn handle_global_function<'gc>(
     // Handle functions that expect unevaluated expressions
     match func_name {
         "import" => return dynamic_import_function(mc, args, env),
-        "std.sprintf" => return crate::sprintf::handle_sprintf_call(mc, env, args),
         "Function" => return function_constructor(mc, args, env),
         "new" => return evaluate_new_expression(mc, args, env),
         "eval" => return evalute_eval_function(mc, args, env),

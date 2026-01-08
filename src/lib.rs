@@ -17,21 +17,21 @@ pub(crate) mod js_math;
 // pub(crate) mod js_module;
 pub(crate) mod js_number;
 // pub(crate) mod js_object;
+#[cfg(feature = "os")]
 pub(crate) mod js_os;
 // pub(crate) mod js_promise;
 // pub(crate) mod js_proxy;
 // pub(crate) mod js_reflect;
 pub(crate) mod js_regexp;
 // pub(crate) mod js_set;
-// pub(crate) mod js_std;
+#[cfg(feature = "std")]
+pub(crate) mod js_std;
 pub(crate) mod js_string;
 // pub(crate) mod js_testintl;
 // pub(crate) mod js_typedarray;
 // pub(crate) mod js_weakmap;
 // pub(crate) mod js_weakset;
 pub(crate) mod repl;
-// pub(crate) mod sprintf;
-// pub(crate) mod tmpfile;
 pub(crate) mod unicode;
 
 pub use crate::core::Token;

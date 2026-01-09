@@ -1029,6 +1029,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             match func_val {
                 Value::Function(name) => {
+                    if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
+                        return Ok(res);
+                    }
                     if name == "eval" {
                         let first_arg = eval_args.get(0).cloned().unwrap_or(Value::Undefined);
                         if let Value::String(script_str) = first_arg {
@@ -1177,6 +1180,33 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         } else {
                             let method = &name[6..];
                             Ok(handle_array_static_method(mc, method, &eval_args, env)?)
+                        }
+                    } else if name.starts_with("Map.") {
+                        if let Some(method) = name.strip_prefix("Map.prototype.") {
+                            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                            if let Value::Object(obj) = this_v {
+                                if let Some(map_val) = obj_get_key_value(&obj, &"__map__".into())? {
+                                    if let Value::Map(map_ptr) = &*map_val.borrow() {
+                                        Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, &eval_args, env)?)
+                                    } else {
+                                        Err(EvalError::Js(raise_eval_error!(
+                                            "TypeError: Map.prototype method called on incompatible receiver"
+                                        )))
+                                    }
+                                } else {
+                                    Err(EvalError::Js(raise_eval_error!(
+                                        "TypeError: Map.prototype method called on incompatible receiver"
+                                    )))
+                                }
+                            } else if let Value::Map(map_ptr) = this_v {
+                                Ok(crate::js_map::handle_map_instance_method(mc, &map_ptr, method, &eval_args, env)?)
+                            } else {
+                                Err(EvalError::Js(raise_eval_error!(
+                                    "TypeError: Map.prototype method called on non-object receiver"
+                                )))
+                            }
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(format!("Unknown Map function: {}", name))))
                         }
                     } else {
                         Err(EvalError::Js(raise_eval_error!(format!("Unknown native function: {}", name))))
@@ -1438,6 +1468,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     return Ok(Value::Object(new_obj));
                                 } else if name == &crate::unicode::utf8_to_utf16("Date") {
                                     return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("Map") {
+                                    return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
                                 }
                             }
                         }
@@ -1689,7 +1721,7 @@ fn evaluate_function_expression<'gc>(
 
 fn get_property_with_accessors<'gc>(
     mc: &MutationContext<'gc>,
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
@@ -1698,14 +1730,14 @@ fn get_property_with_accessors<'gc>(
         match val {
             Value::Property { getter, value, .. } => {
                 if let Some(g) = getter {
-                    return call_accessor(mc, obj, &*g);
+                    return call_accessor(mc, env, obj, &*g);
                 }
                 if let Some(v) = value {
                     return Ok(v.borrow().clone());
                 }
                 Ok(Value::Undefined)
             }
-            Value::Getter(..) => call_accessor(mc, obj, &val),
+            Value::Getter(..) => call_accessor(mc, env, obj, &val),
             _ => Ok(val),
         }
     } else {
@@ -1750,12 +1782,74 @@ fn set_property_with_accessors<'gc>(
     }
 }
 
+fn call_native_function<'gc>(
+    mc: &MutationContext<'gc>,
+    name: &str,
+    this_val: Option<Value<'gc>>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
+    if name == "MapIterator.prototype.next" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_map::handle_map_iterator_next(mc, &obj, env).map_err(EvalError::Js)?));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: MapIterator.prototype.next called on non-object"
+            )));
+        }
+    }
+
+    if name.starts_with("Map.") {
+        if let Some(method) = name.strip_prefix("Map.prototype.") {
+            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+            if let Value::Object(obj) = this_v {
+                if let Some(map_val) = crate::core::obj_get_key_value(&obj, &"__map__".into()).map_err(EvalError::Js)? {
+                    if let Value::Map(map_ptr) = &*map_val.borrow() {
+                        return Ok(Some(
+                            crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env).map_err(EvalError::Js)?,
+                        ));
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!(
+                            "TypeError: Map.prototype method called on incompatible receiver"
+                        )));
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!(
+                        "TypeError: Map.prototype method called on incompatible receiver"
+                    )));
+                }
+            } else if let Value::Map(map_ptr) = this_v {
+                return Ok(Some(
+                    crate::js_map::handle_map_instance_method(mc, &map_ptr, method, args, env).map_err(EvalError::Js)?,
+                ));
+            } else {
+                return Err(EvalError::Js(raise_eval_error!(
+                    "TypeError: Map.prototype method called on non-object receiver"
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn call_accessor<'gc>(
     mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
     receiver: &JSObjectDataPtr<'gc>,
     accessor: &Value<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match accessor {
+        Value::Function(name) => {
+            if let Some(res) = call_native_function(mc, name, Some(Value::Object(*receiver)), &[], env)? {
+                Ok(res)
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!(format!(
+                    "Accessor function {} not supported",
+                    name
+                ))))
+            }
+        }
         Value::Getter(body, captured_env, _) => {
             let call_env = crate::core::new_js_object_data(mc);
             call_env.borrow_mut(mc).prototype = Some(*captured_env);

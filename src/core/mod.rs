@@ -4,6 +4,7 @@ use crate::js_bigint::initialize_bigint;
 use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_json::initialize_json;
+use crate::js_map::initialize_map;
 use crate::js_math::initialize_math;
 use crate::js_number::initialize_number_module;
 use crate::js_regexp::initialize_regexp;
@@ -84,6 +85,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_date(mc, env)?;
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
+    initialize_map(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
@@ -208,14 +210,7 @@ pub fn set_internal_prototype_from_constructor<'gc>(
 
 // Helper to initialize a collection from an iterable argument.
 // Used by Map, Set, WeakMap, WeakSet constructors.
-#[allow(dead_code)]
-pub fn initialize_collection_from_iterable<'gc, F>(
-    mc: &MutationContext<'gc>,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
-    constructor_name: &str,
-    mut process_item: F,
-) -> Result<(), JSError>
+pub fn initialize_collection_from_iterable<'gc, F>(args: &[Value<'gc>], constructor_name: &str, mut process_item: F) -> Result<(), JSError>
 where
     F: FnMut(Value<'gc>) -> Result<(), JSError>,
 {
@@ -226,12 +221,7 @@ where
         let msg = format!("{constructor_name} constructor takes at most one argument",);
         return Err(raise_eval_error!(msg));
     }
-    let iterable = evaluate_expr(mc, env, &args[0]).map_err(|e| match e {
-        crate::core::js_error::EvalError::Js(e) => e,
-        crate::core::js_error::EvalError::Throw(val, _, _) => {
-            crate::raise_eval_error!(format!("Uncaught exception: {:?}", val))
-        }
-    })?;
+    let iterable = args[0].clone();
     match iterable {
         Value::Object(obj) => {
             let mut i = 0;

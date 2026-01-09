@@ -12,6 +12,7 @@ use crate::js_set::initialize_set;
 use crate::js_string::initialize_string;
 use crate::js_symbol::initialize_symbol;
 use crate::js_weakmap::initialize_weakmap;
+use crate::js_weakset::initialize_weakset;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 pub(crate) use gc_arena::GcWeak;
@@ -91,6 +92,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;
     initialize_weakmap(mc, env)?;
+    initialize_weakset(mc, env)?;
     initialize_symbol(mc, env)?;
     initialize_set(mc, env)?;
 

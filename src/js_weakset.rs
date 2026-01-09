@@ -1,40 +1,54 @@
-use crate::core::JSWeakSet;
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{JSWeakSet, PropertyKey};
 use crate::{
-    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
+    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_get_key_value, obj_set_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
-use std::rc::Rc;
 
 /// Handle WeakSet constructor calls
 pub(crate) fn handle_weakset_constructor<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let weakset = Gc::new(mc, GcCell::new(JSWeakSet { values: Vec::new() }));
 
     if !args.is_empty() {
         if args.len() == 1 {
-            // WeakSet(iterable)
-            initialize_weakset_from_iterable(mc, &weakset, args, env)?;
+            // WeakSet(iterable) - args are already evaluated values
+            initialize_weakset_from_iterable(mc, &weakset, &args[0])?;
         } else {
             return Err(raise_eval_error!("WeakSet constructor takes at most one argument"));
         }
     }
 
-    Ok(Value::WeakSet(weakset))
+    // Create a wrapper object for the WeakSet
+    let weakset_obj = new_js_object_data(mc);
+    // Store the actual weakset data
+    weakset_obj.borrow_mut(mc).insert(
+        PropertyKey::String("__weakset__".to_string()),
+        Gc::new(mc, GcCell::new(Value::WeakSet(weakset))),
+    );
+
+    // Set prototype to WeakSet.prototype if available
+    if let Some(weakset_ctor) = obj_get_key_value(env, &"WeakSet".into())?
+        && let Value::Object(ctor) = &*weakset_ctor.borrow()
+        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Value::Object(proto_obj) = &*proto.borrow()
+    {
+        weakset_obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+    }
+
+    Ok(Value::Object(weakset_obj))
 }
 
 /// Initialize WeakSet from an iterable
 fn initialize_weakset_from_iterable<'gc>(
     mc: &MutationContext<'gc>,
     weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    iterable: &Value<'gc>,
 ) -> Result<(), JSError> {
-    let iterable = evaluate_expr(mc, env, &args[0])?;
     match iterable {
         Value::Object(obj) => {
             let mut i = 0;
@@ -60,6 +74,46 @@ fn initialize_weakset_from_iterable<'gc>(
             return Err(raise_eval_error!("WeakSet constructor requires an iterable"));
         }
     }
+    Ok(())
+}
+
+/// Initialize WeakSet constructor and prototype
+pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let weakset_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &weakset_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &weakset_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("WeakSet")))?;
+
+    // Get Object.prototype
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
+    let weakset_proto = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        weakset_proto.borrow_mut(mc).prototype = Some(proto);
+    }
+
+    obj_set_key_value(mc, &weakset_ctor, &"prototype".into(), Value::Object(weakset_proto.clone()))?;
+    obj_set_key_value(mc, &weakset_proto, &"constructor".into(), Value::Object(weakset_ctor.clone()))?;
+
+    // Register instance methods
+    let methods = vec!["add", "has", "delete", "toString"];
+
+    for method in methods {
+        let val = Value::Function(format!("WeakSet.prototype.{}", method));
+        obj_set_key_value(mc, &weakset_proto, &method.into(), val)?;
+        weakset_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+    }
+    // Mark constructor non-enumerable
+    weakset_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+
+    env_set(mc, env, "WeakSet", Value::Object(weakset_ctor))?;
     Ok(())
 }
 
@@ -110,15 +164,14 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
     mc: &MutationContext<'gc>,
     weakset: &Gc<'gc, GcCell<JSWeakSet<'gc>>>,
     method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
     match method {
         "add" => {
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakSet.prototype.add requires exactly one argument"));
             }
-            let value = evaluate_expr(mc, env, &args[0])?;
+            let value = args[0].clone();
 
             // Check if value is an object
             let value_obj_rc = match value {
@@ -146,7 +199,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakSet.prototype.has requires exactly one argument"));
             }
-            let value = evaluate_expr(mc, env, &args[0])?;
+            let value = args[0].clone();
 
             let value_obj_rc = match value {
                 Value::Object(ref obj) => obj,
@@ -159,7 +212,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakSet.prototype.delete requires exactly one argument"));
             }
-            let value = evaluate_expr(mc, env, &args[0])?;
+            let value = args[0].clone();
 
             let value_obj_rc = match value {
                 Value::Object(ref obj) => obj,

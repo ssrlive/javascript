@@ -30,7 +30,7 @@ pub(crate) mod js_string;
 pub(crate) mod js_symbol;
 // pub(crate) mod js_testintl;
 // pub(crate) mod js_typedarray;
-// pub(crate) mod js_weakmap;
+pub(crate) mod js_weakmap;
 // pub(crate) mod js_weakset;
 pub(crate) mod repl;
 pub(crate) mod unicode;

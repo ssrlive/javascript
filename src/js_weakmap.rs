@@ -1,7 +1,7 @@
-use crate::core::JSWeakMap;
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{JSWeakMap, PropertyKey};
 use crate::{
-    core::{Expr, JSObjectDataPtr, Value, evaluate_expr, obj_get_key_value},
+    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_get_key_value, obj_set_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -9,31 +9,46 @@ use crate::{
 /// Handle WeakMap constructor calls
 pub(crate) fn handle_weakmap_constructor<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let weakmap = Gc::new(mc, GcCell::new(JSWeakMap { entries: Vec::new() }));
 
     if !args.is_empty() {
         if args.len() == 1 {
-            // WeakMap(iterable)
-            initialize_weakmap_from_iterable(mc, &weakmap, args, env)?;
+            // WeakMap(iterable) - args are already evaluated values
+            initialize_weakmap_from_iterable(mc, &weakmap, &args[0])?;
         } else {
             return Err(raise_eval_error!("WeakMap constructor takes at most one argument"));
         }
     }
 
-    Ok(Value::WeakMap(weakmap))
+    // Create a wrapper object for the WeakMap
+    let weakmap_obj = new_js_object_data(mc);
+    // Store the actual weakmap data
+    weakmap_obj.borrow_mut(mc).insert(
+        PropertyKey::String("__weakmap__".to_string()),
+        Gc::new(mc, GcCell::new(Value::WeakMap(weakmap))),
+    );
+
+    // Set prototype to WeakMap.prototype if available
+    if let Some(weakmap_ctor) = obj_get_key_value(env, &"WeakMap".into())?
+        && let Value::Object(ctor) = &*weakmap_ctor.borrow()
+        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Value::Object(proto_obj) = &*proto.borrow()
+    {
+        weakmap_obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+    }
+
+    Ok(Value::Object(weakmap_obj))
 }
 
 /// Initialize WeakMap from an iterable
 fn initialize_weakmap_from_iterable<'gc>(
     mc: &MutationContext<'gc>,
     weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    iterable: &Value<'gc>,
 ) -> Result<(), JSError> {
-    let iterable = evaluate_expr(mc, env, &args[0])?;
     match iterable {
         Value::Object(obj) => {
             let mut i = 0;
@@ -72,8 +87,48 @@ fn initialize_weakmap_from_iterable<'gc>(
     Ok(())
 }
 
+/// Initialize WeakMap constructor and prototype
+pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let weakmap_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &weakmap_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &weakmap_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("WeakMap")))?;
+
+    // Get Object.prototype
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
+    let weakmap_proto = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        weakmap_proto.borrow_mut(mc).prototype = Some(proto);
+    }
+
+    obj_set_key_value(mc, &weakmap_ctor, &"prototype".into(), Value::Object(weakmap_proto.clone()))?;
+    obj_set_key_value(mc, &weakmap_proto, &"constructor".into(), Value::Object(weakmap_ctor.clone()))?;
+
+    // Register instance methods
+    let methods = vec!["set", "get", "has", "delete", "toString"];
+
+    for method in methods {
+        let val = Value::Function(format!("WeakMap.prototype.{method}"));
+        obj_set_key_value(mc, &weakmap_proto, &method.into(), val)?;
+        weakmap_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+    }
+    // Mark constructor non-enumerable
+    weakmap_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+
+    env_set(mc, env, "WeakMap", Value::Object(weakmap_ctor))?;
+    Ok(())
+}
+
 /// Check if WeakMap has a key
-fn weakmap_has_key<'gc>(weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key_obj_rc: &JSObjectDataPtr<'gc>) -> bool {
+fn weakmap_has_key<'gc>(mc: &MutationContext<'gc>, weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>, key_obj_rc: &JSObjectDataPtr<'gc>) -> bool {
     let weakmap = weakmap.borrow();
     for (k, _) in &weakmap.entries {
         if k.upgrade(mc).map_or(false, |p| Gc::ptr_eq(p, *key_obj_rc)) {
@@ -102,16 +157,16 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
     mc: &MutationContext<'gc>,
     weakmap: &Gc<'gc, GcCell<JSWeakMap<'gc>>>,
     method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     match method {
         "set" => {
             if args.len() != 2 {
                 return Err(raise_eval_error!("WeakMap.prototype.set requires exactly two arguments"));
             }
-            let key = evaluate_expr(mc, env, &args[0])?;
-            let value = evaluate_expr(mc, env, &args[1])?;
+            let key = args[0].clone();
+            let value = args[1].clone();
 
             // Check if key is an object
             let key_obj_rc = match key {
@@ -134,7 +189,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakMap.prototype.get requires exactly one argument"));
             }
-            let key = evaluate_expr(mc, env, &args[0])?;
+            let key = args[0].clone();
 
             let key_obj_rc = match key {
                 Value::Object(ref obj) => obj,
@@ -154,20 +209,20 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakMap.prototype.has requires exactly one argument"));
             }
-            let key = evaluate_expr(mc, env, &args[0])?;
+            let key = args[0].clone();
 
             let key_obj_rc = match key {
                 Value::Object(ref obj) => obj,
                 _ => return Ok(Value::Boolean(false)),
             };
 
-            Ok(Value::Boolean(weakmap_has_key(weakmap, key_obj_rc)))
+            Ok(Value::Boolean(weakmap_has_key(mc, weakmap, key_obj_rc)))
         }
         "delete" => {
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakMap.prototype.delete requires exactly one argument"));
             }
-            let key = evaluate_expr(mc, env, &args[0])?;
+            let key = args[0].clone();
 
             let key_obj_rc = match key {
                 Value::Object(ref obj) => obj,

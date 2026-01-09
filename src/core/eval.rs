@@ -1691,6 +1691,37 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         } else {
                             Err(EvalError::Js(raise_eval_error!(format!("Unknown Map function: {}", name))))
                         }
+                    } else if name.starts_with("WeakMap.") {
+                        if let Some(method) = name.strip_prefix("WeakMap.prototype.") {
+                            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                            if let Value::Object(obj) = this_v {
+                                if let Some(wm_val) = obj_get_key_value(&obj, &"__weakmap__".into())? {
+                                    if let Value::WeakMap(wm_ptr) = &*wm_val.borrow() {
+                                        Ok(crate::js_weakmap::handle_weakmap_instance_method(
+                                            mc, wm_ptr, method, &eval_args, env,
+                                        )?)
+                                    } else {
+                                        Err(EvalError::Js(raise_eval_error!(
+                                            "TypeError: WeakMap.prototype method called on incompatible receiver"
+                                        )))
+                                    }
+                                } else {
+                                    Err(EvalError::Js(raise_eval_error!(
+                                        "TypeError: WeakMap.prototype method called on incompatible receiver"
+                                    )))
+                                }
+                            } else if let Value::WeakMap(wm_ptr) = this_v {
+                                Ok(crate::js_weakmap::handle_weakmap_instance_method(
+                                    mc, &wm_ptr, method, &eval_args, env,
+                                )?)
+                            } else {
+                                Err(EvalError::Js(raise_eval_error!(
+                                    "TypeError: WeakMap.prototype method called on non-object receiver"
+                                )))
+                            }
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(format!("Unknown Map function: {}", name))))
+                        }
                     } else if name.starts_with("Set.") {
                         if let Some(method) = name.strip_prefix("Set.prototype.") {
                             let this_v = this_val.clone().unwrap_or(Value::Undefined);
@@ -2005,6 +2036,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
                                 } else if name == &crate::unicode::utf8_to_utf16("Map") {
                                     return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
+                                    return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
                                 } else if name == &crate::unicode::utf8_to_utf16("Set") {
                                     return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
                                 }

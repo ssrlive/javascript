@@ -134,9 +134,9 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     env.borrow_mut(mc).is_function_scope = true;
 
     // Record a module path on the module environment so stack frames / errors can include it
-    // Store as `__script_name` similarly to `evaluate_script`.
+    // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    obj_set_key_value(mc, &env, &"__script_name".into(), val)?;
+    obj_set_key_value(mc, &env, &"__filepath".into(), val)?;
 
     // Add exports object to the environment
     env.borrow_mut(mc).insert(

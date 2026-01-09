@@ -58,6 +58,12 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     let object_proto = new_js_object_data(mc);
     obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
     obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
+    obj_set_key_value(
+        mc,
+        &object_proto,
+        &"toString".into(),
+        Value::Function("Object.prototype.toString".to_string()),
+    )?;
 
     env_set(mc, env, "Object", Value::Object(object_ctor))?;
 
@@ -71,6 +77,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_math(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
+    // crate::js_function::initialize_function(mc, env)?;
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
@@ -120,10 +127,8 @@ where
         env_set(mc, &root.global_env, "globalThis", Value::Object(root.global_env))?;
         if let Some(p) = script_path.as_ref() {
             let p_str = p.as_ref().to_string_lossy().to_string();
-            // Store __filename
-            obj_set_key_value(mc, &root.global_env, &"__filename".into(), Value::String(utf8_to_utf16(&p_str)))?;
-            // Store __script_name for import resolution
-            obj_set_key_value(mc, &root.global_env, &"__script_name".into(), Value::String(utf8_to_utf16(&p_str)))?;
+            // Store __filepath
+            obj_set_key_value(mc, &root.global_env, &"__filepath".into(), Value::String(utf8_to_utf16(&p_str)))?;
         }
         match evaluate_statements(mc, &root.global_env, &mut statements) {
             Ok(result) => Ok(value_to_string(&result)),

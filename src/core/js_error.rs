@@ -76,6 +76,48 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     obj_set_key_value(mc, &error_proto, &"message".into(), Value::String(utf8_to_utf16("")))?;
 
     env_set(mc, env, "Error", Value::Object(error_ctor))?;
+
+    let error_ctor_val = Value::Object(error_ctor);
+    let error_proto_val = Value::Object(error_proto);
+
+    initialize_native_error(mc, env, "ReferenceError", error_ctor_val.clone(), error_proto_val.clone())?;
+    initialize_native_error(mc, env, "TypeError", error_ctor_val.clone(), error_proto_val.clone())?;
+    initialize_native_error(mc, env, "SyntaxError", error_ctor_val.clone(), error_proto_val.clone())?;
+    initialize_native_error(mc, env, "RangeError", error_ctor_val.clone(), error_proto_val.clone())?;
+
+    Ok(())
+}
+
+fn initialize_native_error<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    name: &str,
+    _parent_ctor: Value<'gc>,
+    parent_proto: Value<'gc>,
+) -> Result<(), JSError> {
+    let ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16(name)))?;
+
+    // Set prototype of constructor to parent constructor (Error) so strict inheritance works if checked
+    // However, usually Foo.__proto__ === Function.prototype.
+    // But in class inheritance: class Ref extends Error {} -> Ref.__proto__ === Error.
+    // Native errors behave like subclasses.
+
+    // For simplicity, let's just make sure the prototype property is set up correctly.
+
+    let proto = new_js_object_data(mc);
+    // ReferenceError.prototype.__proto__ === Error.prototype
+    if let Value::Object(parent_p_obj) = parent_proto {
+        proto.borrow_mut(mc).prototype = Some(parent_p_obj);
+    }
+
+    obj_set_key_value(mc, &ctor, &"prototype".into(), Value::Object(proto))?;
+    obj_set_key_value(mc, &proto, &"constructor".into(), Value::Object(ctor))?;
+    obj_set_key_value(mc, &proto, &"name".into(), Value::String(utf8_to_utf16(name)))?;
+    obj_set_key_value(mc, &proto, &"message".into(), Value::String(utf8_to_utf16("")))?;
+
+    env_set(mc, env, name, Value::Object(ctor))?;
     Ok(())
 }
 

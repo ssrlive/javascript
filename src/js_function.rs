@@ -1332,3 +1332,19 @@ fn handle_object_has_own_property<'gc>(
         Err(raise_eval_error!("hasOwnProperty called without this"))
     }
 }
+
+pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let func_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &func_ctor, &"name".into(), Value::String(utf8_to_utf16("Function")))?;
+    
+    let func_proto = new_js_object_data(mc);
+    
+    obj_set_key_value(mc, &func_ctor, &"prototype".into(), Value::Object(func_proto.clone()))?;
+    obj_set_key_value(mc, &func_proto, &"constructor".into(), Value::Object(func_ctor.clone()))?;
+
+    // Function.prototype.bind
+    obj_set_key_value(mc, &func_proto, &"bind".into(), Value::Function("Function.prototype.bind".to_string()))?;
+
+    crate::core::env_set(mc, env, "Function", Value::Object(func_ctor))?;
+    Ok(())
+}

@@ -1,6 +1,6 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match, dead_code)]
 
-use crate::core::{Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext};
+use crate::core::{ClassDefinition, Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext};
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
@@ -320,7 +320,7 @@ pub enum Value<'gc> {
     Closure(Gc<'gc, ClosureData<'gc>>),
     AsyncClosure(Gc<'gc, ClosureData<'gc>>),
     GeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
-    ClassDefinition(Gc<'gc, ClosureData<'gc>>),
+    ClassDefinition(Gc<'gc, ClassDefinition>),
     // Getter/Setter legacy variants - keeping structures as implied by usage
     Getter(Vec<Statement>, JSObjectDataPtr<'gc>, Option<Box<Value<'gc>>>),
     Setter(

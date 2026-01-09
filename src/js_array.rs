@@ -1614,12 +1614,11 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         }
     }
     if let Some(root_env) = root_env_opt {
-        // // Try to set prototype to Array.prototype
-        // if crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Array").is_err() {
-        //     // Fallback to Object.prototype
-        //     let _ = crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Object");
-        // }
-        todo!("Set Array prototype properly");
+        // Try to set prototype to Array.prototype
+        if crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Array").is_err() {
+            // Fallback to Object.prototype
+            let _ = crate::core::set_internal_prototype_from_constructor(mc, &arr, &root_env, "Object");
+        }
     }
 
     Ok(arr)

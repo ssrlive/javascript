@@ -26,7 +26,7 @@ pub enum StatementKind {
     LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
     VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: var {a, b} = {a: 1, b: 2};
     ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
-    Class(String, Option<Expr>, Vec<ClassMember>),                 // name, extends, members
+    Class(Box<ClassDefinition>),                                   // name, extends, members
     Assign(String, Expr),                                          // variable assignment
     For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
     ForOf(String, Expr, Vec<Statement>),                           // variable, iterable, body
@@ -105,7 +105,7 @@ pub enum Expr {
     Yield(Option<Box<Expr>>),
     YieldStar(Box<Expr>),
     LogicalNot(Box<Expr>),
-    // Class(std::rc::Rc<crate::js_class::ClassDefinition>),
+    Class(Box<ClassDefinition>),
     New(Box<Expr>, Vec<Expr>),
     UnaryNeg(Box<Expr>),
     UnaryPlus(Box<Expr>),
@@ -181,7 +181,8 @@ pub enum ObjectDestructuringElement {
     Rest(String),                                          // ...rest
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Collect)]
+#[collect(require_static)]
 pub enum ClassMember {
     Constructor(Vec<DestructuringElement>, Vec<Statement>),           // parameters, body
     Method(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameters, body
@@ -203,8 +204,8 @@ pub enum ClassMember {
     StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameter, body
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Collect)]
+#[collect(require_static)]
 pub struct ClassDefinition {
     pub name: String,
     pub extends: Option<Expr>,

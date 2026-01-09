@@ -32,14 +32,32 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         set_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &set_ctor, &"prototype".into(), Value::Object(set_proto))?;
-    obj_set_key_value(mc, &set_proto, &"constructor".into(), Value::Object(set_ctor))?;
+    obj_set_key_value(mc, &set_ctor, &"prototype".into(), Value::Object(set_proto.clone()))?;
+    obj_set_key_value(mc, &set_proto, &"constructor".into(), Value::Object(set_ctor.clone()))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 
     for method in methods {
         obj_set_key_value(mc, &set_proto, &method.into(), Value::Function(format!("Set.prototype.{}", method)))?;
+        set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+    }
+    // Mark constructor non-enumerable
+    set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+
+    // Get Symbol.iterator
+    let iterator_sym = if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+    {
+        Some(iter_sym.borrow().clone())
+    } else {
+        None
+    };
+
+    if let Some(Value::Symbol(iterator_sym_data)) = iterator_sym {
+        let val = Value::Function("Set.prototype.values".to_string());
+        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(iterator_sym_data), val)?;
     }
 
     // Register size getter

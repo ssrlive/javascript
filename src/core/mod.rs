@@ -10,6 +10,7 @@ use crate::js_number::initialize_number_module;
 use crate::js_regexp::initialize_regexp;
 use crate::js_set::initialize_set;
 use crate::js_string::initialize_string;
+use crate::js_symbol::initialize_symbol;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
 pub(crate) use gc_arena::GcWeak;
@@ -61,12 +62,13 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     let object_proto = new_js_object_data(mc);
     obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
     obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
-    obj_set_key_value(
-        mc,
-        &object_proto,
-        &"toString".into(),
-        Value::Function("Object.prototype.toString".to_string()),
-    )?;
+    // Make prototype builtin properties non-enumerable
+    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+
+    let val = Value::Function("Object.prototype.toString".to_string());
+    obj_set_key_value(mc, &object_proto, &"toString".into(), val)?;
+
+    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
 
     env_set(mc, env, "Object", Value::Object(object_ctor))?;
 
@@ -87,6 +89,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;
+    initialize_symbol(mc, env)?;
     initialize_set(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;

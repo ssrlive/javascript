@@ -231,6 +231,10 @@ impl<'gc> JSObjectData<'gc> {
         None
     }
 
+    pub fn set_non_enumerable(&mut self, key: PropertyKey<'gc>) {
+        self.non_enumerable.insert(key);
+    }
+
     pub fn is_configurable(&self, key: &PropertyKey<'gc>) -> bool {
         !self.non_configurable.contains(key)
     }

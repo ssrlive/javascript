@@ -36,6 +36,8 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 
     obj_set_key_value(mc, &array_ctor, &"prototype".into(), Value::Object(array_proto))?;
     obj_set_key_value(mc, &array_proto, &"constructor".into(), Value::Object(array_ctor))?;
+    // Make constructor non-enumerable
+    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Register static methods
     obj_set_key_value(mc, &array_ctor, &"isArray".into(), Value::Function("Array.isArray".to_string()))?;
@@ -82,12 +84,11 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     ];
 
     for method in methods {
-        obj_set_key_value(
-            mc,
-            &array_proto,
-            &method.into(),
-            Value::Function(format!("Array.prototype.{}", method)),
-        )?;
+        let val = Value::Function(format!("Array.prototype.{method}"));
+        obj_set_key_value(mc, &array_proto, &method.into(), val)?;
+
+        // Methods on prototypes should be non-enumerable so for..in doesn't list them
+        array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
 
     env_set(mc, env, "Array", Value::Object(array_ctor))?;

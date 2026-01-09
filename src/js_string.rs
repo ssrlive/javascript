@@ -1,9 +1,7 @@
-#![allow(warnings)]
-
 use crate::core::js_error::EvalError;
 use crate::core::{
-    Expr, JSObjectDataPtr, MutationContext, Value, env_set, evaluate_expr, get_own_property, new_js_object_data, obj_get_key_value,
-    obj_set_key_value, value_to_string,
+    JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -14,7 +12,6 @@ use crate::unicode::{
     utf8_to_utf16, utf16_char_at, utf16_find, utf16_len, utf16_replace, utf16_rfind, utf16_slice, utf16_to_lowercase, utf16_to_uppercase,
     utf16_to_utf8,
 };
-use crate::{raise_eval_error, raise_syntax_error, raise_type_error};
 
 pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let string_ctor = new_js_object_data(mc);
@@ -99,17 +96,18 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             &method.into(),
             Value::Function(format!("String.prototype.{}", method)),
         )?;
+        // Methods on String.prototype should be non-enumerable
+        string_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from(method));
     }
+
+    // Make constructor non-enumerable on the prototype
+    string_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("constructor"));
 
     env_set(mc, env, "String", Value::Object(string_ctor))?;
     Ok(())
 }
 
-pub(crate) fn string_constructor<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn string_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
     // String() constructor
     if args.len() == 1 {
         let arg_val = args[0].clone();
@@ -119,30 +117,19 @@ pub(crate) fn string_constructor<'gc>(
             Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
             Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
             Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
-            Value::Object(_obj) => {
-                // // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                // let prim = to_primitive(mc, &Value::Object(obj.clone()), "string", env).map_err(|e| match e {
-                //     EvalError::Js(e) => e,
-                //     EvalError::Throw(v, ..) => crate::error::JSError::new(
-                //         crate::error::JSErrorKind::RuntimeError {
-                //             message: value_to_string(&v),
-                //         },
-                //         "string.rs".to_string(),
-                //         0,
-                //         "string_constructor".to_string(),
-                //     ),
-                // })?;
-                // match prim {
-                //     Value::String(s) => Ok(Value::String(s)),
-                //     Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
-                //     Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
-                //     Value::Symbol(sd) => match sd.description {
-                //         Some(ref d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", d)))),
-                //         None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
-                //     },
-                //     _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
-                // }
-                Ok(Value::String(utf8_to_utf16("[object Object]")))
+            Value::Object(obj) => {
+                // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
+                let prim = to_primitive(&Value::Object(obj.clone()), "string", env).map_err(EvalError::from)?;
+                match prim {
+                    Value::String(s) => Ok(Value::String(s)),
+                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                    Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
+                    Value::Symbol(sd) => match sd.description {
+                        Some(ref d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", d)))),
+                        None => Ok(Value::String(utf8_to_utf16("Symbol()"))),
+                    },
+                    _ => Ok(Value::String(utf8_to_utf16("[object Object]"))),
+                }
             }
             Value::Function(name) => Ok(Value::String(utf8_to_utf16(&format!("[Function: {name}]")))),
             Value::Closure(_) => Ok(Value::String(utf8_to_utf16("[Function]"))),
@@ -182,49 +169,44 @@ pub fn handle_string_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
-        "toString" => string_to_string_method(mc, s, args, env),
-        "valueOf" => string_to_string_method(mc, s, args, env),
-        "substring" => string_substring_method(mc, s, args, env),
-        "substr" => string_substr_method(mc, s, args, env),
-        "slice" => string_slice_method(mc, s, args, env),
-        "toUpperCase" => string_to_uppercase(mc, s, args, env),
-        "toLowerCase" => string_to_lowercase(mc, s, args, env),
-        "indexOf" => string_indexof_method(mc, s, args, env),
-        "lastIndexOf" => string_lastindexof_method(mc, s, args, env),
-        "replace" => string_replace_method(mc, s, args, env),
+        "toString" => string_to_string_method(s, args),
+        "valueOf" => string_to_string_method(s, args),
+        "substring" => string_substring_method(s, args),
+        "substr" => string_substr_method(s, args),
+        "slice" => string_slice_method(s, args),
+        "toUpperCase" => string_to_uppercase(s, args),
+        "toLowerCase" => string_to_lowercase(s, args),
+        "indexOf" => string_indexof_method(s, args),
+        "lastIndexOf" => string_lastindexof_method(s, args),
+        "replace" => string_replace_method(s, args),
         "split" => string_split_method(mc, s, args, env),
         "match" => string_match_method(mc, s, args, env),
-        "charAt" => string_charat_method(mc, s, args, env),
-        "charCodeAt" => string_char_code_at_method(mc, s, args, env),
-        "trim" => string_trim_method(mc, s, args, env),
-        "trimEnd" => string_trim_end_method(mc, s, args, env),
-        "trimStart" => string_trim_start_method(mc, s, args, env),
-        "startsWith" => string_starts_with_method(mc, s, args, env),
-        "endsWith" => string_ends_with_method(mc, s, args, env),
-        "includes" => string_includes_method(mc, s, args, env),
-        "repeat" => string_repeat_method(mc, s, args, env),
-        "concat" => string_concat_method(mc, s, args, env),
-        "padStart" => string_pad_start_method(mc, s, args, env),
-        "padEnd" => string_pad_end_method(mc, s, args, env),
-        "at" => string_at_method(mc, s, args, env),
-        "codePointAt" => string_code_point_at_method(mc, s, args, env),
+        "charAt" => string_charat_method(s, args),
+        "charCodeAt" => string_char_code_at_method(s, args),
+        "trim" => string_trim_method(s, args),
+        "trimEnd" => string_trim_end_method(s, args),
+        "trimStart" => string_trim_start_method(s, args),
+        "startsWith" => string_starts_with_method(s, args),
+        "endsWith" => string_ends_with_method(s, args),
+        "includes" => string_includes_method(s, args),
+        "repeat" => string_repeat_method(s, args),
+        "concat" => string_concat_method(s, args),
+        "padStart" => string_pad_start_method(s, args),
+        "padEnd" => string_pad_end_method(s, args),
+        "at" => string_at_method(s, args),
+        "codePointAt" => string_code_point_at_method(s, args),
         "search" => string_search_method(mc, s, args, env),
         "matchAll" => string_match_all_method(mc, s, args, env),
-        "toLocaleLowerCase" => string_to_locale_lowercase(mc, s, args, env),
-        "toLocaleUpperCase" => string_to_locale_uppercase(mc, s, args, env),
-        "normalize" => string_normalize_method(mc, s, args, env),
+        "toLocaleLowerCase" => string_to_locale_lowercase(s, args),
+        "toLocaleUpperCase" => string_to_locale_uppercase(s, args),
+        "normalize" => string_normalize_method(s, args),
         "toWellFormed" => string_to_well_formed_method(mc, s, args, env),
-        "replaceAll" => string_replace_all_method(mc, s, args, env),
+        "replaceAll" => string_replace_all_method(s, args),
         _ => Err(EvalError::Js(raise_eval_error!(format!("Unknown string method: {method}")))), // method not found
     }
 }
 
-fn string_to_string_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_to_string_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         Ok(Value::String(s.to_vec()))
     } else {
@@ -233,12 +215,7 @@ fn string_to_string_method<'gc>(
     }
 }
 
-fn string_substring_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_substring_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     // substring(start, end?) - end is optional and defaults to length
     if args.len() == 1 || args.len() == 2 {
         let start_val = args[0].clone();
@@ -277,12 +254,7 @@ fn string_substring_method<'gc>(
     }
 }
 
-fn string_substr_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_substr_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     // substr(start, length?) - length is optional and defaults to remaining length
     if args.len() == 1 || args.len() == 2 {
         let start_val = args[0].clone();
@@ -315,12 +287,7 @@ fn string_substr_method<'gc>(
     }
 }
 
-fn string_slice_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_slice_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let start = if !args.is_empty() {
         match args[0].clone() {
             Value::Number(n) => n as isize,
@@ -352,12 +319,7 @@ fn string_slice_method<'gc>(
     }
 }
 
-fn string_to_uppercase<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_to_uppercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         Ok(Value::String(utf16_to_uppercase(s)))
     } else {
@@ -366,12 +328,7 @@ fn string_to_uppercase<'gc>(
     }
 }
 
-fn string_to_lowercase<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_to_lowercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         Ok(Value::String(utf16_to_lowercase(s)))
     } else {
@@ -380,12 +337,7 @@ fn string_to_lowercase<'gc>(
     }
 }
 
-fn string_indexof_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_indexof_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 || args.len() == 2 {
         let search_val = args[0].clone();
         let from_index = if args.len() == 2 {
@@ -418,12 +370,7 @@ fn string_indexof_method<'gc>(
     }
 }
 
-fn string_lastindexof_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_lastindexof_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 || args.len() == 2 {
         let search_val = args[0].clone();
         let from_index = if args.len() == 2 {
@@ -464,12 +411,7 @@ fn string_lastindexof_method<'gc>(
     }
 }
 
-fn string_replace_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_replace_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 2 {
         let search_val = args[0].clone();
         let replace_val = args[1].clone();
@@ -905,12 +847,7 @@ fn string_match_method<'gc>(
     }
 }
 
-fn string_charat_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_charat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 {
         let idx_val = args[0].clone();
         if let Value::Number(n) = idx_val {
@@ -940,12 +877,7 @@ fn string_charat_method<'gc>(
     }
 }
 
-fn string_char_code_at_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_char_code_at_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     // charCodeAt(index) - returns the UTF-16 code unit at index as a number
     if args.len() == 1 {
         let idx_val = args[0].clone();
@@ -966,12 +898,7 @@ fn string_char_code_at_method<'gc>(
     }
 }
 
-fn string_trim_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_trim_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim();
@@ -984,12 +911,7 @@ fn string_trim_method<'gc>(
     }
 }
 
-fn string_trim_end_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_trim_end_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim_end();
@@ -1000,12 +922,7 @@ fn string_trim_end_method<'gc>(
     }
 }
 
-fn string_trim_start_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_trim_start_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.is_empty() {
         let str_val = utf16_to_utf8(s);
         let trimmed = str_val.trim_start();
@@ -1016,12 +933,7 @@ fn string_trim_start_method<'gc>(
     }
 }
 
-fn string_starts_with_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_starts_with_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 {
         let search_val = args[0].clone();
         if let Value::String(search) = search_val {
@@ -1036,12 +948,7 @@ fn string_starts_with_method<'gc>(
     }
 }
 
-fn string_ends_with_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_ends_with_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 {
         let search_val = args[0].clone();
         if let Value::String(search) = search_val {
@@ -1058,45 +965,33 @@ fn string_ends_with_method<'gc>(
     }
 }
 
-fn string_includes_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    todo!("Implement String.prototype.includes");
-    // if args.is_empty() {
-    //     return Err(EvalError::Js(raise_eval_error!("includes method expects at least 1 argument")));
-    // }
-    // let search_val = args[0].clone();
-    // let search_str = to_primitive(mc, &search_val, "string", env)?;
-    // let search = if let Value::String(s) = search_str {
-    //     s
-    // } else {
-    //     return Err(EvalError::Js(raise_eval_error!("includes: argument must be a string")));
-    // };
+fn string_includes_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.is_empty() {
+        return Err(EvalError::Js(raise_eval_error!("includes method expects at least 1 argument")));
+    }
+    let search_val = args[0].clone();
+    // Convert search to string-like UTF-16
+    let search = match search_val {
+        Value::String(ss) => ss,
+        other => utf8_to_utf16(&value_to_string(&other)),
+    };
 
-    // let position = if args.len() > 1 {
-    //     let pos_val = args[1].clone();
-    //     if let Value::Number(n) = pos_val { n as usize } else { 0 }
-    // } else {
-    //     0
-    // };
+    let position = if args.len() > 1 {
+        let pos_val = args[1].clone();
+        if let Value::Number(n) = pos_val { n as usize } else { 0 }
+    } else {
+        0
+    };
 
-    // if position >= s.len() {
-    //     return Ok(Value::Boolean(false));
-    // }
+    if position >= s.len() {
+        return Ok(Value::Boolean(false));
+    }
 
-    // let includes = utf16_find(&s[position..], &search).is_some();
-    // Ok(Value::Boolean(includes))
+    let includes = utf16_find(&s[position..], &search).is_some();
+    Ok(Value::Boolean(includes))
 }
 
-fn string_repeat_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_repeat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 1 {
         let count_val = args[0].clone();
         if let Value::Number(n) = count_val {
@@ -1117,12 +1012,7 @@ fn string_repeat_method<'gc>(
     }
 }
 
-fn string_concat_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_concat_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut result = s.to_vec();
     for arg in args {
         let arg_val = arg.clone();
@@ -1142,12 +1032,7 @@ fn string_concat_method<'gc>(
     Ok(Value::String(result))
 }
 
-fn string_pad_start_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_pad_start_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if !args.is_empty() {
         let target_len_val = args[0].clone();
         if let Value::Number(target_len) = target_len_val {
@@ -1180,12 +1065,7 @@ fn string_pad_start_method<'gc>(
     }
 }
 
-fn string_pad_end_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_pad_end_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if !args.is_empty() {
         let target_len_val = args[0].clone();
         if let Value::Number(target_len) = target_len_val {
@@ -1220,12 +1100,7 @@ fn string_pad_end_method<'gc>(
     }
 }
 
-fn string_at_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_at_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let idx = if !args.is_empty() {
         match args[0].clone() {
             Value::Number(n) => n as i64,
@@ -1243,12 +1118,7 @@ fn string_at_method<'gc>(
     }
 }
 
-fn string_code_point_at_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_code_point_at_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let idx = if !args.is_empty() {
         match args[0].clone() {
             Value::Number(n) => n as usize,
@@ -1454,30 +1324,15 @@ fn string_match_all_method<'gc>(
     make_array_from_values(mc, env, matches)
 }
 
-fn string_to_locale_lowercase<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    string_to_lowercase(mc, s, args, env)
+fn string_to_locale_lowercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    string_to_lowercase(s, args)
 }
 
-fn string_to_locale_uppercase<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
-    string_to_uppercase(mc, s, args, env)
+fn string_to_locale_uppercase<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
+    string_to_uppercase(s, args)
 }
 
-fn string_normalize_method<'gc>(
-    _mc: &MutationContext<'gc>,
-    s: &[u16],
-    _args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_normalize_method<'gc>(s: &[u16], _args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     Ok(Value::String(s.to_vec()))
 }
 
@@ -1528,12 +1383,7 @@ fn make_array_from_values<'gc>(
     Ok(Value::Object(arr))
 }
 
-fn string_replace_all_method<'gc>(
-    mc: &MutationContext<'gc>,
-    s: &[u16],
-    args: &[Value<'gc>],
-    env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+fn string_replace_all_method<'gc>(s: &[u16], args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if args.len() == 2 {
         let search_val = args[0].clone();
         let replace_val = args[1].clone();
@@ -1697,11 +1547,7 @@ fn string_replace_all_method<'gc>(
     }
 }
 
-pub fn string_from_char_code<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn string_from_char_code<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut chars = Vec::new();
     for arg in args {
         let num = match arg {
@@ -1714,11 +1560,7 @@ pub fn string_from_char_code<'gc>(
     Ok(Value::String(chars))
 }
 
-pub fn string_from_code_point<'gc>(
-    mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn string_from_code_point<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     let mut chars = Vec::new();
     for arg in args {
         let num = match arg {
@@ -1737,6 +1579,6 @@ pub fn string_from_code_point<'gc>(
     Ok(Value::String(chars))
 }
 
-pub fn string_raw<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub fn string_raw<'gc>(_args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     Ok(Value::String(Vec::new()))
 }

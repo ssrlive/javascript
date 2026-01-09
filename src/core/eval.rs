@@ -6,7 +6,7 @@ use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
 use crate::js_json::handle_json_method;
 use crate::js_number::{handle_number_instance_method, handle_number_prototype_method, handle_number_static_method, number_constructor};
-use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
+use crate::js_string::{handle_string_method, string_from_char_code, string_from_code_point, string_raw};
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
@@ -19,6 +19,7 @@ use crate::{
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 use crate::{Token, parse_statements, raise_type_error, tokenize};
+use num_traits::Zero;
 
 #[derive(Clone, Debug)]
 pub enum ControlFlow<'gc> {
@@ -211,7 +212,7 @@ pub fn evaluate_statements<'gc>(
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    match evaluate_statements_with_context(mc, env, statements)? {
+    match evaluate_statements_with_labels(mc, env, statements, &[], &[])? {
         ControlFlow::Normal(val) => Ok(val),
         ControlFlow::Return(val) => Ok(val),
         ControlFlow::Throw(val, line, column) => Err(EvalError::Throw(val, line, column)),
@@ -248,11 +249,22 @@ pub fn evaluate_statements_with_context<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     statements: &[Statement],
+    labels: &[String],
+) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
+    evaluate_statements_with_labels(mc, env, statements, labels, &[])
+}
+
+pub fn evaluate_statements_with_labels<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+    labels: &[String],
+    own_labels: &[String],
 ) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
     hoist_declarations(mc, env, statements)?;
     let mut last_value = Value::Undefined;
     for stmt in statements {
-        if let Some(cf) = eval_res(mc, stmt, &mut last_value, env)? {
+        if let Some(cf) = eval_res(mc, stmt, &mut last_value, env, labels, own_labels)? {
             return Ok(cf);
         }
     }
@@ -264,6 +276,8 @@ fn eval_res<'gc>(
     stmt: &Statement,
     last_value: &mut Value<'gc>,
     env: &JSObjectDataPtr<'gc>,
+    labels: &[String],
+    own_labels: &[String],
 ) -> Result<Option<ControlFlow<'gc>>, EvalError<'gc>> {
     match &stmt.kind {
         StatementKind::Expr(expr) => match evaluate_expr(mc, env, expr) {
@@ -496,7 +510,7 @@ fn eval_res<'gc>(
             let mut stmts_clone = stmts.clone();
             let block_env = new_js_object_data(mc);
             block_env.borrow_mut(mc).prototype = Some(*env);
-            let res = evaluate_statements_with_context(mc, &block_env, &mut stmts_clone)?;
+            let res = evaluate_statements_with_context(mc, &block_env, &mut stmts_clone, labels)?;
             match res {
                 ControlFlow::Normal(val) => {
                     *last_value = val;
@@ -512,7 +526,8 @@ fn eval_res<'gc>(
                 Value::Number(n) => n != 0.0 && !n.is_nan(),
                 Value::String(s) => !s.is_empty(),
                 Value::Null | Value::Undefined => false,
-                Value::Object(_) => true,
+                Value::Object(_) | Value::Symbol(_) => true,
+                Value::BigInt(b) => !b.is_zero(),
                 _ => false,
             };
 
@@ -520,7 +535,7 @@ fn eval_res<'gc>(
                 let mut stmts = then_block.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts)?;
+                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts, labels)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -532,7 +547,7 @@ fn eval_res<'gc>(
                 let mut stmts = else_stmts.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts)?;
+                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts, labels)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -546,7 +561,7 @@ fn eval_res<'gc>(
         }
         StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body) => {
             let mut try_stmts = try_body.clone();
-            let try_res = evaluate_statements_with_context(mc, env, &mut try_stmts);
+            let try_res = evaluate_statements_with_context(mc, env, &mut try_stmts, labels);
 
             let mut result = match try_res {
                 Ok(cf) => cf,
@@ -570,7 +585,7 @@ fn eval_res<'gc>(
                     }
 
                     let mut catch_stmts_clone = catch_stmts.clone();
-                    let catch_res = evaluate_statements_with_context(mc, &catch_env, &mut catch_stmts_clone);
+                    let catch_res = evaluate_statements_with_context(mc, &catch_env, &mut catch_stmts_clone, labels);
                     match catch_res {
                         Ok(cf) => result = cf,
                         Err(e) => match e {
@@ -586,7 +601,7 @@ fn eval_res<'gc>(
 
             if let Some(finally_stmts) = finally_body {
                 let mut finally_stmts_clone = finally_stmts.clone();
-                let finally_res = evaluate_statements_with_context(mc, env, &mut finally_stmts_clone);
+                let finally_res = evaluate_statements_with_context(mc, env, &mut finally_stmts_clone, labels);
                 match finally_res {
                     Ok(ControlFlow::Normal(_)) => {
                         // If finally completes normally, return the previous result (try or catch)
@@ -615,8 +630,29 @@ fn eval_res<'gc>(
         }
         StatementKind::Label(label, stmt) => {
             let mut stmts = vec![*stmt.clone()];
-            let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+            // If inner is a loop or label, pass current label down
+            let new_labels = match stmt.kind {
+                StatementKind::For(..)
+                | StatementKind::ForIn(..)
+                | StatementKind::ForOf(..)
+                | StatementKind::While(..)
+                | StatementKind::DoWhile(..)
+                | StatementKind::Label(..) => {
+                    let mut l = labels.to_vec();
+                    l.push(label.clone());
+                    l
+                }
+                _ => Vec::new(),
+            };
+            let effective_labels = if new_labels.is_empty() { labels } else { &new_labels };
+            let mut new_own = own_labels.to_vec();
+            new_own.push(label.clone());
+            let res = evaluate_statements_with_labels(mc, env, &mut stmts, effective_labels, &new_own)?;
             match res {
+                ControlFlow::Normal(val) => {
+                    *last_value = val;
+                    Ok(None)
+                }
                 ControlFlow::Break(Some(ref l)) if l == label => Ok(None),
                 other => Ok(Some(other)),
             }
@@ -627,7 +663,7 @@ fn eval_res<'gc>(
             let loop_env = new_js_object_data(mc);
             loop_env.borrow_mut(mc).prototype = Some(*env);
             if let Some(init_stmt) = init {
-                evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt))?;
+                evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels)?;
             }
             loop {
                 if let Some(test_expr) = test {
@@ -637,32 +673,45 @@ fn eval_res<'gc>(
                         Value::Number(n) => n != 0.0 && !n.is_nan(),
                         Value::String(s) => !s.is_empty(),
                         Value::Null | Value::Undefined => false,
-                        Value::Object(_) => true,
+                        Value::Object(_) | Value::Symbol(_) => true,
+                        Value::BigInt(b) => !b.is_zero(),
                         _ => false,
                     };
                     if !is_true {
                         break;
                     }
                 }
-                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                 match res {
                     ControlFlow::Normal(v) => *last_value = v,
                     ControlFlow::Break(label) => {
                         if label.is_none() {
                             break;
                         }
+                        // If break has label, check if it matches us? No, breaks targets are handled by Label stmt or loop.
+                        // But loops can be targets of breaks too if labeled.
+                        // However, Label stmt handles breaks. Loops only handle unlabeled breaks (implicit break of current loop).
+                        // If we have label, we pass it up to Label stmt.
+
+                        // Wait, if I have `L: while` and `break L`, the Label stmt handles it.
+                        // So loop just returns Break(L).
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
-                        if label.is_some() {
-                            return Ok(Some(ControlFlow::Continue(label)));
+                        if let Some(ref l) = label {
+                            if own_labels.contains(l) {
+                                // Match! Continue this loop.
+                            } else {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
                         }
+                        // Continue loop (either unlabeled or matched label)
                     }
                     ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
                     ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                 }
                 if let Some(update_stmt) = update {
-                    evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(update_stmt))?;
+                    evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(update_stmt), labels)?;
                 }
             }
             Ok(None)
@@ -677,13 +726,14 @@ fn eval_res<'gc>(
                     Value::Number(n) => n != 0.0 && !n.is_nan(),
                     Value::String(s) => !s.is_empty(),
                     Value::Null | Value::Undefined => false,
-                    Value::Object(_) => true,
+                    Value::Object(_) | Value::Symbol(_) => true,
+                    Value::BigInt(b) => !b.is_zero(),
                     _ => false,
                 };
                 if !is_true {
                     break;
                 }
-                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                 match res {
                     ControlFlow::Normal(v) => *last_value = v,
                     ControlFlow::Break(label) => {
@@ -693,8 +743,12 @@ fn eval_res<'gc>(
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
-                        if label.is_some() {
-                            return Ok(Some(ControlFlow::Continue(label)));
+                        if let Some(ref l) = label {
+                            if own_labels.contains(l) {
+                                // Match! Continue this loop.
+                            } else {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
                         }
                     }
                     ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -707,7 +761,7 @@ fn eval_res<'gc>(
             let loop_env = new_js_object_data(mc);
             loop_env.borrow_mut(mc).prototype = Some(*env);
             loop {
-                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                 match res {
                     ControlFlow::Normal(v) => *last_value = v,
                     ControlFlow::Break(label) => {
@@ -717,8 +771,12 @@ fn eval_res<'gc>(
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
-                        if label.is_some() {
-                            return Ok(Some(ControlFlow::Continue(label)));
+                        if let Some(ref l) = label {
+                            if own_labels.contains(l) {
+                                // Match! Continue this loop.
+                            } else {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
                         }
                     }
                     ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -730,7 +788,8 @@ fn eval_res<'gc>(
                     Value::Number(n) => n != 0.0 && !n.is_nan(),
                     Value::String(s) => !s.is_empty(),
                     Value::Null | Value::Undefined => false,
-                    Value::Object(_) => true,
+                    Value::Object(_) | Value::Symbol(_) => true,
+                    Value::BigInt(b) => !b.is_zero(),
                     _ => false,
                 };
                 if !is_true {
@@ -741,6 +800,99 @@ fn eval_res<'gc>(
         }
         StatementKind::ForOf(var_name, iterable, body) => {
             let iter_val = evaluate_expr(mc, env, iterable)?;
+            let mut iterator = None;
+
+            // Try to use Symbol.iterator
+            if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method_opt = if let Value::Object(obj) = &iter_val {
+                    obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))?
+                } else {
+                    None
+                };
+
+                if let Some(method_cell) = method_opt {
+                    let method = method_cell.borrow().clone();
+                    // Call method
+                    let res = match method {
+                        Value::Function(name) => call_native_function(mc, &name, Some(iter_val.clone()), &[], env)?,
+                        Value::Closure(cl) => Some(call_closure(mc, &cl, Some(iter_val.clone()), &[], env)?),
+                        _ => None,
+                    };
+
+                    if let Some(Value::Object(iter_obj)) = res {
+                        iterator = Some(iter_obj);
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+
+                loop {
+                    let next_method = obj_get_key_value(&iter_obj, &"next".into())?
+                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                        .borrow()
+                        .clone();
+
+                    let next_res_val = match next_method {
+                        Value::Function(name) => call_native_function(mc, &name, Some(Value::Object(iter_obj)), &[], env)?
+                            .ok_or(EvalError::Js(raise_type_error!("next() result unknown")))?,
+                        Value::Closure(cl) => call_closure(mc, &cl, Some(Value::Object(iter_obj)), &[], env)?,
+                        _ => return Err(EvalError::Js(raise_type_error!("next is not a function"))),
+                    };
+
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = if let Some(done_val) = obj_get_key_value(&next_res, &"done".into())? {
+                            match &*done_val.borrow() {
+                                Value::Boolean(b) => *b,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if done {
+                            break;
+                        }
+
+                        let value = if let Some(val) = obj_get_key_value(&next_res, &"value".into())? {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+
+                        env_set(mc, &loop_env, var_name, value)?;
+                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                        match res {
+                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Break(label) => {
+                                if label.is_none() {
+                                    break;
+                                }
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if let Some(ref l) = label {
+                                    if !own_labels.contains(l) {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                            }
+                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        }
+                    } else {
+                        return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
+                    }
+                }
+                return Ok(None);
+            }
+
             if let Value::Object(obj) = iter_val {
                 if is_array(mc, &obj) {
                     let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap().borrow().clone();
@@ -753,7 +905,7 @@ fn eval_res<'gc>(
                     for i in 0..len {
                         let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
                         env_set(mc, &loop_env, var_name, val)?;
-                        let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                         match res {
                             ControlFlow::Normal(v) => *last_value = v,
                             ControlFlow::Break(label) => {
@@ -763,8 +915,10 @@ fn eval_res<'gc>(
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
                             ControlFlow::Continue(label) => {
-                                if label.is_some() {
-                                    return Ok(Some(ControlFlow::Continue(label)));
+                                if let Some(ref l) = label {
+                                    if !own_labels.contains(l) {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
                                 }
                             }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -773,10 +927,112 @@ fn eval_res<'gc>(
                     }
                     return Ok(None);
                 }
+
+                // Implement ForIn for objects: enumerate enumerable string keys across prototype chain
+                let mut keys: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut current = Some(obj);
+                while let Some(o) = current {
+                    for (key, _val) in o.borrow().properties.iter() {
+                        if !o.borrow().is_enumerable(key) {
+                            continue;
+                        }
+                        if let PropertyKey::String(s) = key {
+                            if s == "length" {
+                                continue;
+                            }
+                            if !seen.contains(s) {
+                                keys.push(s.clone());
+                                seen.insert(s.clone());
+                            }
+                        }
+                    }
+                    current = o.borrow().prototype.clone();
+                }
+
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+                for k in keys {
+                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(&k)))?;
+                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Break(label) => {
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if let Some(ref l) = label {
+                                if !own_labels.contains(l) {
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
+                }
+                return Ok(None);
             }
-            Err(EvalError::Js(raise_type_error!("ForOf only supports Arrays currently")))
+
+            Err(EvalError::Js(raise_type_error!("ForOf only supports Arrays and Objects currently")))
         }
-        _ => Ok(None),
+        StatementKind::ForIn(var_name, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+            if let Value::Object(obj) = iter_val {
+                // Collect enumerable string keys across prototype chain in insertion order
+                let mut keys: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut current = Some(obj);
+                while let Some(o) = current {
+                    for (key, _val) in o.borrow().properties.iter() {
+                        if !o.borrow().is_enumerable(key) {
+                            continue;
+                        }
+                        if let PropertyKey::String(s) = key {
+                            if s == "length" {
+                                continue;
+                            }
+                            if !seen.contains(s) {
+                                keys.push(s.clone());
+                                seen.insert(s.clone());
+                            }
+                        }
+                    }
+                    current = o.borrow().prototype.clone();
+                }
+
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+                for k in keys {
+                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(&k)))?;
+                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Break(label) => {
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if let Some(ref l) = label {
+                                if !own_labels.contains(l) {
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
+                }
+                return Ok(None);
+            }
+            Ok(None)
+        }
+        _ => todo!("Statement kind not implemented yet"),
     }
 }
 
@@ -841,6 +1097,7 @@ fn get_primitive_prototype_property<'gc>(
         Value::Number(_) => "Number",
         Value::String(_) => "String",
         Value::Boolean(_) => "Boolean",
+        Value::Symbol(_) => "Symbol",
         Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function",
         _ => return Ok(Value::Undefined),
     };
@@ -887,9 +1144,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Expr::Index(obj_expr, key_expr) => {
                     let obj_val = evaluate_expr(mc, env, obj_expr)?;
                     let key_val_res = evaluate_expr(mc, env, key_expr)?;
-                    let key_str = value_to_string(&key_val_res);
+
+                    let key = match key_val_res {
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        _ => PropertyKey::from(value_to_string(&key_val_res)),
+                    };
+
                     if let Value::Object(obj) = obj_val {
-                        set_property_with_accessors(mc, env, &obj, &PropertyKey::from(key_str), val.clone())?;
+                        set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
                         Ok(val)
                     } else {
                         Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
@@ -925,6 +1187,22 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Ok(new_val)
             } else {
                 Err(EvalError::Js(raise_eval_error!("AddAssign only for variables")))
+            }
+        }
+        Expr::SubAssign(target, value_expr) => {
+            let val = evaluate_expr(mc, env, value_expr)?;
+            if let Expr::Var(name, _, _) = &**target {
+                let current = evaluate_var(mc, env, name)?;
+                match (current, val) {
+                    (Value::Number(ln), Value::Number(rn)) => {
+                        let new_val = Value::Number(ln - rn);
+                        env_set_recursive(mc, env, name, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    _ => return Err(EvalError::Js(raise_eval_error!("SubAssign types invalid"))),
+                }
+            } else {
+                Err(EvalError::Js(raise_eval_error!("SubAssign only for variables")))
             }
         }
         Expr::Binary(left, op, right) => {
@@ -1098,7 +1376,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Value::Number(n) => n != 0.0 && !n.is_nan(),
                 Value::String(s) => !s.is_empty(),
                 Value::Null | Value::Undefined => false,
-                Value::Object(_) => true,
+                Value::Object(_) | Value::Symbol(_) => true,
+                Value::BigInt(b) => !b.is_zero(),
                 _ => false,
             };
             Ok(Value::Boolean(!b))
@@ -1110,7 +1389,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Value::Number(n) => n != 0.0 && !n.is_nan(),
                 Value::String(s) => !s.is_empty(),
                 Value::Null | Value::Undefined => false,
-                Value::Object(_) => true,
+                Value::Object(_) | Value::Symbol(_) => true,
+                Value::BigInt(b) => !b.is_zero(),
                 _ => false,
             };
 
@@ -1179,6 +1459,30 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
                     } else {
                         get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
+                    };
+                    (f_val, Some(obj_val))
+                }
+                Expr::Index(obj_expr, key_expr) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    let key_val = evaluate_expr(mc, env, key_expr)?;
+
+                    let key = match key_val {
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s).into()),
+                        Value::Number(n) => PropertyKey::from(n.to_string()),
+                        _ => PropertyKey::from(value_to_string(&key_val)),
+                    };
+
+                    let f_val = if let Value::Object(obj) = &obj_val {
+                        if let Some(val) = obj_get_key_value(obj, &key)? {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        }
+                    } else if matches!(obj_val, Value::Undefined | Value::Null) {
+                        return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
+                    } else {
+                        get_primitive_prototype_property(mc, env, &obj_val, &key)?
                     };
                     (f_val, Some(obj_val))
                 }
@@ -1287,11 +1591,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Ok(handle_date_static_method(method, &eval_args)?)
                     } else if name.starts_with("String.") {
                         if name == "String.fromCharCode" {
-                            Ok(string_from_char_code(mc, &eval_args, env)?)
+                            Ok(string_from_char_code(&eval_args)?)
                         } else if name == "String.fromCodePoint" {
-                            Ok(string_from_code_point(mc, &eval_args, env)?)
+                            Ok(string_from_code_point(&eval_args)?)
                         } else if name == "String.raw" {
-                            Ok(string_raw(mc, &eval_args, env)?)
+                            Ok(string_raw(&eval_args)?)
                         } else if name.starts_with("String.prototype.") {
                             let method = &name[17..];
                             // String instance methods need a 'this' value which should be the first argument if called directly?
@@ -1324,9 +1628,25 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                             // Ah, I see `Expr::Call` logic is split.
                             // Let's check `Expr::Call` implementation again.
 
-                            Err(EvalError::Js(raise_eval_error!(
-                                "String prototype methods not fully supported in direct calls yet"
-                            )))
+                            let method = &name[17..];
+                            // Use the provided `this` value (from method call) as the receiver; fall back to ToString conversion
+                            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                            let s_vec = match this_v {
+                                Value::String(s) => s.clone(),
+                                Value::Object(ref obj) => {
+                                    if let Ok(Some(val_rc)) = obj_get_key_value(obj, &"__value__".into()) {
+                                        if let Value::String(s2) = &*val_rc.borrow() {
+                                            s2.clone()
+                                        } else {
+                                            utf8_to_utf16(&value_to_string(&this_v))
+                                        }
+                                    } else {
+                                        utf8_to_utf16(&value_to_string(&this_v))
+                                    }
+                                }
+                                _ => utf8_to_utf16(&value_to_string(&this_v)),
+                            };
+                            Ok(handle_string_method(mc, &s_vec, method, &eval_args, env)?)
                         } else {
                             Err(EvalError::Js(raise_eval_error!(format!("Unknown String function: {}", name))))
                         }
@@ -1395,16 +1715,25 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         "TypeError: Set.prototype method called on incompatible receiver"
                                     )))
                                 }
-                            } else if let Value::Set(set_ptr) = this_v {
+                            } else if let Value::Set(set_ptr) = this_v.clone() {
                                 Ok(crate::js_set::handle_set_instance_method(
                                     mc,
                                     &set_ptr,
-                                    Value::Set(set_ptr.clone()),
+                                    this_v.clone(),
                                     method,
                                     &eval_args,
                                     env,
                                 )?)
                             } else {
+                                // Fallback: if `this_v` is an object, check if it has the Set internal slot on the underlying object
+                                // This happens when `this_v` is a JSObject wrapping the Set pointer? No, `Value::Set` is separate.
+                                // Actually, `this_val` from `Expr::Call` might be just `obj_val`.
+                                // If `this_val` is `Value::Object` (which it defaults to in `Expr::Call` matching logic),
+                                // it might still fail the `__set__` check if it's not set up yet?
+
+                                // Debug:
+                                // println!("Set method call debug: method={}, this_val={:?}", method, this_v);
+
                                 Err(EvalError::Js(raise_eval_error!(
                                     "TypeError: Set.prototype method called on non-object receiver"
                                 )))
@@ -1504,11 +1833,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         match &*native_name.borrow() {
                             Value::String(name) => {
                                 if name == &crate::unicode::utf8_to_utf16("String") {
-                                    Ok(crate::js_string::string_constructor(mc, &eval_args, env)?)
+                                    Ok(crate::js_string::string_constructor(&eval_args, env)?)
                                 } else if name == &crate::unicode::utf8_to_utf16("Number") {
                                     Ok(number_constructor(&eval_args, env).map_err(EvalError::Js)?)
                                 } else if name == &crate::unicode::utf8_to_utf16("BigInt") {
                                     Ok(bigint_constructor(&eval_args, env)?)
+                                } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
+                                    Ok(crate::js_symbol::handle_symbol_call(mc, &eval_args, env).map_err(EvalError::Js)?)
                                 } else {
                                     Err(EvalError::Js(raise_eval_error!("Not a function")))
                                 }
@@ -1551,7 +1882,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Err(e) => Err(e),
                     }
                 }
-                _ => Err(EvalError::Js(raise_eval_error!(format!("Value {func_val:?} is not callable yet")))),
+                _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
             }
         }
         Expr::New(ctor, args) => {
@@ -1683,7 +2014,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Ok(Value::Object(new_obj))
                     }
                 }
-                _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
+                _ => todo!("New expression with non-object constructor not implemented yet"),
             }
         }
         Expr::Property(obj_expr, key) => {
@@ -1704,6 +2035,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let key = match key_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
                 _ => PropertyKey::String(value_to_string(&key_val)),
             };
 
@@ -1715,6 +2047,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 get_primitive_prototype_property(mc, env, &obj_val, &key)
             }
         }
+        Expr::PostIncrement(target) => evaluate_update_expression(mc, env, target, 1.0, true),
+        Expr::PostDecrement(target) => evaluate_update_expression(mc, env, target, -1.0, true),
+        Expr::Increment(target) => evaluate_update_expression(mc, env, target, 1.0, false),
+        Expr::Decrement(target) => evaluate_update_expression(mc, env, target, -1.0, false),
         Expr::TemplateString(parts) => {
             let mut result = Vec::new();
             for part in parts {
@@ -1812,7 +2148,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 | Value::Closure(_)
                 | Value::AsyncClosure(_)
                 | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_) => true,
+                | Value::ClassDefinition(_)
+                | Value::Symbol(_) => true,
+                Value::BigInt(b) => !b.is_zero(),
                 _ => false,
             };
             if !is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
@@ -1829,7 +2167,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 | Value::Closure(_)
                 | Value::AsyncClosure(_)
                 | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_) => true,
+                | Value::ClassDefinition(_)
+                | Value::Symbol(_) => true,
+                Value::BigInt(b) => !b.is_zero(),
                 _ => false,
             };
             if is_truthy { Ok(lhs) } else { evaluate_expr(mc, env, right) }
@@ -1851,7 +2191,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(crate::js_class::evaluate_super_method(mc, env, prop, &eval_args).map_err(EvalError::Js)?)
         }
         Expr::Super => Ok(crate::js_class::evaluate_super(mc, env).map_err(EvalError::Js)?),
-        _ => Ok(Value::Undefined),
+        _ => todo!(),
     }
 }
 
@@ -2015,6 +2355,15 @@ fn call_native_function<'gc>(
                 "TypeError: SetIterator.prototype.next called on non-object"
             )));
         }
+    }
+
+    if name == "Symbol" {
+        return Ok(Some(crate::js_symbol::handle_symbol_call(mc, args, env).map_err(EvalError::Js)?));
+    }
+
+    if name == "Symbol.prototype.toString" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        return Ok(Some(crate::js_symbol::handle_symbol_tostring(mc, this_v).map_err(EvalError::Js)?));
     }
 
     if name.starts_with("Map.") {
@@ -2252,4 +2601,77 @@ pub fn call_closure<'gc>(
     }
     let mut body_clone = cl.body.clone();
     evaluate_statements(mc, &call_env, &mut body_clone)
+}
+
+fn evaluate_update_expression<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    delta: f64,
+    is_post: bool,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let (old_val, new_val) = match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            let current_num = match current {
+                Value::Number(n) => n,
+                Value::BigInt(_) => return Err(EvalError::Js(raise_type_error!("BigInt update not supported yet"))),
+                _ => f64::NAN,
+            };
+            let new_num = current_num + delta;
+            let new_v = Value::Number(new_num);
+            crate::core::env_set_recursive(mc, env, name, new_v.clone())?;
+            (current, new_v)
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = if let Some(some_cell) = obj_get_key_value(&obj, &key_val)? {
+                    some_cell.borrow().clone()
+                } else {
+                    Value::Undefined
+                };
+
+                let current_num = match current {
+                    Value::Number(n) => n,
+                    _ => f64::NAN,
+                };
+                let new_num = current_num + delta;
+                let new_v = Value::Number(new_num);
+                set_property_with_accessors(mc, env, &obj, &key_val, new_v.clone())?;
+                (current, new_v)
+            } else {
+                return Err(EvalError::Js(crate::raise_type_error!("Cannot update property of non-object")));
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let k_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&k_val);
+            let key = PropertyKey::from(key_str);
+
+            if let Value::Object(obj) = obj_val {
+                let current = if let Some(some_cell) = obj_get_key_value(&obj, &key)? {
+                    some_cell.borrow().clone()
+                } else {
+                    Value::Undefined
+                };
+
+                let current_num = match current {
+                    Value::Number(n) => n,
+                    _ => f64::NAN,
+                };
+                let new_num = current_num + delta;
+                let new_v = Value::Number(new_num);
+                set_property_with_accessors(mc, env, &obj, &key, new_v.clone())?;
+                (current, new_v)
+            } else {
+                return Err(EvalError::Js(crate::raise_type_error!("Cannot update property of non-object")));
+            }
+        }
+        _ => return Err(EvalError::Js(raise_eval_error!("Invalid L-value in update expression"))),
+    };
+
+    if is_post { Ok(old_val) } else { Ok(new_val) }
 }

@@ -1,5 +1,4 @@
-// #![allow(warnings)]
-
+use crate::PropertyKey;
 use crate::core::{GcPtr, JSObjectDataPtr};
 use crate::core::{MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
@@ -59,13 +58,11 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
         "toLocaleTimeString",
     ];
     for method in inst_methods {
-        obj_set_key_value(
-            mc,
-            &date_proto,
-            &method.into(),
-            Value::Function(format!("Date.prototype.{}", method)),
-        )?;
+        obj_set_key_value(mc, &date_proto, &method.into(), Value::Function(format!("Date.prototype.{method}")))?;
+        date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
+    // Mark constructor non-enumerable
+    date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Static methods
     obj_set_key_value(mc, &date_ctor, &"now".into(), Value::Function("Date.now".to_string()))?;

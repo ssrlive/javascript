@@ -29,15 +29,18 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         map_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &map_ctor, &"prototype".into(), Value::Object(map_proto))?;
-    obj_set_key_value(mc, &map_proto, &"constructor".into(), Value::Object(map_ctor))?;
+    obj_set_key_value(mc, &map_ctor, &"prototype".into(), Value::Object(map_proto.clone()))?;
+    obj_set_key_value(mc, &map_proto, &"constructor".into(), Value::Object(map_ctor.clone()))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "clear", "keys", "values", "entries"];
 
     for method in methods {
         obj_set_key_value(mc, &map_proto, &method.into(), Value::Function(format!("Map.prototype.{}", method)))?;
+        map_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
+    // Mark constructor non-enumerable
+    map_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Register size getter
     let size_getter = Value::Function("Map.prototype.size".to_string());

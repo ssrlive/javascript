@@ -1,3 +1,4 @@
+use crate::PropertyKey;
 use crate::core::{
     EvalError, JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value,
 };
@@ -34,13 +35,11 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let methods = vec!["exec", "test", "toString"];
 
     for method in methods {
-        obj_set_key_value(
-            mc,
-            &regexp_proto,
-            &method.into(),
-            Value::Function(format!("RegExp.prototype.{}", method)),
-        )?;
+        let val = Value::Function(format!("RegExp.prototype.{method}"));
+        obj_set_key_value(mc, &regexp_proto, &method.into(), val)?;
+        regexp_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
+    regexp_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     env_set(mc, env, "RegExp", Value::Object(regexp_ctor))?;
     Ok(())

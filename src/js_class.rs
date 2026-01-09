@@ -242,7 +242,7 @@ pub(crate) fn evaluate_new<'gc>(
                         )?;
 
                         // Execute constructor body
-                        let result = crate::core::evaluate_statements_with_context(mc, &func_env, &body)?;
+                        let result = crate::core::evaluate_statements_with_context(mc, &func_env, &body, &[])?;
 
                         // Check for explicit return
                         if let crate::core::ControlFlow::Return(ret_val) = result {

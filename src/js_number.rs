@@ -2,9 +2,9 @@
 
 use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
-use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
+use crate::{PropertyKey, env_set};
 
 pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let number_obj = make_number_object(mc, env)?;
@@ -101,6 +101,19 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         &"toPrecision".into(),
         Value::Function("Number.prototype.toPrecision".to_string()),
     )?;
+
+    // Make number prototype methods non-enumerable and mark constructor non-enumerable
+    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
+    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
+    number_prototype
+        .borrow_mut(mc)
+        .set_non_enumerable(PropertyKey::from("toLocaleString"));
+    number_prototype
+        .borrow_mut(mc)
+        .set_non_enumerable(PropertyKey::from("toExponential"));
+    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toFixed"));
+    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toPrecision"));
+    number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Set prototype on Number constructor
     obj_set_key_value(mc, &number_obj, &"prototype".into(), Value::Object(number_prototype))?;

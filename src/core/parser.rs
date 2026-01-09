@@ -48,12 +48,29 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
         Token::If => parse_if_statement(t, index),
         Token::Return => parse_return_statement(t, index),
         Token::Throw => parse_throw_statement(t, index),
+        Token::Break => parse_break_statement(t, index),
+        Token::Continue => parse_continue_statement(t, index),
         Token::Try => parse_try_statement(t, index),
         Token::LBrace => parse_block_statement(t, index),
         Token::Var => parse_var_statement(t, index),
         Token::Let => parse_let_statement(t, index),
         Token::Const => parse_const_statement(t, index),
+        Token::For => parse_for_statement(t, index),
+        Token::While => parse_while_statement(t, index),
+        Token::Do => parse_do_while_statement(t, index),
         _ => {
+            if let Token::Identifier(name) = &start_token.token {
+                if *index + 1 < t.len() && matches!(t[*index + 1].token, Token::Colon) {
+                    let label_name = name.clone();
+                    *index += 2; // consume Identifier and Colon
+                    let stmt = parse_statement_item(t, index)?;
+                    return Ok(Statement {
+                        kind: StatementKind::Label(label_name, Box::new(stmt)),
+                        line,
+                        column,
+                    });
+                }
+            }
             let expr = parse_expression(t, index)?;
             if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
                 *index += 1;
@@ -96,6 +113,205 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
         kind: StatementKind::Class(Box::new(class_def)),
         line: t[start].line,
         column: t[start].column,
+    })
+}
+
+fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    let line = t[start].line;
+    let column = t[start].column;
+    *index += 1; // consume for
+
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume (
+
+    // Check for declaration
+    let is_decl = matches!(t[*index].token, Token::Var | Token::Let | Token::Const);
+
+    let mut init_expr: Option<Expr> = None;
+    let mut init_decls: Option<Vec<(String, Option<Expr>)>> = None;
+    let mut decl_kind = None;
+
+    if is_decl {
+        decl_kind = Some(t[*index].token.clone());
+        *index += 1; // consume var/let/const
+        let decls = parse_variable_declaration_list(t, index)?;
+        init_decls = Some(decls);
+    } else {
+        if !matches!(t[*index].token, Token::Semicolon) {
+            init_expr = Some(parse_expression(t, index)?);
+        }
+    }
+
+    // Handle 'of'
+    if *index < t.len() && matches!(t[*index].token, Token::Identifier(ref s) if s == "of") {
+        *index += 1; // consume of
+        let iterable = parse_assignment(t, index)?;
+
+        if !matches!(t[*index].token, Token::RParen) {
+            return Err(raise_parse_error_at(&t[*index..]));
+        }
+        *index += 1; // consume )
+
+        let body = parse_statement_item(t, index)?;
+        let body_stmts = match body.kind {
+            StatementKind::Block(stmts) => stmts,
+            _ => vec![body],
+        };
+
+        let var_name = if let Some(decls) = init_decls {
+            if decls.len() != 1 {
+                return Err(raise_parse_error!("Invalid for-of statement"));
+            }
+            decls[0].0.clone()
+        } else if let Some(Expr::Var(s, _, _)) = init_expr {
+            s
+        } else {
+            return Err(raise_parse_error!("Invalid for-of left-hand side"));
+        };
+
+        return Ok(Statement {
+            kind: StatementKind::ForOf(var_name, iterable, body_stmts),
+            line,
+            column,
+        });
+    }
+
+    // Handle 'in'
+    let mut is_for_in = false;
+    let mut for_in_rhs = None;
+
+    if *index < t.len() && matches!(t[*index].token, Token::In) {
+        is_for_in = true;
+        *index += 1;
+        for_in_rhs = Some(parse_expression(t, index)?);
+    } else if !is_decl && init_expr.is_some() {
+        if matches!(t[*index].token, Token::RParen) {
+            // Check if init_expr is `x in y`.
+            if let Some(Expr::Binary(left, BinaryOp::In, right)) = init_expr.clone() {
+                if let Expr::Var(name, _, _) = *left {
+                    *index += 1; // consume )
+                    let body = parse_statement_item(t, index)?;
+                    let body_stmts = match body.kind {
+                        StatementKind::Block(b) => b,
+                        _ => vec![body],
+                    };
+                    return Ok(Statement {
+                        kind: StatementKind::ForIn(name, *right, body_stmts),
+                        line,
+                        column,
+                    });
+                }
+            }
+        }
+    }
+
+    if is_for_in {
+        let rhs = for_in_rhs.unwrap();
+        if !matches!(t[*index].token, Token::RParen) {
+            return Err(raise_parse_error_at(&t[*index..]));
+        }
+        *index += 1;
+        let body = parse_statement_item(t, index)?;
+        let body_stmts = match body.kind {
+            StatementKind::Block(b) => b,
+            _ => vec![body],
+        };
+
+        let var_name = if let Some(decls) = init_decls {
+            if decls.len() != 1 {
+                return Err(raise_parse_error!("Invalid for-in"));
+            }
+            decls[0].0.clone()
+        } else {
+            return Err(raise_parse_error!("Invalid codepath for for-in"));
+        };
+
+        return Ok(Statement {
+            kind: StatementKind::ForIn(var_name, rhs, body_stmts),
+            line,
+            column,
+        });
+    }
+
+    // Standard for loop
+    if !matches!(t[*index].token, Token::Semicolon) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume ;
+
+    let test = if !matches!(t[*index].token, Token::Semicolon) {
+        Some(parse_expression(t, index)?)
+    } else {
+        None
+    };
+
+    if !matches!(t[*index].token, Token::Semicolon) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume ;
+
+    let update = if !matches!(t[*index].token, Token::RParen) {
+        Some(parse_expression(t, index)?)
+    } else {
+        None
+    };
+
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume )
+
+    let body = parse_statement_item(t, index)?;
+    let body_stmts = match body.kind {
+        StatementKind::Block(b) => b,
+        _ => vec![body],
+    };
+
+    let init_stmt = if is_decl {
+        let kind = decl_kind.unwrap();
+        let decls = init_decls.unwrap();
+        let k = match kind {
+            Token::Var => StatementKind::Var(decls),
+            Token::Let => StatementKind::Let(decls),
+            Token::Const => {
+                let mut c_decls = Vec::new();
+                for (n, e) in decls {
+                    if let Some(init) = e {
+                        c_decls.push((n, init));
+                    } else {
+                        return Err(raise_parse_error!("Missing initializer in const"));
+                    }
+                }
+                StatementKind::Const(c_decls)
+            }
+            _ => unreachable!(),
+        };
+        Some(Box::new(Statement { kind: k, line, column }))
+    } else {
+        init_expr.map(|e| {
+            Box::new(Statement {
+                kind: StatementKind::Expr(e),
+                line,
+                column,
+            })
+        })
+    };
+
+    let update_stmt = update.map(|e| {
+        Box::new(Statement {
+            kind: StatementKind::Expr(e),
+            line,
+            column,
+        })
+    });
+
+    Ok(Statement {
+        kind: StatementKind::For(init_stmt, test, update_stmt, body_stmts),
+        line,
+        column,
     })
 }
 
@@ -180,6 +396,115 @@ fn parse_return_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     }
     Ok(Statement {
         kind: StatementKind::Return(expr),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume while
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume (
+    let condition = parse_expression(t, index)?;
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume )
+
+    let body = parse_statement_item(t, index)?;
+    let body_stmts = match body.kind {
+        StatementKind::Block(stmts) => stmts,
+        _ => vec![body],
+    };
+
+    Ok(Statement {
+        kind: StatementKind::While(condition, body_stmts),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume do
+    let body = parse_statement_item(t, index)?;
+    let body_stmts = match body.kind {
+        StatementKind::Block(stmts) => stmts,
+        _ => vec![body],
+    };
+
+    if !matches!(t[*index].token, Token::While) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume while
+
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume (
+
+    let condition = parse_expression(t, index)?;
+
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(&t[*index..]));
+    }
+    *index += 1; // consume )
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: StatementKind::DoWhile(body_stmts, condition),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_break_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume break
+
+    let mut label = None;
+    if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
+        if let Token::Identifier(name) = &t[*index].token {
+            label = Some(name.clone());
+            *index += 1;
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: StatementKind::Break(label),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_continue_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume continue
+
+    let mut label = None;
+    if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
+        if let Token::Identifier(name) = &t[*index].token {
+            label = Some(name.clone());
+            *index += 1;
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+    }
+
+    Ok(Statement {
+        kind: StatementKind::Continue(label),
         line: t[start].line,
         column: t[start].column,
     })

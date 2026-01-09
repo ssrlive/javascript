@@ -613,6 +613,169 @@ fn eval_res<'gc>(
                 other => Ok(Some(other)),
             }
         }
+        StatementKind::Label(label, stmt) => {
+            let mut stmts = vec![*stmt.clone()];
+            let res = evaluate_statements_with_context(mc, env, &mut stmts)?;
+            match res {
+                ControlFlow::Break(Some(ref l)) if l == label => Ok(None),
+                other => Ok(Some(other)),
+            }
+        }
+        StatementKind::Break(label) => Ok(Some(ControlFlow::Break(label.clone()))),
+        StatementKind::Continue(label) => Ok(Some(ControlFlow::Continue(label.clone()))),
+        StatementKind::For(init, test, update, body) => {
+            let loop_env = new_js_object_data(mc);
+            loop_env.borrow_mut(mc).prototype = Some(*env);
+            if let Some(init_stmt) = init {
+                evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt))?;
+            }
+            loop {
+                if let Some(test_expr) = test {
+                    let cond_val = evaluate_expr(mc, &loop_env, test_expr)?;
+                    let is_true = match cond_val {
+                        Value::Boolean(b) => b,
+                        Value::Number(n) => n != 0.0 && !n.is_nan(),
+                        Value::String(s) => !s.is_empty(),
+                        Value::Null | Value::Undefined => false,
+                        Value::Object(_) => true,
+                        _ => false,
+                    };
+                    if !is_true {
+                        break;
+                    }
+                }
+                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                match res {
+                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Break(label) => {
+                        if label.is_none() {
+                            break;
+                        }
+                        return Ok(Some(ControlFlow::Break(label)));
+                    }
+                    ControlFlow::Continue(label) => {
+                        if label.is_some() {
+                            return Ok(Some(ControlFlow::Continue(label)));
+                        }
+                    }
+                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                }
+                if let Some(update_stmt) = update {
+                    evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(update_stmt))?;
+                }
+            }
+            Ok(None)
+        }
+        StatementKind::While(cond, body) => {
+            let loop_env = new_js_object_data(mc);
+            loop_env.borrow_mut(mc).prototype = Some(*env);
+            loop {
+                let cond_val = evaluate_expr(mc, &loop_env, cond)?;
+                let is_true = match cond_val {
+                    Value::Boolean(b) => b,
+                    Value::Number(n) => n != 0.0 && !n.is_nan(),
+                    Value::String(s) => !s.is_empty(),
+                    Value::Null | Value::Undefined => false,
+                    Value::Object(_) => true,
+                    _ => false,
+                };
+                if !is_true {
+                    break;
+                }
+                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                match res {
+                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Break(label) => {
+                        if label.is_none() {
+                            break;
+                        }
+                        return Ok(Some(ControlFlow::Break(label)));
+                    }
+                    ControlFlow::Continue(label) => {
+                        if label.is_some() {
+                            return Ok(Some(ControlFlow::Continue(label)));
+                        }
+                    }
+                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                }
+            }
+            Ok(None)
+        }
+        StatementKind::DoWhile(body, cond) => {
+            let loop_env = new_js_object_data(mc);
+            loop_env.borrow_mut(mc).prototype = Some(*env);
+            loop {
+                let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                match res {
+                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Break(label) => {
+                        if label.is_none() {
+                            break;
+                        }
+                        return Ok(Some(ControlFlow::Break(label)));
+                    }
+                    ControlFlow::Continue(label) => {
+                        if label.is_some() {
+                            return Ok(Some(ControlFlow::Continue(label)));
+                        }
+                    }
+                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                }
+                let cond_val = evaluate_expr(mc, &loop_env, cond)?;
+                let is_true = match cond_val {
+                    Value::Boolean(b) => b,
+                    Value::Number(n) => n != 0.0 && !n.is_nan(),
+                    Value::String(s) => !s.is_empty(),
+                    Value::Null | Value::Undefined => false,
+                    Value::Object(_) => true,
+                    _ => false,
+                };
+                if !is_true {
+                    break;
+                }
+            }
+            Ok(None)
+        }
+        StatementKind::ForOf(var_name, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+            if let Value::Object(obj) = iter_val {
+                if is_array(mc, &obj) {
+                    let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap().borrow().clone();
+                    let len = match len_val {
+                        Value::Number(n) => n as usize,
+                        _ => 0,
+                    };
+                    let loop_env = new_js_object_data(mc);
+                    loop_env.borrow_mut(mc).prototype = Some(*env);
+                    for i in 0..len {
+                        let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                        env_set(mc, &loop_env, var_name, val)?;
+                        let res = evaluate_statements_with_context(mc, &loop_env, body)?;
+                        match res {
+                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Break(label) => {
+                                if label.is_none() {
+                                    break;
+                                }
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if label.is_some() {
+                                    return Ok(Some(ControlFlow::Continue(label)));
+                                }
+                            }
+                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
+            Err(EvalError::Js(raise_type_error!("ForOf only supports Arrays currently")))
+        }
         _ => Ok(None),
     }
 }
@@ -1208,6 +1371,47 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         } else {
                             Err(EvalError::Js(raise_eval_error!(format!("Unknown Map function: {}", name))))
                         }
+                    } else if name.starts_with("Set.") {
+                        if let Some(method) = name.strip_prefix("Set.prototype.") {
+                            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                            if let Value::Object(obj) = this_v {
+                                if let Some(set_val) = obj_get_key_value(&obj, &"__set__".into())? {
+                                    if let Value::Set(set_ptr) = &*set_val.borrow() {
+                                        Ok(crate::js_set::handle_set_instance_method(
+                                            mc,
+                                            set_ptr,
+                                            this_v.clone(),
+                                            method,
+                                            &eval_args,
+                                            env,
+                                        )?)
+                                    } else {
+                                        Err(EvalError::Js(raise_eval_error!(
+                                            "TypeError: Set.prototype method called on incompatible receiver"
+                                        )))
+                                    }
+                                } else {
+                                    Err(EvalError::Js(raise_eval_error!(
+                                        "TypeError: Set.prototype method called on incompatible receiver"
+                                    )))
+                                }
+                            } else if let Value::Set(set_ptr) = this_v {
+                                Ok(crate::js_set::handle_set_instance_method(
+                                    mc,
+                                    &set_ptr,
+                                    Value::Set(set_ptr.clone()),
+                                    method,
+                                    &eval_args,
+                                    env,
+                                )?)
+                            } else {
+                                Err(EvalError::Js(raise_eval_error!(
+                                    "TypeError: Set.prototype method called on non-object receiver"
+                                )))
+                            }
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(format!("Unknown Set function: {}", name))))
+                        }
                     } else {
                         Err(EvalError::Js(raise_eval_error!(format!("Unknown native function: {}", name))))
                     }
@@ -1470,6 +1674,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
                                 } else if name == &crate::unicode::utf8_to_utf16("Map") {
                                     return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("Set") {
+                                    return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
                                 }
                             }
                         }
@@ -1800,6 +2006,17 @@ fn call_native_function<'gc>(
         }
     }
 
+    if name == "SetIterator.prototype.next" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_set::handle_set_iterator_next(mc, &obj, env).map_err(EvalError::Js)?));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: SetIterator.prototype.next called on non-object"
+            )));
+        }
+    }
+
     if name.starts_with("Map.") {
         if let Some(method) = name.strip_prefix("Map.prototype.") {
             let this_v = this_val.clone().unwrap_or(Value::Undefined);
@@ -1826,6 +2043,39 @@ fn call_native_function<'gc>(
             } else {
                 return Err(EvalError::Js(raise_eval_error!(
                     "TypeError: Map.prototype method called on non-object receiver"
+                )));
+            }
+        }
+    }
+
+    if name.starts_with("Set.") {
+        if let Some(method) = name.strip_prefix("Set.prototype.") {
+            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+            if let Value::Object(obj) = this_v {
+                if let Some(set_val) = crate::core::obj_get_key_value(&obj, &"__set__".into()).map_err(EvalError::Js)? {
+                    if let Value::Set(set_ptr) = &*set_val.borrow() {
+                        return Ok(Some(
+                            crate::js_set::handle_set_instance_method(mc, set_ptr, this_v.clone(), method, args, env)
+                                .map_err(EvalError::Js)?,
+                        ));
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!(
+                            "TypeError: Set.prototype method called on incompatible receiver"
+                        )));
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!(
+                        "TypeError: Set.prototype method called on incompatible receiver"
+                    )));
+                }
+            } else if let Value::Set(set_ptr) = this_v {
+                return Ok(Some(
+                    crate::js_set::handle_set_instance_method(mc, &set_ptr, Value::Set(set_ptr.clone()), method, args, env)
+                        .map_err(EvalError::Js)?,
+                ));
+            } else {
+                return Err(EvalError::Js(raise_eval_error!(
+                    "TypeError: Set.prototype method called on non-object receiver"
                 )));
             }
         }
@@ -1965,4 +2215,41 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         obj.borrow_mut(mc).set_property(mc, "stack", stack_str.into());
     }
     err_val
+}
+
+pub fn call_closure<'gc>(
+    mc: &MutationContext<'gc>,
+    cl: &crate::core::ClosureData<'gc>,
+    this_val: Option<Value<'gc>>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let call_env = crate::core::new_js_object_data(mc);
+    call_env.borrow_mut(mc).prototype = Some(cl.env);
+    call_env.borrow_mut(mc).is_function_scope = true;
+    if let Some(tv) = &this_val {
+        crate::core::obj_set_key_value(mc, &call_env, &"this".into(), tv.clone()).map_err(EvalError::Js)?;
+    }
+
+    for (i, param) in cl.params.iter().enumerate() {
+        match param {
+            DestructuringElement::Variable(name, _) => {
+                let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                crate::core::env_set(mc, &call_env, name, arg_val).map_err(EvalError::Js)?;
+            }
+            DestructuringElement::Rest(name) => {
+                let rest_args = if i < args.len() { args[i..].to_vec() } else { Vec::new() };
+                let array_obj = crate::js_array::create_array(mc, env).map_err(EvalError::Js)?;
+                for (j, val) in rest_args.iter().enumerate() {
+                    crate::core::obj_set_key_value(mc, &array_obj, &PropertyKey::from(j.to_string()), val.clone())
+                        .map_err(EvalError::Js)?;
+                }
+                crate::js_array::set_array_length(mc, &array_obj, rest_args.len()).map_err(EvalError::Js)?;
+                crate::core::env_set(mc, &call_env, name, Value::Object(array_obj)).map_err(EvalError::Js)?;
+            }
+            _ => {}
+        }
+    }
+    let mut body_clone = cl.body.clone();
+    evaluate_statements(mc, &call_env, &mut body_clone)
 }

@@ -8,6 +8,7 @@ use crate::js_map::initialize_map;
 use crate::js_math::initialize_math;
 use crate::js_number::initialize_number_module;
 use crate::js_regexp::initialize_regexp;
+use crate::js_set::initialize_set;
 use crate::js_string::initialize_string;
 use crate::raise_eval_error;
 use crate::unicode::utf8_to_utf16;
@@ -86,6 +87,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;
+    initialize_set(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;

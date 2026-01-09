@@ -1,19 +1,33 @@
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
-use crate::core::{Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, get_own_property, new_js_object_data, obj_set_key_value};
+use crate::core::MutationContext;
+use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
+pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let json_obj = new_js_object_data(mc);
+
+    obj_set_key_value(mc, &json_obj, &"parse".into(), Value::Function("JSON.parse".to_string()))?;
+    obj_set_key_value(mc, &json_obj, &"stringify".into(), Value::Function("JSON.stringify".to_string()))?;
+
+    // JSON object usually has [Symbol.toStringTag] = "JSON"
+    // obj_set_key_value(mc, &json_obj, &crate::core::PropertyKey::from("Symbol.toStringTag"), Value::String(utf8_to_utf16("JSON")))?;
+    // We can skip that for now if not strictly required, or add it if Symbol is supported.
+
+    env_set(mc, env, "JSON", Value::Object(json_obj))?;
+    Ok(())
+}
+
 pub fn handle_json_method<'gc>(
     mc: &MutationContext<'gc>,
     method: &str,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     match method {
         "parse" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
+            if args.len() >= 1 {
+                let arg_val = &args[0];
                 match arg_val {
                     Value::String(s) => {
                         let json_str = utf16_to_utf8(&s);
@@ -29,9 +43,9 @@ pub fn handle_json_method<'gc>(
             }
         }
         "stringify" => {
-            if args.len() == 1 {
-                let arg_val = evaluate_expr(mc, env, &args[0])?;
-                match js_value_to_json_value(mc, arg_val) {
+            if args.len() >= 1 {
+                let arg_val = &args[0];
+                match js_value_to_json_value(mc, arg_val.clone()) {
                     Some(json_value) => match serde_json::to_string(&json_value) {
                         Ok(json_str) => {
                             log::debug!("JSON.stringify produced: {}", json_str);

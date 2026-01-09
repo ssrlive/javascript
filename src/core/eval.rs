@@ -1,9 +1,10 @@
 #![allow(warnings)]
 
 use crate::core::{Gc, GcCell, MutationContext};
-use crate::js_array::{handle_array_static_method, is_array};
+use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
+use crate::js_json::handle_json_method;
 use crate::js_number::{handle_number_instance_method, handle_number_prototype_method, handle_number_static_method, number_constructor};
 use crate::js_string::{string_from_char_code, string_from_code_point, string_raw};
 use crate::{
@@ -986,24 +987,15 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(Value::Object(obj))
         }
         Expr::Array(elements) => {
-            let arr_obj = crate::core::new_js_object_data(mc);
-            if let Ok(Value::Object(arr_ctor)) = evaluate_var(mc, env, "Array") {
-                if let Some(proto_val) = obj_get_key_value(&arr_ctor, &"prototype".into())? {
-                    if let Value::Object(proto) = &*proto_val.borrow() {
-                        arr_obj.borrow_mut(mc).prototype = Some(*proto);
-                    }
-                }
-            }
+            let arr_obj = create_array(mc, env)?;
 
-            let mut len = 0;
             for (i, elem_opt) in elements.iter().enumerate() {
                 if let Some(elem) = elem_opt {
                     let val = evaluate_expr(mc, env, elem)?;
                     obj_set_key_value(mc, &arr_obj, &i.to_string().into(), val)?;
                 }
-                len = i + 1;
             }
-            obj_set_key_value(mc, &arr_obj, &"length".into(), Value::Number(len as f64))?;
+            set_array_length(mc, &arr_obj, elements.len())?;
             Ok(Value::Object(arr_obj))
         }
         Expr::Function(name, params, body) => {
@@ -1115,6 +1107,8 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         Ok(handle_number_static_method(method, &eval_args).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Math.") {
                         Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
+                    } else if let Some(method) = name.strip_prefix("JSON.") {
+                        Ok(handle_json_method(mc, method, &eval_args, env).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("Date.prototype.") {
                         if let Some(this_obj) = this_val {
                             Ok(handle_date_method(mc, &this_obj, method, &eval_args, env).map_err(EvalError::Js)?)

@@ -1,15 +1,79 @@
-#![allow(clippy::collapsible_if, clippy::collapsible_match)]
-
 use crate::core::{
-    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, Value, evaluate_expr, get_well_known_symbol_rc,
-    new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Gc, GcCell, GcPtr, MutationContext};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
-use std::rc::Rc;
+
+pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    // 1. Create Object constructor
+    let object_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &object_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &object_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Object")))?;
+
+    // Register Object in the environment
+    crate::core::env_set(mc, env, "Object", Value::Object(object_ctor))?;
+
+    // 2. Create Object.prototype
+    let object_proto = new_js_object_data(mc);
+    // Link prototype and constructor
+    obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
+    obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
+
+    // 3. Register static methods
+    let static_methods = vec![
+        "assign",
+        "create",
+        "defineProperties",
+        "defineProperty",
+        "entries",
+        "freeze",
+        "fromEntries",
+        "getOwnPropertyDescriptor",
+        "getOwnPropertyDescriptors",
+        "getOwnPropertyNames",
+        "getOwnPropertySymbols",
+        "getPrototypeOf",
+        "groupBy",
+        "hasOwn",
+        "is",
+        "isExtensible",
+        "isFrozen",
+        "isSealed",
+        "keys",
+        "preventExtensions",
+        "seal",
+        "setPrototypeOf",
+        "values",
+    ];
+
+    for method in static_methods {
+        let func_name = format!("Object.{}", method);
+        let val = Value::Function(func_name);
+        obj_set_key_value(mc, &object_ctor, &method.into(), val)?;
+    }
+
+    // 4. Register prototype methods
+    let proto_methods = vec![
+        "hasOwnProperty",
+        "isPrototypeOf",
+        "propertyIsEnumerable",
+        "toLocaleString",
+        "toString",
+        "valueOf",
+    ];
+
+    for method in proto_methods {
+        let func_name = format!("Object.prototype.{}", method);
+        let val = Value::Function(func_name);
+        obj_set_key_value(mc, &object_proto, &method.into(), val)?;
+    }
+
+    Ok(())
+}
 
 fn define_property_internal<'gc>(
     mc: &MutationContext<'gc>,
@@ -93,20 +157,19 @@ fn define_property_internal<'gc>(
         }
     }
 
-    let mut getter_opt: Option<(Vec<crate::core::Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
+    let mut getter_opt: Option<Box<Value>> = None;
     if let Some(get_rc) = obj_get_key_value(desc_obj, &"get".into())? {
         let get_val = get_rc.borrow();
-        if let Some((_params, body, env)) = crate::core::extract_closure_from_value(&get_val) {
-            getter_opt = Some((body, env, None));
+        if !matches!(&*get_val, Value::Undefined) {
+            getter_opt = Some(Box::new(get_val.clone()));
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    let mut setter_opt: Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr, Option<JSObjectDataPtr>)> = None;
+    let mut setter_opt: Option<Box<Value>> = None;
     if let Some(set_rc) = obj_get_key_value(desc_obj, &"set".into())? {
         let set_val = set_rc.borrow();
-        if let Some((params, body, env)) = crate::core::extract_closure_from_value(&set_val) {
-            setter_opt = Some((params, body, env, None));
+        if !matches!(&*set_val, Value::Undefined) {
+            setter_opt = Some(Box::new(set_val.clone()));
         }
     }
 
@@ -254,7 +317,7 @@ pub fn handle_object_method<'gc>(
             let obj_val = evaluate_expr(mc, env, &args[0])?;
             match obj_val {
                 Value::Object(obj) => {
-                    if let Some(proto_rc) = obj.borrow().prototype.clone().and_then(|w| w.upgrade()) {
+                    if let Some(proto_rc) = obj.borrow().prototype.clone() {
                         Ok(Value::Object(proto_rc))
                     } else {
                         Ok(Value::Null)
@@ -436,19 +499,24 @@ pub fn handle_object_method<'gc>(
                                 // Data value
                                 if let Some(v) = value {
                                     obj_set_key_value(mc, &desc_obj, &"value".into(), v.borrow().clone())?;
-                                    // writable: treat as true by default for data properties
+                                    // writable: treat as true by default for data properties (simplification)
+                                    // Real implementation tracks writable separate from Value::Property in Value::Property?
+                                    // Current Value::Property struct doesn't have 'writable' field!
+                                    // It assumes checking 'setter' existence calls for writable? No.
+                                    // This engine seems to use Value::Property only for Accessors or special internal slots,
+                                    // but regular properties are just values.
+                                    // If we are here, it's likely an accessor.
+                                    // But if it has 'value', it's data?
+                                    // The Value::Property variant in core/value.rs has: value, getter, setter. Make sense.
+
                                     obj_set_key_value(mc, &desc_obj, &"writable".into(), Value::Boolean(true))?;
                                 }
                                 // Accessor
-                                if let Some((gbody, genv, _)) = getter {
-                                    // expose getter as function (Closure) on descriptor
-                                    let closure_data = ClosureData::new(&Vec::new(), gbody, genv, None);
-                                    obj_set_key_value(mc, &desc_obj, &"get".into(), Value::Closure(Gc::new(mc, closure_data)))?;
+                                if let Some(g) = getter {
+                                    obj_set_key_value(mc, &desc_obj, &"get".into(), *g.clone())?;
                                 }
-                                if let Some((sparams, sbody, senv, _)) = setter {
-                                    // expose setter as function (Closure) on descriptor
-                                    let closure_data = ClosureData::new(sparams, sbody, senv, None);
-                                    obj_set_key_value(mc, &desc_obj, &"set".into(), Value::Closure(Gc::new(mc, closure_data)))?;
+                                if let Some(s) = setter {
+                                    obj_set_key_value(mc, &desc_obj, &"set".into(), *s.clone())?;
                                 }
                                 // flags: enumerable depends on object's non-enumerable set
                                 let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
@@ -640,10 +708,10 @@ pub fn handle_object_method<'gc>(
 
 pub(crate) fn handle_to_string_method<'gc>(
     mc: &MutationContext<'gc>,
-    obj_val: &Value,
+    obj_val: &Value<'gc>,
     args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!(format!(
             "{}.toString() takes no arguments, but {} were provided",
@@ -700,7 +768,7 @@ pub(crate) fn handle_to_string_method<'gc>(
 
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if is_date_object(object) {
-                return crate::js_date::handle_date_method(object, "toString", args, env);
+                return crate::js_date::handle_date_method(mc, &Value::Object(object.clone()), "toString", &[], env);
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
@@ -725,7 +793,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             }
 
             // If this object contains a Symbol.toStringTag property, honor it
-            if let Some(tag_sym_rc) = get_well_known_symbol_rc("toStringTag") {
+            if let Some(tag_sym_rc) = get_well_known_symbol(mc, env, "toStringTag") {
                 if let Value::Symbol(sd) = &*tag_sym_rc.borrow() {
                     let key = PropertyKey::Symbol(sd.clone());
                     if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
@@ -763,7 +831,12 @@ pub(crate) fn handle_to_string_method<'gc>(
     }
 }
 
-pub(crate) fn handle_error_to_string_method<'gc>(mc: &MutationContext<'gc>, obj_val: &Value, args: &[Expr]) -> Result<Value, JSError> {
+#[allow(dead_code)]
+pub(crate) fn handle_error_to_string_method<'gc>(
+    _mc: &MutationContext<'gc>,
+    obj_val: &Value<'gc>,
+    args: &[Expr],
+) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!("Error.prototype.toString takes no arguments"));
     }
@@ -891,14 +964,15 @@ pub(crate) fn handle_value_of_method<'gc>(
                             return crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), args, env);
                         }
 
-                        let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
-                        let res = crate::js_function::handle_global_function(mc, &func_name, &[], &func_env)?;
-                        if matches!(
-                            res,
-                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
-                        ) {
-                            return Ok(res);
-                        }
+                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
+                        // let res = crate::js_function::handle_global_function(mc, &func_name, &[], &func_env)?;
+                        // if matches!(
+                        //     res,
+                        //     Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                        // ) {
+                        //     return Ok(res);
+                        // }
+                        todo!("Handle built-in function calls in valueOf");
                     }
                     _ => {}
                 }
@@ -934,7 +1008,7 @@ pub(crate) fn handle_value_of_method<'gc>(
             }
             // If this object looks like a Date (has __timestamp), call Date.valueOf()
             if is_date_object(obj) {
-                return crate::js_date::handle_date_method(obj, "valueOf", args, env);
+                return crate::js_date::handle_date_method(mc, obj_val, "valueOf", &[], env);
             }
             // For regular objects, return the object itself
             Ok(Value::Object(obj.clone()))
@@ -999,13 +1073,12 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             let target_val = crate::core::evaluate_expr(mc, env, &args[0])?;
             match target_val {
                 Value::Object(target_map) => {
-                    let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> =
-                        target_map.borrow().prototype.clone().and_then(|w| w.upgrade());
+                    let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> = target_map.borrow().prototype.clone();
                     while let Some(parent) = current_opt {
-                        if Gc::ptr_eq(parent, object) {
+                        if Gc::ptr_eq(parent, *object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
-                        current_opt = parent.borrow().prototype.clone().and_then(|w| w.upgrade());
+                        current_opt = parent.borrow().prototype.clone();
                     }
                     Ok(Some(Value::Boolean(false)))
                 }
@@ -1040,4 +1113,17 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
         )?)),
         _ => Ok(None),
     }
+}
+
+fn get_well_known_symbol<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol") {
+        if let Value::Object(sym_ctor) = &*sym_ctor_val.borrow() {
+            if let Ok(Some(sym_val)) = obj_get_key_value(sym_ctor, &name.into()) {
+                if let Value::Symbol(_) = &*sym_val.borrow() {
+                    return Some(sym_val);
+                }
+            }
+        }
+    }
+    None
 }

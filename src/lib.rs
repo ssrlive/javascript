@@ -16,7 +16,7 @@ pub(crate) mod js_map;
 pub(crate) mod js_math;
 pub(crate) mod js_module;
 pub(crate) mod js_number;
-// pub(crate) mod js_object;
+pub(crate) mod js_object;
 #[cfg(feature = "os")]
 pub(crate) mod js_os;
 // pub(crate) mod js_promise;

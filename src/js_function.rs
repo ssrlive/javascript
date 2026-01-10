@@ -99,8 +99,20 @@ pub fn handle_global_function<'gc>(
         "Date" => return handle_date_constructor(mc, args, env),
         "testWithIntlConstructors" => return test_with_intl_constructors(mc, args, env),
 
-        "Object.prototype.valueOf" => return object_prototype_value_of(mc, args, env),
-        "Object.prototype.toString" => return object_prototype_to_string(mc, args, env),
+        "Object.prototype.valueOf" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return crate::js_object::handle_value_of_method(mc, &this_val, args, env);
+            }
+            return Err(crate::raise_eval_error!("Object.prototype.valueOf called without this"));
+        }
+        "Object.prototype.toString" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return crate::js_object::handle_to_string_method(mc, &this_val, args, env);
+            }
+            return Err(crate::raise_eval_error!("Object.prototype.toString called without this"));
+        }
         "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(mc, args, env),
         "parseInt" => return parse_int_function(mc, args, env),
         "parseFloat" => return parse_float_function(mc, args, env),
@@ -447,7 +459,13 @@ pub fn handle_global_function<'gc>(
             Err(raise_type_error!("Array.prototype method called without this"))
         }
 
-        _ => Err(raise_eval_error!(format!("Global function {} not found", func_name))),
+        _ => {
+            if func_name.starts_with("Object.") && !func_name.contains(".prototype.") {
+                let method = &func_name["Object.".len()..];
+                return crate::js_object::handle_object_method(mc, method, args, env);
+            }
+            Err(raise_eval_error!(format!("Global function {} not found", func_name)))
+        }
     }
 }
 

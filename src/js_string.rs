@@ -1,7 +1,7 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value,
-    to_primitive, value_to_string,
+    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value,
+    obj_set_key_value, to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -97,11 +97,11 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             Value::Function(format!("String.prototype.{}", method)),
         )?;
         // Methods on String.prototype should be non-enumerable
-        string_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from(method));
+        string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
 
     // Make constructor non-enumerable on the prototype
-    string_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("constructor"));
+    string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     env_set(mc, env, "String", Value::Object(string_ctor))?;
     Ok(())

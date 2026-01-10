@@ -58,21 +58,7 @@ pub struct JsRoot<'gc> {
 pub type JsArena = gc_arena::Arena<gc_arena::Rootable!['gc => JsRoot<'gc>]>;
 
 pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
-    let object_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &object_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-
-    let object_proto = new_js_object_data(mc);
-    obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
-    obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
-    // Make prototype builtin properties non-enumerable
-    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
-
-    let val = Value::Function("Object.prototype.toString".to_string());
-    obj_set_key_value(mc, &object_proto, &"toString".into(), val)?;
-
-    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
-
-    env_set(mc, env, "Object", Value::Object(object_ctor))?;
+    crate::js_object::initialize_object_module(mc, env)?;
 
     initialize_error_constructor(mc, env)?;
 

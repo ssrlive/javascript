@@ -1,6 +1,6 @@
 use crate::core::{
-    ClosureData, Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value,
-    prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, JSObjectDataPtr, PropertyKey, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_closure_call_env,
+    prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext};
 use crate::error::JSError;
@@ -188,7 +188,7 @@ fn define_property_internal<'gc>(
 pub fn handle_object_method<'gc>(
     mc: &MutationContext<'gc>,
     method: &str,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     match method {
@@ -199,7 +199,7 @@ pub fn handle_object_method<'gc>(
             if args.len() > 1 {
                 return Err(raise_type_error!("Object.keys accepts only one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
@@ -239,7 +239,7 @@ pub fn handle_object_method<'gc>(
             if args.len() > 1 {
                 return Err(raise_type_error!("Object.values accepts only one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     let mut values = Vec::new();
@@ -276,8 +276,8 @@ pub fn handle_object_method<'gc>(
             if args.len() != 2 {
                 return Err(raise_type_error!("Object.hasOwn requires exactly two arguments"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
-            let prop_val = evaluate_expr(mc, env, &args[1])?;
+            let obj_val = args[0].clone();
+            let prop_val = args[1].clone();
 
             if matches!(obj_val, Value::Undefined | Value::Null) {
                 return Err(raise_type_error!("Cannot convert undefined or null to object"));
@@ -314,7 +314,7 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getPrototypeOf requires exactly one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     if let Some(proto_rc) = obj.borrow().prototype.clone() {
@@ -335,8 +335,8 @@ pub fn handle_object_method<'gc>(
             if args.len() != 2 {
                 return Err(raise_type_error!("Object.groupBy requires exactly two arguments"));
             }
-            let items_val = evaluate_expr(mc, env, &args[0])?;
-            let callback_val = evaluate_expr(mc, env, &args[1])?;
+            let items_val = args[0].clone();
+            let callback_val = args[1].clone();
 
             let items_obj = match items_val {
                 Value::Object(obj) => obj,
@@ -392,7 +392,7 @@ pub fn handle_object_method<'gc>(
             if args.is_empty() {
                 return Err(raise_type_error!("Object.create requires at least one argument"));
             }
-            let proto_val = evaluate_expr(mc, env, &args[0])?;
+            let proto_val = args[0].clone();
             let proto_obj = match proto_val {
                 Value::Object(obj) => Some(obj),
                 Value::Undefined | Value::Null => None,
@@ -411,7 +411,7 @@ pub fn handle_object_method<'gc>(
 
             // If properties descriptor is provided, add properties
             if args.len() > 1 {
-                let props_val = evaluate_expr(mc, env, &args[1])?;
+                let props_val = args[1].clone();
                 if let Value::Object(props_obj) = props_val {
                     for (key, desc_val) in props_obj.borrow().properties.iter() {
                         if let Value::Object(desc_obj) = &*desc_val.borrow() {
@@ -436,7 +436,7 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertySymbols requires exactly one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     let result_obj = crate::js_array::create_array(mc, env)?;
@@ -458,7 +458,7 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertyNames requires exactly one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     let result_obj = crate::js_array::create_array(mc, env)?;
@@ -481,7 +481,7 @@ pub fn handle_object_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_type_error!("Object.getOwnPropertyDescriptors requires exactly one argument"));
             }
-            let obj_val = evaluate_expr(mc, env, &args[0])?;
+            let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
                     let result_obj = new_js_object_data(mc);
@@ -563,7 +563,7 @@ pub fn handle_object_method<'gc>(
             // Evaluate target and apply ToObject semantics: throw on undefined,
             // box primitives into corresponding object wrappers, or use the
             // object directly.
-            let target_val = evaluate_expr(mc, env, &args[0])?;
+            let target_val = args[0].clone();
             let target_obj = match target_val {
                 Value::Object(o) => o,
                 Value::Undefined => return Err(raise_type_error!("Object.assign target cannot be undefined or null")),
@@ -619,7 +619,7 @@ pub fn handle_object_method<'gc>(
 
             // Iterate sources
             for src_expr in args.iter().skip(1) {
-                let src_val = evaluate_expr(mc, env, src_expr)?;
+                let src_val = src_expr.clone();
                 if let Value::Object(source_obj) = src_val {
                     for (key, _val_rc) in source_obj.borrow().properties.iter() {
                         if *key != "length".into() && *key != "__proto__".into() {
@@ -642,13 +642,13 @@ pub fn handle_object_method<'gc>(
             if args.len() < 3 {
                 return Err(raise_type_error!("Object.defineProperty requires three arguments"));
             }
-            let target_val = evaluate_expr(mc, env, &args[0])?;
+            let target_val = args[0].clone();
             let target_obj = match target_val {
                 Value::Object(o) => o,
                 _ => return Err(raise_type_error!("Object.defineProperty called on non-object")),
             };
 
-            let prop_val = evaluate_expr(mc, env, &args[1])?;
+            let prop_val = args[1].clone();
             // Determine property key (support strings & numbers for now)
             let prop_key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
@@ -656,7 +656,7 @@ pub fn handle_object_method<'gc>(
                 _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
             };
 
-            let desc_val = evaluate_expr(mc, env, &args[2])?;
+            let desc_val = args[2].clone();
             let desc_obj = match desc_val {
                 Value::Object(o) => o,
                 _ => return Err(raise_type_error!("Property descriptor must be an object")),
@@ -669,13 +669,13 @@ pub fn handle_object_method<'gc>(
             if args.len() < 2 {
                 return Err(raise_type_error!("Object.defineProperties requires two arguments"));
             }
-            let target_val = evaluate_expr(mc, env, &args[0])?;
+            let target_val = args[0].clone();
             let target_obj = match target_val {
                 Value::Object(o) => o,
                 _ => return Err(raise_type_error!("Object.defineProperties called on non-object")),
             };
 
-            let props_val = evaluate_expr(mc, env, &args[1])?;
+            let props_val = args[1].clone();
             let props_obj = match props_val {
                 Value::Object(o) => o,
                 _ => return Err(raise_type_error!("Object.defineProperties requires an object as second argument")),
@@ -709,7 +709,7 @@ pub fn handle_object_method<'gc>(
 pub(crate) fn handle_to_string_method<'gc>(
     mc: &MutationContext<'gc>,
     obj_val: &Value<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
@@ -835,7 +835,7 @@ pub(crate) fn handle_to_string_method<'gc>(
 pub(crate) fn handle_error_to_string_method<'gc>(
     _mc: &MutationContext<'gc>,
     obj_val: &Value<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
         return Err(raise_type_error!("Error.prototype.toString takes no arguments"));
@@ -878,7 +878,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
 pub(crate) fn handle_value_of_method<'gc>(
     mc: &MutationContext<'gc>,
     obj_val: &Value<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if !args.is_empty() {
@@ -1054,7 +1054,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
     mc: &MutationContext<'gc>,
     func_name: &str,
     object: &JSObjectDataPtr<'gc>,
-    args: &[Expr],
+    args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, JSError> {
     match func_name {
@@ -1062,7 +1062,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("hasOwnProperty requires one argument"));
             }
-            let key_val = crate::core::evaluate_expr(mc, env, &args[0])?;
+            let key_val = args[0].clone();
             let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }
@@ -1070,7 +1070,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("isPrototypeOf requires one argument"));
             }
-            let target_val = crate::core::evaluate_expr(mc, env, &args[0])?;
+            let target_val = args[0].clone();
             match target_val {
                 Value::Object(target_map) => {
                     let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> = target_map.borrow().prototype.clone();
@@ -1089,7 +1089,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("propertyIsEnumerable requires one argument"));
             }
-            let key_val = crate::core::evaluate_expr(mc, env, &args[0])?;
+            let key_val = args[0].clone();
             let exists = crate::core::has_own_property_value(object, &key_val);
             Ok(Some(Value::Boolean(exists)))
         }

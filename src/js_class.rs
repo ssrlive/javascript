@@ -1476,7 +1476,7 @@ pub(crate) fn handle_boolean_constructor<'gc>(
 #[allow(dead_code)]
 pub(crate) fn boolean_prototype_to_string<'gc>(
     mc: &MutationContext<'gc>,
-    _args: &[Expr],
+    _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let this_val = evaluate_this(mc, env)?;
@@ -1497,7 +1497,7 @@ pub(crate) fn boolean_prototype_to_string<'gc>(
 #[allow(dead_code)]
 pub(crate) fn boolean_prototype_value_of<'gc>(
     mc: &MutationContext<'gc>,
-    _args: &[Expr],
+    _args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     let this_val = evaluate_this(mc, env)?;
@@ -1568,7 +1568,7 @@ pub(crate) fn handle_string_constructor<'gc>(
     Ok(Value::Object(obj))
 }
 
-fn prepare_call_env_with_this<'gc>(
+pub(crate) fn prepare_call_env_with_this<'gc>(
     mc: &MutationContext<'gc>,
     captured_env: Option<&JSObjectDataPtr<'gc>>,
     this_val: Option<Value<'gc>>,

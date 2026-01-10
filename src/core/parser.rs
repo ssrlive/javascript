@@ -2084,14 +2084,14 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     // regular property named 'get'/'set' (e.g. `set: function(...)`) with
                     // the getter/setter syntax.
                     // Recognize getter/setter signatures including computed keys
-                    let is_getter = if tokens.len() >= 2 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
-                        if matches!(tokens[1].token, Token::Identifier(_) | Token::StringLit(_)) {
-                            tokens.len() >= 3 && matches!(tokens[2].token, Token::LParen)
-                        } else if matches!(tokens[1].token, Token::LBracket) {
+                    let is_getter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
+                        if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                            tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
+                        } else if matches!(tokens[*index + 1].token, Token::LBracket) {
                             // find matching RBracket and ensure '(' follows
                             let mut depth = 0i32;
                             let mut idx_after = None;
-                            for (i, t) in tokens.iter().enumerate().skip(1) {
+                            for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
                                 match &t.token {
                                     Token::LBracket => depth += 1,
                                     Token::RBracket => {
@@ -2116,13 +2116,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         false
                     };
 
-                    let is_setter = if tokens.len() >= 2 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
-                        if matches!(tokens[1].token, Token::Identifier(_) | Token::StringLit(_)) {
-                            tokens.len() >= 3 && matches!(tokens[2].token, Token::LParen)
-                        } else if matches!(tokens[1].token, Token::LBracket) {
+                    let is_setter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
+                        if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                            tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
+                        } else if matches!(tokens[*index + 1].token, Token::LBracket) {
                             let mut depth = 0i32;
                             let mut idx_after = None;
-                            for (i, t) in tokens.iter().enumerate().skip(1) {
+                            for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
                                 match &t.token {
                                     Token::LBracket => depth += 1,
                                     Token::RBracket => {

@@ -135,24 +135,26 @@ pub(crate) fn handle_array_static_method<'gc>(
 
             // Handle different types of iterables
             match iterable {
-                // Value::Set(set) => {
-                //     // Handle Set iteration
-                //     for val in &set.borrow().values {
-                //         if let Some(ref fn_val) = map_fn {
-                //             if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
-                //                 let args = vec![val.clone(), val.clone()]; // Set iterator yields value as key
-                //                 let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                //                 let mut body_clone = body.clone();
-                //                 let mapped = evaluate_statements(mc, &func_env, &mut body_clone)?;
-                //                 result.push(mapped);
-                //             } else {
-                //                 return Err(raise_eval_error!("Array.from map function must be a function"));
-                //             }
-                //         } else {
-                //             result.push(val.clone());
-                //         }
-                //     }
-                // }
+                Value::Set(set) => {
+                    // Handle Set iteration
+                    for val in &set.borrow().values {
+                        if let Some(ref fn_val) = map_fn {
+                            let call_args = vec![val.clone(), val.clone()];
+                            let mapped = match fn_val {
+                                Value::Closure(cl) => {
+                                    crate::core::call_closure(mc, &*cl, None, &call_args, env)?
+                                }
+                                Value::Function(name) => {
+                                    crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
+                                }
+                                _ => return Err(EvalError::Js(raise_eval_error!("Array.from map function must be a function"))),
+                            };
+                            result.push(mapped);
+                        } else {
+                            result.push(val.clone());
+                        }
+                    }
+                }
                 Value::Object(object) => {
                     // let maybe_set = {
                     //     let borrow = object.borrow();
@@ -488,16 +490,29 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                        //     // Map params: (element, index, array)
-                        //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                        //     evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.forEach expects a function")));
-                        // }
-                        todo!()
+                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+                        let val = val_rc.borrow().clone();
+                        let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+                        
+                        let actual_func = if let Value::Object(obj) = &callback_val {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback_val.clone()
+                            }
+                        } else {
+                            callback_val.clone()
+                        };
+
+                        match &actual_func {
+                            Value::Closure(cl) => {
+                                crate::core::call_closure(mc, &*cl, None, &call_args, env)?;
+                            }
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?;
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.forEach callback must be a function"))),
+                        }
                     }
                 }
                 Ok(Value::Undefined)
@@ -515,17 +530,19 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 set_array_length(mc, &new_array, current_len)?;
 
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                        //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     obj_set_key_value(mc, &new_array, &i.to_string().into(), res)?;
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.map expects a function")));
-                        // }
-                        todo!()
+                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+                        let val = val_rc.borrow().clone();
+                        let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
+                        let res = match &callback_val {
+                            Value::Closure(cl) => {
+                                crate::core::call_closure(mc, &*cl, None, &call_args, env)?
+                            }
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.map callback must be a function"))),
+                        };
+                        obj_set_key_value(mc, &new_array, &i.to_string().into(), res)?;
                     }
                 }
                 Ok(Value::Object(new_array))

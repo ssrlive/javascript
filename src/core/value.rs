@@ -354,6 +354,12 @@ pub enum Value<'gc> {
     Uninitialized,
 }
 
+impl Value<'_> {
+    pub fn is_null_or_undefined(&self) -> bool {
+        matches!(self, Value::Null | Value::Undefined)
+    }
+}
+
 impl From<f64> for Value<'_> {
     fn from(n: f64) -> Self {
         Value::Number(n)

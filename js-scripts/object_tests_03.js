@@ -1,3 +1,5 @@
+"use strict";
+
 function assert(condition, message) {
     if (!condition) {
         throw new Error(message);
@@ -77,8 +79,10 @@ function assert(condition, message) {
 
   const rand = new Person("Rand McKinnon", 33, "M");
   const ken = new Person("Ken Jones", 39, "M");
+  console.log("ken:", ken);
 
   const car1 = new Car("Eagle", "Talon TSi", 1993, rand);
+  console.log("car1:", car1);
   const car2 = new Car("Nissan", "300ZX", 1992, ken);
 
   console.log(car2.owner.name);
@@ -166,7 +170,7 @@ function assert(condition, message) {
   console.log("=== Testing difference between dot and bracket notation ===");
 
   const myObj = {};
-  str = "myString";
+  let str = "myString";
   myObj[str] = "This key is in variable str";
 
   console.log(myObj.str); // undefined
@@ -442,3 +446,5 @@ function assert(condition, message) {
   console.log(anotherFruit); // { name: "grape" }; not { name: "apple" }
   assert(anotherFruit.name === "grape", 'anotherFruit.name should be "grape"');
 }
+
+true;

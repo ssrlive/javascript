@@ -2151,6 +2151,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                     return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
                                 } else if name == &crate::unicode::utf8_to_utf16("Set") {
                                     return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("ArrayBuffer") {
+                                    return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("SharedArrayBuffer") {
+                                    return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("DataView") {
+                                    return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
+                                } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
+                                    return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
                                 }
                             }
                         }
@@ -2708,6 +2716,66 @@ fn call_native_function<'gc>(
                     "TypeError: Set.prototype method called on non-object receiver"
                 )));
             }
+        }
+    }
+
+    if name.starts_with("DataView.prototype.") {
+        if let Some(method) = name.strip_prefix("DataView.prototype.") {
+            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+            if let Value::Object(obj) = this_v {
+                return Ok(Some(
+                    crate::js_typedarray::handle_dataview_method(mc, &obj, method, args, env).map_err(EvalError::Js)?,
+                ));
+            } else {
+                return Err(EvalError::Js(raise_eval_error!("TypeError: DataView method called on non-object")));
+            }
+        }
+    }
+
+    if name.starts_with("Atomics.") {
+        if let Some(method) = name.strip_prefix("Atomics.") {
+            return Ok(Some(
+                crate::js_typedarray::handle_atomics_method(mc, method, args, env).map_err(EvalError::Js)?,
+            ));
+        }
+    }
+
+    if name == "ArrayBuffer.prototype.byteLength" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(
+                crate::js_typedarray::handle_arraybuffer_accessor(mc, &obj, "byteLength").map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: ArrayBuffer.prototype.byteLength called on non-object"
+            )));
+        }
+    }
+
+    if name == "SharedArrayBuffer.prototype.byteLength" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(
+                crate::js_typedarray::handle_arraybuffer_accessor(mc, &obj, "byteLength").map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: SharedArrayBuffer.prototype.byteLength called on non-object"
+            )));
+        }
+    }
+
+    if let Some(prop) = name.strip_prefix("TypedArray.prototype.") {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(
+                crate::js_typedarray::handle_typedarray_accessor(mc, &obj, prop).map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: TypedArray accessor called on non-object"
+            )));
         }
     }
     Ok(None)

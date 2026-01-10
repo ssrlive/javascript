@@ -74,6 +74,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
+    crate::js_typedarray::initialize_typedarray(mc, env)?;
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;

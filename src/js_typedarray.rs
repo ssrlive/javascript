@@ -1,12 +1,10 @@
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
-use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, new_js_object_data, obj_get_key_value, obj_set_key_value};
+use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
 use num_traits::ToPrimitive;
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 use std::sync::Condvar;
 use std::sync::LazyLock;
 use std::sync::{Arc, Mutex};
@@ -18,21 +16,22 @@ use std::time::Duration;
 static WAITERS: LazyLock<Mutex<HashMap<(usize, usize), Vec<Arc<(Mutex<bool>, Condvar)>>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Create an ArrayBuffer constructor object
-pub fn make_arraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_arraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     // Set the constructor function
-    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
+    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype(mc)?))?;
     obj_set_key_value(mc, &obj, &"name".into(), Value::String(utf8_to_utf16("ArrayBuffer")))?;
 
     // Mark as ArrayBuffer constructor
     obj_set_key_value(mc, &obj, &"__arraybuffer".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("ArrayBuffer")))?;
 
     Ok(obj)
 }
 
 /// Create the Atomics object with basic atomic methods
-pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_atomics_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     obj_set_key_value(mc, &obj, &"load".into(), Value::Function("Atomics.load".to_string()))?;
@@ -57,7 +56,12 @@ pub fn make_atomics_object() -> Result<JSObjectDataPtr, JSError> {
 }
 
 /// Handle Atomics.* calls (minimal mutex-backed implementations)
-pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_atomics_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Helper to extract TypedArray from first argument
     if args.is_empty() {
         return Err(raise_eval_error!("Atomics method requires arguments"));
@@ -68,7 +72,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
         if args.len() != 1 {
             return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument"));
         }
-        let size_val = evaluate_expr(mc, env, &args[0])?;
+        let size_val = args[0].clone();
         let size = match size_val {
             Value::Number(n) => n as usize,
             _ => return Err(raise_eval_error!("Atomics.isLockFree argument must be a number")),
@@ -84,7 +88,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
         };
         return Ok(Value::Boolean(res));
     }
-    let ta_val = evaluate_expr(mc, env, &args[0])?;
+    let ta_val = args[0].clone();
     let ta_obj = if let Value::Object(object) = ta_val {
         if let Some(ta_rc) = obj_get_key_value(&object, &"__typedarray".into())? {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
@@ -104,7 +108,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() != 2 {
                 return Err(raise_eval_error!("Atomics.load requires 2 arguments"));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
+            let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
@@ -116,8 +120,8 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() != 3 {
                 return Err(raise_eval_error!("Atomics.store requires 3 arguments"));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
-            let val_val = evaluate_expr(mc, env, &args[2])?;
+            let idx_val = args[1].clone();
+            let val_val = args[2].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
@@ -135,9 +139,9 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() != 4 {
                 return Err(raise_eval_error!("Atomics.compareExchange requires 4 arguments"));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
-            let expected_val = evaluate_expr(mc, env, &args[2])?;
-            let replacement_val = evaluate_expr(mc, env, &args[3])?;
+            let idx_val = args[1].clone();
+            let expected_val = args[2].clone();
+            let replacement_val = args[3].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
@@ -162,13 +166,13 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!(format!("Atomics.{} invalid args", method)));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
+            let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
             };
             let operand = if args.len() == 3 {
-                let v = evaluate_expr(mc, env, &args[2])?;
+                let v = args[2].clone();
                 match v {
                     Value::Number(n) => n as i64,
                     Value::BigInt(b) => b.to_i64().unwrap_or(0),
@@ -195,12 +199,12 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 3 || args.len() > 4 {
                 return Err(raise_eval_error!("Atomics.wait requires 3 or 4 arguments"));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
+            let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
             };
-            let expected_val = evaluate_expr(mc, env, &args[2])?;
+            let expected_val = args[2].clone();
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
@@ -215,7 +219,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
 
             // Determine timeout (milliseconds)
             let timeout_ms_opt = if args.len() == 4 {
-                let tval = evaluate_expr(mc, env, &args[3])?;
+                let tval = args[3].clone();
                 match tval {
                     Value::Number(n) => Some(n as i64),
                     _ => None,
@@ -225,7 +229,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             };
 
             // Compute key for waiters: (arc_ptr, byte_index)
-            let buffer_rc = ta_obj.borrow().buffer.clone();
+            let buffer_rc = ta_obj.buffer.clone();
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
             let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
 
@@ -284,13 +288,13 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("Atomics.notify requires 2 or 3 arguments"));
             }
-            let idx_val = evaluate_expr(mc, env, &args[1])?;
+            let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
                 _ => return Err(raise_eval_error!("Atomics index must be a number")),
             };
             let count = if args.len() == 3 {
-                let cval = evaluate_expr(mc, env, &args[2])?;
+                let cval = args[2].clone();
                 match cval {
                     Value::Number(n) => n as usize,
                     _ => return Err(raise_eval_error!("Atomics count must be a number")),
@@ -299,7 +303,7 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                 usize::MAX
             };
 
-            let buffer_rc = ta_obj.borrow().buffer.clone();
+            let buffer_rc = ta_obj.buffer.clone();
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
             let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
 
@@ -325,44 +329,42 @@ pub fn handle_atomics_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             }
             Ok(Value::Number(awakened as f64))
         }
-        "isLockFree" => {
-            // For simplicity, always return false (no native lock-free guarantees)
-            if args.len() != 1 {
-                return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument"));
-            }
-            Ok(Value::Boolean(false))
-        }
         _ => Err(raise_eval_error!(format!("Atomics method '{method}' not implemented"))),
     }
 }
 
 /// Create a SharedArrayBuffer constructor object
-pub fn make_sharedarraybuffer_constructor() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_sharedarraybuffer_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
     // Set prototype and name
-    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_arraybuffer_prototype()?))?;
+    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_sharedarraybuffer_prototype(mc)?))?;
     obj_set_key_value(mc, &obj, &"name".into(), Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
 
     // Mark as ArrayBuffer constructor and indicate it's the shared variant
     obj_set_key_value(mc, &obj, &"__arraybuffer".into(), Value::Boolean(true))?;
     obj_set_key_value(mc, &obj, &"__sharedarraybuffer".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("SharedArrayBuffer")))?;
 
     Ok(obj)
 }
 
 /// Create the ArrayBuffer prototype
-pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_arraybuffer_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
 
     // Add methods to prototype
     obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("ArrayBuffer".to_string()))?;
-    obj_set_key_value(
-        mc,
-        &proto,
-        &"byteLength".into(),
-        Value::Function("ArrayBuffer.prototype.byteLength".to_string()),
-    )?;
+
+    // byteLength is an accessor property
+    let byte_len_getter = Value::Function("ArrayBuffer.prototype.byteLength".to_string());
+    let byte_len_prop = Value::Property {
+        value: None,
+        getter: Some(Box::new(byte_len_getter)),
+        setter: None,
+    };
+    obj_set_key_value(mc, &proto, &"byteLength".into(), byte_len_prop)?;
+
     obj_set_key_value(
         mc,
         &proto,
@@ -373,21 +375,51 @@ pub fn make_arraybuffer_prototype() -> Result<JSObjectDataPtr, JSError> {
     Ok(proto)
 }
 
+/// Create the SharedArrayBuffer prototype
+pub fn make_sharedarraybuffer_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
+    let proto = new_js_object_data(mc);
+
+    // Add methods to prototype
+    obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("SharedArrayBuffer".to_string()))?;
+
+    // byteLength is an accessor property
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"byteLength".into(),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("SharedArrayBuffer.prototype.byteLength".to_string()))),
+            setter: None,
+        },
+    )?;
+
+    obj_set_key_value(
+        mc,
+        &proto,
+        &"slice".into(),
+        Value::Function("SharedArrayBuffer.prototype.slice".to_string()),
+    )?;
+
+    Ok(proto)
+}
+
 /// Create a DataView constructor object
-pub fn make_dataview_constructor() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_dataview_constructor<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let obj = new_js_object_data(mc);
 
-    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_dataview_prototype()?))?;
+    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_dataview_prototype(mc)?))?;
     obj_set_key_value(mc, &obj, &"name".into(), Value::String(utf8_to_utf16("DataView")))?;
 
     // Mark as DataView constructor
     obj_set_key_value(mc, &obj, &"__dataview".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("DataView")))?;
 
     Ok(obj)
 }
 
 /// Create the DataView prototype
-pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
+pub fn make_dataview_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
 
     obj_set_key_value(mc, &proto, &"constructor".into(), Value::Function("DataView".to_string()))?;
@@ -395,19 +427,31 @@ pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
         mc,
         &proto,
         &"buffer".into(),
-        Value::Function("DataView.prototype.buffer".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("DataView.prototype.buffer".to_string()))),
+            setter: None,
+        },
     )?;
     obj_set_key_value(
         mc,
         &proto,
         &"byteLength".into(),
-        Value::Function("DataView.prototype.byteLength".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("DataView.prototype.byteLength".to_string()))),
+            setter: None,
+        },
     )?;
     obj_set_key_value(
         mc,
         &proto,
         &"byteOffset".into(),
-        Value::Function("DataView.prototype.byteOffset".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("DataView.prototype.byteOffset".to_string()))),
+            setter: None,
+        },
     )?;
 
     // DataView methods for different data types
@@ -513,7 +557,7 @@ pub fn make_dataview_prototype() -> Result<JSObjectDataPtr, JSError> {
 }
 
 /// Create TypedArray constructors
-pub fn make_typedarray_constructors() -> Result<Vec<(String, JSObjectDataPtr)>, JSError> {
+pub fn make_typedarray_constructors<'gc>(mc: &MutationContext<'gc>) -> Result<Vec<(String, JSObjectDataPtr<'gc>)>, JSError> {
     let kinds = vec![
         ("Int8Array", TypedArrayKind::Int8),
         ("Uint8Array", TypedArrayKind::Uint8),
@@ -531,7 +575,7 @@ pub fn make_typedarray_constructors() -> Result<Vec<(String, JSObjectDataPtr)>, 
     let mut constructors = Vec::new();
 
     for (name, kind) in kinds {
-        let constructor = make_typedarray_constructor(name, kind)?;
+        let constructor = make_typedarray_constructor(mc, name, kind)?;
         constructors.push((name.to_string(), constructor));
     }
 
@@ -554,21 +598,22 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
     }
 }
 
-fn make_typedarray_constructor(name: &str, kind: TypedArrayKind) -> Result<JSObjectDataPtr, JSError> {
+fn make_typedarray_constructor<'gc>(mc: &MutationContext<'gc>, name: &str, kind: TypedArrayKind) -> Result<JSObjectDataPtr<'gc>, JSError> {
     // Mark as TypedArray constructor with kind
     let kind_value = typedarray_kind_to_number(&kind);
 
     let obj = new_js_object_data(mc);
 
-    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_typedarray_prototype(kind)?))?;
+    obj_set_key_value(mc, &obj, &"prototype".into(), Value::Object(make_typedarray_prototype(mc, kind)?))?;
     obj_set_key_value(mc, &obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
 
     obj_set_key_value(mc, &obj, &"__kind".into(), Value::Number(kind_value as f64))?;
+    obj_set_key_value(mc, &obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("TypedArray")))?;
 
     Ok(obj)
 }
 
-fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JSError> {
+fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKind) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
 
     // Store the kind in the prototype for later use
@@ -594,25 +639,41 @@ fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JS
         mc,
         &proto,
         &"buffer".into(),
-        Value::Function("TypedArray.prototype.buffer".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("TypedArray.prototype.buffer".to_string()))),
+            setter: None,
+        },
     )?;
     obj_set_key_value(
         mc,
         &proto,
         &"byteLength".into(),
-        Value::Function("TypedArray.prototype.byteLength".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("TypedArray.prototype.byteLength".to_string()))),
+            setter: None,
+        },
     )?;
     obj_set_key_value(
         mc,
         &proto,
         &"byteOffset".into(),
-        Value::Function("TypedArray.prototype.byteOffset".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("TypedArray.prototype.byteOffset".to_string()))),
+            setter: None,
+        },
     )?;
     obj_set_key_value(
         mc,
         &proto,
         &"length".into(),
-        Value::Function("TypedArray.prototype.length".to_string()),
+        Value::Property {
+            value: None,
+            getter: Some(Box::new(Value::Function("TypedArray.prototype.length".to_string()))),
+            setter: None,
+        },
     )?;
 
     // Array methods that TypedArrays inherit
@@ -628,13 +689,17 @@ fn make_typedarray_prototype(kind: TypedArrayKind) -> Result<JSObjectDataPtr, JS
 }
 
 /// Handle ArrayBuffer constructor calls
-pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_arraybuffer_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // ArrayBuffer(length)
     if args.is_empty() {
         return Err(raise_eval_error!("ArrayBuffer constructor requires a length argument"));
     }
 
-    let length_val = evaluate_expr(mc, env, &args[0])?;
+    let length_val = args[0].clone();
     let length = match length_val {
         Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
         _ => return Err(raise_eval_error!("ArrayBuffer length must be a non-negative integer")),
@@ -655,20 +720,24 @@ pub fn handle_arraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> R
     obj_set_key_value(mc, &obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
     // Set prototype
-    let proto = make_arraybuffer_prototype()?;
+    let proto = make_arraybuffer_prototype(mc)?;
     obj.borrow_mut(mc).prototype = Some(proto.clone());
 
     Ok(Value::Object(obj))
 }
 
 /// Handle SharedArrayBuffer constructor calls (creates a shared buffer)
-pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_sharedarraybuffer_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // SharedArrayBuffer(length)
     if args.is_empty() {
         return Err(raise_eval_error!("SharedArrayBuffer constructor requires a length argument"));
     }
 
-    let length_val = evaluate_expr(mc, env, &args[0])?;
+    let length_val = args[0].clone();
     let length = match length_val {
         Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
         _ => return Err(raise_eval_error!("SharedArrayBuffer length must be a non-negative integer")),
@@ -688,21 +757,41 @@ pub fn handle_sharedarraybuffer_constructor(args: &[Expr], env: &JSObjectDataPtr
     let obj = new_js_object_data(mc);
     obj_set_key_value(mc, &obj, &"__arraybuffer".into(), Value::ArrayBuffer(buffer))?;
 
-    // Set prototype to ArrayBuffer.prototype
-    let proto = make_arraybuffer_prototype()?;
-    obj.borrow_mut(mc).prototype = Some(proto.clone());
+    // Set prototype
+    let mut proto_ptr = None;
+    if let Some(ctor_val) = obj_get_key_value(env, &"SharedArrayBuffer".into())? {
+        if let Value::Object(ctor_obj) = &*ctor_val.borrow() {
+            if let Some(p_val) = obj_get_key_value(ctor_obj, &"prototype".into())? {
+                if let Value::Object(p_obj) = &*p_val.borrow() {
+                    proto_ptr = Some(p_obj.clone());
+                }
+            }
+        }
+    }
+
+    let proto = if let Some(p) = proto_ptr {
+        p
+    } else {
+        // Fallback if constructor not found in env
+        make_sharedarraybuffer_prototype(mc)?
+    };
+    obj.borrow_mut(mc).prototype = Some(proto);
 
     Ok(Value::Object(obj))
 }
 
 /// Handle DataView constructor calls
-pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_dataview_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // DataView(buffer [, byteOffset [, byteLength]])
     if args.is_empty() {
         return Err(raise_eval_error!("DataView constructor requires a buffer argument"));
     }
 
-    let buffer_val = evaluate_expr(mc, env, &args[0])?;
+    let buffer_val = args[0].clone();
     let buffer = match buffer_val {
         Value::Object(obj) => {
             if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
@@ -719,7 +808,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     };
 
     let byte_offset = if args.len() > 1 {
-        let offset_val = evaluate_expr(mc, env, &args[1])?;
+        let offset_val = args[1].clone();
         match offset_val {
             Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
             _ => return Err(raise_eval_error!("DataView byteOffset must be a non-negative integer")),
@@ -729,7 +818,7 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     };
 
     let byte_length = if args.len() > 2 {
-        let length_val = evaluate_expr(mc, env, &args[2])?;
+        let length_val = args[2].clone();
         match length_val {
             Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => n as usize,
             _ => return Err(raise_eval_error!("DataView byteLength must be a non-negative integer")),
@@ -758,14 +847,19 @@ pub fn handle_dataview_constructor(args: &[Expr], env: &JSObjectDataPtr) -> Resu
     obj_set_key_value(mc, &obj, &"__dataview".into(), Value::DataView(data_view))?;
 
     // Set prototype
-    let proto = make_dataview_prototype()?;
+    let proto = make_dataview_prototype(mc)?;
     obj.borrow_mut(mc).prototype = Some(proto.clone());
 
     Ok(Value::Object(obj))
 }
 
 /// Handle TypedArray constructor calls
-pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_typedarray_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    constructor_obj: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Get the kind from the constructor
     let kind_val = obj_get_key_value(constructor_obj, &"__kind".into())?;
     let kind = if let Some(kind_val) = kind_val {
@@ -810,7 +904,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         );
         (buffer, 0, 0)
     } else if args.len() == 1 {
-        let arg_val = evaluate_expr(mc, env, &args[0])?;
+        let arg_val = args[0].clone();
         match arg_val {
             Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => {
                 // new TypedArray(length)
@@ -847,7 +941,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                 } else if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
-                        (ab.clone(), 0, ab.borrow().data.lock().unwrap().len() / element_size)
+                        (ab.clone(), 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
@@ -859,8 +953,8 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         }
     } else if args.len() == 2 {
         // new TypedArray(buffer, byteOffset)
-        let buffer_val = evaluate_expr(mc, env, &args[0])?;
-        let offset_val = evaluate_expr(mc, env, &args[1])?;
+        let buffer_val = args[0].clone();
+        let offset_val = args[1].clone();
 
         if let Value::Object(obj) = buffer_val {
             if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
@@ -870,7 +964,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                         if !offset.is_multiple_of(element_size) {
                             return Err(raise_eval_error!("TypedArray byteOffset must be multiple of element size"));
                         }
-                        let remaining_bytes = ab.borrow().data.lock().unwrap().len() - offset;
+                        let remaining_bytes = (**ab).borrow().data.lock().unwrap().len() - offset;
                         let length = remaining_bytes / element_size;
                         (ab.clone(), offset, length)
                     } else {
@@ -887,9 +981,9 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
         }
     } else if args.len() == 3 {
         // new TypedArray(buffer, byteOffset, length)
-        let buffer_val = evaluate_expr(mc, env, &args[0])?;
-        let offset_val = evaluate_expr(mc, env, &args[1])?;
-        let length_val = evaluate_expr(mc, env, &args[2])?;
+        let buffer_val = args[0].clone();
+        let offset_val = args[1].clone();
+        let length_val = args[2].clone();
 
         if let Value::Object(obj) = buffer_val {
             if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
@@ -900,7 +994,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
                         if !offset.is_multiple_of(element_size) {
                             return Err(raise_eval_error!("TypedArray byteOffset must be multiple of element size"));
                         }
-                        if length * element_size + offset > ab.borrow().data.lock().unwrap().len() {
+                        if length * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
                             return Err(raise_eval_error!("TypedArray length exceeds buffer size"));
                         }
                         (ab.clone(), offset, length)
@@ -924,7 +1018,7 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
     let obj = new_js_object_data(mc);
 
     // Set prototype first
-    let proto = make_typedarray_prototype(kind.clone())?;
+    let proto = make_typedarray_prototype(mc, kind.clone())?;
     obj.borrow_mut(mc).prototype = Some(proto.clone());
 
     // Create TypedArray instance
@@ -945,12 +1039,12 @@ pub fn handle_typedarray_constructor(constructor_obj: &JSObjectDataPtr, args: &[
 
 /// Handle DataView instance method calls
 pub fn handle_dataview_method<'gc>(
-    mc: &MutationContext<'gc>,
-    object: &JSObjectDataPtr,
+    _mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
     method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Get the DataView from the object
     let dv_val = obj_get_key_value(object, &"__dataview".into())?;
     let data_view_rc = if let Some(dv_val) = dv_val {
@@ -969,7 +1063,7 @@ pub fn handle_dataview_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("DataView.getInt8 requires exactly 1 argument"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -984,7 +1078,7 @@ pub fn handle_dataview_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("DataView.getUint8 requires exactly 1 argument"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -999,13 +1093,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getInt16 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1023,13 +1117,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getUint16 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1047,13 +1141,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getInt32 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1071,13 +1165,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getUint32 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1095,13 +1189,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getFloat32 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1119,13 +1213,13 @@ pub fn handle_dataview_method<'gc>(
             if args.is_empty() || args.len() > 2 {
                 return Err(raise_eval_error!("DataView.getFloat64 requires 1 or 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
+            let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
             };
             let little_endian = if args.len() > 1 {
-                let le_val = evaluate_expr(mc, env, &args[1])?;
+                let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1144,8 +1238,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() != 2 {
                 return Err(raise_eval_error!("DataView.setInt8 requires exactly 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1154,16 +1248,15 @@ pub fn handle_dataview_method<'gc>(
                 Value::Number(n) => n as i8,
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
-            let mut data_view = data_view_rc;
-            data_view.set_int8(offset, value).map_err(|e| raise_eval_error!(e))?;
+            data_view_rc.set_int8(offset, value).map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
         }
         "setUint8" => {
             if args.len() != 2 {
                 return Err(raise_eval_error!("DataView.setUint8 requires exactly 2 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1172,16 +1265,15 @@ pub fn handle_dataview_method<'gc>(
                 Value::Number(n) => n as u8,
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
-            let mut data_view = data_view_rc;
-            data_view.set_uint8(offset, value).map_err(|e| raise_eval_error!(e))?;
+            data_view_rc.set_uint8(offset, value).map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
         }
         "setInt16" => {
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setInt16 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1191,7 +1283,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1199,8 +1291,7 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_int16(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
@@ -1209,8 +1300,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setUint16 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1220,7 +1311,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1228,8 +1319,7 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_uint16(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
@@ -1238,8 +1328,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setInt32 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1249,7 +1339,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1257,8 +1347,7 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_int32(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
@@ -1267,8 +1356,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setUint32 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1278,7 +1367,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1286,8 +1375,7 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_uint32(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
@@ -1296,8 +1384,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setFloat32 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1307,7 +1395,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1315,8 +1403,7 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_float32(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
@@ -1325,8 +1412,8 @@ pub fn handle_dataview_method<'gc>(
             if args.len() < 2 || args.len() > 3 {
                 return Err(raise_eval_error!("DataView.setFloat64 requires 2 or 3 arguments"));
             }
-            let offset_val = evaluate_expr(mc, env, &args[0])?;
-            let value_val = evaluate_expr(mc, env, &args[1])?;
+            let offset_val = args[0].clone();
+            let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
                 _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
@@ -1336,7 +1423,7 @@ pub fn handle_dataview_method<'gc>(
                 _ => return Err(raise_eval_error!("DataView value must be a number")),
             };
             let little_endian = if args.len() > 2 {
-                let le_val = evaluate_expr(mc, env, &args[2])?;
+                let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
                     _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
@@ -1344,146 +1431,18 @@ pub fn handle_dataview_method<'gc>(
             } else {
                 false
             };
-            let mut data_view = data_view_rc;
-            data_view
+            data_view_rc
                 .set_float64(offset, value, little_endian)
                 .map_err(|e| raise_eval_error!(e))?;
             Ok(Value::Undefined)
         }
         // Property accessors
-        "buffer" => {
-            let data_view = data_view_rc;
-            Ok(Value::ArrayBuffer(data_view.buffer.clone()))
-        }
-        "byteLength" => {
-            let data_view = data_view_rc;
-            Ok(Value::Number(data_view.byte_length as f64))
-        }
-        "byteOffset" => {
-            let data_view = data_view_rc;
-            Ok(Value::Number(data_view.byte_offset as f64))
-        }
+        "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer.clone())),
+        "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
+        "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
         _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented"))),
     }
 }
-
-#[cfg(test)]
-mod atomics_thread_tests {
-    use super::*;
-    use crate::core::{evaluate_statements, initialize_global_constructors, parse_statements};
-    use crate::unicode::utf16_to_utf8;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    #[test]
-    fn atomics_wait_notify_multithreaded() {
-        // Create a shared ArrayBuffer (shared = true)
-        let buffer = Gc::new(
-            mc,
-            GcCell::new(JSArrayBuffer {
-                data: Arc::new(Mutex::new(vec![0u8; 16])),
-                detached: false,
-                shared: true,
-            }),
-        );
-
-        // Create a typed array view (Int32Array) referencing the same buffer
-        let _ = Rc::new(RefCell::new(JSTypedArray {
-            kind: TypedArrayKind::Int32,
-            buffer: buffer.clone(),
-            byte_offset: 0,
-            length: 4,
-        }));
-
-        // Extract the inner Arc for sharing between threads. Each thread will
-        // create its own `JSArrayBuffer` wrapper using the same `Arc<Mutex<...>>`.
-        let shared_arc = buffer.borrow().data.clone();
-
-        // Ensure initial int32 value at index 0 is 0
-        {
-            let data_arc = buffer.borrow().data.clone();
-            let mut d = data_arc.lock().unwrap();
-            let b = 0i32.to_le_bytes();
-            d[0] = b[0];
-            d[1] = b[1];
-            d[2] = b[2];
-            d[3] = b[3];
-        }
-
-        // Spawn a thread that will call Atomics.wait(ia, 0, 0) and block until notified.
-        // The thread creates its own JS environment but uses the same underlying
-        // Arc-backed byte buffer so wait/notify will match on the same key.
-        let shared_for_wait = shared_arc.clone();
-        let waiter = std::thread::spawn(move || {
-            // Build a local JSArrayBuffer wrapper around the shared Arc
-            let local_buffer = Rc::new(RefCell::new(JSArrayBuffer {
-                data: shared_for_wait.clone(),
-                detached: false,
-                shared: true,
-            }));
-            let local_ta = Rc::new(RefCell::new(JSTypedArray {
-                kind: TypedArrayKind::Int32,
-                buffer: local_buffer.clone(),
-                byte_offset: 0,
-                length: 4,
-            }));
-            let obj_local = new_js_object_data(mc);
-            obj_set_key_value(mc, &obj_local, &"__typedarray".into(), Value::TypedArray(local_ta)).unwrap();
-
-            let env_local = new_js_object_data(mc);
-            env_local.borrow_mut(mc).is_function_scope = true;
-            initialize_global_constructors(mc, &env_local).unwrap();
-            obj_set_key_value(mc, &env_local, &"ia".into(), Value::Object(obj_local)).unwrap();
-
-            let mut tokens = crate::tokenize("Atomics.wait(ia, 0, 0)").unwrap();
-            let stmts = parse_statements(&mut tokens).unwrap();
-            let v = evaluate_statements(mc, &env_local, &stmts).unwrap();
-            // Expect a string result ("ok" when woken)
-            if let Value::String(s) = v {
-                utf16_to_utf8(&s)
-            } else {
-                "".to_string()
-            }
-        });
-
-        // Give the waiter a moment to block in Atomics.wait
-        std::thread::sleep(Duration::from_millis(100));
-
-        // In the notifier context, store a new value and notify the waiter
-        // Build a separate notifier environment that shares the same Arc
-        let local_buffer2 = Rc::new(RefCell::new(JSArrayBuffer {
-            data: shared_arc.clone(),
-            detached: false,
-            shared: true,
-        }));
-        let local_ta2 = Rc::new(RefCell::new(JSTypedArray {
-            kind: TypedArrayKind::Int32,
-            buffer: local_buffer2.clone(),
-            byte_offset: 0,
-            length: 4,
-        }));
-        let obj_notify = new_js_object_data(mc);
-        obj_set_key_value(mc, &obj_notify, &"__typedarray".into(), Value::TypedArray(local_ta2)).unwrap();
-        let env_notify = new_js_object_data(mc);
-        env_notify.borrow_mut(mc).is_function_scope = true;
-        initialize_global_constructors(mc, &env_notify).unwrap();
-        obj_set_key_value(mc, &env_notify, &"ia".into(), Value::Object(obj_notify)).unwrap();
-
-        let mut tokens2 = crate::tokenize("Atomics.store(ia, 0, 1); Atomics.notify(ia, 0, 1)").unwrap();
-        let stmts2 = parse_statements(&mut tokens2).unwrap();
-        let _ = evaluate_statements(mc, &env_notify, &stmts2).unwrap();
-
-        // Join waiter and assert it observed an "ok" wakeup
-        let res = waiter.join().unwrap();
-        assert_eq!(res, "ok");
-    }
-}
-
-use std::borrow::Borrow;
-use std::io::Cursor;
-use std::io::{Read, Write};
 
 impl<'gc> JSDataView<'gc> {
     fn check_bounds(&self, offset: usize, size: usize) -> Result<usize, JSError> {
@@ -1676,10 +1635,10 @@ impl<'gc> JSDataView<'gc> {
 impl<'gc> crate::core::JSTypedArray<'gc> {
     pub fn element_size(&self) -> usize {
         match self.kind {
-            crate::core::TypedArrayType::Int8 | crate::core::TypedArrayType::Uint8 | crate::core::TypedArrayType::Uint8Clamped => 1,
-            crate::core::TypedArrayType::Int16 | crate::core::TypedArrayType::Uint16 => 2,
-            crate::core::TypedArrayType::Int32 | crate::core::TypedArrayType::Uint32 | crate::core::TypedArrayType::Float32 => 4,
-            crate::core::TypedArrayType::Float64 | crate::core::TypedArrayType::BigInt64 | crate::core::TypedArrayType::BigUint64 => 8,
+            TypedArrayKind::Int8 | TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => 1,
+            TypedArrayKind::Int16 | TypedArrayKind::Uint16 => 2,
+            TypedArrayKind::Int32 | TypedArrayKind::Uint32 | TypedArrayKind::Float32 => 4,
+            TypedArrayKind::Float64 | TypedArrayKind::BigInt64 | TypedArrayKind::BigUint64 => 8,
         }
     }
 
@@ -1695,38 +1654,38 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
 
         // Very basic implementation:
         match self.kind {
-            crate::core::TypedArrayType::Int8 => {
+            TypedArrayKind::Int8 => {
                 let bytes = [data[byte_offset]];
                 Ok(i8::from_ne_bytes(bytes) as f64)
             }
-            crate::core::TypedArrayType::Uint8 | crate::core::TypedArrayType::Uint8Clamped => {
+            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => {
                 let bytes = [data[byte_offset]];
                 Ok(u8::from_ne_bytes(bytes) as f64)
             }
-            crate::core::TypedArrayType::Int16 => {
+            TypedArrayKind::Int16 => {
                 let bytes = [data[byte_offset], data[byte_offset + 1]];
                 Ok(i16::from_le_bytes(bytes) as f64) // Assume LE for now
             }
-            crate::core::TypedArrayType::Uint16 => {
+            TypedArrayKind::Uint16 => {
                 let bytes = [data[byte_offset], data[byte_offset + 1]];
                 Ok(u16::from_le_bytes(bytes) as f64)
             }
-            crate::core::TypedArrayType::Int32 => {
+            TypedArrayKind::Int32 => {
                 let mut b = [0u8; 4];
                 b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
                 Ok(i32::from_le_bytes(b) as f64)
             }
-            crate::core::TypedArrayType::Uint32 => {
+            TypedArrayKind::Uint32 => {
                 let mut b = [0u8; 4];
                 b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
                 Ok(u32::from_le_bytes(b) as f64)
             }
-            crate::core::TypedArrayType::Float32 => {
+            TypedArrayKind::Float32 => {
                 let mut b = [0u8; 4];
                 b.copy_from_slice(&data[byte_offset..byte_offset + 4]);
                 Ok(f32::from_le_bytes(b) as f64)
             }
-            crate::core::TypedArrayType::Float64 => {
+            TypedArrayKind::Float64 => {
                 let mut b = [0u8; 8];
                 b.copy_from_slice(&data[byte_offset..byte_offset + 8]);
                 Ok(f64::from_le_bytes(b))
@@ -1738,7 +1697,7 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
     pub fn set(&self, mc: &crate::core::MutationContext<'gc>, idx: usize, val: f64) -> Result<(), crate::error::JSError> {
         let size = self.element_size();
         let byte_offset = self.byte_offset + idx * size;
-        let mut buffer = self.buffer.borrow_mut(mc);
+        let buffer = self.buffer.borrow_mut(mc);
         let mut data = buffer.data.lock().unwrap();
 
         if byte_offset + size > data.len() {
@@ -1746,37 +1705,37 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         }
 
         match self.kind {
-            crate::core::TypedArrayType::Int8 => {
+            TypedArrayKind::Int8 => {
                 let b = (val as i8).to_le_bytes();
                 data[byte_offset] = b[0];
             }
-            crate::core::TypedArrayType::Uint8 | crate::core::TypedArrayType::Uint8Clamped => {
+            TypedArrayKind::Uint8 | TypedArrayKind::Uint8Clamped => {
                 let b = (val as u8).to_le_bytes();
                 data[byte_offset] = b[0];
             }
-            crate::core::TypedArrayType::Int16 => {
+            TypedArrayKind::Int16 => {
                 let b = (val as i16).to_le_bytes();
                 data[byte_offset] = b[0];
                 data[byte_offset + 1] = b[1];
             }
-            crate::core::TypedArrayType::Uint16 => {
+            TypedArrayKind::Uint16 => {
                 let b = (val as u16).to_le_bytes();
                 data[byte_offset] = b[0];
                 data[byte_offset + 1] = b[1];
             }
-            crate::core::TypedArrayType::Int32 => {
+            TypedArrayKind::Int32 => {
                 let b = (val as i32).to_le_bytes();
                 data[byte_offset..byte_offset + 4].copy_from_slice(&b);
             }
-            crate::core::TypedArrayType::Uint32 => {
+            TypedArrayKind::Uint32 => {
                 let b = (val as u32).to_le_bytes();
                 data[byte_offset..byte_offset + 4].copy_from_slice(&b);
             }
-            crate::core::TypedArrayType::Float32 => {
+            TypedArrayKind::Float32 => {
                 let b = (val as f32).to_le_bytes();
                 data[byte_offset..byte_offset + 4].copy_from_slice(&b);
             }
-            crate::core::TypedArrayType::Float64 => {
+            TypedArrayKind::Float64 => {
                 let b = val.to_le_bytes();
                 data[byte_offset..byte_offset + 8].copy_from_slice(&b);
             }
@@ -1784,4 +1743,93 @@ impl<'gc> crate::core::JSTypedArray<'gc> {
         }
         Ok(())
     }
+}
+
+pub fn handle_arraybuffer_accessor<'gc>(
+    _mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    property: &str,
+) -> Result<Value<'gc>, JSError> {
+    match property {
+        "byteLength" => {
+            if let Some(ab_val) = obj_get_key_value(object, &"__arraybuffer".into())? {
+                if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
+                    let len = (**ab).borrow().data.lock().unwrap().len();
+                    Ok(Value::Number(len as f64))
+                } else {
+                    Err(raise_eval_error!(
+                        "Method ArrayBuffer.prototype.byteLength called on incompatible receiver"
+                    ))
+                }
+            } else {
+                Err(raise_eval_error!(
+                    "Method ArrayBuffer.prototype.byteLength called on incompatible receiver"
+                ))
+            }
+        }
+        _ => Ok(Value::Undefined),
+    }
+}
+
+pub fn handle_typedarray_accessor<'gc>(
+    _mc: &MutationContext<'gc>,
+    object: &JSObjectDataPtr<'gc>,
+    property: &str,
+) -> Result<Value<'gc>, JSError> {
+    if let Some(ta_val) = obj_get_key_value(object, &"__typedarray".into())? {
+        if let Value::TypedArray(ta) = &*ta_val.borrow() {
+            match property {
+                "buffer" => Ok(Value::ArrayBuffer(ta.buffer.clone())),
+                "byteLength" => Ok(Value::Number((ta.length * ta.element_size()) as f64)),
+                "byteOffset" => Ok(Value::Number(ta.byte_offset as f64)),
+                "length" => Ok(Value::Number(ta.length as f64)),
+                "toStringTag" => {
+                    let name = match ta.kind {
+                        TypedArrayKind::Int8 => "Int8Array",
+                        TypedArrayKind::Uint8 => "Uint8Array",
+                        TypedArrayKind::Uint8Clamped => "Uint8ClampedArray",
+                        TypedArrayKind::Int16 => "Int16Array",
+                        TypedArrayKind::Uint16 => "Uint16Array",
+                        TypedArrayKind::Int32 => "Int32Array",
+                        TypedArrayKind::Uint32 => "Uint32Array",
+                        TypedArrayKind::Float32 => "Float32Array",
+                        TypedArrayKind::Float64 => "Float64Array",
+                        TypedArrayKind::BigInt64 => "BigInt64Array",
+                        TypedArrayKind::BigUint64 => "BigUint64Array",
+                    };
+                    Ok(Value::String(crate::unicode::utf8_to_utf16(name)))
+                }
+                _ => Ok(Value::Undefined),
+            }
+        } else {
+            Err(raise_eval_error!(
+                "Method TypedArray.prototype getter called on incompatible receiver"
+            ))
+        }
+    } else {
+        Err(raise_eval_error!(
+            "Method TypedArray.prototype getter called on incompatible receiver"
+        ))
+    }
+}
+
+pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let arraybuffer = make_arraybuffer_constructor(mc)?;
+    crate::core::env_set(mc, env, "ArrayBuffer", Value::Object(arraybuffer))?;
+
+    let dataview = make_dataview_constructor(mc)?;
+    crate::core::env_set(mc, env, "DataView", Value::Object(dataview))?;
+
+    let typed_arrays = make_typedarray_constructors(mc)?;
+    for (name, ctor) in typed_arrays {
+        crate::core::env_set(mc, env, &name, Value::Object(ctor))?;
+    }
+
+    let atomics = make_atomics_object(mc)?;
+    crate::core::env_set(mc, env, "Atomics", Value::Object(atomics))?;
+
+    let shared_ab = make_sharedarraybuffer_constructor(mc)?;
+    crate::core::env_set(mc, env, "SharedArrayBuffer", Value::Object(shared_ab))?;
+
+    Ok(())
 }

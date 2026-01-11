@@ -71,7 +71,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_math(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
-    // crate::js_function::initialize_function(mc, env)?;
+    crate::js_function::initialize_function(mc, env)?;
     initialize_regexp(mc, env)?;
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;

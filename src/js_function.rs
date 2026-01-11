@@ -1391,3 +1391,71 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     crate::core::env_set(mc, env, "Function", Value::Object(func_ctor))?;
     Ok(())
 }
+
+pub fn handle_function_prototype_method<'gc>(
+    mc: &MutationContext<'gc>,
+    this_value: &Value<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    match method {
+        "bind" => {
+            // function.bind(thisArg, ...args)
+            if let Value::Closure(closure_gc) = this_value {
+                let this_arg = args.get(0).cloned().unwrap_or(Value::Undefined);
+
+                let original = closure_gc;
+                // Check if already bound?
+                // logic: if already bound, subsequent binds (of this) are ignored?
+                // MDN: "The bind() method creates a new function that, when called, has its this keyword set to the provided value."
+                // "The new function has the same body as the original function. The this value is bound to the first argument of bind()."
+
+                // If original func is already bound, calling bind on it creates a NEW bound function.
+                // The new bound function calls the OLD bound function.
+                // But with our ClosureData implementation, if we just clone data and set bound_this, we are modifying the 'effective' this for the code.
+                // If 'original' has 'bound_this' set, 'call_closure' uses that.
+                // If we overwrite 'bound_this' in the clone:
+                //   Value::Closure(new_data { bound_this: new_this })
+                //   call_closure(new_data) -> uses new_this.
+                // This is WRONG if the original was already bound. The original binding should take precedence.
+                // But wait, if original was bound, 'call_closure' on original uses original.bound_this.
+                // If we clone 'original.body' etc, we are essentially copying the code.
+                // Does 'bound_this' stick to the code?
+
+                // Correct implementation of Bound Function creates a wrapper that calls TargetFunction.
+                // Since this engine simplifies things by using ClosureData, we have limits.
+                // If 'bound_this' is already set, we should probably NOT overwrite it with new access?
+                // Or rather, we can't easily implement "bound function calling bound function" without wrapper.
+
+                let effective_bound_this = if original.bound_this.is_some() {
+                    original.bound_this.clone()
+                } else {
+                    Some(this_arg)
+                };
+
+                // NOTE: Arguments binding is skipped for now as ClosureData doesn't support it.
+
+                let new_closure_data = ClosureData {
+                    params: original.params.clone(),
+                    body: original.body.clone(),
+                    env: original.env.clone(),
+                    home_object: original.home_object.clone(),
+                    captured_envs: original.captured_envs.clone(),
+                    bound_this: effective_bound_this,
+                };
+
+                Ok(Value::Closure(Gc::new(mc, new_closure_data)))
+            } else if let Value::Function(_) = this_value {
+                // Binding native function: not supported
+                // Return original for now or undefined? Returning original is wrong 'this'.
+                // Returning undefined throws error.
+                // Let's return the function itself (broken binding) or error.
+                Err(crate::raise_type_error!("Binding native functions not supported yet"))
+            } else {
+                Err(crate::raise_type_error!("Function.prototype.bind called on non-function"))
+            }
+        }
+        _ => Err(crate::raise_type_error!(format!("Unknown Function.prototype method: {method}"))),
+    }
+}

@@ -752,10 +752,16 @@ pub(crate) fn create_class_object<'gc>(
                 // Instance private properties handled during instantiation
             }
             ClassMember::PrivateMethod(method_name, params, body) => {
-                // Add private method to prototype using the '#name' key
-                let closure_data = ClosureData::new(params, body, env, None);
+                // Create a closure for the private method
+                let final_key = if method_name.starts_with('#') {
+                    method_name.clone()
+                } else {
+                    format!("#{method_name}")
+                };
+
+                let closure_data = ClosureData::new(params, body, env, Some(prototype_obj.clone()));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
-                obj_set_key_value(mc, &prototype_obj, &format!("#{}", method_name).into(), method_closure)?;
+                obj_set_key_value(mc, &prototype_obj, &final_key.into(), method_closure)?;
             }
             ClassMember::PrivateGetter(getter_name, body) => {
                 let key = format!("#{}", getter_name);

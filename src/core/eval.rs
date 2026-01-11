@@ -4,6 +4,7 @@ use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
+use crate::js_function::handle_function_prototype_method;
 use crate::js_json::handle_json_method;
 use crate::js_number::{handle_number_instance_method, handle_number_prototype_method, handle_number_static_method, number_constructor};
 use crate::js_string::{handle_string_method, string_from_char_code, string_from_code_point, string_raw};
@@ -1898,6 +1899,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         } else {
                             Err(EvalError::Js(raise_eval_error!(format!("Unknown Set function: {}", name))))
                         }
+                    } else if name.starts_with("Function.") {
+                        if let Some(method) = name.strip_prefix("Function.prototype.") {
+                            let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                            Ok(handle_function_prototype_method(mc, &this_v, method, &eval_args, env).map_err(EvalError::Js)?)
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(format!("Unknown Function method: {}", name))))
+                        }
                     } else {
                         Err(EvalError::Js(raise_eval_error!(format!("Unknown native function: {}", name))))
                     }
@@ -1909,7 +1917,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 let call_env = crate::core::new_js_object_data(mc);
                                 call_env.borrow_mut(mc).prototype = Some(cl.env);
                                 call_env.borrow_mut(mc).is_function_scope = true;
-                                if let Some(tv) = &this_val {
+                                let effective_this = if let Some(bound) = &cl.bound_this {
+                                    Some(bound.clone())
+                                } else {
+                                    this_val.clone()
+                                };
+
+                                if let Some(tv) = &effective_this {
                                     obj_set_key_value(mc, &call_env, &"this".into(), tv.clone())?;
                                 }
 
@@ -2015,7 +2029,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     let call_env = crate::core::new_js_object_data(mc);
                     call_env.borrow_mut(mc).prototype = Some(cl.env);
                     call_env.borrow_mut(mc).is_function_scope = true;
-                    if let Some(tv) = &this_val {
+                    let effective_this = if let Some(bound) = &cl.bound_this {
+                        Some(bound.clone())
+                    } else {
+                        this_val.clone()
+                    };
+
+                    if let Some(tv) = &effective_this {
                         obj_set_key_value(mc, &call_env, &"this".into(), tv.clone())?;
                     }
 
@@ -3004,7 +3024,16 @@ pub fn call_closure<'gc>(
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(cl.env);
     call_env.borrow_mut(mc).is_function_scope = true;
-    if let Some(tv) = &this_val {
+
+    let this_val_for_log = this_val.clone();
+
+    let effective_this = if let Some(bound) = &cl.bound_this {
+        Some(bound.clone())
+    } else {
+        this_val
+    };
+
+    if let Some(tv) = effective_this {
         crate::core::obj_set_key_value(mc, &call_env, &"this".into(), tv.clone()).map_err(EvalError::Js)?;
     }
 
@@ -3055,11 +3084,8 @@ fn evaluate_update_expression<'gc>(
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             if let Value::Object(obj) = obj_val {
                 let key_val = PropertyKey::from(key.to_string());
-                let current = if let Some(some_cell) = obj_get_key_value(&obj, &key_val)? {
-                    some_cell.borrow().clone()
-                } else {
-                    Value::Undefined
-                };
+                // Use get_property_with_accessors so getters are invoked for reads
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
 
                 let current_num = match current {
                     Value::Number(n) => n,
@@ -3080,11 +3106,8 @@ fn evaluate_update_expression<'gc>(
             let key = PropertyKey::from(key_str);
 
             if let Value::Object(obj) = obj_val {
-                let current = if let Some(some_cell) = obj_get_key_value(&obj, &key)? {
-                    some_cell.borrow().clone()
-                } else {
-                    Value::Undefined
-                };
+                // Use get_property_with_accessors so getters are invoked for reads
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
 
                 let current_num = match current {
                     Value::Number(n) => n,

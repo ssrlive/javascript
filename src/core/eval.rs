@@ -19,6 +19,7 @@ use crate::{
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
 use crate::{Token, parse_statements, raise_type_error, tokenize};
+use num_bigint::BigInt;
 use num_traits::Zero;
 
 #[derive(Clone, Debug)]
@@ -1119,6 +1120,18 @@ fn get_primitive_prototype_property<'gc>(
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
+        Expr::BigInt(chars) => {
+            let s = utf16_to_utf8(chars);
+            // Assuming the parser gives us a valid integer string.
+            // But it might have 'n' at the end?
+            // The parser probably stripped 'n' or it's just digits.
+            // If it's from source code "123n", lexer handles it.
+            // Let's assume it's parsable.
+            let bi = s
+                .parse::<BigInt>()
+                .map_err(|e| EvalError::Js(raise_eval_error!(format!("Invalid BigInt literal: {e}"))))?;
+            Ok(Value::BigInt(bi))
+        }
         Expr::StringLit(s) => Ok(Value::String(s.clone())),
         Expr::Boolean(b) => Ok(Value::Boolean(*b)),
         Expr::Null => Ok(Value::Null),
@@ -1615,6 +1628,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 "std module (tmpfile) not enabled. Recompile with --features std"
                             )))
                         }
+                    } else if let Some(method) = name.strip_prefix("Boolean.prototype.") {
+                        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                        Ok(crate::js_boolean::handle_boolean_prototype_method(this_v, method).map_err(EvalError::Js)?)
                     } else if let Some(method) = name.strip_prefix("BigInt.prototype.") {
                         let this_v = this_val.clone().unwrap_or(Value::Undefined);
                         Ok(crate::js_bigint::handle_bigint_object_method(this_v, method, &eval_args).map_err(EvalError::Js)?)
@@ -1973,8 +1989,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     } else if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
                         match &*native_name.borrow() {
                             Value::String(name) => {
-                                if name == &crate::unicode::utf8_to_utf16("String") {
+                                if name == &crate::unicode::utf8_to_utf16("Object") {
+                                    Ok(crate::js_class::handle_object_constructor(mc, &eval_args, env)?)
+                                } else if name == &crate::unicode::utf8_to_utf16("String") {
                                     Ok(crate::js_string::string_constructor(&eval_args, env)?)
+                                } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
+                                    Ok(crate::js_boolean::boolean_constructor(&eval_args)?)
                                 } else if name == &crate::unicode::utf8_to_utf16("Number") {
                                     Ok(number_constructor(&eval_args, env).map_err(EvalError::Js)?)
                                 } else if name == &crate::unicode::utf8_to_utf16("BigInt") {
@@ -2126,6 +2146,40 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                         obj_set_key_value(mc, err_obj, &"name".into(), Value::String(name.clone()))?;
                                     }
                                     return Ok(err_val);
+                                } else if name == &crate::unicode::utf8_to_utf16("String") {
+                                    let val = match crate::js_string::string_constructor(&eval_args, env)? {
+                                        Value::String(s) => s,
+                                        _ => Vec::new(),
+                                    };
+                                    let new_obj = crate::core::new_js_object_data(mc);
+
+                                    obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::String(val.clone()))?;
+
+                                    if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                                        && let Value::Object(proto_obj) = &*proto_val.borrow()
+                                    {
+                                        new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                                    }
+
+                                    let val = Value::Number(crate::unicode::utf16_len(&val) as f64);
+                                    obj_set_key_value(mc, &new_obj, &"length".into(), val)?;
+
+                                    return Ok(Value::Object(new_obj));
+                                } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
+                                    let val = match crate::js_boolean::boolean_constructor(&eval_args)? {
+                                        Value::Boolean(b) => b,
+                                        _ => false,
+                                    };
+                                    let new_obj = crate::core::new_js_object_data(mc);
+                                    obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Boolean(val))?;
+
+                                    if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                                        && let Value::Object(proto_obj) = &*proto_val.borrow()
+                                    {
+                                        new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                                    }
+
+                                    return Ok(Value::Object(new_obj));
                                 } else if name == &crate::unicode::utf8_to_utf16("Number") {
                                     let val = match number_constructor(&eval_args, env).map_err(EvalError::Js)? {
                                         Value::Number(n) => n,
@@ -2653,6 +2707,11 @@ fn call_native_function<'gc>(
     if name == "Symbol.prototype.toString" {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_tostring(mc, this_v).map_err(EvalError::Js)?));
+    }
+
+    if name == "Symbol.prototype.valueOf" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v).map_err(EvalError::Js)?));
     }
 
     if name.starts_with("Map.") {

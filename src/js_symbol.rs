@@ -44,9 +44,16 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let val = Value::Function("Symbol.prototype.toString".to_string());
     obj_set_key_value(mc, &symbol_proto, &"toString".into(), val)?;
     symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
+
+    // valueOf method
+    let val_of = Value::Function("Symbol.prototype.valueOf".to_string());
+    obj_set_key_value(mc, &symbol_proto, &"valueOf".into(), val_of)?;
+    symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
+
     symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     env_set(mc, env, "Symbol", Value::Object(symbol_ctor))?;
+
     Ok(())
 }
 
@@ -70,16 +77,50 @@ pub(crate) fn handle_symbol_call<'gc>(
 }
 
 pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value: Value<'gc>) -> Result<Value<'gc>, JSError> {
-    if let Value::Symbol(sym) = this_value {
-        let desc = sym.description.as_deref().unwrap_or("");
-        let s = if desc.is_empty() {
-            "Symbol()".to_string()
-        } else {
-            format!("Symbol({desc})")
-        };
-        Ok(Value::String(utf8_to_utf16(&s)))
+    let sym = match this_value {
+        Value::Symbol(s) => s,
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+                if let Value::Symbol(s) = &*val.borrow() {
+                    s.clone()
+                } else {
+                    return Err(crate::raise_type_error!(
+                        "Symbol.prototype.toString called on incompatible receiver"
+                    ));
+                }
+            } else {
+                return Err(crate::raise_type_error!(
+                    "Symbol.prototype.toString called on incompatible receiver"
+                ));
+            }
+        }
+        _ => {
+            return Err(crate::raise_type_error!(
+                "Symbol.prototype.toString called on incompatible receiver"
+            ));
+        }
+    };
+
+    let desc = sym.description.as_deref().unwrap_or("");
+    let s = if desc.is_empty() {
+        "Symbol()".to_string()
     } else {
-        // Primitive Symbol check?
-        Err(crate::raise_type_error!("Symbol.prototype.toString called on non-symbol"))
+        format!("Symbol({desc})")
+    };
+    Ok(Value::String(utf8_to_utf16(&s)))
+}
+
+pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value: Value<'gc>) -> Result<Value<'gc>, JSError> {
+    match this_value {
+        Value::Symbol(s) => Ok(Value::Symbol(s)),
+        Value::Object(obj) => {
+            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+                if let Value::Symbol(s) = &*val.borrow() {
+                    return Ok(Value::Symbol(s.clone()));
+                }
+            }
+            Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver"))
+        }
+        _ => Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver")),
     }
 }

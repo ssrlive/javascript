@@ -1375,23 +1375,40 @@ pub(crate) fn handle_object_constructor<'gc>(
         Value::BigInt(h) => {
             // Object(bigint) creates a boxed BigInt-like object
             let obj = new_js_object_data(mc);
-            obj_set_key_value(mc, &obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
-            obj_set_key_value(mc, &obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
             obj_set_key_value(mc, &obj, &"__value__".into(), Value::BigInt(h.clone()))?;
-            // Set internal prototype to BigInt.prototype if available
-            crate::core::set_internal_prototype_from_constructor(mc, env, &obj, "BigInt")?;
+
+            // Manually set internal prototype to BigInt.prototype
+            if let Some(bi) = crate::core::obj_get_key_value(env, &"BigInt".into())? {
+                if let Value::Object(ctor_obj) = &*bi.borrow() {
+                    if let Some(proto) = crate::core::obj_get_key_value(ctor_obj, &"prototype".into())? {
+                        if let Value::Object(proto_obj) = &*proto.borrow() {
+                            obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+                        }
+                    }
+                }
+            }
+
             Ok(Value::Object(obj))
         }
+
         Value::Symbol(sd) => {
             // Object(symbol) creates Symbol object
             let obj = new_js_object_data(mc);
-            obj_set_key_value(mc, &obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
-            obj_set_key_value(mc, &obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
             obj_set_key_value(mc, &obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
-            // Set internal prototype to Symbol.prototype if available
-            crate::core::set_internal_prototype_from_constructor(mc, env, &obj, "Symbol")?;
+
+            // Manually set internal prototype to Symbol.prototype
+            if let Some(sym) = crate::core::obj_get_key_value(env, &"Symbol".into())? {
+                if let Value::Object(ctor_obj) = &*sym.borrow() {
+                    if let Some(proto) = crate::core::obj_get_key_value(ctor_obj, &"prototype".into())? {
+                        if let Value::Object(proto_obj) = &*proto.borrow() {
+                            obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+                        }
+                    }
+                }
+            }
             Ok(Value::Object(obj))
         }
+
         _ => {
             // For other types, return empty object
             let obj = new_js_object_data(mc);

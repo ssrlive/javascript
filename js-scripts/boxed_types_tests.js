@@ -1,3 +1,5 @@
+"use strict";
+
 function testBoxed(name, obj, primitiveValue, expectedToString) {
     console.log(`--- Testing ${name} ---`);
     console.log(`typeof:`, typeof obj);
@@ -51,12 +53,9 @@ try {
 }
 
 
-{
-    // Simple assertion function defined inside a block but it can be used in the whole file
-    function assert(condition, message) {
-        if (!condition) {
-            throw new Error(message || "Assertion failed");
-        }
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message || "Assertion failed");
     }
 }
 

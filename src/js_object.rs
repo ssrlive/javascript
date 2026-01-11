@@ -597,8 +597,6 @@ pub fn handle_object_method<'gc>(
                 }
                 Value::BigInt(h) => {
                     let obj = new_js_object_data(mc);
-                    obj_set_key_value(mc, &obj, &"valueOf".into(), Value::Function("BigInt_valueOf".to_string()))?;
-                    obj_set_key_value(mc, &obj, &"toString".into(), Value::Function("BigInt_toString".to_string()))?;
                     obj_set_key_value(mc, &obj, &"__value__".into(), Value::BigInt(h.clone()))?;
                     // Set prototype to BigInt.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "BigInt");
@@ -606,9 +604,8 @@ pub fn handle_object_method<'gc>(
                 }
                 Value::Symbol(sd) => {
                     let obj = new_js_object_data(mc);
-                    obj_set_key_value(mc, &obj, &"valueOf".into(), Value::Function("Symbol_valueOf".to_string()))?;
-                    obj_set_key_value(mc, &obj, &"toString".into(), Value::Function("Symbol_toString".to_string()))?;
                     obj_set_key_value(mc, &obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
+
                     // Set prototype to Symbol.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
                     obj

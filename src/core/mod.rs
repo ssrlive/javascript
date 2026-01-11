@@ -1,6 +1,7 @@
 use crate::error::JSError;
 use crate::js_array::initialize_array;
 use crate::js_bigint::initialize_bigint;
+use crate::js_boolean::initialize_boolean;
 use crate::js_console::initialize_console_object;
 use crate::js_date::initialize_date;
 use crate::js_json::initialize_json;
@@ -75,6 +76,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // Initialize Date constructor and prototype
     initialize_date(mc, env)?;
     crate::js_typedarray::initialize_typedarray(mc, env)?;
+    initialize_boolean(mc, env)?;
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;

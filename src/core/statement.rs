@@ -3,7 +3,7 @@ use crate::core::{Collect, GcTrace};
 
 #[derive(Clone, Debug)]
 pub struct Statement {
-    pub kind: StatementKind,
+    pub kind: Box<StatementKind>,
     pub line: usize,
     pub column: usize,
 }
@@ -15,27 +15,27 @@ pub enum StatementKind {
     Var(Vec<(String, Option<Expr>)>),
     Const(Vec<(String, Expr)>),
     Return(Option<Expr>),
-    Throw(Expr),                                                                              // throw expression
-    Block(Vec<Statement>),                                                                    // block statement `{ ... }`
-    If(Expr, Vec<Statement>, Option<Vec<Statement>>),                                         // condition, then_body, else_body
-    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool),             // name, params, body, is_generator
-    TryCatch(Vec<Statement>, Option<String>, Option<Vec<Statement>>, Option<Vec<Statement>>), // try_body, catch_param, catch_body, finally_body
-    LetDestructuringArray(Vec<DestructuringElement>, Expr),                                   // array destructuring: let [a, b] = [1, 2];
-    VarDestructuringArray(Vec<DestructuringElement>, Expr),                                   // array destructuring: var [a, b] = [1, 2];
-    ConstDestructuringArray(Vec<DestructuringElement>, Expr),                                 // const [a, b] = [1, 2];
+    Throw(Expr),           // throw expression
+    Block(Vec<Statement>), // block statement `{ ... }`
+    If(Box<IfStatement>),
+    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool), // name, params, body, is_generator
+    TryCatch(Box<TryCatchStatement>),
+    LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
+    VarDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: var [a, b] = [1, 2];
+    ConstDestructuringArray(Vec<DestructuringElement>, Expr), // const [a, b] = [1, 2];
     LetDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: let {a, b} = {a: 1, b: 2};
     VarDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // object destructuring: var {a, b} = {a: 1, b: 2};
     ConstDestructuringObject(Vec<ObjectDestructuringElement>, Expr), // const {a, b} = {a: 1, b: 2};
-    Class(Box<ClassDefinition>),                                   // name, extends, members
-    Assign(String, Expr),                                          // variable assignment
-    For(Option<Box<Statement>>, Option<Expr>, Option<Box<Statement>>, Vec<Statement>), // init, condition, increment, body
-    ForOf(String, Expr, Vec<Statement>),                           // variable, iterable, body
-    ForIn(String, Expr, Vec<Statement>),                           // variable, object, body
+    Class(Box<ClassDefinition>),                            // name, extends, members
+    Assign(String, Expr),                                   // variable assignment
+    For(Box<ForStatement>),
+    ForOf(String, Expr, Vec<Statement>), // variable, iterable, body
+    ForIn(String, Expr, Vec<Statement>), // variable, object, body
     ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
     ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
-    While(Expr, Vec<Statement>),                                   // condition, body
-    DoWhile(Vec<Statement>, Expr),                                 // body, condition
-    Switch(Expr, Vec<SwitchCase>),                                 // expression, cases
+    While(Expr, Vec<Statement>),         // condition, body
+    DoWhile(Vec<Statement>, Expr),       // body, condition
+    Switch(Box<SwitchStatement>),
     Break(Option<String>),
     Continue(Option<String>),
     Label(String, Box<Statement>),
@@ -43,9 +43,42 @@ pub enum StatementKind {
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>), // export specifiers, optional inner declaration
 }
 
+#[derive(Clone, Debug)]
+pub struct IfStatement {
+    pub condition: Expr,
+    pub then_body: Vec<Statement>,
+    pub else_body: Option<Vec<Statement>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TryCatchStatement {
+    pub try_body: Vec<Statement>,
+    pub catch_param: Option<String>,
+    pub catch_body: Option<Vec<Statement>>,
+    pub finally_body: Option<Vec<Statement>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ForStatement {
+    pub init: Option<Box<Statement>>,
+    pub test: Option<Expr>,
+    pub update: Option<Box<Statement>>,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwitchStatement {
+    pub expr: Expr,
+    pub cases: Vec<SwitchCase>,
+}
+
 impl From<StatementKind> for Statement {
     fn from(kind: StatementKind) -> Self {
-        Statement { kind, line: 0, column: 0 }
+        Statement {
+            kind: Box::new(kind),
+            line: 0,
+            column: 0,
+        }
     }
 }
 
@@ -123,8 +156,8 @@ pub enum Expr {
     Getter(Box<Expr>),
     Setter(Box<Expr>),
     Array(Vec<Option<Expr>>),
-    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
-    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    GeneratorFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
+    AsyncFunction(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
     AsyncArrowFunction(Vec<DestructuringElement>, Vec<Statement>),
     PostIncrement(Box<Expr>),
     PostDecrement(Box<Expr>),
@@ -132,7 +165,7 @@ pub enum Expr {
     TemplateString(Vec<TemplatePart>),
     Regex(String, String),
     Comma(Box<Expr>, Box<Expr>),
-    Function(Option<String>, Vec<DestructuringElement>, Vec<crate::core::Statement>),
+    Function(Option<String>, Vec<DestructuringElement>, Vec<Statement>),
     Call(Box<Expr>, Vec<Expr>),
     DynamicImport(Box<Expr>),
     ValuePlaceholder,

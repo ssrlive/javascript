@@ -121,7 +121,11 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     Ok(number_obj)
 }
 
-pub(crate) fn number_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn number_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Number constructor
     if let Some(arg_val) = args.first() {
         match arg_val {
@@ -138,7 +142,7 @@ pub(crate) fn number_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr
             Value::Undefined => Ok(Value::Number(f64::NAN)),
             Value::Object(obj) => {
                 // Try ToPrimitive with 'number' hint
-                let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+                let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
                 match prim {
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {

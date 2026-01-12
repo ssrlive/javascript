@@ -1,22 +1,21 @@
-#![allow(
-    clippy::collapsible_if,
-    clippy::collapsible_match,
-    clippy::collapsible_else_if,
-    unused_variables,
-    dead_code,
-    unused_imports
-)]
-
 use crate::JSError;
-use crate::core::statement::{ExportSpecifier, ImportSpecifier, Statement, StatementKind};
-use crate::core::{BinaryOp, ClassMember, DestructuringElement, Expr, TemplatePart, Token, TokenData};
+use crate::core::statement::{
+    ExportSpecifier, ForStatement, IfStatement, ImportSpecifier, Statement, StatementKind, SwitchStatement, TryCatchStatement,
+};
+use crate::core::{BinaryOp, ClassMember, DestructuringElement, Expr, ObjectDestructuringElement, TemplatePart, Token, TokenData};
 use crate::raise_parse_error;
-use crate::{core::value::Value, raise_parse_error_with_token, unicode::utf16_to_utf8};
+use crate::{raise_parse_error_with_token, unicode::utf16_to_utf8};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
     rc::Rc,
 };
+
+#[derive(Debug)]
+enum ForOfPattern {
+    Object(Vec<DestructuringElement>),
+    Array(Vec<DestructuringElement>),
+}
 
 pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statement>, JSError> {
     let mut statements = Vec::new();
@@ -58,6 +57,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
         Token::For => parse_for_statement(t, index),
         Token::While => parse_while_statement(t, index),
         Token::Do => parse_do_while_statement(t, index),
+        Token::Switch => parse_switch_statement(t, index),
         _ => {
             if let Token::Identifier(name) = &start_token.token {
                 if *index + 1 < t.len() && matches!(t[*index + 1].token, Token::Colon) {
@@ -65,7 +65,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                     *index += 2; // consume Identifier and Colon
                     let stmt = parse_statement_item(t, index)?;
                     return Ok(Statement {
-                        kind: StatementKind::Label(label_name, Box::new(stmt)),
+                        kind: Box::new(StatementKind::Label(label_name, Box::new(stmt))),
                         line,
                         column,
                     });
@@ -76,7 +76,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                 *index += 1;
             }
             Ok(Statement {
-                kind: StatementKind::Expr(expr),
+                kind: Box::new(StatementKind::Expr(expr)),
                 line,
                 column,
             })
@@ -110,7 +110,7 @@ fn parse_class_declaration(t: &[TokenData], index: &mut usize) -> Result<Stateme
 
     let class_def = crate::core::ClassDefinition { name, extends, members };
     Ok(Statement {
-        kind: StatementKind::Class(Box::new(class_def)),
+        kind: Box::new(StatementKind::Class(Box::new(class_def))),
         line: t[start].line,
         column: t[start].column,
     })
@@ -133,12 +133,23 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let mut init_expr: Option<Expr> = None;
     let mut init_decls: Option<Vec<(String, Option<Expr>)>> = None;
     let mut decl_kind = None;
+    let mut for_of_pattern: Option<ForOfPattern> = None;
 
     if is_decl {
         decl_kind = Some(t[*index].token.clone());
         *index += 1; // consume var/let/const
-        let decls = parse_variable_declaration_list(t, index)?;
-        init_decls = Some(decls);
+
+        // Check for destructuring
+        if matches!(t[*index].token, Token::LBrace) {
+            let pattern = parse_object_destructuring_pattern(t, index)?;
+            for_of_pattern = Some(ForOfPattern::Object(pattern));
+        } else if matches!(t[*index].token, Token::LBracket) {
+            let pattern = parse_array_destructuring_pattern(t, index)?;
+            for_of_pattern = Some(ForOfPattern::Array(pattern));
+        } else {
+            let decls = parse_variable_declaration_list(t, index)?;
+            init_decls = Some(decls);
+        }
     } else {
         if !matches!(t[*index].token, Token::Semicolon) {
             init_expr = Some(parse_expression(t, index)?);
@@ -156,24 +167,47 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         *index += 1; // consume )
 
         let body = parse_statement_item(t, index)?;
-        let body_stmts = match body.kind {
+        let body_stmts = match *body.kind {
             StatementKind::Block(stmts) => stmts,
             _ => vec![body],
         };
 
-        let var_name = if let Some(decls) = init_decls {
-            if decls.len() != 1 {
-                return Err(raise_parse_error!("Invalid for-of statement"));
+        let kind = if let Some(pattern) = for_of_pattern {
+            match pattern {
+                ForOfPattern::Object(destr_pattern) => {
+                    // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
+                    let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+                    for elem in destr_pattern.into_iter() {
+                        match elem {
+                            DestructuringElement::Property(key, boxed) => {
+                                obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                            }
+                            DestructuringElement::Rest(name) => {
+                                obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                            }
+                            _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern")),
+                        }
+                    }
+                    StatementKind::ForOfDestructuringObject(obj_pattern, iterable, body_stmts)
+                }
+                ForOfPattern::Array(arr_pattern) => StatementKind::ForOfDestructuringArray(arr_pattern, iterable, body_stmts),
             }
-            decls[0].0.clone()
-        } else if let Some(Expr::Var(s, _, _)) = init_expr {
-            s
         } else {
-            return Err(raise_parse_error!("Invalid for-of left-hand side"));
+            let var_name = if let Some(decls) = init_decls {
+                if decls.len() != 1 {
+                    return Err(raise_parse_error!("Invalid for-of statement"));
+                }
+                decls[0].0.clone()
+            } else if let Some(Expr::Var(s, _, _)) = init_expr {
+                s
+            } else {
+                return Err(raise_parse_error!("Invalid for-of left-hand side"));
+            };
+            StatementKind::ForOf(var_name, iterable, body_stmts)
         };
 
         return Ok(Statement {
-            kind: StatementKind::ForOf(var_name, iterable, body_stmts),
+            kind: Box::new(kind),
             line,
             column,
         });
@@ -194,12 +228,12 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 if let Expr::Var(name, _, _) = *left {
                     *index += 1; // consume )
                     let body = parse_statement_item(t, index)?;
-                    let body_stmts = match body.kind {
+                    let body_stmts = match *body.kind {
                         StatementKind::Block(b) => b,
                         _ => vec![body],
                     };
                     return Ok(Statement {
-                        kind: StatementKind::ForIn(name, *right, body_stmts),
+                        kind: Box::new(StatementKind::ForIn(name, *right, body_stmts)),
                         line,
                         column,
                     });
@@ -215,7 +249,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
         *index += 1;
         let body = parse_statement_item(t, index)?;
-        let body_stmts = match body.kind {
+        let body_stmts = match *body.kind {
             StatementKind::Block(b) => b,
             _ => vec![body],
         };
@@ -230,7 +264,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         };
 
         return Ok(Statement {
-            kind: StatementKind::ForIn(var_name, rhs, body_stmts),
+            kind: Box::new(StatementKind::ForIn(var_name, rhs, body_stmts)),
             line,
             column,
         });
@@ -265,7 +299,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     *index += 1; // consume )
 
     let body = parse_statement_item(t, index)?;
-    let body_stmts = match body.kind {
+    let body_stmts = match *body.kind {
         StatementKind::Block(b) => b,
         _ => vec![body],
     };
@@ -289,11 +323,15 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             }
             _ => unreachable!(),
         };
-        Some(Box::new(Statement { kind: k, line, column }))
+        Some(Box::new(Statement {
+            kind: Box::new(k),
+            line,
+            column,
+        }))
     } else {
         init_expr.map(|e| {
             Box::new(Statement {
-                kind: StatementKind::Expr(e),
+                kind: Box::new(StatementKind::Expr(e)),
                 line,
                 column,
             })
@@ -302,14 +340,19 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
 
     let update_stmt = update.map(|e| {
         Box::new(Statement {
-            kind: StatementKind::Expr(e),
+            kind: Box::new(StatementKind::Expr(e)),
             line,
             column,
         })
     });
 
     Ok(Statement {
-        kind: StatementKind::For(init_stmt, test, update_stmt, body_stmts),
+        kind: Box::new(StatementKind::For(Box::new(ForStatement {
+            init: init_stmt,
+            test,
+            update: update_stmt,
+            body: body_stmts,
+        }))),
         line,
         column,
     })
@@ -340,7 +383,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     let body = parse_statement_block(t, index)?;
 
     Ok(Statement {
-        kind: StatementKind::FunctionDeclaration(name, params, body, false),
+        kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, false)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -360,7 +403,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     *index += 1; // consume )
 
     let then_stmt = parse_statement_item(t, index)?;
-    let then_block = match then_stmt.kind {
+    let then_block = match *then_stmt.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![then_stmt],
     };
@@ -368,7 +411,7 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     let else_block = if *index < t.len() && matches!(t[*index].token, Token::Else) {
         *index += 1;
         let else_stmt = parse_statement_item(t, index)?;
-        match else_stmt.kind {
+        match *else_stmt.kind {
             StatementKind::Block(stmts) => Some(stmts),
             _ => Some(vec![else_stmt]),
         }
@@ -377,7 +420,11 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     };
 
     Ok(Statement {
-        kind: StatementKind::If(condition, then_block, else_block),
+        kind: Box::new(StatementKind::If(Box::new(IfStatement {
+            condition,
+            then_body: then_block,
+            else_body: else_block,
+        }))),
         line: t[start].line,
         column: t[start].column,
     })
@@ -395,7 +442,7 @@ fn parse_return_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
         *index += 1;
     }
     Ok(Statement {
-        kind: StatementKind::Return(expr),
+        kind: Box::new(StatementKind::Return(expr)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -415,13 +462,13 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     *index += 1; // consume )
 
     let body = parse_statement_item(t, index)?;
-    let body_stmts = match body.kind {
+    let body_stmts = match *body.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![body],
     };
 
     Ok(Statement {
-        kind: StatementKind::While(condition, body_stmts),
+        kind: Box::new(StatementKind::While(condition, body_stmts)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -431,7 +478,7 @@ fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     let start = *index;
     *index += 1; // consume do
     let body = parse_statement_item(t, index)?;
-    let body_stmts = match body.kind {
+    let body_stmts = match *body.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![body],
     };
@@ -458,7 +505,75 @@ fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     }
 
     Ok(Statement {
-        kind: StatementKind::DoWhile(body_stmts, condition),
+        kind: Box::new(StatementKind::DoWhile(body_stmts, condition)),
+        line: t[start].line,
+        column: t[start].column,
+    })
+}
+
+fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    *index += 1; // consume switch
+
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume (
+    let expr = parse_expression(t, index)?;
+
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume )
+
+    if !matches!(t[*index].token, Token::LBrace) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume {
+
+    let mut cases: Vec<crate::core::SwitchCase> = Vec::new();
+
+    while *index < t.len() && !matches!(t[*index].token, Token::RBrace) {
+        if matches!(t[*index].token, Token::Case) {
+            *index += 1; // consume case
+            let case_expr = parse_expression(t, index)?;
+            if !matches!(t[*index].token, Token::Colon) {
+                return Err(raise_parse_error_at(t.get(*index)));
+            }
+            *index += 1; // consume colon
+
+            // collect statements until next Case/Default/RBrace
+            let mut stmts: Vec<Statement> = Vec::new();
+            while *index < t.len() && !matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+                stmts.push(parse_statement_item(t, index)?);
+            }
+            cases.push(crate::core::SwitchCase::Case(case_expr, stmts));
+        } else if matches!(t[*index].token, Token::Default) {
+            *index += 1; // consume default
+            if !matches!(t[*index].token, Token::Colon) {
+                return Err(raise_parse_error_at(t.get(*index)));
+            }
+            *index += 1; // consume colon
+
+            let mut stmts: Vec<Statement> = Vec::new();
+            while *index < t.len() && !matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+                stmts.push(parse_statement_item(t, index)?);
+            }
+            cases.push(crate::core::SwitchCase::Default(stmts));
+        } else if matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1; // allow stray semicolons/line terminators
+        } else {
+            return Err(raise_parse_error_at(t.get(*index)));
+        }
+    }
+
+    if !matches!(t[*index].token, Token::RBrace) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume }
+
+    Ok(Statement {
+        kind: Box::new(StatementKind::Switch(Box::new(SwitchStatement { expr, cases }))),
         line: t[start].line,
         column: t[start].column,
     })
@@ -481,7 +596,7 @@ fn parse_break_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
 
     Ok(Statement {
-        kind: StatementKind::Break(label),
+        kind: Box::new(StatementKind::Break(label)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -504,7 +619,7 @@ fn parse_continue_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     }
 
     Ok(Statement {
-        kind: StatementKind::Continue(label),
+        kind: Box::new(StatementKind::Continue(label)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -521,7 +636,7 @@ fn parse_throw_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         *index += 1;
     }
     Ok(Statement {
-        kind: StatementKind::Throw(expr),
+        kind: Box::new(StatementKind::Throw(expr)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -532,7 +647,7 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     *index += 1; // consume try
 
     let try_block = parse_block_statement(t, index)?;
-    let try_body = if let StatementKind::Block(stmts) = try_block.kind {
+    let try_body = if let StatementKind::Block(stmts) = *try_block.kind {
         stmts
     } else {
         return Err(raise_parse_error!("Expected block after try"));
@@ -560,7 +675,7 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
 
         let catch_block = parse_block_statement(t, index)?;
-        if let StatementKind::Block(stmts) = catch_block.kind {
+        if let StatementKind::Block(stmts) = *catch_block.kind {
             catch_body = Some(stmts);
         } else {
             return Err(raise_parse_error!("Expected block after catch"));
@@ -571,7 +686,7 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     if *index < t.len() && matches!(t[*index].token, Token::Finally) {
         *index += 1; // consume finally
         let finally_block = parse_block_statement(t, index)?;
-        if let StatementKind::Block(stmts) = finally_block.kind {
+        if let StatementKind::Block(stmts) = *finally_block.kind {
             finally_body = Some(stmts);
         } else {
             return Err(raise_parse_error!("Expected block after finally"));
@@ -583,7 +698,12 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
 
     Ok(Statement {
-        kind: StatementKind::TryCatch(try_body, catch_param, catch_body, finally_body),
+        kind: Box::new(StatementKind::TryCatch(Box::new(TryCatchStatement {
+            try_body,
+            catch_param,
+            catch_body,
+            finally_body,
+        }))),
         line: t[start].line,
         column: t[start].column,
     })
@@ -598,7 +718,7 @@ fn parse_block_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
     *index += 1; // consume }
     Ok(Statement {
-        kind: StatementKind::Block(body),
+        kind: Box::new(StatementKind::Block(body)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -607,12 +727,70 @@ fn parse_block_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
 fn parse_var_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume var
+
+    // Support array/object destructuring in variable declarations
+    if *index < t.len() && matches!(t[*index].token, Token::LBracket) {
+        let mut idx = *index;
+        let pattern = parse_array_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+            return Ok(Statement {
+                kind: Box::new(StatementKind::VarDestructuringArray(pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in destructuring declaration"));
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
+        let mut idx = *index;
+        let pattern = parse_object_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+
+            // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
+            let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+            for elem in pattern.into_iter() {
+                match elem {
+                    DestructuringElement::Property(key, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                    }
+                    DestructuringElement::Rest(name) => {
+                        obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                    }
+                    _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern")),
+                }
+            }
+
+            return Ok(Statement {
+                kind: Box::new(StatementKind::VarDestructuringObject(obj_pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in destructuring declaration"));
+        }
+    }
+
+    // Fallback to simple identifier declarations
     let decls = parse_variable_declaration_list(t, index)?;
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
     Ok(Statement {
-        kind: StatementKind::Var(decls),
+        kind: Box::new(StatementKind::Var(decls)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -621,12 +799,70 @@ fn parse_var_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
 fn parse_let_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume let
+
+    // Support array/object destructuring in let declarations
+    if *index < t.len() && matches!(t[*index].token, Token::LBracket) {
+        let mut idx = *index;
+        let pattern = parse_array_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+            return Ok(Statement {
+                kind: Box::new(StatementKind::LetDestructuringArray(pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in destructuring declaration"));
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
+        let mut idx = *index;
+        let pattern = parse_object_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+
+            // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
+            let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+            for elem in pattern.into_iter() {
+                match elem {
+                    DestructuringElement::Property(key, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                    }
+                    DestructuringElement::Rest(name) => {
+                        obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                    }
+                    _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern")),
+                }
+            }
+
+            return Ok(Statement {
+                kind: Box::new(StatementKind::LetDestructuringObject(obj_pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in destructuring declaration"));
+        }
+    }
+
+    // Fallback to simple identifier declarations
     let decls = parse_variable_declaration_list(t, index)?;
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
         *index += 1;
     }
     Ok(Statement {
-        kind: StatementKind::Let(decls),
+        kind: Box::new(StatementKind::Let(decls)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -635,6 +871,64 @@ fn parse_let_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
 fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume const
+
+    // Support array/object destructuring in const declarations
+    if *index < t.len() && matches!(t[*index].token, Token::LBracket) {
+        let mut idx = *index;
+        let pattern = parse_array_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+            return Ok(Statement {
+                kind: Box::new(StatementKind::ConstDestructuringArray(pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in const destructuring declaration"));
+        }
+    }
+
+    if *index < t.len() && matches!(t[*index].token, Token::LBrace) {
+        let mut idx = *index;
+        let pattern = parse_object_destructuring_pattern(t, &mut idx)?;
+        *index = idx;
+        if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+            *index += 1;
+            let init = parse_assignment(t, index)?;
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+
+            // Convert Vec<DestructuringElement> -> Vec<ObjectDestructuringElement>
+            let mut obj_pattern: Vec<ObjectDestructuringElement> = Vec::new();
+            for elem in pattern.into_iter() {
+                match elem {
+                    DestructuringElement::Property(key, boxed) => {
+                        obj_pattern.push(ObjectDestructuringElement::Property { key, value: *boxed });
+                    }
+                    DestructuringElement::Rest(name) => {
+                        obj_pattern.push(ObjectDestructuringElement::Rest(name));
+                    }
+                    _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern")),
+                }
+            }
+
+            return Ok(Statement {
+                kind: Box::new(StatementKind::ConstDestructuringObject(obj_pattern, init)),
+                line: t[start].line,
+                column: t[start].column,
+            });
+        } else {
+            return Err(raise_parse_error!("Missing initializer in const destructuring declaration"));
+        }
+    }
+
+    // Fallback to simple identifier declarations (must have initializer for const)
     let decls = parse_variable_declaration_list(t, index)?;
     let mut const_decls = Vec::new();
     for (name, init) in decls {
@@ -648,7 +942,7 @@ fn parse_const_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
         *index += 1;
     }
     Ok(Statement {
-        kind: StatementKind::Const(const_decls),
+        kind: Box::new(StatementKind::Const(const_decls)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -773,7 +1067,7 @@ fn parse_import_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     }
 
     Ok(Statement {
-        kind: StatementKind::Import(specifiers, source),
+        kind: Box::new(StatementKind::Import(specifiers, source)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -853,7 +1147,7 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
     }
 
     Ok(Statement {
-        kind: StatementKind::Export(specifiers, inner_stmt),
+        kind: Box::new(StatementKind::Export(specifiers, inner_stmt)),
         line: t[start].line,
         column: t[start].column,
     })
@@ -900,6 +1194,7 @@ pub fn parse_statement(t: &mut [TokenData]) -> Result<Statement, JSError> {
     parse_statement_item(t, &mut index)
 }
 
+#[allow(dead_code)]
 pub fn parse_full_expression(tokens: &[TokenData], index: &mut usize) -> Result<Expr, JSError> {
     // Allow line terminators inside expressions (e.g., after a binary operator
     // at the end of a line). Tokenizer emits `LineTerminator` for newlines —
@@ -1758,7 +2053,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Class => {
             // Class Expression
             // class [Identifier] [extends Expression] { ClassBody }
-            let name = if *index < tokens.len() {
+            let _name = if *index < tokens.len() {
                 if let Token::Identifier(n) = &tokens[*index].token {
                     let n = n.clone();
                     *index += 1;
@@ -1770,7 +2065,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 "".to_string()
             };
 
-            let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
+            let _extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
                 *index += 1; // consume extends
                 Some(parse_expression(tokens, index)?)
             } else {
@@ -2084,7 +2379,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     // regular property named 'get'/'set' (e.g. `set: function(...)`) with
                     // the getter/setter syntax.
                     // Recognize getter/setter signatures including computed keys
-                    let is_getter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
+                    let is_getter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get")
+                    {
                         if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
                             tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                         } else if matches!(tokens[*index + 1].token, Token::LBracket) {
@@ -2116,7 +2412,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         false
                     };
 
-                    let is_setter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
+                    let is_setter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set")
+                    {
                         if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
                             tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
                         } else if matches!(tokens[*index + 1].token, Token::LBracket) {
@@ -2408,11 +2705,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             let name = if *index < tokens.len() {
                 if let Token::Identifier(n) = &tokens[*index].token {
                     // Look ahead for next non-LineTerminator token
-                    let mut idx = 1usize;
-                    while idx < tokens.len() && matches!(tokens[idx].token, Token::LineTerminator) {
-                        idx += 1;
+                    let mut lookahead = *index + 1;
+                    while lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LineTerminator) {
+                        lookahead += 1;
                     }
-                    if idx < tokens.len() && matches!(tokens[idx].token, Token::LParen) {
+                    if lookahead < tokens.len() && matches!(tokens[lookahead].token, Token::LParen) {
                         let name = n.clone();
                         log::trace!("parse_primary: treating '{}' as function name", name);
                         *index += 1;
@@ -3203,7 +3500,7 @@ mod tests {
         let stmts = parse_statements(&tokens, &mut index).unwrap();
         assert_eq!(stmts.len(), 1, "expected only one statement (the binary expression)");
 
-        match &stmts[0].kind {
+        match &*stmts[0].kind {
             StatementKind::Expr(expr) => match expr {
                 Expr::Binary(left, op, right) => {
                     assert!(matches!(op, BinaryOp::Add));

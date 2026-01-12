@@ -124,7 +124,7 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
     fn trace<T: GcTrace<'gc>>(&self, cc: &mut T) {
         for (k, v) in &self.properties {
             k.trace(cc);
-            (*v.borrow()).trace(cc);
+            v.trace(cc);
         }
         for k in &self.non_enumerable {
             k.trace(cc);
@@ -136,7 +136,7 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
             k.trace(cc);
         }
         if let Some(p) = &self.prototype {
-            (*p.borrow()).trace(cc);
+            p.trace(cc);
         }
     }
 }
@@ -262,6 +262,7 @@ impl<'gc> ClosureData<'gc> {
             home_object: GcCell::new(home_object),
             captured_envs: Vec::new(),
             bound_this: None,
+            is_arrow: false,
         }
     }
 }
@@ -281,6 +282,7 @@ pub struct ClosureData<'gc> {
     pub home_object: GcCell<Option<JSObjectDataPtr<'gc>>>,
     pub captured_envs: Vec<JSObjectDataPtr<'gc>>,
     pub bound_this: Option<Value<'gc>>,
+    pub is_arrow: bool,
 }
 
 #[derive(Clone, Collect)]
@@ -432,7 +434,7 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
 
             Value::Property { value, getter, setter } => {
                 if let Some(v) = value {
-                    (*v.borrow()).trace(cc);
+                    v.trace(cc);
                 }
                 if let Some(g) = getter {
                     g.trace(cc);
@@ -461,70 +463,50 @@ impl<'gc> std::fmt::Debug for Value<'gc> {
         }
     }
 }
-// Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default')
-pub fn to_primitive<'gc>(val: &Value<'gc>, _hint: &str, _env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
-    match val {
-        Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => Ok(val.clone()),
-        Value::Object(_object) => {
-            /*
-            // Prefer explicit [Symbol.toPrimitive] if present and callable
-            if let Some(tp_sym) = get_well_known_symbol_rc("toPrimitive") {
-                let key = PropertyKey::Symbol(tp_sym.clone());
-                if let Some(method_rc) = obj_get_key_value(object, &key)? {
-                    let method_val = method_rc.borrow().clone();
-                    // Accept direct closures or function-objects that wrap a closure
-                    if let Some((params, body, captured_env)) = extract_closure_from_value(&method_val) {
-                        // Pass hint as first param if the function declares params
-                        let args = vec![Value::String(utf8_to_utf16(hint))];
-                        let func_env = prepare_function_call_env(
-                            Some(&captured_env),
-                            Some(Value::Object(object.clone())),
-                            Some(&params),
-                            &args,
-                            None,
-                            None,
-                        )?;
-                        let result = evaluate_statements(&func_env, &body)?;
-                        match result {
-                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_) => {
-                                return Ok(result);
-                            }
-                            _ => {
-                                return Err(raise_type_error!("[Symbol.toPrimitive] must return a primitive"));
-                            }
-                        }
-                    } else {
-                        // Not a closure/minimally supported callable - fall through to default algorithm
-                    }
-                }
-            }
 
-            // Default algorithm: order depends on hint
+// Helper: perform ToPrimitive coercion with a given hint ('string', 'number', 'default').
+// This is a simplified implementation that supports user-defined `valueOf` / `toString`.
+pub fn to_primitive<'gc>(
+    mc: &MutationContext<'gc>,
+    val: &Value<'gc>,
+    hint: &str,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    match val {
+        Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => {
+            Ok(val.clone())
+        }
+        Value::Object(obj) => {
+            let is_primitive = |v: &Value<'gc>| {
+                matches!(
+                    v,
+                    Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_)
+                )
+            };
+
             if hint == "string" {
                 // toString -> valueOf
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
-                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                if is_primitive(&to_s) {
                     return Ok(to_s);
                 }
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
-                if matches!(val_of, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
             } else {
-                // number or default: valueOf -> toString
-                let val_of = crate::js_object::handle_value_of_method(&Value::Object(object.clone()), &[], env)?;
-                if matches!(val_of, Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                // number/default: valueOf -> toString
+                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
-                let to_s = crate::js_object::handle_to_string_method(&Value::Object(object.clone()), &[], env)?;
-                if matches!(to_s, Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)) {
+                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                if is_primitive(&to_s) {
                     return Ok(to_s);
                 }
             }
 
             Err(raise_type_error!("Cannot convert object to primitive"))
-            // */
-            todo!("to_primitive not yet implemented for objects");
         }
         _ => Ok(val.clone()),
     }
@@ -532,7 +514,19 @@ pub fn to_primitive<'gc>(val: &Value<'gc>, _hint: &str, _env: &JSObjectDataPtr<'
 
 pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     match val {
-        Value::Number(n) => n.to_string(),
+        Value::Number(n) => {
+            if n.is_nan() {
+                "NaN".to_string()
+            } else if n.is_infinite() {
+                if n.is_sign_negative() {
+                    "-Infinity".to_string()
+                } else {
+                    "Infinity".to_string()
+                }
+            } else {
+                n.to_string()
+            }
+        }
         Value::BigInt(b) => format!("{b}n"),
         Value::String(s) => format!("\"{}\"", utf16_to_utf8(s)),
         Value::Boolean(b) => b.to_string(),
@@ -695,4 +689,18 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             return Err(crate::raise_reference_error!(format!("{} is not defined", key)));
         }
     }
+}
+
+pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
+    if let Some(len_ptr) = obj_get_key_value(obj, &"length".into()).ok().flatten() {
+        if let Value::Number(n) = &*len_ptr.borrow() {
+            return Some(*n as usize);
+        }
+    }
+    None
+}
+
+pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+    obj_set_key_value(mc, obj, &"length".into(), Value::Number(length as f64))?;
+    Ok(())
 }

@@ -187,7 +187,7 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
 }
 
 fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, replaced: &mut bool) {
-    match &mut stmt.kind {
+    match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
             *e = replace_first_yield_in_expr(e, send_value, replaced);
         }
@@ -206,15 +206,17 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
         StatementKind::Return(Some(expr)) => {
             *expr = replace_first_yield_in_expr(expr, send_value, replaced);
         }
-        StatementKind::If(cond, then_body, else_body_opt) => {
-            *cond = replace_first_yield_in_expr(cond, send_value, replaced);
-            for s in then_body.iter_mut() {
+        StatementKind::If(if_stmt) => {
+            let if_stmt = if_stmt.as_mut();
+            let cond = if_stmt.condition.clone();
+            if_stmt.condition = replace_first_yield_in_expr(&cond, send_value, replaced);
+            for s in if_stmt.then_body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
                 if *replaced {
                     return;
                 }
             }
-            if let Some(else_body) = else_body_opt {
+            if let Some(else_body) = if_stmt.else_body.as_mut() {
                 for s in else_body.iter_mut() {
                     replace_first_yield_in_statement(s, send_value, replaced);
                     if *replaced {
@@ -223,11 +225,12 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
-        StatementKind::For(_, cond_opt, _, body) => {
-            if let Some(cond) = cond_opt {
+        StatementKind::For(for_stmt) => {
+            let for_stmt = for_stmt.as_mut();
+            if let Some(cond) = for_stmt.test.as_mut() {
                 *cond = replace_first_yield_in_expr(cond, send_value, replaced);
             }
-            for s in body.iter_mut() {
+            for s in for_stmt.body.iter_mut() {
                 replace_first_yield_in_statement(s, send_value, replaced);
                 if *replaced {
                     return;
@@ -306,10 +309,10 @@ fn expr_contains_yield(e: &Expr) -> bool {
 // Replace the first nested statement containing a yield with a Throw statement
 // holding `throw_value`. Returns true if a replacement was performed.
 fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &Value) -> bool {
-    match &mut stmt.kind {
+    match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
             if expr_contains_yield(e) {
-                stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
+                *stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                 return true;
             }
             false
@@ -319,7 +322,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
                 if let Some(expr) = expr_opt
                     && expr_contains_yield(expr)
                 {
-                    stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
+                    *stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                     return true;
                 }
             }
@@ -328,19 +331,20 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         StatementKind::Const(decls) => {
             for (_, expr) in decls {
                 if expr_contains_yield(expr) {
-                    stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
+                    *stmt.kind = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None));
                     return true;
                 }
             }
             false
         }
-        StatementKind::If(_, then_body, else_body_opt) => {
-            for s in then_body.iter_mut() {
+        StatementKind::If(if_stmt) => {
+            let if_stmt = if_stmt.as_mut();
+            for s in if_stmt.then_body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
                 }
             }
-            if let Some(else_body) = else_body_opt {
+            if let Some(else_body) = if_stmt.else_body.as_mut() {
                 for s in else_body.iter_mut() {
                     if replace_first_yield_statement_with_throw(s, throw_value) {
                         return true;
@@ -357,8 +361,15 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        StatementKind::For(_, _, _, body)
-        | StatementKind::ForOf(_, _, body)
+        StatementKind::For(for_stmt) => {
+            for s in for_stmt.as_mut().body.iter_mut() {
+                if replace_first_yield_statement_with_throw(s, throw_value) {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::ForOf(_, _, body)
         | StatementKind::ForIn(_, _, body)
         | StatementKind::ForOfDestructuringObject(_, _, body)
         | StatementKind::ForOfDestructuringArray(_, _, body)
@@ -378,18 +389,21 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
             }
             false
         }
-        StatementKind::TryCatch(try_body, _, catch_body, finally_body_opt) => {
-            for s in try_body.iter_mut() {
+        StatementKind::TryCatch(tc_stmt) => {
+            let tc_stmt = tc_stmt.as_mut();
+            for s in tc_stmt.try_body.iter_mut() {
                 if replace_first_yield_statement_with_throw(s, throw_value) {
                     return true;
                 }
             }
-            for s in catch_body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
-                    return true;
+            if let Some(catch_body) = tc_stmt.catch_body.as_mut() {
+                for s in catch_body.iter_mut() {
+                    if replace_first_yield_statement_with_throw(s, throw_value) {
+                        return true;
+                    }
                 }
             }
-            if let Some(finally) = finally_body_opt {
+            if let Some(finally) = tc_stmt.finally_body.as_mut() {
                 for s in finally.iter_mut() {
                     if replace_first_yield_statement_with_throw(s, throw_value) {
                         return true;
@@ -407,7 +421,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
 // expression if found.
 fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<Box<Expr>>)> {
     for (i, s) in stmts.iter().enumerate() {
-        match &s.kind {
+        match &*s.kind {
             StatementKind::Expr(e) => match e {
                 Expr::Yield(inner) => return Some((i, inner.clone())),
                 Expr::YieldStar(inner) => return Some((i, Some(inner.clone()))),
@@ -418,17 +432,23 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
                     return Some((i, found));
                 }
             }
-            StatementKind::If(_, then_body, else_body_opt) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(then_body) {
+            StatementKind::If(if_stmt) => {
+                let if_stmt = if_stmt.as_ref();
+                if let Some((_inner_idx, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
                     return Some((i, found));
                 }
-                if let Some(else_body) = else_body_opt
+                if let Some(else_body) = &if_stmt.else_body
                     && let Some((_inner_idx, found)) = find_first_yield_in_statements(else_body)
                 {
                     return Some((i, found));
                 }
             }
-            StatementKind::For(_, _, _, body) | StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
+            StatementKind::For(for_stmt) => {
+                if let Some((_inner_idx, found)) = find_first_yield_in_statements(&for_stmt.body) {
+                    return Some((i, found));
+                }
+            }
+            StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
                 if let Some((_inner_idx, found)) = find_first_yield_in_statements(body) {
                     return Some((i, found));
                 }

@@ -22,6 +22,8 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     // Link prototype and constructor
     obj_set_key_value(mc, &object_ctor, &"prototype".into(), Value::Object(object_proto))?;
     obj_set_key_value(mc, &object_proto, &"constructor".into(), Value::Object(object_ctor))?;
+    // Make constructor non-enumerable
+    object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // 3. Register static methods
     let static_methods = vec![
@@ -70,6 +72,8 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
         let func_name = format!("Object.prototype.{}", method);
         let val = Value::Function(func_name);
         obj_set_key_value(mc, &object_proto, &method.into(), val)?;
+        // Methods on prototypes should be non-enumerable so for..in doesn't list them
+        object_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
 
     Ok(())

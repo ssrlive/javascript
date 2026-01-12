@@ -6,7 +6,11 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
 use num_bigint::Sign;
 
-pub(crate) fn bigint_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub(crate) fn bigint_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // BigInt(value) conversion per simplified rules:
     if args.len() != 1 {
         return Err(raise_type_error!("BigInt requires exactly one argument"));
@@ -30,7 +34,7 @@ pub(crate) fn bigint_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+            let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
@@ -99,7 +103,12 @@ pub fn handle_bigint_object_method<'gc>(this_val: Value<'gc>, method: &str, args
 }
 
 /// Handle static methods on the BigInt constructor (asIntN, asUintN)
-pub fn handle_bigint_static_method<'gc>(method: &str, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
+pub fn handle_bigint_static_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Evaluate arguments
     if method != "asIntN" && method != "asUintN" {
         return Err(raise_eval_error!(format!("BigInt has no static method '{}'", method)));
@@ -147,7 +156,7 @@ pub fn handle_bigint_static_method<'gc>(method: &str, args: &[Value<'gc>], env: 
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = to_primitive(&Value::Object(obj.clone()), "number", env)?;
+            let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
@@ -214,6 +223,15 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 
     // Create prototype
     let bigint_proto = new_js_object_data(mc);
+    // Set BigInt.prototype's prototype to Object.prototype if available
+    if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(obj_proto) = &*proto_val.borrow()
+    {
+        bigint_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+    }
+
     let to_string = Value::Function("BigInt.prototype.toString".to_string());
     obj_set_key_value(mc, &bigint_proto, &"toString".into(), to_string)?;
     let value_of = Value::Function("BigInt.prototype.valueOf".to_string());

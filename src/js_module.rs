@@ -25,7 +25,7 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
             ClosureData::new(
                 &[DestructuringElement::Variable("x".to_string(), None)],
                 &[Statement {
-                    kind: StatementKind::Return(Some(Expr::Var("x".to_string(), None, None))),
+                    kind: Box::new(StatementKind::Return(Some(Expr::Var("x".to_string(), None, None)))),
                     line: 0,
                     column: 0,
                 }],

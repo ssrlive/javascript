@@ -199,7 +199,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
             let execute = |cl: &crate::core::ClosureData<'gc>| -> Result<(), JSError> {
                 for value in &values {
                     let call_args = vec![value.clone(), value.clone(), this_val.clone()];
-                    match crate::core::call_closure(mc, cl, this_arg.clone(), &call_args, _env) {
+                    match crate::core::call_closure(mc, cl, this_arg.clone(), &call_args, _env, None) {
                         Ok(_) => {}
                         Err(e) => {
                             return Err(match e {

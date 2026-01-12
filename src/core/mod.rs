@@ -90,6 +90,16 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
     env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
 
+    // Expose common global functions as callables
+    env_set(mc, env, "parseInt", Value::Function("parseInt".to_string()))?;
+    env_set(mc, env, "parseFloat", Value::Function("parseFloat".to_string()))?;
+    env_set(mc, env, "isNaN", Value::Function("isNaN".to_string()))?;
+    env_set(mc, env, "isFinite", Value::Function("isFinite".to_string()))?;
+    env_set(mc, env, "encodeURI", Value::Function("encodeURI".to_string()))?;
+    env_set(mc, env, "decodeURI", Value::Function("decodeURI".to_string()))?;
+    env_set(mc, env, "encodeURIComponent", Value::Function("encodeURIComponent".to_string()))?;
+    env_set(mc, env, "decodeURIComponent", Value::Function("decodeURIComponent".to_string()))?;
+
     #[cfg(feature = "os")]
     crate::js_os::initialize_os_module(mc, env)?;
 
@@ -201,7 +211,17 @@ pub fn set_internal_prototype_from_constructor<'gc>(
 ) -> Result<(), JSError> {
     if let Some(proto_obj) = get_constructor_prototype(mc, env, ctor_name)? {
         // set internal prototype pointer (store Weak to avoid cycles)
+        log::trace!("setting prototype for ctor='{}' proto_obj={:p}", ctor_name, Gc::as_ptr(proto_obj));
         obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+        // Also set the `__proto__` own property so `obj.__proto__` accesses match expectations
+        match obj_set_key_value(mc, obj, &"__proto__".into(), Value::Object(proto_obj.clone())) {
+            Ok(_) => {
+                // __proto__ should be non-enumerable
+                obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
+                log::trace!("set_internal_prototype_from_constructor: set __proto__ own property");
+            }
+            Err(e) => log::trace!("set_internal_prototype_from_constructor: failed to set __proto__: {:?}", e),
+        }
     }
     Ok(())
 }

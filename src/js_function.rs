@@ -88,7 +88,7 @@ pub fn handle_global_function<'gc>(
         "Object.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return crate::js_object::handle_to_string_method(mc, &this_val, args, env);
+                return Ok(crate::core::handle_object_prototype_to_string(mc, &this_val));
             }
             return Err(crate::raise_eval_error!("Object.prototype.toString called without this"));
         }
@@ -100,8 +100,8 @@ pub fn handle_global_function<'gc>(
         "encodeURIComponent" => return encode_uri_component(args),
         "decodeURIComponent" => return decode_uri_component(args),
         "Object" => return crate::js_class::handle_object_constructor(mc, args, env),
-        "BigInt" => return crate::js_bigint::bigint_constructor(args, env),
-        "Number" => return crate::js_number::number_constructor(args, env),
+        "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
+        "Number" => return crate::js_number::number_constructor(mc, args, env),
         "Boolean" => return boolean_constructor(args),
         "Boolean_toString" => return crate::js_class::boolean_prototype_to_string(mc, args, env),
         "Boolean_valueOf" => return crate::js_class::boolean_prototype_value_of(mc, args, env),
@@ -387,7 +387,7 @@ pub fn handle_global_function<'gc>(
     match func_name {
         "console.error" => Ok(crate::js_console::handle_console_method(mc, "error", args, env)?),
         "console.log" => Ok(crate::js_console::handle_console_method(mc, "log", args, env)?),
-        "String" => Ok(crate::js_string::string_constructor(args, env)?),
+        "String" => Ok(crate::js_string::string_constructor(mc, args, env)?),
         "Array" => Ok(handle_array_constructor(mc, args, env)?),
 
         name if name.starts_with("Array.prototype.") => {
@@ -811,13 +811,13 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
-    if let Some(Statement {
-        kind: StatementKind::FunctionDeclaration(_n, params, body, _i),
-        ..
-    }) = stmts.first()
-    {
-        // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
-        Ok(Value::Closure(Gc::new(mc, ClosureData::new(params, body, env, None))))
+    if let Some(Statement { kind, .. }) = stmts.first() {
+        if let StatementKind::FunctionDeclaration(_n, params, body, _i) = &**kind {
+            // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
+            Ok(Value::Closure(Gc::new(mc, ClosureData::new(params, body, env, None))))
+        } else {
+            Err(raise_type_error!("Failed to parse function body"))
+        }
     } else {
         Err(raise_type_error!("Failed to parse function body"))
     }
@@ -1443,6 +1443,7 @@ pub fn handle_function_prototype_method<'gc>(
                     home_object: original.home_object.clone(),
                     captured_envs: original.captured_envs.clone(),
                     bound_this: effective_bound_this,
+                    is_arrow: original.is_arrow,
                 };
 
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))

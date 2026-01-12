@@ -1,6 +1,6 @@
 #![allow(warnings)]
 
-use crate::core::MutationContext;
+use crate::core::{MutationContext, object_get_length, object_set_length};
 use crate::{
     core::{JSObjectDataPtr, PropertyKey, env_set, js_error::EvalError, new_js_object_data},
     error::JSError,
@@ -141,9 +141,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                         if let Some(ref fn_val) = map_fn {
                             let call_args = vec![val.clone(), val.clone()];
                             let mapped = match fn_val {
-                                Value::Closure(cl) => {
-                                    crate::core::call_closure(mc, &*cl, None, &call_args, env)?
-                                }
+                                Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                                 Value::Function(name) => {
                                     crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
                                 }
@@ -222,26 +220,26 @@ pub(crate) fn handle_array_static_method<'gc>(
                             };
 
                             if let Some(ref fn_val) = map_fn {
-                                // if let Some((params, body, captured_env)) = extract_closure_from_value(fn_val) {
-                                //     let args = vec![element, Value::Number(i as f64)];
-                                //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                                //     let mut body_clone = body.clone();
-                                //     let mapped = evaluate_statements(mc, &func_env, &mut body_clone).map_err(|e| match e {
-                                //         EvalError::Js(e) => e,
-                                //         EvalError::Throw(v, ..) => JSError::new(
-                                //             crate::error::JSErrorKind::RuntimeError {
-                                //                 message: value_to_string(&v),
-                                //             },
-                                //             "array.rs".to_string(),
-                                //             0,
-                                //             "handle_array_static_method".to_string(),
-                                //         ),
-                                //     })?;
-                                //     result.push(mapped);
-                                // } else {
-                                //     return Err(EvalError::Js(raise_eval_error!("Array.from map function must be a function")));
-                                // }
-                                todo!()
+                                // Support closures or function names for map function
+                                let actual_fn = if let Value::Object(obj) = fn_val {
+                                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                        prop.borrow().clone()
+                                    } else {
+                                        fn_val.clone()
+                                    }
+                                } else {
+                                    fn_val.clone()
+                                };
+
+                                let call_args = vec![element, Value::Number(i as f64)];
+                                let mapped = match &actual_fn {
+                                    Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
+                                    Value::Function(name) => {
+                                        crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
+                                    }
+                                    _ => return Err(EvalError::Js(raise_eval_error!("Array.from map function must be a function"))),
+                                };
+                                result.push(mapped);
                             } else {
                                 result.push(element);
                             }
@@ -493,7 +491,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
-                        
+
                         let actual_func = if let Value::Object(obj) = &callback_val {
                             if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
                                 prop.borrow().clone()
@@ -506,7 +504,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                         match &actual_func {
                             Value::Closure(cl) => {
-                                crate::core::call_closure(mc, &*cl, None, &call_args, env)?;
+                                crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?;
                             }
                             Value::Function(name) => {
                                 crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?;
@@ -533,10 +531,19 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
-                        let res = match &callback_val {
-                            Value::Closure(cl) => {
-                                crate::core::call_closure(mc, &*cl, None, &call_args, env)?
+                        // Support inline closures wrapped as objects with __closure__ like forEach does.
+                        let actual_func = if let Value::Object(obj) = &callback_val {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback_val.clone()
                             }
+                        } else {
+                            callback_val.clone()
+                        };
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                             Value::Function(name) => {
                                 crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
                             }
@@ -560,28 +567,41 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                        //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
+                        // Support inline closures wrapped as objects with __closure__ like forEach does.
+                        let actual_func = if let Value::Object(obj) = &callback_val {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback_val.clone()
+                            }
+                        } else {
+                            callback_val.clone()
+                        };
 
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     // truthy check
-                        //     let include = match res {
-                        //         Value::Boolean(b) => b,
-                        //         Value::Number(n) => n != 0.0,
-                        //         Value::String(ref s) => !s.is_empty(),
-                        //         Value::Object(_) => true,
-                        //         Value::Undefined => false,
-                        //         _ => false,
-                        //     };
-                        //     if include {
-                        //         obj_set_key_value(mc, &new_array, &idx.to_string().into(), val.borrow().clone())?;
-                        //         idx += 1;
-                        //     }
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.filter expects a function")));
-                        // }
-                        todo!()
+                        let element_val = val.borrow().clone();
+                        let call_args = vec![element_val.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &call_args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.filter expects a function"))),
+                        };
+
+                        // truthy check
+                        let include = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if include {
+                            obj_set_key_value(mc, &new_array, &idx.to_string().into(), element_val)?;
+                            idx += 1;
+                        }
                     }
                 }
                 set_array_length(mc, &new_array, idx)?;
@@ -621,21 +641,33 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
                     if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                        //     // build args for callback: first acc, then current element
-                        //     let args = vec![
-                        //         accumulator.clone(),
-                        //         val.borrow().clone(),
-                        //         Value::Number(i as f64),
-                        //         Value::Object(object.clone()),
-                        //     ];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     accumulator = res;
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.reduce expects a function")));
-                        // }
-                        todo!()
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback_val {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback_val.clone()
+                            }
+                        } else {
+                            callback_val.clone()
+                        };
+
+                        let args = vec![
+                            accumulator.clone(),
+                            val.borrow().clone(),
+                            Value::Number(i as f64),
+                            Value::Object(object.clone()),
+                        ];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.reduce expects a function"))),
+                        };
+
+                        accumulator = res;
                     }
                 }
                 Ok(accumulator)
@@ -701,21 +733,33 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in (0..start_loop).rev() {
                     if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                        //     // build args for callback: first acc, then current element
-                        //     let args = vec![
-                        //         accumulator.clone(),
-                        //         val.borrow().clone(),
-                        //         Value::Number(i as f64),
-                        //         Value::Object(object.clone()),
-                        //     ];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     accumulator = res;
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.reduceRight expects a function")));
-                        // }
-                        todo!()
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback_val {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback_val.clone()
+                            }
+                        } else {
+                            callback_val.clone()
+                        };
+
+                        let args = vec![
+                            accumulator.clone(),
+                            val.borrow().clone(),
+                            Value::Number(i as f64),
+                            Value::Object(object.clone()),
+                        ];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.reduceRight expects a function"))),
+                        };
+
+                        accumulator = res;
                     }
                 }
                 Ok(accumulator)
@@ -730,31 +774,39 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in 0..current_len {
                     if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
-                        // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                        //     let element = value.borrow().clone();
-                        //     let index_val = Value::Number(i as f64);
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
+                            }
+                        } else {
+                            callback.clone()
+                        };
 
-                        //     // Create new environment for callback
-                        //     let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                        //     let func_env = prepare_closure_call_env(&captured_env, Some(&params), &args, Some(env))?;
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
 
-                        //     let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                        //     // truthy check
-                        //     let is_truthy = match res {
-                        //         Value::Boolean(b) => b,
-                        //         Value::Number(n) => n != 0.0,
-                        //         Value::String(ref s) => !s.is_empty(),
-                        //         Value::Object(_) => true,
-                        //         Value::Undefined => false,
-                        //         _ => false,
-                        //     };
-                        //     if is_truthy {
-                        //         return Ok(element);
-                        //     }
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.find expects a function")));
-                        // }
-                        todo!()
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.find expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if is_truthy {
+                            return Ok(element);
+                        }
                     }
                 }
                 Ok(Value::Undefined)
@@ -789,10 +841,39 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if is_truthy {
                         //         return Ok(Value::Number(i as f64));
                         //     }
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.findIndex expects a function")));
-                        // }
-                        todo!()
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
+                            }
+                        } else {
+                            callback.clone()
+                        };
+
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findIndex expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if is_truthy {
+                            return Ok(Value::Number(i as f64));
+                        }
                     }
                 }
                 Ok(Value::Number(-1.0))
@@ -827,10 +908,39 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if is_truthy {
                         //         return Ok(Value::Boolean(true));
                         //     }
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.some expects a function")));
-                        // }
-                        todo!()
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
+                            }
+                        } else {
+                            callback.clone()
+                        };
+
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.some expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if is_truthy {
+                            return Ok(Value::Boolean(true));
+                        }
                     }
                 }
                 Ok(Value::Boolean(false))
@@ -865,10 +975,39 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if !is_truthy {
                         //         return Ok(Value::Boolean(false));
                         //     }
-                        // } else {
-                        //     return Err(EvalError::Js(raise_eval_error!("Array.every expects a function")));
-                        // }
-                        todo!()
+                        // Support inline closures wrapped as objects with __closure__.
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
+                            }
+                        } else {
+                            callback.clone()
+                        };
+
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.every expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if !is_truthy {
+                            return Ok(Value::Boolean(false));
+                        }
                     }
                 }
                 Ok(Value::Boolean(true))
@@ -1007,34 +1146,47 @@ pub(crate) fn handle_array_instance_method<'gc>(
             } else {
                 // Custom sort with compare function
                 let compare_fn = args[0].clone();
-                // if let Some((params, body, captured_env)) = extract_closure_from_value(&compare_fn) {
-                //     elements.sort_by(|a, b| {
-                //         // Create function environment for comparison (fresh frame whose prototype is captured_env)
-                //         let args = vec![a.1.clone(), b.1.clone()];
-                //         let func_env = match prepare_closure_call_env(mc, &captured_env, Some(&params), &args, Some(env)) {
-                //             Ok(e) => e,
-                //             Err(_) => return std::cmp::Ordering::Equal,
-                //         };
+                // Support closures wrapped in objects or bare closures/functions
+                let actual_fn = if let Value::Object(obj) = &compare_fn {
+                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                        prop.borrow().clone()
+                    } else {
+                        compare_fn.clone()
+                    }
+                } else {
+                    compare_fn.clone()
+                };
 
-                //         match evaluate_statements(mc, &func_env, &body) {
-                //             Ok(Value::Number(n)) => {
-                //                 if n < 0.0 {
-                //                     std::cmp::Ordering::Less
-                //                 } else if n > 0.0 {
-                //                     std::cmp::Ordering::Greater
-                //                 } else {
-                //                     std::cmp::Ordering::Equal
-                //                 }
-                //             }
-                //             _ => std::cmp::Ordering::Equal,
-                //         }
-                //     });
-                // } else {
-                //     return Err(EvalError::Js(raise_eval_error!(
-                //         "Array.sort expects a function as compare function"
-                //     )));
-                // }
-                todo!()
+                elements.sort_by(|a, b| {
+                    let args = vec![a.1.clone(), b.1.clone()];
+                    match &actual_fn {
+                        Value::Closure(cl) => match crate::core::call_closure(mc, &*cl, None, &args, env, None) {
+                            Ok(Value::Number(n)) => {
+                                if n < 0.0 {
+                                    std::cmp::Ordering::Less
+                                } else if n > 0.0 {
+                                    std::cmp::Ordering::Greater
+                                } else {
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                            _ => std::cmp::Ordering::Equal,
+                        },
+                        Value::Function(name) => match crate::js_function::handle_global_function(mc, name, &args, env) {
+                            Ok(Value::Number(n)) => {
+                                if n < 0.0 {
+                                    std::cmp::Ordering::Less
+                                } else if n > 0.0 {
+                                    std::cmp::Ordering::Greater
+                                } else {
+                                    std::cmp::Ordering::Equal
+                                }
+                            }
+                            _ => std::cmp::Ordering::Equal,
+                        },
+                        _ => std::cmp::Ordering::Equal,
+                    }
+                });
             }
 
             // Update the array with sorted elements
@@ -1345,15 +1497,26 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut result = Vec::new();
             for i in 0..current_len {
                 if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                    // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback_val) {
-                    //     let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
-                    //     let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params), &args, Some(env))?;
-                    //     let mapped_val = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                    //     flatten_single_value(mc, mapped_val, &mut result, 1)?;
-                    // } else {
-                    //     return Err(EvalError::Js(raise_eval_error!("Array.flatMap expects a function")));
-                    // }
-                    todo!()
+                    // Support inline closures wrapped as objects with __closure__.
+                    let actual_func = if let Value::Object(obj) = &callback_val {
+                        if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            prop.borrow().clone()
+                        } else {
+                            callback_val.clone()
+                        }
+                    } else {
+                        callback_val.clone()
+                    };
+
+                    let args = vec![val.borrow().clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                    let mapped_val = match &actual_func {
+                        Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                        Value::Function(name) => crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?,
+                        _ => return Err(EvalError::Js(raise_eval_error!("Array.flatMap expects a function"))),
+                    };
+
+                    flatten_single_value(mc, mapped_val, &mut result, 1)?;
                 }
             }
 
@@ -1452,42 +1615,46 @@ pub(crate) fn handle_array_instance_method<'gc>(
         "findLast" => {
             if !args.is_empty() {
                 let callback = args[0].clone();
-                match callback {
-                    Value::Closure(data) => {
-                        let params = &data.params;
-                        let body = &data.body;
-                        let captured_env = &data.env;
-                        let current_len = get_array_length(mc, object).unwrap_or(0);
+                let current_len = get_array_length(mc, object).unwrap_or(0);
 
-                        // Search from the end
-                        for i in (0..current_len).rev() {
-                            if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
-
-                                let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                                // let func_env = prepare_closure_call_env(mc, captured_env, Some(params), &args, Some(env))?;
-
-                                // let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                                // // truthy check
-                                // let is_truthy = match res {
-                                //     Value::Boolean(b) => b,
-                                //     Value::Number(n) => n != 0.0,
-                                //     Value::String(ref s) => !s.is_empty(),
-                                //     Value::Object(_) => true,
-                                //     Value::Undefined => false,
-                                //     _ => false,
-                                // };
-                                // if is_truthy {
-                                //     return Ok(element);
-                                // }
-                                todo!()
+                // Search from the end
+                for i in (0..current_len).rev() {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
                             }
+                        } else {
+                            callback.clone()
+                        };
+
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findLast expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if is_truthy {
+                            return Ok(element);
                         }
-                        Ok(Value::Undefined)
                     }
-                    _ => Err(EvalError::Js(raise_eval_error!("Array.findLast expects a function"))),
                 }
+                Ok(Value::Undefined)
             } else {
                 Err(EvalError::Js(raise_eval_error!("Array.findLast expects at least one argument")))
             }
@@ -1495,42 +1662,46 @@ pub(crate) fn handle_array_instance_method<'gc>(
         "findLastIndex" => {
             if !args.is_empty() {
                 let callback = args[0].clone();
-                match callback {
-                    Value::Closure(data) => {
-                        let params = &data.params;
-                        let body = &data.body;
-                        let captured_env = &data.env;
-                        let current_len = get_array_length(mc, object).unwrap_or(0);
+                let current_len = get_array_length(mc, object).unwrap_or(0);
 
-                        // Search from the end
-                        for i in (0..current_len).rev() {
-                            if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
-                                let element = value.borrow().clone();
-                                let index_val = Value::Number(i as f64);
-
-                                let args = vec![element.clone(), index_val, Value::Object(object.clone())];
-                                // let func_env = prepare_closure_call_env(mc, captured_env, Some(params), &args, Some(env))?;
-
-                                // let res = evaluate_statements(mc, &func_env, &mut body.clone())?;
-                                // // truthy check
-                                // let is_truthy = match res {
-                                //     Value::Boolean(b) => b,
-                                //     Value::Number(n) => n != 0.0,
-                                //     Value::String(ref s) => !s.is_empty(),
-                                //     Value::Object(_) => true,
-                                //     Value::Undefined => false,
-                                //     _ => false,
-                                // };
-                                // if is_truthy {
-                                //     return Ok(Value::Number(i as f64));
-                                // }
-                                todo!()
+                // Search from the end
+                for i in (0..current_len).rev() {
+                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                        let actual_func = if let Value::Object(obj) = &callback {
+                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                prop.borrow().clone()
+                            } else {
+                                callback.clone()
                             }
+                        } else {
+                            callback.clone()
+                        };
+
+                        let element = value.borrow().clone();
+                        let args = vec![element.clone(), Value::Number(i as f64), Value::Object(object.clone())];
+
+                        let res = match &actual_func {
+                            Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &args, env, None)?,
+                            Value::Function(name) => {
+                                crate::js_function::handle_global_function(mc, name, &args, env).map_err(EvalError::Js)?
+                            }
+                            _ => return Err(EvalError::Js(raise_eval_error!("Array.findLastIndex expects a function"))),
+                        };
+
+                        let is_truthy = match res {
+                            Value::Boolean(b) => b,
+                            Value::Number(n) => n != 0.0,
+                            Value::String(ref s) => !s.is_empty(),
+                            Value::Object(_) => true,
+                            Value::Undefined => false,
+                            _ => false,
+                        };
+                        if is_truthy {
+                            return Ok(Value::Number(i as f64));
                         }
-                        Ok(Value::Number(-1.0))
                     }
-                    _ => Err(EvalError::Js(raise_eval_error!("Array.findLastIndex expects a function"))),
                 }
+                Ok(Value::Number(-1.0))
             } else {
                 Err(EvalError::Js(raise_eval_error!(
                     "Array.findLastIndex expects at least one argument"
@@ -1598,20 +1769,11 @@ pub(crate) fn is_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc
 }
 
 pub(crate) fn get_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
-    if let Some(length_rc) = get_own_property(obj, &"length".into())
-        && let Value::Number(len) = *length_rc.borrow()
-        && len >= 0.0
-        && len == len.floor()
-    {
-        return Some(len as usize);
-    }
-    None
+    object_get_length(obj)
 }
 
 pub(crate) fn set_array_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, new_length: usize) -> Result<(), JSError> {
-    obj_set_key_value(mc, obj, &"length".into(), Value::Number(new_length as f64))?;
-    obj.borrow_mut(mc).non_enumerable.insert("length".into());
-    Ok(())
+    object_set_length(mc, obj, new_length)
 }
 
 pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {

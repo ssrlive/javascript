@@ -107,7 +107,11 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     Ok(())
 }
 
-pub(crate) fn string_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+pub(crate) fn string_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // String() constructor
     if args.len() == 1 {
         let arg_val = args[0].clone();
@@ -119,7 +123,7 @@ pub(crate) fn string_constructor<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr
             Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
             Value::Object(obj) => {
                 // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                let prim = to_primitive(&Value::Object(obj.clone()), "string", env).map_err(EvalError::from)?;
+                let prim = to_primitive(mc, &Value::Object(obj.clone()), "string", env).map_err(EvalError::from)?;
                 match prim {
                     Value::String(s) => Ok(Value::String(s)),
                     Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),

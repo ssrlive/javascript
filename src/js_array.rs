@@ -91,6 +91,32 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
 
+    // Register Symbol.iterator on Array.prototype (alias to Array.prototype.values)
+    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())? {
+        if let Value::Object(sym_ctor) = &*sym_val.borrow() {
+            if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())? {
+                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
+                    let val = Value::Function("Array.prototype.values".to_string());
+                    obj_set_key_value(mc, &array_proto, &PropertyKey::Symbol(iter_sym.clone()), val)?;
+                    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(iter_sym.clone()));
+                }
+            }
+
+            // Symbol.toStringTag default for Array.prototype
+            if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())? {
+                if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
+                    obj_set_key_value(
+                        mc,
+                        &array_proto,
+                        &PropertyKey::Symbol(tag_sym.clone()),
+                        Value::String(utf8_to_utf16("Array")),
+                    )?;
+                    array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
+                }
+            }
+        }
+    }
+
     env_set(mc, env, "Array", Value::Object(array_ctor))?;
     Ok(())
 }
@@ -1595,22 +1621,23 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             Ok(Value::Object(object.clone()))
         }
-        "entries" => {
-            let length = get_array_length(mc, object).unwrap_or(0);
-
-            let result = create_array(mc, env)?;
-            set_array_length(mc, &result, length)?;
-            for i in 0..length {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
-                    // Create entry [i, value]
-                    let entry = create_array(mc, env)?;
-                    obj_set_key_value(mc, &entry, &"0".into(), Value::Number(i as f64))?;
-                    obj_set_key_value(mc, &entry, &"1".into(), val.borrow().clone())?;
-                    set_array_length(mc, &entry, 2)?;
-                    obj_set_key_value(mc, &result, &i.to_string().into(), Value::Object(entry))?;
-                }
+        "keys" => {
+            if !args.is_empty() {
+                return Err(EvalError::Js(raise_eval_error!("Array.prototype.keys takes no arguments")));
             }
-            Ok(Value::Object(result))
+            Ok(create_array_iterator(mc, env, object.clone(), "keys")?)
+        }
+        "values" => {
+            if !args.is_empty() {
+                return Err(EvalError::Js(raise_eval_error!("Array.prototype.values takes no arguments")));
+            }
+            Ok(create_array_iterator(mc, env, object.clone(), "values")?)
+        }
+        "entries" => {
+            if !args.is_empty() {
+                return Err(EvalError::Js(raise_eval_error!("Array.prototype.entries takes no arguments")));
+            }
+            Ok(create_array_iterator(mc, env, object.clone(), "entries")?)
         }
         "findLast" => {
             if !args.is_empty() {
@@ -1802,4 +1829,148 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     }
 
     Ok(arr)
+}
+
+/// Create a new Array Iterator
+pub(crate) fn create_array_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    object: JSObjectDataPtr<'gc>,
+    kind: &str,
+) -> Result<Value<'gc>, JSError> {
+    let iterator = new_js_object_data(mc);
+
+    // Store array
+    obj_set_key_value(mc, &iterator, &"__iterator_array__".into(), Value::Object(object.clone()))?;
+    // Store index
+    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+    // Store kind
+    obj_set_key_value(mc, &iterator, &"__iterator_kind__".into(), Value::String(utf8_to_utf16(kind)))?;
+
+    // next method
+    obj_set_key_value(
+        mc,
+        &iterator,
+        &"next".into(),
+        Value::Function("ArrayIterator.prototype.next".to_string()),
+    )?;
+
+    // Register Symbols
+    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.iterator
+        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+            && let Value::Symbol(s) = &*iter_sym.borrow()
+        {
+            let val = Value::Function("IteratorSelf".to_string());
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+        }
+
+        // Symbol.toStringTag
+        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+            && let Value::Symbol(s) = &*tag_sym.borrow()
+        {
+            let val = Value::String(utf8_to_utf16("Array Iterator"));
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+        }
+    }
+
+    Ok(Value::Object(iterator))
+}
+
+pub(crate) fn handle_array_iterator_next<'gc>(
+    mc: &MutationContext<'gc>,
+    iterator: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    // Get array
+    let arr_val = obj_get_key_value(iterator, &"__iterator_array__".into())?.ok_or(raise_eval_error!("Iterator has no array"))?;
+    let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
+        o.clone()
+    } else {
+        return Err(raise_eval_error!("Iterator array is invalid"));
+    };
+
+    // Get index
+    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?.ok_or(raise_eval_error!("Iterator has no index"))?;
+    let mut index = if let Value::Number(n) = &*index_val.borrow() {
+        *n as usize
+    } else {
+        return Err(raise_eval_error!("Iterator index is invalid"));
+    };
+
+    // Get kind
+    let kind_val = obj_get_key_value(iterator, &"__iterator_kind__".into())?.ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind = if let Value::String(s) = &*kind_val.borrow() {
+        crate::unicode::utf16_to_utf8(s)
+    } else {
+        return Err(raise_eval_error!("Iterator kind is invalid"));
+    };
+
+    let length = get_array_length(mc, &arr_ptr).unwrap_or(0);
+
+    if index >= length {
+        let result_obj = new_js_object_data(mc);
+        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
+        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        return Ok(Value::Object(result_obj));
+    }
+
+    let element_val = if let Some(v) = obj_get_key_value(&arr_ptr, &index.to_string().into())? {
+        v.borrow().clone()
+    } else {
+        Value::Undefined
+    };
+
+    let result_value = match kind.as_str() {
+        "keys" => Value::Number(index as f64),
+        "values" => element_val,
+        "entries" => {
+            let entry = create_array(mc, env)?;
+            obj_set_key_value(mc, &entry, &"0".into(), Value::Number(index as f64))?;
+            obj_set_key_value(mc, &entry, &"1".into(), element_val)?;
+            set_array_length(mc, &entry, 2)?;
+            Value::Object(entry)
+        }
+        _ => return Err(raise_eval_error!("Unknown iterator kind")),
+    };
+
+    // Update index
+    index += 1;
+    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+
+    let result_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &result_obj, &"value".into(), result_value)?;
+    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
+
+    Ok(Value::Object(result_obj))
+}
+
+/// Serialize an array as "[a,b]" using the same element formatting used by Array.prototype.toString.
+pub fn serialize_array_for_eval<'gc>(mc: &MutationContext<'gc>, object: &JSObjectDataPtr<'gc>) -> Result<String, JSError> {
+    let current_len = get_array_length(mc, object).unwrap_or(0);
+    let mut parts = Vec::new();
+    for i in 0..current_len {
+        if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+            match &*val_rc.borrow() {
+                Value::Undefined | Value::Null => parts.push(String::new()),
+                Value::String(s) => parts.push(format!("\"{}\"", utf16_to_utf8(s))),
+                Value::Number(n) => parts.push(n.to_string()),
+                Value::Boolean(b) => parts.push(b.to_string()),
+                Value::BigInt(b) => parts.push(b.to_string()),
+                Value::Object(o) => {
+                    if is_array(mc, o) {
+                        parts.push(serialize_array_for_eval(mc, o)?);
+                    } else {
+                        parts.push("[object Object]".to_string());
+                    }
+                }
+                _ => parts.push("[object Object]".to_string()),
+            }
+        } else {
+            parts.push(String::new());
+        }
+    }
+    Ok(format!("[{}]", parts.join(",")))
 }

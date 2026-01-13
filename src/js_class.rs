@@ -1361,6 +1361,12 @@ pub(crate) fn evaluate_super_method<'gc>(
                     method
                 );
                 // Look up method on super object
+                log::trace!(
+                    "evaluate_super_method - home_obj={:p} super_obj={:p} method={}",
+                    Gc::as_ptr(*home_obj),
+                    Gc::as_ptr(super_obj.clone()),
+                    method
+                );
                 if let Some(method_val) = obj_get_key_value(&super_obj, &method.into())? {
                     // Reduce verbosity: only log a short method type rather than full Value debug
                     let method_type = match &*method_val.borrow() {
@@ -1400,14 +1406,19 @@ pub(crate) fn evaluate_super_method<'gc>(
                                 // Execute method body
                                 return Ok(evaluate_statements(mc, &func_env, &body)?);
                             }
-                            Value::Function(_func_name) => {
-                                // if func_name == "Object.prototype.toString" {
-                                //     return crate::js_object::handle_to_string_method(mc, &this_val.borrow().clone(), args, env);
-                                // }
-                                // if func_name == "Object.prototype.valueOf" {
-                                //     return crate::js_object::handle_value_of_method(&this_val.borrow().clone(), args, env);
-                                // }
-                                todo!("Handle built-in super methods like Object.prototype.toString, Object.prototype.valueOf, etc.");
+                            Value::Function(func_name) => {
+                                let fname = func_name.as_str();
+                                let this_clone = this_val.borrow().clone();
+                                // Handle common built-in prototype methods directly
+                                if fname == "Object.prototype.toString" {
+                                    return Ok(crate::core::handle_object_prototype_to_string(mc, &this_clone, env));
+                                }
+                                if fname == "Object.prototype.valueOf" {
+                                    // Use default object valueOf which returns object itself
+                                    return Ok(this_clone);
+                                }
+                                // Fallback: method not implemented for builtins
+                                return Err(raise_eval_error!(format!("Method '{}' not found in parent class", method)));
                             }
                             Value::Object(func_obj) => {
                                 if let Some(cl_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {

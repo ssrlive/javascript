@@ -55,10 +55,34 @@ impl Repl {
         let tokens = tokenize(script)?;
         let mut index = 0;
         let mut statements = parse_statements(&tokens, &mut index)?;
+        // If the last statement is a declaration, the REPL should return `undefined`
+        // (declaration statements evaluate to undefined in JS). Compute this now
+        // and pass it into the execution closure.
+        let last_is_declaration = statements
+            .last()
+            .map(|s| {
+                matches!(
+                    *s.kind,
+                    crate::core::StatementKind::Let(..)
+                        | crate::core::StatementKind::Var(..)
+                        | crate::core::StatementKind::Const(..)
+                        | crate::core::StatementKind::FunctionDeclaration(..)
+                        | crate::core::StatementKind::Class(..)
+                        | crate::core::StatementKind::Import(..)
+                        | crate::core::StatementKind::Export(..)
+                )
+            })
+            .unwrap_or(false);
 
         self.arena
             .mutate(move |mc, root| match evaluate_statements(mc, &root.global_env, &mut statements) {
-                Ok(val) => Ok(crate::core::value_to_string(&val)),
+                Ok(val) => {
+                    if last_is_declaration {
+                        Ok(crate::core::value_to_string(&crate::core::Value::Undefined))
+                    } else {
+                        Ok(crate::core::value_to_string(&val))
+                    }
+                }
                 Err(e) => match e {
                     EvalError::Js(js_err) => Err(js_err),
                     EvalError::Throw(val, line, column) => {

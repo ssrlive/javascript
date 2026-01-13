@@ -19,7 +19,7 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     obj_set_key_value(mc, &number_obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("Number")))?;
 
     obj_set_key_value(mc, &number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
-    obj_set_key_value(mc, &number_obj, &"MIN_VALUE".into(), Value::Number(f64::MIN_POSITIVE))?;
+    obj_set_key_value(mc, &number_obj, &"MIN_VALUE".into(), Value::Number(f64::from_bits(1)))?;
     obj_set_key_value(mc, &number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
     obj_set_key_value(mc, &number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
     obj_set_key_value(mc, &number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;

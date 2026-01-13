@@ -68,7 +68,18 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_number_module(mc, env)?;
 
+    // Minimal Reflect object so Reflect.setPrototypeOf is available in tests
+    let reflect_obj = new_js_object_data(mc);
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &"setPrototypeOf".into(),
+        Value::Function("Reflect.setPrototypeOf".to_string()),
+    )?;
+    env_set(mc, env, "Reflect", Value::Object(reflect_obj))?;
+
     initialize_math(mc, env)?;
+    initialize_symbol(mc, env)?;
     initialize_string(mc, env)?;
     initialize_array(mc, env)?;
     crate::js_function::initialize_function(mc, env)?;
@@ -82,7 +93,6 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_map(mc, env)?;
     initialize_weakmap(mc, env)?;
     initialize_weakset(mc, env)?;
-    initialize_symbol(mc, env)?;
     initialize_set(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
@@ -143,7 +153,81 @@ where
             obj_set_key_value(mc, &root.global_env, &"__filepath".into(), Value::String(utf8_to_utf16(&p_str)))?;
         }
         match evaluate_statements(mc, &root.global_env, &mut statements) {
-            Ok(result) => Ok(value_to_string(&result)),
+            Ok(result) => {
+                let out = match &result {
+                    Value::String(s) => {
+                        let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                        match serde_json::to_string(&s_utf8) {
+                            Ok(quoted) => quoted,
+                            Err(_) => format!("\"{}\"", s_utf8),
+                        }
+                    }
+                    Value::Object(obj) => {
+                        // If it's an Array, delegate to array helper for consistent formatting
+                        if crate::js_array::is_array(mc, obj) {
+                            crate::js_array::serialize_array_for_eval(mc, obj)?
+                        } else if crate::js_regexp::is_regex_object(obj) {
+                            // For top-level RegExp object display as [object RegExp]
+                            "[object RegExp]".to_string()
+                        } else {
+                            // If object has no enumerable own properties, print as {}
+                            // Otherwise serialize enumerable properties from the object and its prototype chain
+                            let mut seen_keys = std::collections::HashSet::new();
+                            let mut props: Vec<(String, String)> = Vec::new();
+                            let mut cur_obj_opt: Option<crate::core::JSObjectDataPtr<'_>> = Some(obj.clone());
+                            while let Some(cur_obj) = cur_obj_opt {
+                                for key in cur_obj.borrow().properties.keys() {
+                                    // Skip non-enumerable and internal properties (like __proto__)
+                                    if !cur_obj.borrow().is_enumerable(key)
+                                        || matches!(key, crate::core::PropertyKey::String(s) if s == "__proto__")
+                                    {
+                                        continue;
+                                    }
+                                    // Skip keys we've already included (own properties take precedence)
+                                    if seen_keys.contains(key) {
+                                        continue;
+                                    }
+                                    seen_keys.insert(key.clone());
+                                    // Get value for key
+                                    if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(&cur_obj, key) {
+                                        let val = val_rc.borrow().clone();
+                                        let val_str = match val {
+                                            Value::String(s) => format!("\"{}\"", crate::unicode::utf16_to_utf8(&s)),
+                                            Value::Number(n) => n.to_string(),
+                                            Value::Boolean(b) => b.to_string(),
+                                            Value::BigInt(b) => b.to_string(),
+                                            Value::Undefined => "undefined".to_string(),
+                                            Value::Null => "null".to_string(),
+                                            Value::Object(o) => {
+                                                // For nested arrays, serialize them properly, otherwise use default object string
+                                                if crate::js_array::is_array(mc, &o) {
+                                                    crate::js_array::serialize_array_for_eval(mc, &o)?
+                                                } else {
+                                                    value_to_string(&val)
+                                                }
+                                            }
+                                            _ => value_to_string(&val),
+                                        };
+                                        props.push((key.to_string(), val_str));
+                                    }
+                                }
+                                cur_obj_opt = cur_obj.borrow().prototype;
+                            }
+                            if props.is_empty() {
+                                "{}".to_string()
+                            } else {
+                                let mut pairs: Vec<String> = Vec::new();
+                                for (k, v) in props.iter() {
+                                    pairs.push(format!("\"{}\":{}", k, v));
+                                }
+                                format!("{{{}}}", pairs.join(","))
+                            }
+                        }
+                    }
+                    _ => value_to_string(&result),
+                };
+                Ok(out)
+            }
             Err(e) => match e {
                 EvalError::Js(js_err) => Err(js_err),
                 EvalError::Throw(val, line, column) => {

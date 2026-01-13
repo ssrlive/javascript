@@ -88,11 +88,68 @@ pub fn handle_global_function<'gc>(
         "Object.prototype.toString" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
-                return Ok(crate::core::handle_object_prototype_to_string(mc, &this_val));
+                return Ok(crate::core::handle_object_prototype_to_string(mc, &this_val, env));
             }
             return Err(crate::raise_eval_error!("Object.prototype.toString called without this"));
         }
         "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(args, env),
+        "RegExp.prototype.exec" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_regexp::handle_regexp_method(mc, &obj, "exec", args, env).map_err(|e| match e {
+                        crate::core::EvalError::Js(j) => j,
+                        crate::core::EvalError::Throw(v, ..) => crate::error::JSError::new(
+                            crate::error::JSErrorKind::Throw(crate::core::value_to_string(&v)),
+                            "unknown".to_string(),
+                            0,
+                            "unknown".to_string(),
+                        ),
+                    });
+                } else {
+                    return Err(raise_type_error!("RegExp.prototype.exec called on non-object receiver"));
+                }
+            }
+            return Err(raise_eval_error!("RegExp.prototype.exec called without this"));
+        }
+        "RegExp.prototype.test" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_regexp::handle_regexp_method(mc, &obj, "test", args, env).map_err(|e| match e {
+                        crate::core::EvalError::Js(j) => j,
+                        crate::core::EvalError::Throw(v, ..) => crate::error::JSError::new(
+                            crate::error::JSErrorKind::Throw(crate::core::value_to_string(&v)),
+                            "unknown".to_string(),
+                            0,
+                            "unknown".to_string(),
+                        ),
+                    });
+                } else {
+                    return Err(raise_type_error!("RegExp.prototype.test called on non-object receiver"));
+                }
+            }
+            return Err(raise_eval_error!("RegExp.prototype.test called without this"));
+        }
+        "RegExp.prototype.toString" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_regexp::handle_regexp_method(mc, &obj, "toString", args, env).map_err(|e| match e {
+                        crate::core::EvalError::Js(j) => j,
+                        crate::core::EvalError::Throw(v, ..) => crate::error::JSError::new(
+                            crate::error::JSErrorKind::Throw(crate::core::value_to_string(&v)),
+                            "unknown".to_string(),
+                            0,
+                            "unknown".to_string(),
+                        ),
+                    });
+                } else {
+                    return Err(raise_type_error!("RegExp.prototype.toString called on non-object receiver"));
+                }
+            }
+            return Err(raise_eval_error!("RegExp.prototype.toString called without this"));
+        }
         "parseInt" => return parse_int_function(args),
         "parseFloat" => return parse_float_function(args),
         "isNaN" => return is_nan_function(args),

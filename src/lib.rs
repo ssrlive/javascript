@@ -36,7 +36,7 @@ pub(crate) mod js_weakset;
 pub(crate) mod repl;
 pub(crate) mod unicode;
 
-pub use crate::core::Token;
+pub use crate::core::{Token, TokenData};
 pub use core::{
     JSArrayBuffer, JSDataView, JSObjectData, JSTypedArray, JsArena, TypedArrayKind, initialize_global_constructors, new_js_object_data,
     parse_object_destructuring_pattern, parse_simple_expression, parse_statement, parse_statements, read_script_file,

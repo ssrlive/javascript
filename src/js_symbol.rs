@@ -40,6 +40,26 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let iterator_sym = Value::Symbol(iterator_sym_data);
     obj_set_key_value(mc, &symbol_ctor, &"iterator".into(), iterator_sym)?;
 
+    // Symbol.toPrimitive
+    let to_primitive_data = Gc::new(
+        mc,
+        SymbolData {
+            description: Some("Symbol.toPrimitive".to_string()),
+        },
+    );
+    let to_primitive_sym = Value::Symbol(to_primitive_data);
+    obj_set_key_value(mc, &symbol_ctor, &"toPrimitive".into(), to_primitive_sym)?;
+
+    // Symbol.toStringTag
+    let to_string_tag_data = Gc::new(
+        mc,
+        SymbolData {
+            description: Some("Symbol.toStringTag".to_string()),
+        },
+    );
+    let to_string_tag_sym = Value::Symbol(to_string_tag_data);
+    obj_set_key_value(mc, &symbol_ctor, &"toStringTag".into(), to_string_tag_sym)?;
+
     // toString method
     let val = Value::Function("Symbol.prototype.toString".to_string());
     obj_set_key_value(mc, &symbol_proto, &"toString".into(), val)?;
@@ -51,6 +71,19 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("valueOf"));
 
     symbol_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+
+    // Symbol.for and Symbol.keyFor (static) - register as functions on the constructor
+    let for_fn = Value::Function("Symbol.for".to_string());
+    obj_set_key_value(mc, &symbol_ctor, &"for".into(), for_fn)?;
+    symbol_ctor.borrow_mut(mc).set_non_enumerable(PropertyKey::from("for"));
+
+    let keyfor_fn = Value::Function("Symbol.keyFor".to_string());
+    obj_set_key_value(mc, &symbol_ctor, &"keyFor".into(), keyfor_fn)?;
+    symbol_ctor.borrow_mut(mc).set_non_enumerable(PropertyKey::from("keyFor"));
+
+    // Create per-environment symbol registry object used by Symbol.for / Symbol.keyFor
+    let registry_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, env, &"__symbol_registry".into(), Value::Object(registry_obj.clone()))?;
 
     env_set(mc, env, "Symbol", Value::Object(symbol_ctor))?;
 
@@ -122,5 +155,84 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value:
             Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver"))
         }
         _ => Err(crate::raise_type_error!("Symbol.prototype.valueOf called on incompatible receiver")),
+    }
+}
+
+pub(crate) fn handle_symbol_for<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Err(crate::raise_type_error!("Symbol.for requires one argument"));
+    }
+
+    let key = crate::core::value_to_string(&args[0]);
+
+    // Retrieve or create registry object on the environment
+    let registry_obj = match obj_get_key_value(env, &"__symbol_registry".into())? {
+        Some(val) => {
+            if let Value::Object(obj) = &*val.borrow() {
+                obj.clone()
+            } else {
+                let obj = new_js_object_data(mc);
+                obj_set_key_value(mc, env, &"__symbol_registry".into(), Value::Object(obj.clone()))?;
+                obj
+            }
+        }
+        None => {
+            let obj = new_js_object_data(mc);
+            obj_set_key_value(mc, env, &"__symbol_registry".into(), Value::Object(obj.clone()))?;
+            obj
+        }
+    };
+
+    // If an existing symbol is found for this key, return it
+    if let Ok(Some(val)) = obj_get_key_value(&registry_obj, &key.clone().into()) {
+        if let Value::Symbol(s) = &*val.borrow() {
+            return Ok(Value::Symbol(s.clone()));
+        }
+    }
+
+    // Otherwise create and store a new symbol associated with the key
+    let sym = Gc::new(
+        mc,
+        SymbolData {
+            description: Some(key.clone()),
+        },
+    );
+    obj_set_key_value(mc, &registry_obj, &key.into(), Value::Symbol(sym.clone()))?;
+    Ok(Value::Symbol(sym))
+}
+
+pub(crate) fn handle_symbol_keyfor<'gc>(
+    _mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Err(crate::raise_type_error!("Symbol.keyFor requires one argument"));
+    }
+
+    match &args[0] {
+        Value::Symbol(s) => {
+            // Lookup registry object and iterate properties to find matching symbol
+            if let Some(val) = obj_get_key_value(env, &"__symbol_registry".into())? {
+                if let Value::Object(obj) = &*val.borrow() {
+                    for (k, v) in &obj.borrow().properties {
+                        if let Value::Symbol(s2) = &*v.borrow() {
+                            if Gc::ptr_eq(*s, *s2) {
+                                // Found the key; return it as a JS string
+                                if let PropertyKey::String(utf8_key) = k {
+                                    return Ok(Value::String(crate::unicode::utf8_to_utf16(utf8_key)));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(Value::Undefined)
+        }
+        _ => Ok(Value::Undefined),
     }
 }

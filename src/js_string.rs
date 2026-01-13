@@ -37,7 +37,31 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &string_ctor, &"prototype".into(), Value::Object(string_proto))?;
     obj_set_key_value(mc, &string_proto, &"constructor".into(), Value::Object(string_ctor))?;
 
-    // Register static methods
+    // Register Symbol.iterator
+    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())? {
+        if let Value::Object(sym_ctor) = &*sym_val.borrow() {
+            if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())? {
+                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
+                    obj_set_key_value(
+                        mc,
+                        &string_proto,
+                        &PropertyKey::Symbol(iter_sym.clone()),
+                        Value::Function("String.prototype.[Symbol.iterator]".to_string()),
+                    )?;
+                }
+            }
+
+            // Symbol.toStringTag default for String.prototype
+            if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())? {
+                if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
+                    let val = Value::String(utf8_to_utf16("String"));
+                    obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(tag_sym.clone()), val)?;
+                    string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
+                }
+            }
+        }
+    }
+
     obj_set_key_value(
         mc,
         &string_ctor,
@@ -173,6 +197,7 @@ pub fn handle_string_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
+        "[Symbol.iterator]" => create_string_iterator(mc, s),
         "toString" => string_to_string_method(s, args),
         "valueOf" => string_to_string_method(s, args),
         "substring" => string_substring_method(s, args),
@@ -1585,4 +1610,79 @@ pub fn string_from_code_point<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, Ev
 
 pub fn string_raw<'gc>(_args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     Ok(Value::String(Vec::new()))
+}
+/// Create a new String Iterator
+pub(crate) fn create_string_iterator<'gc>(mc: &MutationContext<'gc>, s: &[u16]) -> Result<Value<'gc>, EvalError<'gc>> {
+    let iterator = new_js_object_data(mc);
+
+    // Store string data
+    obj_set_key_value(mc, &iterator, &"__iterator_string__".into(), Value::String(s.to_vec()))?;
+    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+
+    // next method
+    obj_set_key_value(
+        mc,
+        &iterator,
+        &"next".into(),
+        Value::Function("StringIterator.prototype.next".to_string()),
+    )?;
+
+    Ok(Value::Object(iterator))
+}
+
+pub(crate) fn handle_string_iterator_next<'gc>(
+    mc: &MutationContext<'gc>,
+    iterator: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Get string
+    let str_val = obj_get_key_value(iterator, &"__iterator_string__".into())?
+        .ok_or(raise_eval_error!("Iterator has no string"))
+        .map_err(EvalError::Js)?;
+    let s = if let Value::String(utf16) = &*str_val.borrow() {
+        utf16.clone()
+    } else {
+        return Err(EvalError::Js(raise_eval_error!("Iterator string is invalid")));
+    };
+
+    // Get index
+    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?
+        .ok_or(raise_eval_error!("Iterator has no index"))
+        .map_err(EvalError::Js)?;
+    let mut index = if let Value::Number(n) = &*index_val.borrow() {
+        if *n < 0.0 { 0 } else { *n as usize }
+    } else {
+        return Err(EvalError::Js(raise_eval_error!("Iterator index is invalid")));
+    };
+
+    let len = s.len();
+    if index >= len {
+        let result_obj = new_js_object_data(mc);
+        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
+        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        return Ok(Value::Object(result_obj));
+    }
+
+    // Identify code point (handles surrogate pairs)
+    let c1 = s[index];
+    let mut code_unit_count = 1;
+    let mut ch_vec = vec![c1];
+
+    if (0xD800..=0xDBFF).contains(&c1) {
+        if index + 1 < len {
+            let c2 = s[index + 1];
+            if (0xDC00..=0xDFFF).contains(&c2) {
+                ch_vec.push(c2);
+                code_unit_count = 2;
+            }
+        }
+    }
+
+    index += code_unit_count;
+    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+
+    let result_obj = new_js_object_data(mc);
+    obj_set_key_value(mc, &result_obj, &"value".into(), Value::String(ch_vec))?;
+    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
+
+    Ok(Value::Object(result_obj))
 }

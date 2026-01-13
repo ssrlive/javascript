@@ -32,6 +32,10 @@ pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statem
 }
 
 fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    // Skip leading semicolons or line terminators when parsing a single statement
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     if *index >= t.len() {
         return Err(raise_parse_error!("Unexpected end of input"));
     }
@@ -166,6 +170,10 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
         *index += 1; // consume )
 
+        // Skip any semicolons or line terminators before for-of body
+        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1;
+        }
         let body = parse_statement_item(t, index)?;
         let body_stmts = match *body.kind {
             StatementKind::Block(stmts) => stmts,
@@ -248,6 +256,10 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             return Err(raise_parse_error_at(t.get(*index)));
         }
         *index += 1;
+        // Skip any semicolons or line terminators before for-in body
+        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1;
+        }
         let body = parse_statement_item(t, index)?;
         let body_stmts = match *body.kind {
             StatementKind::Block(b) => b,
@@ -298,6 +310,10 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
     *index += 1; // consume )
 
+    // Skip any semicolons or line terminators before for loop body
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     let body = parse_statement_item(t, index)?;
     let body_stmts = match *body.kind {
         StatementKind::Block(b) => b,
@@ -402,14 +418,28 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     }
     *index += 1; // consume )
 
+    // Skip any semicolons or line terminators before a single-statement body
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     let then_stmt = parse_statement_item(t, index)?;
     let then_block = match *then_stmt.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![then_stmt],
     };
 
+    // Skip any semicolons or line terminators before an 'else' token so it binds
+    // to the nearest if (handles constructs like `if (a)\nelse ...`).
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
+
     let else_block = if *index < t.len() && matches!(t[*index].token, Token::Else) {
         *index += 1;
+        // Skip any semicolons or line terminators before else body
+        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+            *index += 1;
+        }
         let else_stmt = parse_statement_item(t, index)?;
         match *else_stmt.kind {
             StatementKind::Block(stmts) => Some(stmts),
@@ -461,6 +491,10 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
     *index += 1; // consume )
 
+    // Skip any semicolons or line terminators before while body
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     let body = parse_statement_item(t, index)?;
     let body_stmts = match *body.kind {
         StatementKind::Block(stmts) => stmts,
@@ -477,12 +511,20 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
 fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume do
+    // Skip any semicolons or line terminators before do body
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     let body = parse_statement_item(t, index)?;
     let body_stmts = match *body.kind {
         StatementKind::Block(stmts) => stmts,
         _ => vec![body],
     };
 
+    // Skip any semicolons or line terminators before the 'while' in a do-while
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     if !matches!(t[*index].token, Token::While) {
         return Err(raise_parse_error_at(t.get(*index)));
     }
@@ -544,7 +586,14 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 
             // collect statements until next Case/Default/RBrace
             let mut stmts: Vec<Statement> = Vec::new();
-            while *index < t.len() && !matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+            loop {
+                // Skip stray semicolons/line terminators between statements
+                while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+                    *index += 1;
+                }
+                if *index >= t.len() || matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+                    break;
+                }
                 stmts.push(parse_statement_item(t, index)?);
             }
             cases.push(crate::core::SwitchCase::Case(case_expr, stmts));
@@ -556,7 +605,14 @@ fn parse_switch_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
             *index += 1; // consume colon
 
             let mut stmts: Vec<Statement> = Vec::new();
-            while *index < t.len() && !matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+            loop {
+                // Skip stray semicolons/line terminators between statements
+                while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+                    *index += 1;
+                }
+                if *index >= t.len() || matches!(t[*index].token, Token::Case | Token::Default | Token::RBrace) {
+                    break;
+                }
                 stmts.push(parse_statement_item(t, index)?);
             }
             cases.push(crate::core::SwitchCase::Default(stmts));
@@ -653,6 +709,11 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         return Err(raise_parse_error!("Expected block after try"));
     };
 
+    // Skip any semicolons or line terminators before catch/finally
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
+
     let mut catch_param = None;
     let mut catch_body = None;
 
@@ -683,6 +744,10 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
 
     let mut finally_body = None;
+    // Skip any semicolons or line terminators before finally (may follow a catch block)
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     if *index < t.len() && matches!(t[*index].token, Token::Finally) {
         *index += 1; // consume finally
         let finally_block = parse_block_statement(t, index)?;
@@ -1156,6 +1221,11 @@ fn parse_export_statement(t: &[TokenData], index: &mut usize) -> Result<Statemen
 fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result<Vec<(String, Option<Expr>)>, JSError> {
     let mut decls = Vec::new();
     loop {
+        // Skip LineTerminators
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+            *index += 1;
+        }
+
         if let Token::Identifier(name) = &t[*index].token {
             let name = name.clone();
             *index += 1;
@@ -1900,7 +1970,8 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         // Check duplicate private
         if is_private {
             if declared_private_names.contains(&name) {
-                // return Err(...)
+                let msg = format!("Duplicate private name: #{}", name);
+                return Err(raise_parse_error_with_token!(&t[*index], msg));
             }
             declared_private_names.insert(name.clone());
             current_private_names.borrow_mut().insert(name.clone());

@@ -63,7 +63,7 @@ fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
             Ok(trimmed.parse::<f64>().unwrap_or(f64::NAN))
         }
         Value::BigInt(_) => Err(EvalError::Js(crate::raise_type_error!("Cannot convert a BigInt value to a number"))),
-        Value::Symbol(_) => Err(EvalError::Js(crate::raise_type_error!("Cannot convert a Symbol value to a number"))),
+        Value::Symbol(_) => Err(EvalError::Js(crate::raise_type_error!("Cannot convert Symbol"))),
         _ => Ok(f64::NAN),
     }
 }
@@ -92,11 +92,11 @@ fn value_to_concat_string<'gc>(val: &Value<'gc>) -> String {
 
 fn bigint_shift_count<'gc>(count: &BigInt) -> Result<usize, EvalError<'gc>> {
     if count.sign() == num_bigint::Sign::Minus {
-        return Err(EvalError::Js(crate::raise_range_error!("BigInt shift count must be non-negative")));
+        return Err(EvalError::Js(crate::raise_eval_error!("invalid bigint shift")));
     }
     count
         .to_usize()
-        .ok_or_else(|| EvalError::Js(crate::raise_range_error!("BigInt shift count is too large")))
+        .ok_or_else(|| EvalError::Js(crate::raise_eval_error!("invalid bigint shift")))
 }
 
 fn collect_names_from_destructuring(pattern: &[DestructuringElement], names: &mut Vec<String>) {
@@ -123,6 +123,560 @@ fn collect_names_from_object_destructuring(pattern: &[ObjectDestructuringElement
             ObjectDestructuringElement::Rest(name) => names.push(name.clone()),
         }
     }
+}
+
+// Helper: bind inner object pattern (DestructuringElement::NestedObject) for let/const (block-scoped) bindings
+fn bind_object_inner_for_letconst<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    pattern: &Vec<DestructuringElement>,
+    obj: &JSObjectDataPtr<'gc>,
+    is_const: bool,
+) -> Result<(), EvalError<'gc>> {
+    for inner in pattern.iter() {
+        match inner {
+            DestructuringElement::Property(key, boxed) => match &**boxed {
+                DestructuringElement::Variable(name, default_expr) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) {
+                        if let Some(def) = default_expr {
+                            prop_val = evaluate_expr(mc, env, def)?;
+                        }
+                    }
+                    env_set(mc, env, name, prop_val.clone())?;
+                    if is_const {
+                        env.borrow_mut(mc).set_const(name.clone());
+                    }
+                }
+                DestructuringElement::NestedObject(nested) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                        let prop_name = nested
+                            .iter()
+                            .find_map(|p| {
+                                if let DestructuringElement::Property(k, _) = p {
+                                    Some(k.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "property".to_string());
+                        return Err(EvalError::Js(raise_eval_error!(format!(
+                            "Cannot destructure property '{}' of {}",
+                            prop_name,
+                            if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                        ))));
+                    }
+                    if let Value::Object(o3) = &prop_val {
+                        bind_object_inner_for_letconst(mc, env, nested, o3, is_const)?;
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                    }
+                }
+                DestructuringElement::NestedArray(nested_arr) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                        return Err(EvalError::Js(raise_eval_error!(format!(
+                            "Cannot destructure property '{}' of {}",
+                            key,
+                            if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                        ))));
+                    }
+                    if let Value::Object(oarr) = &prop_val {
+                        bind_array_inner_for_letconst(mc, env, nested_arr, oarr, is_const)?;
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                    }
+                }
+                _ => {
+                    return Err(EvalError::Js(crate::raise_syntax_error!(
+                        "Nested object destructuring not implemented"
+                    )));
+                }
+            },
+            _ => {
+                return Err(EvalError::Js(crate::raise_syntax_error!(
+                    "Nested object destructuring not implemented"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Helper: bind inner object pattern for var (function-scoped) bindings
+fn bind_object_inner_for_var<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    pattern: &Vec<DestructuringElement>,
+    obj: &JSObjectDataPtr<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    // Determine function-scope env
+    let mut target_env = *env;
+    while !target_env.borrow().is_function_scope {
+        if let Some(proto) = target_env.borrow().prototype {
+            target_env = proto;
+        } else {
+            break;
+        }
+    }
+
+    for inner in pattern.iter() {
+        match inner {
+            DestructuringElement::Property(key, boxed) => match &**boxed {
+                DestructuringElement::Variable(name, default_expr) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) {
+                        if let Some(def) = default_expr {
+                            prop_val = evaluate_expr(mc, env, def)?;
+                        }
+                    }
+                    env_set_recursive(mc, &target_env, name, prop_val)?;
+                }
+                DestructuringElement::NestedObject(nested) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                        let prop_name = nested
+                            .iter()
+                            .find_map(|p| {
+                                if let DestructuringElement::Property(k, _) = p {
+                                    Some(k.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "property".to_string());
+                        return Err(EvalError::Js(raise_eval_error!(format!(
+                            "Cannot destructure property '{}' of {}",
+                            prop_name,
+                            if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                        ))));
+                    }
+                    if let Value::Object(o3) = &prop_val {
+                        bind_object_inner_for_var(mc, env, nested, o3)?;
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                    }
+                }
+                DestructuringElement::NestedArray(nested_arr) => {
+                    let mut prop_val = Value::Undefined;
+                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                        prop_val = cell.borrow().clone();
+                    }
+                    if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                        return Err(EvalError::Js(raise_eval_error!(format!(
+                            "Cannot destructure property '{}' of {}",
+                            key,
+                            if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                        ))));
+                    }
+                    if let Value::Object(oarr) = &prop_val {
+                        bind_array_inner_for_var(mc, env, nested_arr, oarr)?;
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                    }
+                }
+                _ => {
+                    return Err(EvalError::Js(crate::raise_syntax_error!(
+                        "Nested object destructuring not implemented"
+                    )));
+                }
+            },
+            _ => {
+                return Err(EvalError::Js(crate::raise_syntax_error!(
+                    "Nested object destructuring not implemented"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Helper: bind inner array pattern for let/const bindings
+fn bind_array_inner_for_letconst<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    pattern: &Vec<DestructuringElement>,
+    arr_obj: &JSObjectDataPtr<'gc>,
+    is_const: bool,
+) -> Result<(), EvalError<'gc>> {
+    let _current_len = crate::js_array::get_array_length(mc, arr_obj).unwrap_or(0);
+    for (j, inner_elem) in pattern.iter().enumerate() {
+        match inner_elem {
+            DestructuringElement::Variable(name, default_expr) => {
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) {
+                    if let Some(def) = default_expr {
+                        elem_val = evaluate_expr(mc, env, def)?;
+                    }
+                }
+                env_set(mc, env, name, elem_val.clone())?;
+                if is_const {
+                    env.borrow_mut(mc).set_const(name.clone());
+                }
+            }
+            DestructuringElement::NestedObject(inner_pattern) => {
+                // get element at index j
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
+                    let prop_name = inner_pattern
+                        .iter()
+                        .find_map(|p| {
+                            if let DestructuringElement::Property(k, _) = p {
+                                Some(k.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| "property".to_string());
+                    return Err(EvalError::Js(raise_eval_error!(format!(
+                        "Cannot destructure property '{}' of {}",
+                        prop_name,
+                        if matches!(elem_val, Value::Null) { "null" } else { "undefined" }
+                    ))));
+                }
+                if let Value::Object(obj2) = &elem_val {
+                    // bind inner properties in current env (let/const semantics)
+                    for inner in inner_pattern.iter() {
+                        match inner {
+                            DestructuringElement::Property(key, boxed) => {
+                                match &**boxed {
+                                    DestructuringElement::Variable(name, default_expr) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) {
+                                            if let Some(def) = default_expr {
+                                                prop_val = evaluate_expr(mc, env, def)?;
+                                            }
+                                        }
+                                        env_set(mc, env, name, prop_val.clone())?;
+                                        if is_const {
+                                            env.borrow_mut(mc).set_const(name.clone());
+                                        }
+                                    }
+                                    DestructuringElement::NestedObject(nested) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                            let prop_name = nested
+                                                .iter()
+                                                .find_map(|p| {
+                                                    if let DestructuringElement::Property(k, _) = p {
+                                                        Some(k.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| "property".to_string());
+                                            return Err(EvalError::Js(raise_eval_error!(format!(
+                                                "Cannot destructure property '{}' of {}",
+                                                prop_name,
+                                                if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                            ))));
+                                        }
+                                        if let Value::Object(o3) = &prop_val {
+                                            // recursively bind as let/const
+                                            bind_object_inner_for_letconst(mc, env, nested, o3, is_const)?;
+                                        } else {
+                                            return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                                        }
+                                    }
+                                    DestructuringElement::NestedArray(nested_arr) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                            return Err(EvalError::Js(raise_eval_error!(format!(
+                                                "Cannot destructure property '{}' of {}",
+                                                key,
+                                                if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                            ))));
+                                        }
+                                        if let Value::Object(oarr) = &prop_val {
+                                            bind_array_inner_for_letconst(mc, env, nested_arr, oarr, is_const)?;
+                                        } else {
+                                            return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(EvalError::Js(crate::raise_syntax_error!(
+                                            "Nested object destructuring not implemented"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(EvalError::Js(crate::raise_syntax_error!(
+                                    "Nested object destructuring not implemented"
+                                )));
+                            }
+                        }
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                }
+            }
+            DestructuringElement::NestedArray(inner_array) => {
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
+                    return Err(EvalError::Js(raise_eval_error!("Cannot destructure array from undefined/null")));
+                }
+                if let Value::Object(oarr) = &elem_val {
+                    bind_array_inner_for_letconst(mc, env, inner_array, oarr, is_const)?;
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                }
+            }
+            DestructuringElement::Rest(name) => {
+                // Collect remaining elements into an array
+                let arr_obj2 = crate::js_array::create_array(mc, env)?;
+                // get length
+                let len = if let Ok(Some(len_cell)) = obj_get_key_value(arr_obj, &"length".into()) {
+                    if let Value::Number(n) = len_cell.borrow().clone() {
+                        n as usize
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let mut idx2 = 0;
+                for jj in j..len {
+                    if let Ok(Some(cell2)) = obj_get_key_value(arr_obj, &jj.to_string().into()) {
+                        obj_set_key_value(mc, &arr_obj2, &PropertyKey::from(idx2.to_string()), cell2.borrow().clone())?;
+                        idx2 += 1;
+                    }
+                }
+                obj_set_key_value(mc, &arr_obj2, &"length".into(), Value::Number(idx2 as f64))?;
+                env_set(mc, env, name, Value::Object(arr_obj2))?;
+                if is_const {
+                    env.borrow_mut(mc).set_const(name.clone());
+                }
+                break;
+            }
+            _ => {
+                return Err(EvalError::Js(crate::raise_syntax_error!(
+                    "Nested array destructuring not implemented"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Helper: bind inner array pattern (DestructuringElement::NestedArray) for let/const (block-scoped) bindings
+fn bind_array_inner_for_var<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    pattern: &Vec<DestructuringElement>,
+    arr_obj: &JSObjectDataPtr<'gc>,
+) -> Result<(), EvalError<'gc>> {
+    // Determine function-scope env
+    let mut target_env = *env;
+    while !target_env.borrow().is_function_scope {
+        if let Some(proto) = target_env.borrow().prototype {
+            target_env = proto;
+        } else {
+            break;
+        }
+    }
+
+    let _current_len = crate::js_array::get_array_length(mc, arr_obj).unwrap_or(0);
+    for (j, inner_elem) in pattern.iter().enumerate() {
+        match inner_elem {
+            DestructuringElement::Variable(name, default_expr) => {
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) {
+                    if let Some(def) = default_expr {
+                        elem_val = evaluate_expr(mc, env, def)?;
+                    }
+                }
+                env_set_recursive(mc, &target_env, name, elem_val)?;
+            }
+            DestructuringElement::NestedObject(inner_pattern) => {
+                // get element at index j
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
+                    let prop_name = inner_pattern
+                        .iter()
+                        .find_map(|p| {
+                            if let DestructuringElement::Property(k, _) = p {
+                                Some(k.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or_else(|| "property".to_string());
+                    return Err(EvalError::Js(raise_eval_error!(format!(
+                        "Cannot destructure property '{}' of {}",
+                        prop_name,
+                        if matches!(elem_val, Value::Null) { "null" } else { "undefined" }
+                    ))));
+                }
+                if let Value::Object(obj2) = &elem_val {
+                    // bind inner properties as var (function scope)
+                    for inner in inner_pattern.iter() {
+                        match inner {
+                            DestructuringElement::Property(key, boxed) => {
+                                match &**boxed {
+                                    DestructuringElement::Variable(name, default_expr) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) {
+                                            if let Some(def) = default_expr {
+                                                prop_val = evaluate_expr(mc, env, def)?;
+                                            }
+                                        }
+                                        env_set_recursive(mc, &target_env, name, prop_val)?;
+                                    }
+                                    DestructuringElement::NestedObject(nested) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                            let prop_name = nested
+                                                .iter()
+                                                .find_map(|p| {
+                                                    if let DestructuringElement::Property(k, _) = p {
+                                                        Some(k.clone())
+                                                    } else {
+                                                        None
+                                                    }
+                                                })
+                                                .unwrap_or_else(|| "property".to_string());
+                                            return Err(EvalError::Js(raise_eval_error!(format!(
+                                                "Cannot destructure property '{}' of {}",
+                                                prop_name,
+                                                if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                            ))));
+                                        }
+                                        if let Value::Object(o3) = &prop_val {
+                                            // recursively bind as var
+                                            bind_object_inner_for_var(mc, env, nested, o3)?;
+                                        } else {
+                                            return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                                        }
+                                    }
+                                    DestructuringElement::NestedArray(nested_arr) => {
+                                        let mut prop_val = Value::Undefined;
+                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                            prop_val = cell.borrow().clone();
+                                        }
+                                        if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                            return Err(EvalError::Js(raise_eval_error!(format!(
+                                                "Cannot destructure property '{}' of {}",
+                                                key,
+                                                if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                            ))));
+                                        }
+                                        if let Value::Object(oarr) = &prop_val {
+                                            bind_array_inner_for_var(mc, env, nested_arr, oarr)?;
+                                        } else {
+                                            return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                                        }
+                                    }
+                                    _ => {
+                                        return Err(EvalError::Js(crate::raise_syntax_error!(
+                                            "Nested object destructuring not implemented"
+                                        )));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(EvalError::Js(crate::raise_syntax_error!(
+                                    "Nested object destructuring not implemented"
+                                )));
+                            }
+                        }
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                }
+            }
+            DestructuringElement::NestedArray(inner_array) => {
+                let mut elem_val = Value::Undefined;
+                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                    elem_val = cell.borrow().clone();
+                }
+                if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
+                    return Err(EvalError::Js(raise_eval_error!("Cannot destructure array from undefined/null")));
+                }
+                if let Value::Object(oarr) = &elem_val {
+                    bind_array_inner_for_var(mc, env, inner_array, oarr)?;
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                }
+            }
+            DestructuringElement::Rest(name) => {
+                // Collect remaining elements into an array
+                let arr_obj2 = crate::js_array::create_array(mc, env)?;
+                // get length
+                let len = if let Ok(Some(len_cell)) = obj_get_key_value(arr_obj, &"length".into()) {
+                    if let Value::Number(n) = len_cell.borrow().clone() {
+                        n as usize
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                let mut idx2 = 0;
+                for jj in j..len {
+                    if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &jj.to_string().into()) {
+                        obj_set_key_value(mc, &arr_obj2, &PropertyKey::from(idx2.to_string()), cell.borrow().clone())?;
+                        idx2 += 1;
+                    }
+                }
+                obj_set_key_value(mc, &arr_obj2, &"length".into(), Value::Number(idx2 as f64))?;
+                // bind var in function scope
+                env_set_recursive(mc, &target_env, name, Value::Object(arr_obj2))?;
+            }
+            _ => {
+                return Err(EvalError::Js(crate::raise_syntax_error!(
+                    "Nested array destructuring not implemented"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<(), EvalError<'gc>> {
@@ -296,25 +850,43 @@ pub fn evaluate_statements<'gc>(
 }
 
 /// belongs to src/js_object.rs module
-pub(crate) fn handle_object_prototype_to_string<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>) -> Value<'gc> {
+pub(crate) fn handle_object_prototype_to_string<'gc>(
+    mc: &MutationContext<'gc>,
+    val: &Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Value<'gc> {
     let tag = match val {
-        Value::Undefined => "Undefined",
-        Value::Null => "Null",
-        Value::String(_) => "String",
-        Value::Number(_) => "Number",
-        Value::Boolean(_) => "Boolean",
-        Value::BigInt(_) => "BigInt",
-        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function",
+        Value::Undefined => "Undefined".to_string(),
+        Value::Null => "Null".to_string(),
+        Value::String(_) => "String".to_string(),
+        Value::Number(_) => "Number".to_string(),
+        Value::Boolean(_) => "Boolean".to_string(),
+        Value::BigInt(_) => "BigInt".to_string(),
+        Value::Function(_) | Value::Closure(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
         Value::Object(obj) => {
             if is_array(mc, obj) {
-                "Array"
+                "Array".to_string()
             } else if is_date_object(obj) {
-                "Date"
+                "Date".to_string()
             } else {
-                "Object"
+                let mut t = "Object".to_string();
+                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into()) {
+                    if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
+                        if let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into()) {
+                            if let Value::Symbol(s) = &*tag_sym.borrow() {
+                                if let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(s.clone())) {
+                                    if let Value::String(s_val) = &*val.borrow() {
+                                        t = crate::unicode::utf16_to_utf8(s_val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                t
             }
         }
-        _ => "Object",
+        _ => "Object".to_string(),
     };
     Value::String(utf8_to_utf16(&format!("[object {}]", tag)))
 }
@@ -362,6 +934,7 @@ fn eval_res<'gc>(
             Err(e) => Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
         },
         StatementKind::Let(decls) => {
+            let mut last_init = Value::Undefined;
             for (name, expr_opt) in decls {
                 let val = if let Some(expr) = expr_opt {
                     match evaluate_expr(mc, env, expr) {
@@ -371,12 +944,14 @@ fn eval_res<'gc>(
                 } else {
                     Value::Undefined
                 };
+                last_init = val.clone();
                 env_set(mc, env, name, val)?;
             }
-            *last_value = Value::Undefined;
+            *last_value = last_init;
             Ok(None)
         }
         StatementKind::Var(decls) => {
+            let mut last_init = Value::Undefined;
             for (name, expr_opt) in decls {
                 if let Some(expr) = expr_opt {
                     let val = match evaluate_expr(mc, env, expr) {
@@ -384,6 +959,7 @@ fn eval_res<'gc>(
                         Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                     };
 
+                    last_init = val.clone();
                     let mut target_env = *env;
                     while !target_env.borrow().is_function_scope {
                         if let Some(proto) = target_env.borrow().prototype {
@@ -395,20 +971,22 @@ fn eval_res<'gc>(
                     env_set(mc, &target_env, name, val)?;
                 }
             }
-            *last_value = Value::Undefined;
+            *last_value = last_init;
             Ok(None)
         }
         StatementKind::Const(decls) => {
+            let mut last_init = Value::Undefined;
             for (name, expr) in decls {
                 let val = match evaluate_expr(mc, env, expr) {
                     Ok(v) => v,
                     Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                 };
+                last_init = val.clone();
                 // Bind value and mark the binding as const so subsequent assignments fail
                 env_set(mc, env, name, val)?;
                 env.borrow_mut(mc).set_const(name.clone());
             }
-            *last_value = Value::Undefined;
+            *last_value = last_init;
             Ok(None)
         }
         StatementKind::Class(class_def) => {
@@ -567,6 +1145,24 @@ fn eval_res<'gc>(
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
 
+            // If there are any nested patterns in the array, delegate to helper that handles all cases
+            let has_nested = pattern.iter().any(|e| !matches!(e, DestructuringElement::Variable(_, _)));
+            if has_nested {
+                if let Value::Object(obj) = &val {
+                    if is_array(mc, obj) {
+                        let is_const = matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _));
+                        bind_array_inner_for_letconst(mc, env, pattern, obj, is_const)?;
+                        *last_value = Value::Undefined;
+                        return Ok(None);
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Cannot destructure non-array value")));
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Cannot destructure non-array value")));
+                }
+            }
+
+            // Simple variable-only destructuring
             for (i, elem) in pattern.iter().enumerate() {
                 match elem {
                     DestructuringElement::Variable(name, default_expr) => {
@@ -591,112 +1187,9 @@ fn eval_res<'gc>(
                             env.borrow_mut(mc).set_const(name.clone());
                         }
                     }
-
-                    DestructuringElement::NestedObject(inner_pattern) => {
-                        // Nested object pattern, e.g. let [a, {b}] = arr;
-                        // Fetch element at index i
-                        let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                if let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into()) {
-                                    elem_val = cell.borrow().clone();
-                                }
-                            }
-                        }
-
-                        // If element is undefined or null, throw a helpful error
-                        if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
-                            let prop_name = inner_pattern
-                                .iter()
-                                .find_map(|p| {
-                                    if let DestructuringElement::Property(k, _) = p {
-                                        Some(k.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .unwrap_or_else(|| "property".to_string());
-                            return Err(EvalError::Js(raise_eval_error!(format!(
-                                "Cannot destructure property '{}' of {}",
-                                prop_name,
-                                if matches!(elem_val, Value::Null) { "null" } else { "undefined" }
-                            ))));
-                        }
-
-                        // Expect object and bind inner properties
-                        if let Value::Object(obj) = &elem_val {
-                            for inner in inner_pattern.iter() {
-                                match inner {
-                                    DestructuringElement::Property(key, boxed) => match &**boxed {
-                                        DestructuringElement::Variable(name, default_expr) => {
-                                            let mut prop_val = Value::Undefined;
-                                            if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                                prop_val = cell.borrow().clone();
-                                            }
-                                            if matches!(prop_val, Value::Undefined) {
-                                                if let Some(def) = default_expr {
-                                                    prop_val = evaluate_expr(mc, env, def)?;
-                                                }
-                                            }
-                                            env_set(mc, env, name, prop_val.clone())?;
-                                            if matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _)) {
-                                                env.borrow_mut(mc).set_const(name.clone());
-                                            }
-                                        }
-                                        _ => {
-                                            return Err(EvalError::Js(crate::raise_syntax_error!(
-                                                "Nested object destructuring not implemented"
-                                            )));
-                                        }
-                                    },
-                                    _ => {
-                                        return Err(EvalError::Js(crate::raise_syntax_error!(
-                                            "Nested object destructuring not implemented"
-                                        )));
-                                    }
-                                }
-                            }
-                        } else {
-                            return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
-                        }
-                    }
-
-                    DestructuringElement::Rest(name) => {
-                        // Collect remaining elements into an array
-                        let arr_obj = crate::js_array::create_array(mc, env)?;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                // get length
-                                let len = if let Ok(Some(len_cell)) = obj_get_key_value(obj, &"length".into()) {
-                                    if let Value::Number(n) = len_cell.borrow().clone() {
-                                        n as usize
-                                    } else {
-                                        0
-                                    }
-                                } else {
-                                    0
-                                };
-                                let mut idx2 = 0;
-                                for j in i..len {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &j.to_string().into()) {
-                                        obj_set_key_value(mc, &arr_obj, &PropertyKey::from(idx2.to_string()), cell.borrow().clone())?;
-                                        idx2 += 1;
-                                    }
-                                }
-                                obj_set_key_value(mc, &arr_obj, &"length".into(), Value::Number(idx2 as f64))?;
-                            }
-                        }
-                        env_set(mc, env, name, Value::Object(arr_obj))?;
-                    }
-                    _ => {
-                        // Nested patterns not implemented yet
-                        return Err(EvalError::Js(crate::raise_syntax_error!(
-                            "Nested array destructuring not implemented"
-                        )));
-                    }
+                    _ => {}
                 }
             }
-
             *last_value = Value::Undefined;
             Ok(None)
         }
@@ -705,6 +1198,22 @@ fn eval_res<'gc>(
                 Ok(v) => v,
                 Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             };
+
+            // If there are any nested patterns in the array, delegate to helper that handles var semantics
+            let has_nested = pattern.iter().any(|e| !matches!(e, DestructuringElement::Variable(_, _)));
+            if has_nested {
+                if let Value::Object(obj) = &val {
+                    if is_array(mc, obj) {
+                        bind_array_inner_for_var(mc, env, pattern, obj)?;
+                        *last_value = Value::Undefined;
+                        return Ok(None);
+                    } else {
+                        return Err(EvalError::Js(raise_eval_error!("Cannot destructure non-array value")));
+                    }
+                } else {
+                    return Err(EvalError::Js(raise_eval_error!("Cannot destructure non-array value")));
+                }
+            }
 
             for (i, elem) in pattern.iter().enumerate() {
                 match elem {
@@ -905,6 +1414,60 @@ fn eval_res<'gc>(
                                     env.borrow_mut(mc).set_const(name.clone());
                                 }
                             }
+                            DestructuringElement::NestedObject(inner_pattern) => {
+                                // fetch property
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val {
+                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                                        prop_val = cell.borrow().clone();
+                                    }
+                                }
+                                if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                    let prop_name = inner_pattern
+                                        .iter()
+                                        .find_map(|p| {
+                                            if let DestructuringElement::Property(k, _) = p {
+                                                Some(k.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or_else(|| "property".to_string());
+                                    return Err(EvalError::Js(raise_eval_error!(format!(
+                                        "Cannot destructure property '{}' of {}",
+                                        prop_name,
+                                        if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                    ))));
+                                }
+                                if let Value::Object(obj2) = &prop_val {
+                                    let is_const = matches!(*stmt.kind, StatementKind::ConstDestructuringObject(_, _));
+                                    bind_object_inner_for_letconst(mc, env, inner_pattern, obj2, is_const)?;
+                                } else {
+                                    return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                                }
+                            }
+                            DestructuringElement::NestedArray(inner_array) => {
+                                // fetch property
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val {
+                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                                        prop_val = cell.borrow().clone();
+                                    }
+                                }
+                                if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                    return Err(EvalError::Js(raise_eval_error!(format!(
+                                        "Cannot destructure property '{}' of {}",
+                                        key,
+                                        if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                    ))));
+                                }
+                                if let Value::Object(oarr) = &prop_val {
+                                    let is_const = matches!(*stmt.kind, StatementKind::ConstDestructuringObject(_, _));
+                                    bind_array_inner_for_letconst(mc, env, inner_array, oarr, is_const)?;
+                                } else {
+                                    return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                                }
+                            }
                             _ => {
                                 return Err(EvalError::Js(crate::raise_syntax_error!(
                                     "Nested object destructuring not implemented"
@@ -998,6 +1561,56 @@ fn eval_res<'gc>(
                                 }
                                 env_set_recursive(mc, &target_env, name, prop_val)?;
                             }
+                            DestructuringElement::NestedObject(inner_pattern) => {
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val {
+                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                                        prop_val = cell.borrow().clone();
+                                    }
+                                }
+                                if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                    let prop_name = inner_pattern
+                                        .iter()
+                                        .find_map(|p| {
+                                            if let DestructuringElement::Property(k, _) = p {
+                                                Some(k.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .unwrap_or_else(|| "property".to_string());
+                                    return Err(EvalError::Js(raise_eval_error!(format!(
+                                        "Cannot destructure property '{}' of {}",
+                                        prop_name,
+                                        if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                    ))));
+                                }
+                                if let Value::Object(obj2) = &prop_val {
+                                    bind_object_inner_for_var(mc, env, inner_pattern, obj2)?;
+                                } else {
+                                    return Err(EvalError::Js(raise_eval_error!("Expected object for nested destructuring")));
+                                }
+                            }
+                            DestructuringElement::NestedArray(inner_array) => {
+                                let mut prop_val = Value::Undefined;
+                                if let Value::Object(obj) = &val {
+                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                                        prop_val = cell.borrow().clone();
+                                    }
+                                }
+                                if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
+                                    return Err(EvalError::Js(raise_eval_error!(format!(
+                                        "Cannot destructure property '{}' of {}",
+                                        key,
+                                        if matches!(prop_val, Value::Null) { "null" } else { "undefined" }
+                                    ))));
+                                }
+                                if let Value::Object(oarr) = &prop_val {
+                                    bind_array_inner_for_var(mc, env, inner_array, oarr)?;
+                                } else {
+                                    return Err(EvalError::Js(raise_eval_error!("Expected array for nested array destructuring")));
+                                }
+                            }
                             _ => {
                                 return Err(EvalError::Js(crate::raise_syntax_error!(
                                     "Nested object destructuring not implemented"
@@ -1055,7 +1668,13 @@ fn eval_res<'gc>(
                             filename = utf16_to_utf8(s);
                         }
                     }
-                    let frame = format!("at <anonymous> ({}:{}:{})", filename, stmt.line, stmt.column);
+                    let mut frame_name = "<anonymous>".to_string();
+                    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into()) {
+                        if let Value::String(s) = &*frame_val.borrow() {
+                            frame_name = utf16_to_utf8(s);
+                        }
+                    }
+                    let frame = format!("at {} ({}:{}:{})", frame_name, filename, stmt.line, stmt.column);
                     let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
                     let new_stack = format!("{}\n    {}", current_stack, frame);
                     obj.borrow_mut(mc)
@@ -1372,23 +1991,45 @@ fn eval_res<'gc>(
                 && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
-                let method_opt = if let Value::Object(obj) = &iter_val {
-                    obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))?
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))? {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
                 } else {
-                    None
+                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(iter_sym_data.clone()))?
                 };
 
-                if let Some(method_cell) = method_opt {
-                    let method = method_cell.borrow().clone();
-                    // Call method
-                    let res = match method {
-                        Value::Function(name) => call_native_function(mc, &name, Some(iter_val.clone()), &[], env)?,
-                        Value::Closure(cl) => Some(call_closure(mc, &cl, Some(iter_val.clone()), &[], env, None)?),
-                        _ => None,
-                    };
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
 
-                    if let Some(Value::Object(iter_obj)) = res {
+                    if let Value::Object(iter_obj) = res {
                         iterator = Some(iter_obj);
+                    }
+                } else {
+                    // Debug why method is missing
+                    if matches!(iter_val, Value::String(_)) {
+                        let sym_ctor = obj_get_key_value(env, &"Symbol".into())?.unwrap();
+                        let sym_obj = if let Value::Object(o) = &*sym_ctor.borrow() {
+                            o.clone()
+                        } else {
+                            panic!()
+                        };
+                        let iter_sym = obj_get_key_value(&sym_obj, &"iterator".into())?.unwrap();
+                        println!("DEBUG: ForOf String iterator missing. Symbol.iterator: {:?}", iter_sym.borrow());
+                        // check if String.prototype has it
+                        let str_ctor = obj_get_key_value(env, &"String".into())?.unwrap();
+                        if let Value::Object(s_obj) = &*str_ctor.borrow() {
+                            if let Some(proto) = obj_get_key_value(s_obj, &"prototype".into())? {
+                                if let Value::Object(p_obj) = &*proto.borrow() {
+                                    if let Value::Symbol(s) = &*iter_sym.borrow() {
+                                        let has = obj_get_key_value(p_obj, &PropertyKey::Symbol(s.clone()))?;
+                                        println!("DEBUG: String.prototype[@@iterator] found: {:?}", has.is_some());
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1403,12 +2044,7 @@ fn eval_res<'gc>(
                         .borrow()
                         .clone();
 
-                    let next_res_val = match next_method {
-                        Value::Function(name) => call_native_function(mc, &name, Some(Value::Object(iter_obj)), &[], env)?
-                            .ok_or(EvalError::Js(raise_type_error!("next() result unknown")))?,
-                        Value::Closure(cl) => call_closure(mc, &cl, Some(Value::Object(iter_obj)), &[], env, None)?,
-                        _ => return Err(EvalError::Js(raise_type_error!("next is not a function"))),
-                    };
+                    let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
 
                     if let Value::Object(next_res) = next_res_val {
                         let done = if let Some(done_val) = obj_get_key_value(&next_res, &"done".into())? {
@@ -1491,57 +2127,9 @@ fn eval_res<'gc>(
                     }
                     return Ok(None);
                 }
-
-                // Implement ForIn for objects: enumerate enumerable string keys across prototype chain
-                let mut keys: Vec<String> = Vec::new();
-                let mut seen = std::collections::HashSet::new();
-                let mut current = Some(obj);
-                while let Some(o) = current {
-                    for (key, _val) in o.borrow().properties.iter() {
-                        if !o.borrow().is_enumerable(key) {
-                            continue;
-                        }
-                        if let PropertyKey::String(s) = key {
-                            if s == "length" {
-                                continue;
-                            }
-                            if !seen.contains(s) {
-                                keys.push(s.clone());
-                                seen.insert(s.clone());
-                            }
-                        }
-                    }
-                    current = o.borrow().prototype.clone();
-                }
-
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
-                for k in keys {
-                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(&k)))?;
-                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                    match res {
-                        ControlFlow::Normal(v) => *last_value = v,
-                        ControlFlow::Break(label) => {
-                            if label.is_none() {
-                                break;
-                            }
-                            return Ok(Some(ControlFlow::Break(label)));
-                        }
-                        ControlFlow::Continue(label) => {
-                            if let Some(ref l) = label {
-                                if !own_labels.contains(l) {
-                                    return Ok(Some(ControlFlow::Continue(label)));
-                                }
-                            }
-                        }
-                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
-                    }
-                }
-                return Ok(None);
             }
 
-            Err(EvalError::Js(raise_type_error!("ForOf only supports Arrays and Objects currently")))
+            Err(EvalError::Js(raise_type_error!("Value is not iterable")))
         }
         StatementKind::ForIn(var_name, iterable, body) => {
             let iter_val = evaluate_expr(mc, env, iterable)?;
@@ -1678,8 +2266,117 @@ fn eval_res<'gc>(
                 hoist_name(mc, env, &name)?;
             }
 
-            // Simplified: assume array for now
+            // Try iterator first (support for Map, Set, etc.)
             let iter_val = evaluate_expr(mc, env, iterable)?;
+            let mut iterator = None;
+
+            // Try to use Symbol.iterator
+            if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))? {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(iter_sym_data.clone()))?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+
+                loop {
+                    let next_method = obj_get_key_value(&iter_obj, &"next".into())?
+                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                        .borrow()
+                        .clone();
+
+                    let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = if let Some(done_val) = obj_get_key_value(&next_res, &"done".into())? {
+                            match &*done_val.borrow() {
+                                Value::Boolean(b) => *b,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if done {
+                            break;
+                        }
+
+                        let value = if let Some(val) = obj_get_key_value(&next_res, &"value".into())? {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+
+                        // Perform array destructuring on the iterator-provided value
+                        for (j, elem) in pattern.iter().enumerate() {
+                            match elem {
+                                DestructuringElement::Variable(name, _) => {
+                                    let elem_val = if let Value::Object(o) = &value {
+                                        if is_array(mc, o) {
+                                            if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
+                                                cell.borrow().clone()
+                                            } else {
+                                                Value::Undefined
+                                            }
+                                        } else {
+                                            Value::Undefined
+                                        }
+                                    } else {
+                                        Value::Undefined
+                                    };
+                                    crate::core::env_set_recursive(mc, env, name, elem_val)?;
+                                }
+                                _ => {} // Simplified
+                            }
+                        }
+
+                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                        match res {
+                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Break(label) => {
+                                if label.is_none() {
+                                    break;
+                                }
+                                return Ok(Some(ControlFlow::Break(label)));
+                            }
+                            ControlFlow::Continue(label) => {
+                                if let Some(ref l) = label {
+                                    if !own_labels.contains(l) {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                            }
+                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        }
+                    } else {
+                        return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
+                    }
+                }
+                return Ok(None);
+            }
+
+            // Simplified: assume array for now (existing fallback)
             if let Value::Object(obj) = iter_val {
                 if is_array(mc, &obj) {
                     let len = object_get_length(&obj).unwrap_or(0);
@@ -1853,7 +2550,14 @@ fn refresh_error_by_additional_stack_frame<'gc>(
             filename = utf16_to_utf8(s);
         }
     }
-    let frame = format!("at <anonymous> ({}:{}:{})", filename, line, column);
+    // Prefer an explicit frame name if the call environment has one (set in call_closure)
+    let mut frame_name = "<anonymous>".to_string();
+    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into()) {
+        if let Value::String(s) = &*frame_val.borrow() {
+            frame_name = utf16_to_utf8(s);
+        }
+    }
+    let frame = format!("at {} ({}:{}:{})", frame_name, filename, line, column);
     if let EvalError::Js(js_err) = &mut e {
         js_err.inner.stack.push(frame.clone());
     }
@@ -1888,6 +2592,20 @@ fn get_primitive_prototype_property<'gc>(
         if let Value::Object(ctor_obj) = ctor {
             if let Some(proto_ref) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
                 if let Value::Object(proto) = &*proto_ref.borrow() {
+                    // Special-case Symbol.prototype.description: return primitive description without invoking getter
+                    if proto_name == "Symbol" {
+                        if let PropertyKey::String(s) = key {
+                            if s == "description" {
+                                if let Value::Symbol(sd) = obj_val {
+                                    if let Some(desc) = &sd.description {
+                                        return Ok(Value::String(crate::unicode::utf8_to_utf16(desc)));
+                                    }
+                                    return Ok(Value::Undefined);
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(val) = obj_get_key_value(proto, key)? {
                         return Ok(val.borrow().clone());
                     }
@@ -2059,6 +2777,523 @@ fn evaluate_expr_add_assign<'gc>(
         }
         _ => Err(EvalError::Js(raise_eval_error!(
             "AddAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_bitand_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(ln & rn);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                }
+                (l, r) => {
+                    let l = to_int32_value(&l)?;
+                    let r = to_int32_value(&r)?;
+                    let new_val = Value::Number((l & r) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln & rn);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l & r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln & rn);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l & r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "BitAndAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_bitor_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(ln | rn);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                }
+                (l, r) => {
+                    let l = to_int32_value(&l)?;
+                    let r = to_int32_value(&r)?;
+                    let new_val = Value::Number((l | r) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln | rn);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l | r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln | rn);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l | r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "BitOrAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_bitxor_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let new_val = Value::BigInt(ln ^ rn);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                }
+                (l, r) => {
+                    let l = to_int32_value(&l)?;
+                    let r = to_int32_value(&r)?;
+                    let new_val = Value::Number((l ^ r) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln ^ rn);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l ^ r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let new_val = Value::BigInt(ln ^ rn);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = to_int32_value(&r)?;
+                        let new_val = Value::Number((l ^ r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "BitXorAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_leftshift_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let shift = bigint_shift_count(&rn)?;
+                    let new_val = Value::BigInt(ln << shift);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                }
+                (l, r) => {
+                    let l = to_int32_value(&l)?;
+                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let new_val = Value::Number(((l << r) as i32) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let shift = bigint_shift_count(&rn)?;
+                        let new_val = Value::BigInt(ln << shift);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number(((l << r) as i32) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let shift = bigint_shift_count(&rn)?;
+                        let new_val = Value::BigInt(ln << shift);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number(((l << r) as i32) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "LeftShiftAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_rightshift_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(ln), Value::BigInt(rn)) => {
+                    let shift = bigint_shift_count(&rn)?;
+                    let new_val = Value::BigInt(ln >> shift);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                    Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                }
+                (l, r) => {
+                    let l = to_int32_value(&l)?;
+                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let new_val = Value::Number((l >> r) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let shift = bigint_shift_count(&rn)?;
+                        let new_val = Value::BigInt(ln >> shift);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number((l >> r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                match (current, val) {
+                    (Value::BigInt(ln), Value::BigInt(rn)) => {
+                        let shift = bigint_shift_count(&rn)?;
+                        let new_val = Value::BigInt(ln >> shift);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                    (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
+                        Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
+                    }
+                    (l, r) => {
+                        let l = to_int32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number((l >> r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "RightShiftAssign only for variables, properties or indexes"
+        ))),
+    }
+}
+
+fn evaluate_expr_urightshift_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let val = evaluate_expr(mc, env, value_expr)?;
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            match (current, val) {
+                (Value::BigInt(_), _) | (_, Value::BigInt(_)) => Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift"))),
+                (l, r) => {
+                    let l = to_uint32_value(&l)?;
+                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let new_val = Value::Number((l >> r) as f64);
+                    env_set_recursive(mc, env, name, new_val.clone())?;
+                    Ok(new_val)
+                }
+            }
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                let current = get_property_with_accessors(mc, env, &obj, &key_val)?;
+                if let Value::BigInt(_) = current {
+                    return Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift")));
+                }
+                match (current, val) {
+                    (l, r) => {
+                        let l = to_uint32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number((l >> r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key_str = value_to_string(&key_val);
+            let key = PropertyKey::from(key_str);
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+                if let Value::BigInt(_) = current {
+                    return Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift")));
+                }
+                match (current, val) {
+                    (l, r) => {
+                        let l = to_uint32_value(&l)?;
+                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                        let new_val = Value::Number((l >> r) as f64);
+                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                        Ok(new_val)
+                    }
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!(
+            "UnsignedRightShiftAssign only for variables, properties or indexes"
         ))),
     }
 }
@@ -2384,7 +3619,7 @@ fn evaluate_call_dispatch<'gc>(
                 Ok(crate::js_bigint::handle_bigint_object_method(this_v, method, &eval_args).map_err(EvalError::Js)?)
             } else if name == "Object.prototype.toString" {
                 let this_v = this_val.clone().unwrap_or(Value::Undefined);
-                Ok(handle_object_prototype_to_string(mc, &this_v))
+                Ok(handle_object_prototype_to_string(mc, &this_v, env))
             } else if let Some(method) = name.strip_prefix("BigInt.") {
                 Ok(crate::js_bigint::handle_bigint_static_method(mc, method, &eval_args, env).map_err(EvalError::Js)?)
             } else if let Some(method) = name.strip_prefix("Number.prototype.") {
@@ -2505,6 +3740,46 @@ fn evaluate_call_dispatch<'gc>(
                 } else {
                     let method = &name[6..];
                     Ok(handle_array_static_method(mc, method, &eval_args, env)?)
+                }
+            } else if name.starts_with("RegExp.") {
+                if let Some(method) = name.strip_prefix("RegExp.prototype.") {
+                    let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                    if let Value::Object(obj) = this_v {
+                        Ok(crate::js_regexp::handle_regexp_method(mc, &obj, method, &eval_args, env)?)
+                    } else {
+                        Err(EvalError::Js(raise_type_error!(
+                            "RegExp.prototype method called on non-object receiver"
+                        )))
+                    }
+                } else {
+                    Err(EvalError::Js(raise_eval_error!(format!("Unknown RegExp function: {}", name))))
+                }
+            } else if name.starts_with("Map.") {
+                if let Some(method) = name.strip_prefix("Map.prototype.") {
+                    let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                    if let Value::Object(obj) = this_v {
+                        if let Some(map_val) = obj_get_key_value(&obj, &"__map__".into())? {
+                            if let Value::Map(map_ptr) = &*map_val.borrow() {
+                                Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, &eval_args, env)?)
+                            } else {
+                                Err(EvalError::Js(raise_eval_error!(
+                                    "TypeError: Map.prototype method called on incompatible receiver"
+                                )))
+                            }
+                        } else {
+                            Err(EvalError::Js(raise_eval_error!(
+                                "TypeError: Map.prototype method called on incompatible receiver"
+                            )))
+                        }
+                    } else if let Value::Map(map_ptr) = this_v {
+                        Ok(crate::js_map::handle_map_instance_method(mc, &map_ptr, method, &eval_args, env)?)
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!(
+                            "TypeError: Map.prototype method called on non-object receiver"
+                        )))
+                    }
+                } else {
+                    Err(EvalError::Js(raise_eval_error!(format!("Unknown Map function: {}", name))))
                 }
             } else if name.starts_with("Map.") {
                 if let Some(method) = name.strip_prefix("Map.prototype.") {
@@ -2748,6 +4023,61 @@ fn evaluate_expr_call<'gc>(
     args: &[Expr],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let (func_val, this_val) = match func_expr {
+        Expr::OptionalProperty(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if obj_val.is_null_or_undefined() {
+                // Short-circuit optional chain for method call on null/undefined
+                return Ok(Value::Undefined);
+            }
+            let f_val = if let Value::Object(obj) = &obj_val {
+                if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                    val.borrow().clone()
+                } else if key.as_str() == "call" && obj_get_key_value(obj, &"__closure__".into())?.is_some() {
+                    Value::Function("call".to_string())
+                } else {
+                    Value::Undefined
+                }
+            } else if let Value::String(s) = &obj_val
+                && key == "length"
+            {
+                Value::Number(s.len() as f64)
+            } else if matches!(
+                obj_val,
+                Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
+            ) && key == "call"
+            {
+                Value::Function("call".to_string())
+            } else {
+                get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
+            };
+            (f_val, Some(obj_val))
+        }
+        Expr::OptionalIndex(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if obj_val.is_null_or_undefined() {
+                // Short-circuit optional chain for computed method call on null/undefined
+                return Ok(Value::Undefined);
+            }
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+
+            let key = match key_val {
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s).into()),
+                Value::Number(n) => PropertyKey::from(n.to_string()),
+                _ => PropertyKey::from(value_to_string(&key_val)),
+            };
+
+            let f_val = if let Value::Object(obj) = &obj_val {
+                if let Some(val) = obj_get_key_value(obj, &key)? {
+                    val.borrow().clone()
+                } else {
+                    Value::Undefined
+                }
+            } else {
+                get_primitive_prototype_property(mc, env, &obj_val, &key)?
+            };
+            (f_val, Some(obj_val))
+        }
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let f_val = if let Value::Object(obj) = &obj_val {
@@ -2758,6 +4088,10 @@ fn evaluate_expr_call<'gc>(
                 } else {
                     Value::Undefined
                 }
+            } else if let Value::String(s) = &obj_val
+                && key == "length"
+            {
+                Value::Number(s.len() as f64)
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
                 return Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")));
             } else if matches!(
@@ -2836,7 +4170,7 @@ fn evaluate_expr_binary<'gc>(
     let l_val = evaluate_expr(mc, env, left)?;
     let r_val = evaluate_expr(mc, env, right)?;
     match op {
-        BinaryOp::Add => match (l_val, r_val) {
+        BinaryOp::Add => match (l_val.clone(), r_val.clone()) {
             (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(ln + rn)),
             (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
             (Value::String(ls), Value::String(rs)) => {
@@ -2857,7 +4191,25 @@ fn evaluate_expr_binary<'gc>(
             (Value::BigInt(_), _) | (_, Value::BigInt(_)) => {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot mix BigInt and other types")))
             }
-            _ => Err(EvalError::Js(raise_eval_error!("Binary Add only for numbers or strings"))),
+            _ => {
+                // Try ToPrimitive on both operands with 'default' hint and handle string concatenation or numeric addition
+                let l_prim = crate::core::to_primitive(mc, &l_val, "default", env).map_err(EvalError::Js)?;
+                let r_prim = crate::core::to_primitive(mc, &r_val, "default", env).map_err(EvalError::Js)?;
+                match (l_prim, r_prim) {
+                    (Value::String(ls), other) => {
+                        let mut res = ls.clone();
+                        res.extend(utf8_to_utf16(&value_to_concat_string(&other)));
+                        Ok(Value::String(res))
+                    }
+                    (other, Value::String(rs)) => {
+                        let mut res = utf8_to_utf16(&value_to_concat_string(&other));
+                        res.extend(rs);
+                        Ok(Value::String(res))
+                    }
+                    (Value::Number(ln), Value::Number(rn)) => Ok(Value::Number(ln + rn)),
+                    (lprim, rprim) => Ok(Value::Number(to_number(&lprim)? + to_number(&rprim)?)),
+                }
+            }
         },
         BinaryOp::Sub => match (l_val, r_val) {
             (Value::BigInt(ln), Value::BigInt(rn)) => Ok(Value::BigInt(ln - rn)),
@@ -2931,6 +4283,7 @@ fn evaluate_expr_binary<'gc>(
                 (Value::Undefined, Value::Undefined) => true,
                 (Value::Object(l), Value::Object(r)) => Gc::ptr_eq(l, r),
                 (Value::Closure(l), Value::Closure(r)) => Gc::ptr_eq(l, r),
+                (Value::Symbol(l), Value::Symbol(r)) => Gc::ptr_eq(l, r),
                 _ => false,
             };
             Ok(Value::Boolean(eq))
@@ -2945,6 +4298,7 @@ fn evaluate_expr_binary<'gc>(
                 (Value::Undefined, Value::Undefined) => true,
                 (Value::Object(l), Value::Object(r)) => Gc::ptr_eq(l, r),
                 (Value::Closure(l), Value::Closure(r)) => Gc::ptr_eq(l, r),
+                (Value::Symbol(l), Value::Symbol(r)) => Gc::ptr_eq(l, r),
                 _ => false,
             };
             Ok(Value::Boolean(!eq))
@@ -2981,6 +4335,7 @@ fn evaluate_expr_binary<'gc>(
                 (Value::Undefined, Value::Undefined) => true,
                 (Value::Object(l), Value::Object(r)) => Gc::ptr_eq(l, r),
                 (Value::Closure(l), Value::Closure(r)) => Gc::ptr_eq(l, r),
+                (Value::Symbol(l), Value::Symbol(r)) => Gc::ptr_eq(l, r),
                 _ => false,
             };
             Ok(Value::Boolean(eq))
@@ -3010,6 +4365,11 @@ fn evaluate_expr_binary<'gc>(
         }
         BinaryOp::GreaterThan => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l > r)),
+            (Value::String(l), Value::String(r)) => {
+                let ls = crate::unicode::utf16_to_utf8(&l);
+                let rs = crate::unicode::utf16_to_utf8(&r);
+                Ok(Value::Boolean(ls > rs))
+            }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
                 let rn = to_number(&other)?;
@@ -3028,6 +4388,11 @@ fn evaluate_expr_binary<'gc>(
         },
         BinaryOp::LessThan => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l < r)),
+            (Value::String(l), Value::String(r)) => {
+                let ls = crate::unicode::utf16_to_utf8(&l);
+                let rs = crate::unicode::utf16_to_utf8(&r);
+                Ok(Value::Boolean(ls < rs))
+            }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
                 let rn = to_number(&other)?;
@@ -3046,6 +4411,11 @@ fn evaluate_expr_binary<'gc>(
         },
         BinaryOp::GreaterEqual => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l >= r)),
+            (Value::String(l), Value::String(r)) => {
+                let ls = crate::unicode::utf16_to_utf8(&l);
+                let rs = crate::unicode::utf16_to_utf8(&r);
+                Ok(Value::Boolean(ls >= rs))
+            }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
                 let rn = to_number(&other)?;
@@ -3064,6 +4434,11 @@ fn evaluate_expr_binary<'gc>(
         },
         BinaryOp::LessEqual => match (l_val, r_val) {
             (Value::BigInt(l), Value::BigInt(r)) => Ok(Value::Boolean(l <= r)),
+            (Value::String(l), Value::String(r)) => {
+                let ls = crate::unicode::utf16_to_utf8(&l);
+                let rs = crate::unicode::utf16_to_utf8(&r);
+                Ok(Value::Boolean(ls <= rs))
+            }
             (Value::BigInt(l), other) => {
                 let ln = l.to_f64().unwrap_or(f64::NAN);
                 let rn = to_number(&other)?;
@@ -3163,6 +4538,110 @@ fn evaluate_expr_binary<'gc>(
     }
 }
 
+enum LogicalAssignOp {
+    And,
+    Or,
+    Nullish,
+}
+
+fn evaluate_expr_logical_assign<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    value_expr: &Expr,
+    op: LogicalAssignOp,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    match target {
+        Expr::Var(name, _, _) => {
+            let current = evaluate_var(mc, env, name)?;
+            let should_assign = match op {
+                LogicalAssignOp::And => is_truthy(&current),
+                LogicalAssignOp::Or => !is_truthy(&current),
+                LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
+            };
+
+            if should_assign {
+                let val = evaluate_expr(mc, env, value_expr)?;
+                env_set_recursive(mc, env, name, val.clone())?;
+                Ok(val)
+            } else {
+                Ok(current)
+            }
+        }
+        Expr::Property(obj_expr, key_str) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            // Property access on primitives is allowed but assignment strictness might vary.
+            // But usually assignment to primitive fails or ignored.
+            // evaluate_expr_assign handles primitives by Error "Cannot assign to property of non-object".
+            // We'll mimic that.
+            if let Value::Object(obj) = obj_val {
+                let key = PropertyKey::from(key_str.as_str());
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+
+                let should_assign = match op {
+                    LogicalAssignOp::And => is_truthy(&current),
+                    LogicalAssignOp::Or => !is_truthy(&current),
+                    LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
+                };
+
+                if should_assign {
+                    let val = evaluate_expr(mc, env, value_expr)?;
+                    set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+                    Ok(val)
+                } else {
+                    Ok(current)
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val_res = evaluate_expr(mc, env, key_expr)?;
+
+            let key = match key_val_res {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                _ => PropertyKey::from(value_to_string(&key_val_res)),
+            };
+
+            if let Value::Object(obj) = obj_val {
+                let current = get_property_with_accessors(mc, env, &obj, &key)?;
+
+                let should_assign = match op {
+                    LogicalAssignOp::And => is_truthy(&current),
+                    LogicalAssignOp::Or => !is_truthy(&current),
+                    LogicalAssignOp::Nullish => matches!(current, Value::Null | Value::Undefined),
+                };
+
+                if should_assign {
+                    let val = evaluate_expr(mc, env, value_expr)?;
+                    set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+                    Ok(val)
+                } else {
+                    Ok(current)
+                }
+            } else {
+                Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!("Invalid assignment target"))),
+    }
+}
+
+fn is_truthy(val: &Value) -> bool {
+    match val {
+        Value::Boolean(b) => *b,
+        Value::Number(n) => *n != 0.0 && !n.is_nan(),
+        Value::String(s) => !s.is_empty(),
+        Value::Null | Value::Undefined => false,
+        Value::Object(_) | Value::Symbol(_) => true,
+        Value::BigInt(b) => !b.is_zero(),
+        _ => false,
+    }
+}
+
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
         Expr::Number(n) => Ok(Value::Number(*n)),
@@ -3194,33 +4673,23 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::DivAssign(target, value_expr) => evaluate_expr_div_assign(mc, env, &**target, value_expr),
         Expr::ModAssign(target, value_expr) => evaluate_expr_mod_assign(mc, env, &**target, value_expr),
         Expr::PowAssign(target, value_expr) => evaluate_expr_pow_assign(mc, env, &**target, value_expr),
+        Expr::BitAndAssign(target, value_expr) => evaluate_expr_bitand_assign(mc, env, &**target, value_expr),
+        Expr::BitOrAssign(target, value_expr) => evaluate_expr_bitor_assign(mc, env, &**target, value_expr),
+        Expr::BitXorAssign(target, value_expr) => evaluate_expr_bitxor_assign(mc, env, &**target, value_expr),
+        Expr::LeftShiftAssign(target, value_expr) => evaluate_expr_leftshift_assign(mc, env, &**target, value_expr),
+        Expr::RightShiftAssign(target, value_expr) => evaluate_expr_rightshift_assign(mc, env, &**target, value_expr),
+        Expr::UnsignedRightShiftAssign(target, value_expr) => evaluate_expr_urightshift_assign(mc, env, &**target, value_expr),
+        Expr::LogicalAndAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::And),
+        Expr::LogicalOrAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::Or),
+        Expr::NullishAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::Nullish),
         Expr::Binary(left, op, right) => evaluate_expr_binary(mc, env, left, op, right),
         Expr::LogicalNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            let b = match val {
-                Value::Boolean(b) => b,
-                Value::Number(n) => n != 0.0 && !n.is_nan(),
-                Value::String(s) => !s.is_empty(),
-                Value::Null | Value::Undefined => false,
-                Value::Object(_) | Value::Symbol(_) => true,
-                Value::BigInt(b) => !b.is_zero(),
-                _ => false,
-            };
-            Ok(Value::Boolean(!b))
+            Ok(Value::Boolean(!is_truthy(&val)))
         }
         Expr::Conditional(cond, then_expr, else_expr) => {
             let val = evaluate_expr(mc, env, cond)?;
-            let is_true = match val {
-                Value::Boolean(b) => b,
-                Value::Number(n) => n != 0.0 && !n.is_nan(),
-                Value::String(s) => !s.is_empty(),
-                Value::Null | Value::Undefined => false,
-                Value::Object(_) | Value::Symbol(_) => true,
-                Value::BigInt(b) => !b.is_zero(),
-                _ => false,
-            };
-
-            if is_true {
+            if is_truthy(&val) {
                 let r = evaluate_expr(mc, env, then_expr)?;
                 Ok(r)
             } else {
@@ -3229,6 +4698,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             }
         }
         Expr::Object(properties) => evaluate_expr_object(mc, env, properties),
+        Expr::Regex(pattern, flags) => {
+            // Instantiate a RegExp object for a regex literal
+            let pattern_utf16 = crate::unicode::utf8_to_utf16(pattern);
+            let flags_u16 = crate::unicode::utf8_to_utf16(flags);
+            let arg1 = Value::String(pattern_utf16);
+            let arg2 = Value::String(flags_u16);
+            Ok(crate::js_regexp::handle_regexp_constructor(mc, &[arg1, arg2])?)
+        }
 
         Expr::Array(elements) => evaluate_expr_array(mc, env, elements),
 
@@ -3294,7 +4771,23 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
 
             if let Value::Object(obj) = &obj_val {
-                get_property_with_accessors(mc, env, obj, &key.as_str().into())
+                let val = get_property_with_accessors(mc, env, obj, &key.as_str().into())?;
+                // Special-case `__proto__` getter: if not present as an own property, return
+                // the internal prototype pointer (or null).
+                if let Value::Undefined = val {
+                    if key == "__proto__" {
+                        if let Some(proto_ptr) = obj.borrow().prototype {
+                            return Ok(Value::Object(proto_ptr));
+                        } else {
+                            return Ok(Value::Null);
+                        }
+                    }
+                }
+                Ok(val)
+            } else if let Value::String(s) = &obj_val
+                && key == "length"
+            {
+                Ok(Value::Number(s.len() as f64))
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
                 Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
             } else {
@@ -3314,6 +4807,22 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             if let Value::Object(obj) = &obj_val {
                 get_property_with_accessors(mc, env, obj, &key)
+            } else if let Value::String(s) = &obj_val {
+                if let PropertyKey::String(k_str) = &key {
+                    if k_str == "length" {
+                        Ok(Value::Number(s.len() as f64))
+                    } else if let Ok(idx) = k_str.parse::<usize>() {
+                        if idx < s.len() {
+                            Ok(Value::String(vec![s[idx]]))
+                        } else {
+                            Ok(Value::Undefined)
+                        }
+                    } else {
+                        get_primitive_prototype_property(mc, env, &obj_val, &key)
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &obj_val, &key)
+                }
             } else if matches!(obj_val, Value::Undefined | Value::Null) {
                 Err(EvalError::Js(raise_eval_error!("Cannot read properties of null or undefined")))
             } else {
@@ -3409,7 +4918,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 | Value::Closure(_)
                 | Value::AsyncClosure(_)
                 | Value::GeneratorFunction(..)
-                | Value::ClassDefinition(_) => "function",
+                | Value::ClassDefinition(_)
+                | Value::Getter(..)
+                | Value::Setter(..) => "function",
                 Value::Object(obj) => {
                     if obj_get_key_value(&obj, &"__closure__".into()).unwrap_or(None).is_some() {
                         "function"
@@ -3530,20 +5041,124 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             }
         }
         Expr::OptionalCall(lhs, args) => {
-            let left_val = evaluate_expr(mc, env, lhs)?;
-            if left_val.is_null_or_undefined() {
-                Ok(Value::Undefined)
-            } else {
-                let mut eval_args = Vec::new();
-                for arg in args {
-                    eval_args.push(evaluate_expr(mc, env, arg)?);
-                }
-                match left_val {
-                    Value::Function(name) => {
-                        crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone()).map_err(EvalError::Js)
+            // Handle optional call specially for property/index targets so we can short-circuit
+            // when the base is null/undefined without raising a "Cannot read properties of null or undefined" error.
+            match &**lhs {
+                Expr::Property(obj_expr, key) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    if obj_val.is_null_or_undefined() {
+                        return Ok(Value::Undefined);
                     }
-                    Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
-                    _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
+                    let mut eval_args = Vec::new();
+                    for arg in args {
+                        eval_args.push(evaluate_expr(mc, env, arg)?);
+                    }
+
+                    let f_val = if let Value::Object(obj) = &obj_val {
+                        if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                            val.borrow().clone()
+                        } else if key.as_str() == "call" && obj_get_key_value(obj, &"__closure__".into())?.is_some() {
+                            Value::Function("call".to_string())
+                        } else {
+                            Value::Undefined
+                        }
+                    } else if let Value::String(s) = &obj_val
+                        && key == "length"
+                    {
+                        Value::Number(s.len() as f64)
+                    } else if matches!(
+                        obj_val,
+                        Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
+                    ) && key == "call"
+                    {
+                        Value::Function("call".to_string())
+                    } else {
+                        get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
+                    };
+
+                    match f_val {
+                        Value::Function(name) => {
+                            crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone()).map_err(EvalError::Js)
+                        }
+                        Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
+                        _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
+                    }
+                }
+                Expr::Index(obj_expr, index_expr) => {
+                    let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                    if obj_val.is_null_or_undefined() {
+                        return Ok(Value::Undefined);
+                    }
+
+                    let index_val = evaluate_expr(mc, env, index_expr)?;
+                    let prop_key = match index_val {
+                        Value::Symbol(s) => crate::core::PropertyKey::Symbol(s),
+                        Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        val => {
+                            let s = match val {
+                                Value::Number(n) => n.to_string(),
+                                Value::Boolean(b) => b.to_string(),
+                                Value::Undefined => "undefined".to_string(),
+                                Value::Null => "null".to_string(),
+                                _ => crate::core::value_to_string(&val),
+                            };
+                            crate::core::PropertyKey::String(s)
+                        }
+                    };
+
+                    let mut eval_args = Vec::new();
+                    for arg in args {
+                        eval_args.push(evaluate_expr(mc, env, arg)?);
+                    }
+
+                    let f_val = if let Value::Object(obj) = &obj_val {
+                        if let Some(val_rc) = crate::core::obj_get_key_value(&obj, &prop_key).map_err(EvalError::Js)? {
+                            val_rc.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        }
+                    } else {
+                        get_primitive_prototype_property(mc, env, &obj_val, &prop_key)?
+                    };
+
+                    match f_val {
+                        Value::Function(name) => {
+                            crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone()).map_err(EvalError::Js)
+                        }
+                        Value::Closure(c) => call_closure(mc, &c, Some(obj_val.clone()), &eval_args, env, None),
+                        _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
+                    }
+                }
+                _ => {
+                    // Fallback: evaluate the lhs; if it throws because of reading properties of null/undefined,
+                    // treat it as short-circuit for optional chaining and return undefined.
+                    match evaluate_expr(mc, env, lhs) {
+                        Ok(left_val) => {
+                            if left_val.is_null_or_undefined() {
+                                Ok(Value::Undefined)
+                            } else {
+                                let mut eval_args = Vec::new();
+                                for arg in args {
+                                    eval_args.push(evaluate_expr(mc, env, arg)?);
+                                }
+                                match left_val {
+                                    Value::Function(name) => {
+                                        crate::js_function::handle_global_function(mc, &name, &eval_args, &env.clone())
+                                            .map_err(EvalError::Js)
+                                    }
+                                    Value::Closure(c) => call_closure(mc, &c, None, &eval_args, env, None),
+                                    _ => Err(EvalError::Js(crate::raise_type_error!("OptionalCall target is not a function"))),
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if e.message() == "Cannot read properties of null or undefined" {
+                                Ok(Value::Undefined)
+                            } else {
+                                Err(e)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3737,14 +5352,12 @@ fn set_property_with_accessors<'gc>(
         if s == "__proto__" {
             match &val {
                 Value::Object(proto_obj) => {
+                    // Update internal prototype pointer; do NOT create an own enumerable '__proto__' property
                     obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                    // Also set the own property so future reads of `__proto__` return the value
-                    crate::core::obj_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
                     return Ok(());
                 }
                 Value::Null => {
                     obj.borrow_mut(mc).prototype = None;
-                    crate::core::obj_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
                     return Ok(());
                 }
                 _ => {
@@ -3831,19 +5444,48 @@ fn call_native_function<'gc>(
 
     if name == "toString" {
         let this = this_val.unwrap_or(Value::Undefined);
-        let tag = match this {
-            Value::Number(_) => "Number",
-            Value::String(_) => "String",
-            Value::Boolean(_) => "Boolean",
-            Value::BigInt(_) => "BigInt",
-            Value::Symbol(_) => "Symbol",
-            Value::Undefined => "Undefined",
-            Value::Null => "Null",
-            Value::Object(_) => "Object",
-            Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function",
-            _ => "Object",
+        let tag = match &this {
+            Value::Number(_) => "Number".to_string(),
+            Value::String(_) => "String".to_string(),
+            Value::Boolean(_) => "Boolean".to_string(),
+            Value::BigInt(_) => "BigInt".to_string(),
+            Value::Symbol(_) => "Symbol".to_string(),
+            Value::Undefined => "Undefined".to_string(),
+            Value::Null => "Null".to_string(),
+            Value::Object(obj) => {
+                let mut t = "Object".to_string();
+                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into()) {
+                    if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
+                        if let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into()) {
+                            if let Value::Symbol(s) = &*tag_sym.borrow() {
+                                if let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(s.clone())) {
+                                    if let Value::String(s_val) = &*val.borrow() {
+                                        t = crate::unicode::utf16_to_utf8(s_val);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                t
+            }
+            Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..) => "Function".to_string(),
+            _ => "Object".to_string(),
         };
         return Ok(Some(Value::String(crate::unicode::utf8_to_utf16(&format!("[object {tag}]")))));
+    }
+    if name == "IteratorSelf" {
+        return Ok(Some(this_val.unwrap_or(Value::Undefined)));
+    }
+    if name == "StringIterator.prototype.next" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(crate::js_string::handle_string_iterator_next(mc, &obj)?));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: StringIterator.prototype.next called on non-object"
+            )));
+        }
     }
     if name == "MapIterator.prototype.next" {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
@@ -3852,6 +5494,19 @@ fn call_native_function<'gc>(
         } else {
             return Err(EvalError::Js(raise_eval_error!(
                 "TypeError: MapIterator.prototype.next called on non-object"
+            )));
+        }
+    }
+
+    if name == "ArrayIterator.prototype.next" {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(
+                crate::js_array::handle_array_iterator_next(mc, &obj, env).map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: ArrayIterator.prototype.next called on non-object"
             )));
         }
     }
@@ -3871,6 +5526,14 @@ fn call_native_function<'gc>(
         return Ok(Some(crate::js_symbol::handle_symbol_call(mc, args, env).map_err(EvalError::Js)?));
     }
 
+    if name == "Symbol.for" {
+        return Ok(Some(crate::js_symbol::handle_symbol_for(mc, args, env).map_err(EvalError::Js)?));
+    }
+
+    if name == "Symbol.keyFor" {
+        return Ok(Some(crate::js_symbol::handle_symbol_keyfor(mc, args, env).map_err(EvalError::Js)?));
+    }
+
     if name == "Symbol.prototype.toString" {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_tostring(mc, this_v).map_err(EvalError::Js)?));
@@ -3879,6 +5542,38 @@ fn call_native_function<'gc>(
     if name == "Symbol.prototype.valueOf" {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v).map_err(EvalError::Js)?));
+    }
+
+    if name == "Reflect.setPrototypeOf" {
+        // Reflect.setPrototypeOf(obj, proto)
+        if args.len() != 2 {
+            return Err(EvalError::Js(raise_eval_error!("Reflect.setPrototypeOf requires two arguments")));
+        }
+        let target = args[0].clone();
+        let proto = args[1].clone();
+        return match target {
+            Value::Object(obj) => {
+                match proto {
+                    Value::Object(proto_obj) => {
+                        obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+                        // also set the own property __proto__ for consistency
+                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Object(proto_obj.clone())).map_err(EvalError::Js)?;
+                        Ok(Some(Value::Boolean(true)))
+                    }
+                    Value::Null => {
+                        obj.borrow_mut(mc).prototype = None;
+                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Null).map_err(EvalError::Js)?;
+                        Ok(Some(Value::Boolean(true)))
+                    }
+                    _ => Err(EvalError::Js(raise_eval_error!(
+                        "Reflect.setPrototypeOf expects an object or null as second argument"
+                    ))),
+                }
+            }
+            _ => Err(EvalError::Js(raise_eval_error!(
+                "Reflect.setPrototypeOf requires an object as first argument"
+            ))),
+        };
     }
 
     if name.starts_with("Map.") {
@@ -4024,11 +5719,18 @@ fn call_accessor<'gc>(
                 ))))
             }
         }
-        Value::Getter(body, captured_env, _) => {
+        Value::Getter(body, captured_env, home_opt) => {
             let call_env = crate::core::new_js_object_data(mc);
             call_env.borrow_mut(mc).prototype = Some(*captured_env);
             call_env.borrow_mut(mc).is_function_scope = true;
             crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
+            // If the getter carried a home object, propagate it into call env so `super` resolves
+            if let Some(home_box) = home_opt {
+                if let Value::Object(home_obj) = &**home_box {
+                    crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
+                        .map_err(EvalError::Js)?;
+                }
+            }
             let mut body_clone = body.clone();
             evaluate_statements(mc, &call_env, &mut body_clone)
         }
@@ -4038,6 +5740,11 @@ fn call_accessor<'gc>(
             call_env.borrow_mut(mc).prototype = Some(cl_data.env);
             call_env.borrow_mut(mc).is_function_scope = true;
             crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
+            // Propagate [[HomeObject]] if present on the closure
+            if let Some(home_obj) = cl_data.home_object.borrow().clone() {
+                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
+                    .map_err(EvalError::Js)?;
+            }
             let mut body_clone = cl_data.body.clone();
             evaluate_statements(mc, &call_env, &mut body_clone)
         }
@@ -4046,6 +5753,21 @@ fn call_accessor<'gc>(
             let cl_val_opt = crate::core::obj_get_key_value(obj, &"__closure__".into()).map_err(EvalError::Js)?;
             if let Some(cl_val) = cl_val_opt {
                 if let Value::Closure(cl) = &*cl_val.borrow() {
+                    // If the function object has a stored __home_object__, propagate that into the call env
+                    if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(obj, &"__home_object__".into()) {
+                        if let Value::Object(home_obj) = &*home_val_rc.borrow() {
+                            let cl_data = &*cl;
+                            let call_env = crate::core::new_js_object_data(mc);
+                            call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                            call_env.borrow_mut(mc).is_function_scope = true;
+                            crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver))
+                                .map_err(EvalError::Js)?;
+                            crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
+                                .map_err(EvalError::Js)?;
+                            let mut body_clone = cl_data.body.clone();
+                            return evaluate_statements(mc, &call_env, &mut body_clone);
+                        }
+                    }
                     return call_accessor(mc, env, receiver, &Value::Closure(*cl));
                 }
             }
@@ -4181,7 +5903,12 @@ pub fn call_closure<'gc>(
             // Use structured debug logging; avoid formatting full `Value` to reduce stack usage
             log::debug!("call_closure: binding NFE name='{}' args_len={}", name, args.len());
             crate::core::env_set(mc, &call_env, &name, Value::Object(fn_obj_ptr)).map_err(EvalError::Js)?;
+            // Also set a frame name on the call environment so thrown errors can
+            // indicate which function they occurred in (used in stack traces).
+            crate::core::obj_set_key_value(mc, &call_env, &"__frame".into(), Value::String(utf8_to_utf16(&name))).map_err(EvalError::Js)?;
         }
+        // Link caller environment so stacks can be assembled by walking __caller
+        crate::core::obj_set_key_value(mc, &call_env, &"__caller".into(), Value::Object(env.clone())).map_err(EvalError::Js)?;
     }
 
     let effective_this = if let Some(bound) = &cl.bound_this {
@@ -4192,6 +5919,17 @@ pub fn call_closure<'gc>(
 
     if let Some(tv) = effective_this {
         crate::core::obj_set_key_value(mc, &call_env, &"this".into(), tv.clone()).map_err(EvalError::Js)?;
+    }
+
+    // If the function was stored as an object with a `__home_object__` property, propagate
+    // that into the call environment (this covers methods defined in object-literals).
+    if let Some(fn_obj_ptr) = fn_obj {
+        if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(&fn_obj_ptr, &"__home_object__".into()) {
+            if let Value::Object(home_obj) = &*home_val_rc.borrow() {
+                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
+                    .map_err(EvalError::Js)?;
+            }
+        }
     }
 
     // FIX: propagate [[HomeObject]] into call_env so `super` resolves parent prototype and avoids recursive lookup
@@ -4336,8 +6074,12 @@ fn evaluate_update_expression<'gc>(
         Expr::Index(obj_expr, key_expr) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let k_val = evaluate_expr(mc, env, key_expr)?;
-            let key_str = value_to_string(&k_val);
-            let key = PropertyKey::from(key_str);
+            let key = match k_val {
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::from(n.to_string()),
+                _ => PropertyKey::from(value_to_string(&k_val)),
+            };
 
             if let Value::Object(obj) = obj_val {
                 // Use get_property_with_accessors so getters are invoked for reads
@@ -4598,6 +6340,8 @@ fn evaluate_expr_new<'gc>(
                             return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
                         } else if name == &crate::unicode::utf8_to_utf16("Array") {
                             return Ok(crate::js_array::handle_array_constructor(mc, &eval_args, env)?);
+                        } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
+                            return Ok(crate::js_regexp::handle_regexp_constructor(mc, &eval_args)?);
                         } else if name == &crate::unicode::utf8_to_utf16("Map") {
                             return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
                         } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
@@ -4614,6 +6358,8 @@ fn evaluate_expr_new<'gc>(
                             return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
                         } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
                             return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
+                        } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
+                            return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
                         }
                     }
                 }
@@ -4659,18 +6405,124 @@ fn evaluate_expr_object<'gc>(
         }
 
         let key_val = evaluate_expr(mc, env, key_expr)?;
-        let val = evaluate_expr(mc, env, val_expr)?;
+        let mut val = evaluate_expr(mc, env, val_expr)?;
 
-        let key_str = match key_val {
-            Value::String(s) => utf16_to_utf8(&s),
-            Value::Number(n) => n.to_string(),
-            Value::Boolean(b) => b.to_string(),
-            Value::BigInt(b) => b.to_string(),
-            Value::Undefined => "undefined".to_string(),
-            Value::Null => "null".to_string(),
-            _ => "object".to_string(),
+        // If this value is a Closure/AsyncClosure/GeneratorFunction that is a method
+        // defined on an object literal, set its [[HomeObject]] so that `super` works.
+        match &mut val {
+            Value::Closure(_c) => {
+                // set home object to this object
+                // Note: closure.home_object is not directly mutated here; instead we store
+                // the home object on the function object itself (see handling below for
+                // Value::Object representing functions with a __closure__ property).
+            }
+            Value::AsyncClosure(_) => {
+                // handled via function object __home_object__ setting
+            }
+            Value::GeneratorFunction(_, _) => {
+                // handled via function object __home_object__ setting
+            }
+
+            // For getter/setter variants, wrap them with home object so super resolves
+            Value::Getter(body, captured_env, _) => {
+                val = Value::Getter(body.clone(), *captured_env, Some(Box::new(Value::Object(obj.clone()))));
+            }
+            Value::Setter(params, body, captured_env, _) => {
+                val = Value::Setter(
+                    params.clone(),
+                    body.clone(),
+                    *captured_env,
+                    Some(Box::new(Value::Object(obj.clone()))),
+                );
+            }
+            _ => {}
+        }
+
+        let key_v = match key_val {
+            Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+            Value::Number(n) => PropertyKey::String(n.to_string()),
+            Value::Boolean(b) => PropertyKey::String(b.to_string()),
+            Value::BigInt(b) => PropertyKey::String(b.to_string()),
+            Value::Undefined => PropertyKey::String("undefined".to_string()),
+            Value::Null => PropertyKey::String("null".to_string()),
+            Value::Symbol(s) => PropertyKey::Symbol(s),
+            Value::Object(_) => PropertyKey::String("[object Object]".to_string()),
+            _ => PropertyKey::String("object".to_string()),
         };
-        obj_set_key_value(mc, &obj, &PropertyKey::from(key_str), val)?;
+
+        // If the value is a function object (holds a __closure__), attach a __home_object__
+        // own property on the function object so it can propagate [[HomeObject]] during calls
+        if let Value::Object(func_obj) = &val {
+            if let Ok(Some(_)) = obj_get_key_value(func_obj, &"__closure__".into()) {
+                let _ = obj_set_key_value(mc, func_obj, &"__home_object__".into(), Value::Object(obj.clone()));
+            }
+        }
+
+        // Merge accessors if existing property is a getter or setter; otherwise set normally
+        if let Some(existing_ptr) = obj_get_key_value(&obj, &key_v)? {
+            let existing = existing_ptr.borrow().clone();
+            let new_val = val.clone();
+            match (existing, new_val) {
+                // If existing is a Property descriptor, merge appropriately
+                (
+                    Value::Property {
+                        value: existing_value,
+                        getter: existing_getter,
+                        setter: existing_setter,
+                    },
+                    new_val,
+                ) => {
+                    let (mut getter_opt, mut setter_opt, mut value_opt) = (existing_getter, existing_setter, existing_value);
+                    match new_val {
+                        Value::Getter(_, _, _) => getter_opt = Some(Box::new(new_val)),
+                        Value::Setter(_, _, _, _) => setter_opt = Some(Box::new(new_val)),
+                        other => {
+                            // Replace data value
+                            let new_ptr = Gc::new(mc, GcCell::new(other));
+                            value_opt = Some(new_ptr);
+                        }
+                    }
+                    let prop_descriptor = Value::Property {
+                        value: value_opt,
+                        getter: getter_opt,
+                        setter: setter_opt,
+                    };
+                    obj_set_key_value(mc, &obj, &key_v, prop_descriptor)?;
+                }
+                // If existing is a Getter/Setter, create a Property descriptor
+                (Value::Getter(_, _, _), Value::Getter(_, _, _))
+                | (Value::Getter(_, _, _), Value::Setter(_, _, _, _))
+                | (Value::Setter(_, _, _, _), Value::Getter(_, _, _))
+                | (Value::Setter(_, _, _, _), Value::Setter(_, _, _, _)) => {
+                    // Extract existing components
+                    let (mut getter_opt, mut setter_opt) = (None::<Box<Value<'gc>>>, None::<Box<Value<'gc>>>);
+                    if let Value::Getter(_, _, _) = obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone() {
+                        getter_opt = Some(Box::new(obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone()));
+                    }
+                    if let Value::Setter(_, _, _, _) = obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone() {
+                        setter_opt = Some(Box::new(obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone()));
+                    }
+                    // Incorporate new value
+                    match val {
+                        Value::Getter(_, _, _) => getter_opt = Some(Box::new(val)),
+                        Value::Setter(_, _, _, _) => setter_opt = Some(Box::new(val)),
+                        _ => {}
+                    }
+                    let prop_descriptor = Value::Property {
+                        value: None,
+                        getter: getter_opt,
+                        setter: setter_opt,
+                    };
+                    obj_set_key_value(mc, &obj, &key_v, prop_descriptor)?;
+                }
+                // Otherwise just overwrite
+                (_other, new_val) => {
+                    obj_set_key_value(mc, &obj, &key_v, new_val)?;
+                }
+            }
+        } else {
+            obj_set_key_value(mc, &obj, &key_v, val)?;
+        }
     }
     Ok(Value::Object(obj))
 }

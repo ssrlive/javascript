@@ -60,6 +60,15 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(iterator_sym_data), val)?;
     }
 
+    // Symbol.toStringTag
+    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+        && let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        && let Value::Symbol(s) = &*tag_sym.borrow()
+    {
+        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(s.clone()), Value::String(utf8_to_utf16("Set")))?;
+    }
+
     // Register size getter
     let size_getter = Value::Function("Set.prototype.size".to_string());
     let size_prop = Value::Property {
@@ -172,19 +181,19 @@ pub(crate) fn handle_set_instance_method<'gc>(
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.values takes no arguments"));
             }
-            create_set_iterator(mc, set.clone(), "values")
+            create_set_iterator(mc, _env, set.clone(), "values")
         }
         "keys" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.keys takes no arguments"));
             }
-            create_set_iterator(mc, set.clone(), "values") // Set keys are same as values
+            create_set_iterator(mc, _env, set.clone(), "values") // Set keys are same as values
         }
         "entries" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.entries takes no arguments"));
             }
-            create_set_iterator(mc, set.clone(), "entries")
+            create_set_iterator(mc, _env, set.clone(), "entries")
         }
         "forEach" => {
             if args.is_empty() {
@@ -235,7 +244,12 @@ pub(crate) fn handle_set_instance_method<'gc>(
     }
 }
 
-fn create_set_iterator<'gc>(mc: &MutationContext<'gc>, set: Gc<'gc, GcCell<JSSet<'gc>>>, kind: &str) -> Result<Value<'gc>, JSError> {
+fn create_set_iterator<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    set: Gc<'gc, GcCell<JSSet<'gc>>>,
+    kind: &str,
+) -> Result<Value<'gc>, JSError> {
     let iterator = new_js_object_data(mc);
 
     // Store set weak reference or strong? JS iterators usually keep the collection alive.
@@ -257,9 +271,34 @@ fn create_set_iterator<'gc>(mc: &MutationContext<'gc>, set: Gc<'gc, GcCell<JSSet
         Value::Function("SetIterator.prototype.next".to_string()),
     )?;
 
-    // Iterator prototype?
-    // For now simple object with next method.
-    // Ideally should inherit from Set Iterator Prototype which inherits from Iterator Prototype.
+    // Register Symbols
+    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.iterator
+        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+            && let Value::Symbol(s) = &*iter_sym.borrow()
+        {
+            obj_set_key_value(
+                mc,
+                &iterator,
+                &PropertyKey::Symbol(s.clone()),
+                Value::Function("IteratorSelf".to_string()),
+            )?;
+        }
+
+        // Symbol.toStringTag
+        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+            && let Value::Symbol(s) = &*tag_sym.borrow()
+        {
+            obj_set_key_value(
+                mc,
+                &iterator,
+                &PropertyKey::Symbol(s.clone()),
+                Value::String(utf8_to_utf16("Set Iterator")),
+            )?;
+        }
+    }
 
     Ok(Value::Object(iterator))
 }

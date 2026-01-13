@@ -517,12 +517,93 @@ pub fn handle_object_method<'gc>(
                                 }
                                 // Accessor
                                 if let Some(g) = getter {
-                                    obj_set_key_value(mc, &desc_obj, &"get".into(), *g.clone())?;
+                                    match &*g.clone() {
+                                        Value::Getter(body, captured_env, _home) => {
+                                            let func_obj = crate::core::new_js_object_data(mc);
+                                            let closure_data = crate::core::ClosureData {
+                                                params: Vec::new(),
+                                                body: body.clone(),
+                                                env: *captured_env,
+                                                home_object: crate::core::GcCell::new(None),
+                                                captured_envs: Vec::new(),
+                                                bound_this: None,
+                                                is_arrow: false,
+                                            };
+                                            let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
+                                            obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                                            obj_set_key_value(mc, &desc_obj, &"get".into(), Value::Object(func_obj))?;
+                                        }
+                                        other => {
+                                            obj_set_key_value(mc, &desc_obj, &"get".into(), other.clone())?;
+                                        }
+                                    }
                                 }
                                 if let Some(s) = setter {
-                                    obj_set_key_value(mc, &desc_obj, &"set".into(), *s.clone())?;
+                                    match &*s.clone() {
+                                        Value::Setter(params, body, captured_env, _home) => {
+                                            let func_obj = crate::core::new_js_object_data(mc);
+                                            let closure_data = crate::core::ClosureData {
+                                                params: params.clone(),
+                                                body: body.clone(),
+                                                env: *captured_env,
+                                                home_object: crate::core::GcCell::new(None),
+                                                captured_envs: Vec::new(),
+                                                bound_this: None,
+                                                is_arrow: false,
+                                            };
+                                            let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
+                                            obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                                            obj_set_key_value(mc, &desc_obj, &"set".into(), Value::Object(func_obj))?;
+                                        }
+                                        other => {
+                                            obj_set_key_value(mc, &desc_obj, &"set".into(), other.clone())?;
+                                        }
+                                    }
                                 }
                                 // flags: enumerable depends on object's non-enumerable set
+                                let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
+                                obj_set_key_value(mc, &desc_obj, &"enumerable".into(), enum_flag)?;
+                                let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
+                                obj_set_key_value(mc, &desc_obj, &"configurable".into(), config_flag)?;
+                            }
+                            // Handle raw Getter/Setter values stored directly on objects (from object literal shorthand)
+                            Value::Getter(body, captured_env, _home_opt) => {
+                                // Create a function object to expose as the 'get' value on the descriptor
+                                let func_obj = crate::core::new_js_object_data(mc);
+                                let closure_data = crate::core::ClosureData {
+                                    params: Vec::new(),
+                                    body: body.clone(),
+                                    env: *captured_env,
+                                    home_object: crate::core::GcCell::new(None),
+                                    captured_envs: Vec::new(),
+                                    bound_this: None,
+                                    is_arrow: false,
+                                };
+                                let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
+                                obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                                obj_set_key_value(mc, &desc_obj, &"get".into(), Value::Object(func_obj))?;
+
+                                let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
+                                obj_set_key_value(mc, &desc_obj, &"enumerable".into(), enum_flag)?;
+                                let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
+                                obj_set_key_value(mc, &desc_obj, &"configurable".into(), config_flag)?;
+                            }
+                            Value::Setter(params, body, captured_env, _home_opt) => {
+                                // Create a function object to expose as the 'set' value on the descriptor
+                                let func_obj = crate::core::new_js_object_data(mc);
+                                let closure_data = crate::core::ClosureData {
+                                    params: params.clone(),
+                                    body: body.clone(),
+                                    env: *captured_env,
+                                    home_object: crate::core::GcCell::new(None),
+                                    captured_envs: Vec::new(),
+                                    bound_this: None,
+                                    is_arrow: false,
+                                };
+                                let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
+                                obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                                obj_set_key_value(mc, &desc_obj, &"set".into(), Value::Object(func_obj))?;
+
                                 let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
                                 obj_set_key_value(mc, &desc_obj, &"enumerable".into(), enum_flag)?;
                                 let config_flag = Value::Boolean(obj.borrow().is_configurable(key));
@@ -756,6 +837,11 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::Null => Ok(Value::String(utf8_to_utf16("[object Null]"))),
         Value::Uninitialized => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
         Value::Object(object) => {
+            // If this is an Error object, use Error.prototype.toString behavior
+            if crate::core::js_error::is_error(&Value::Object(object.clone())) {
+                return handle_error_to_string_method(mc, &Value::Object(object.clone()), args);
+            }
+
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = obj_get_key_value(object, &"__value__".into())? {
                 match &*wrapped_val.borrow() {

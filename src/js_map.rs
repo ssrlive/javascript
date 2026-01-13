@@ -51,6 +51,26 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     };
     obj_set_key_value(mc, &map_proto, &"size".into(), size_prop)?;
 
+    // Register Symbols
+    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.iterator
+        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+            && let Value::Symbol(s) = &*iter_sym.borrow()
+        {
+            let val = Value::Function("Map.prototype.entries".to_string());
+            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(s.clone()), val)?;
+        }
+
+        // Symbol.toStringTag
+        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+            && let Value::Symbol(s) = &*tag_sym.borrow()
+        {
+            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(s.clone()), Value::String(utf8_to_utf16("Map")))?;
+        }
+    }
+
     env_set(mc, env, "Map", Value::Object(map_ctor))?;
     Ok(())
 }
@@ -212,6 +232,27 @@ pub(crate) fn create_map_iterator<'gc>(
         &"next".into(),
         Value::Function("MapIterator.prototype.next".to_string()),
     )?;
+
+    // Register Symbols
+    if let Some(sym_ctor) = obj_get_key_value(_env, &"Symbol".into())?
+        && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+    {
+        // Symbol.iterator
+        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+            && let Value::Symbol(s) = &*iter_sym.borrow()
+        {
+            let val = Value::Function("IteratorSelf".to_string());
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+        }
+
+        // Symbol.toStringTag
+        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+            && let Value::Symbol(s) = &*tag_sym.borrow()
+        {
+            let val = Value::String(utf8_to_utf16("Map Iterator"));
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+        }
+    }
 
     Ok(Value::Object(iterator))
 }

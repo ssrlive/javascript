@@ -1,5 +1,3 @@
-#![cfg(feature = "os")]
-
 use crate::core::MutationContext;
 use std::collections::HashMap;
 use std::fs::File;
@@ -76,22 +74,15 @@ pub(crate) fn handle_os_method<'gc>(
     if get_own_property(&object, &"open".into()).is_some() {
         match method {
             "open" => {
-                if let Some(filename_val) = args.get(0) {
+                if let Some(filename_val) = args.first() {
                     let filename = match filename_val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => {
                             return Err(raise_eval_error!("os.open filename must be a string"));
                         }
                     };
                     log::trace!("os.open called with filename={} args={}", filename, args.len());
-                    let flags = if let Some(flag_val) = args.get(1) {
-                        match flag_val {
-                            Value::Number(n) => *n as i32,
-                            _ => 0,
-                        }
-                    } else {
-                        0
-                    };
+                    let flags = if let Some(Value::Number(n)) = args.get(1) { *n as i32 } else { 0 };
                     // For simplicity, treat flags as: 0=read, 1=write, 2=read+write
                     let mut options = std::fs::OpenOptions::new();
                     if flags & 2 != 0 {
@@ -126,7 +117,7 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
             "close" => {
-                if let Some(fd_val) = args.get(0) {
+                if let Some(fd_val) = args.first() {
                     let fd = match fd_val {
                         Value::Number(n) => *n as u64,
                         _ => {
@@ -181,7 +172,7 @@ pub(crate) fn handle_os_method<'gc>(
                         }
                     };
                     let data = match data_val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     log::trace!("os.write called fd={} data_len={}", fd, data.len());
@@ -234,9 +225,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
             "remove" => {
-                if let Some(filename_val) = args.get(0) {
+                if let Some(filename_val) = args.first() {
                     let filename = match filename_val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => {
                             return Err(raise_eval_error!("os.remove filename must be a string"));
                         }
@@ -249,9 +240,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
             "mkdir" => {
-                if let Some(dirname_val) = args.get(0) {
+                if let Some(dirname_val) = args.first() {
                     let dirname = match dirname_val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => {
                             return Err(raise_eval_error!("os.mkdir dirname must be a string"));
                         }
@@ -264,9 +255,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::Number(-1.0));
             }
             "readdir" => {
-                if let Some(dirname_val) = args.get(0) {
+                if let Some(dirname_val) = args.first() {
                     let dirname = match dirname_val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => {
                             return Err(raise_eval_error!("os.readdir dirname must be a string"));
                         }
@@ -331,7 +322,7 @@ pub(crate) fn handle_os_method<'gc>(
                 let mut result = String::new();
                 for (i, val) in args.iter().enumerate() {
                     let part = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     if i > 0 {
@@ -342,9 +333,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16(&result)));
             }
             "dirname" | "path.dirname" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
@@ -358,9 +349,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16(".")));
             }
             "basename" | "path.basename" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
@@ -374,9 +365,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "extname" | "path.extname" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     let path_obj = std::path::Path::new(&path);
@@ -390,9 +381,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "resolve" | "path.resolve" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     if let Ok(canonical) = std::fs::canonicalize(&path)
@@ -405,9 +396,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "normalize" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     let normalized = std::path::Path::new(&path).to_string_lossy().to_string();
@@ -416,9 +407,9 @@ pub(crate) fn handle_os_method<'gc>(
                 return Ok(Value::String(utf8_to_utf16("")));
             }
             "isAbsolute" => {
-                if let Some(val) = args.get(0) {
+                if let Some(val) = args.first() {
                     let path = match val {
-                        Value::String(s) => utf16_to_utf8(&s),
+                        Value::String(s) => utf16_to_utf8(s),
                         _ => "".to_string(),
                     };
                     let is_absolute = std::path::Path::new(&path).is_absolute();

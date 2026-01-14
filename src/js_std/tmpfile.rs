@@ -93,7 +93,7 @@ pub(crate) fn handle_file_method<'gc>(object: &JSObjectDataPtr<'gc>, method: &st
                 let mut to_write = String::new();
                 for av in args {
                     match av {
-                        Value::String(sv) => to_write.push_str(&utf16_to_utf8(&sv)),
+                        Value::String(sv) => to_write.push_str(&utf16_to_utf8(sv)),
                         Value::Number(n) => to_write.push_str(&n.to_string()),
                         Value::Boolean(b) => to_write.push_str(&b.to_string()),
                         _ => {}

@@ -29,8 +29,8 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         map_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &map_ctor, &"prototype".into(), Value::Object(map_proto.clone()))?;
-    obj_set_key_value(mc, &map_proto, &"constructor".into(), Value::Object(map_ctor.clone()))?;
+    obj_set_key_value(mc, &map_ctor, &"prototype".into(), Value::Object(map_proto))?;
+    obj_set_key_value(mc, &map_proto, &"constructor".into(), Value::Object(map_ctor))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "clear", "keys", "values", "entries"];
@@ -60,14 +60,14 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("Map.prototype.entries".to_string());
-            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(s.clone()), val)?;
+            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(*s), val)?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(s.clone()), Value::String(utf8_to_utf16("Map")))?;
+            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Map")))?;
         }
     }
 
@@ -111,7 +111,7 @@ pub(crate) fn handle_map_constructor<'gc>(
         && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        map_obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+        map_obj.borrow_mut(mc).prototype = Some(*proto_obj);
     }
 
     Ok(Value::Object(map_obj))
@@ -242,7 +242,7 @@ pub(crate) fn create_map_iterator<'gc>(
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("IteratorSelf".to_string());
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), val)?;
         }
 
         // Symbol.toStringTag
@@ -250,7 +250,7 @@ pub(crate) fn create_map_iterator<'gc>(
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
             let val = Value::String(utf8_to_utf16("Map Iterator"));
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), val)?;
         }
     }
 

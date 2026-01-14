@@ -11,8 +11,18 @@ use std::rc::Rc;
 /// Create the Reflect object with all reflection methods
 pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
     let reflect_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("apply".to_string()), Value::Function("Reflect.apply".to_string()))?;
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("construct".to_string()), Value::Function("Reflect.construct".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("apply".to_string()),
+        Value::Function("Reflect.apply".to_string()),
+    )?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("construct".to_string()),
+        Value::Function("Reflect.construct".to_string()),
+    )?;
     obj_set_key_value(
         mc,
         &reflect_obj,
@@ -25,7 +35,12 @@ pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
         &crate::core::PropertyKey::String("deleteProperty".to_string()),
         Value::Function("Reflect.deleteProperty".to_string()),
     )?;
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("get".to_string()), Value::Function("Reflect.get".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("get".to_string()),
+        Value::Function("Reflect.get".to_string()),
+    )?;
     obj_set_key_value(
         mc,
         &reflect_obj,
@@ -38,21 +53,36 @@ pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
         &crate::core::PropertyKey::String("getPrototypeOf".to_string()),
         Value::Function("Reflect.getPrototypeOf".to_string()),
     )?;
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("has".to_string()), Value::Function("Reflect.has".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("has".to_string()),
+        Value::Function("Reflect.has".to_string()),
+    )?;
     obj_set_key_value(
         mc,
         &reflect_obj,
         &crate::core::PropertyKey::String("isExtensible".to_string()),
         Value::Function("Reflect.isExtensible".to_string()),
     )?;
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("ownKeys".to_string()), Value::Function("Reflect.ownKeys".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("ownKeys".to_string()),
+        Value::Function("Reflect.ownKeys".to_string()),
+    )?;
     obj_set_key_value(
         mc,
         &reflect_obj,
         &crate::core::PropertyKey::String("preventExtensions".to_string()),
         Value::Function("Reflect.preventExtensions".to_string()),
     )?;
-    obj_set_key_value(mc, &reflect_obj, &crate::core::PropertyKey::String("set".to_string()), Value::Function("Reflect.set".to_string()))?;
+    obj_set_key_value(
+        mc,
+        &reflect_obj,
+        &crate::core::PropertyKey::String("set".to_string()),
+        Value::Function("Reflect.set".to_string()),
+    )?;
     obj_set_key_value(
         mc,
         &reflect_obj,
@@ -220,7 +250,7 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                                 let promise_obj = Value::Object(new_js_object_data(mc));
                                 if let Value::Object(obj) = &promise_obj {
                                     obj.borrow_mut(mc);
-                        // .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
+                                    // .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
                                 }
 
                                 // Prepare function environment and bind parameters (bind `this` directly)
@@ -244,8 +274,9 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                                             promise.borrow_mut(mc).state = crate::js_promise::PromiseState::Rejected(value.clone());
                                         }
                                         _ => {
-                                            promise.borrow_mut(mc).state =
-                                                crate::js_promise::PromiseState::Rejected(Value::String(utf8_to_utf16(&format!("{:?}", e))));
+                                            promise.borrow_mut(mc).state = crate::js_promise::PromiseState::Rejected(Value::String(
+                                                utf8_to_utf16(&format!("{:?}", e)),
+                                            ));
                                         }
                                     },
                                 }
@@ -321,7 +352,7 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                     if let Value::Object(attr_obj) = &attributes {
                         if let Some(value_rc) = obj_get_key_value(attr_obj, &crate::core::PropertyKey::String("value".to_string()))? {
                             let prop_key = match property_key {
-                                Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                                Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(s)),
                                 Value::Number(n) => PropertyKey::String(n.to_string()),
                                 _ => return Err(raise_type_error!("Invalid property key")),
                             };
@@ -403,10 +434,30 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                     if let Some(value_rc) = obj_get_key_value(&obj, &prop_key)? {
                         // Create a descriptor object
                         let descriptor = new_js_object_data(mc);
-                        obj_set_key_value(mc, &descriptor, &crate::core::PropertyKey::String("value".to_string()), value_rc.borrow().clone())?;
-                        obj_set_key_value(mc, &descriptor, &crate::core::PropertyKey::String("writable".to_string()), Value::Boolean(true))?;
-                        obj_set_key_value(mc, &descriptor, &crate::core::PropertyKey::String("enumerable".to_string()), Value::Boolean(true))?;
-                        obj_set_key_value(mc, &descriptor, &crate::core::PropertyKey::String("configurable".to_string()), Value::Boolean(true))?;
+                        obj_set_key_value(
+                            mc,
+                            &descriptor,
+                            &crate::core::PropertyKey::String("value".to_string()),
+                            value_rc.borrow().clone(),
+                        )?;
+                        obj_set_key_value(
+                            mc,
+                            &descriptor,
+                            &crate::core::PropertyKey::String("writable".to_string()),
+                            Value::Boolean(true),
+                        )?;
+                        obj_set_key_value(
+                            mc,
+                            &descriptor,
+                            &crate::core::PropertyKey::String("enumerable".to_string()),
+                            Value::Boolean(true),
+                        )?;
+                        obj_set_key_value(
+                            mc,
+                            &descriptor,
+                            &crate::core::PropertyKey::String("configurable".to_string()),
+                            Value::Boolean(true),
+                        )?;
                         Ok(Value::Object(descriptor))
                     } else {
                         Ok(Value::Undefined)

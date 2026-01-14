@@ -92,7 +92,7 @@ pub fn handle_atomics_method<'gc>(
     let ta_obj = if let Value::Object(object) = ta_val {
         if let Some(ta_rc) = obj_get_key_value(&object, &"__typedarray".into())? {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
-                ta.clone()
+                *ta
             } else {
                 return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
             }
@@ -229,7 +229,7 @@ pub fn handle_atomics_method<'gc>(
             };
 
             // Compute key for waiters: (arc_ptr, byte_index)
-            let buffer_rc = ta_obj.buffer.clone();
+            let buffer_rc = ta_obj.buffer;
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
             let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
 
@@ -303,7 +303,7 @@ pub fn handle_atomics_method<'gc>(
                 usize::MAX
             };
 
-            let buffer_rc = ta_obj.buffer.clone();
+            let buffer_rc = ta_obj.buffer;
             let arc_ptr = Arc::as_ptr(&buffer_rc.borrow().data) as usize;
             let byte_index = ta_obj.byte_offset + idx * ta_obj.element_size();
 
@@ -721,7 +721,7 @@ pub fn handle_arraybuffer_constructor<'gc>(
 
     // Set prototype
     let proto = make_arraybuffer_prototype(mc)?;
-    obj.borrow_mut(mc).prototype = Some(proto.clone());
+    obj.borrow_mut(mc).prototype = Some(proto);
 
     Ok(Value::Object(obj))
 }
@@ -759,14 +759,12 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     // Set prototype
     let mut proto_ptr = None;
-    if let Some(ctor_val) = obj_get_key_value(env, &"SharedArrayBuffer".into())? {
-        if let Value::Object(ctor_obj) = &*ctor_val.borrow() {
-            if let Some(p_val) = obj_get_key_value(ctor_obj, &"prototype".into())? {
-                if let Value::Object(p_obj) = &*p_val.borrow() {
-                    proto_ptr = Some(p_obj.clone());
-                }
-            }
-        }
+    if let Some(ctor_val) = obj_get_key_value(env, &"SharedArrayBuffer".into())?
+        && let Value::Object(ctor_obj) = &*ctor_val.borrow()
+        && let Some(p_val) = obj_get_key_value(ctor_obj, &"prototype".into())?
+        && let Value::Object(p_obj) = &*p_val.borrow()
+    {
+        proto_ptr = Some(*p_obj);
     }
 
     let proto = if let Some(p) = proto_ptr {
@@ -796,7 +794,7 @@ pub fn handle_dataview_constructor<'gc>(
         Value::Object(obj) => {
             if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
-                    ab.clone()
+                    *ab
                 } else {
                     return Err(raise_eval_error!("DataView buffer must be an ArrayBuffer"));
                 }
@@ -848,7 +846,7 @@ pub fn handle_dataview_constructor<'gc>(
 
     // Set prototype
     let proto = make_dataview_prototype(mc)?;
-    obj.borrow_mut(mc).prototype = Some(proto.clone());
+    obj.borrow_mut(mc).prototype = Some(proto);
 
     Ok(Value::Object(obj))
 }
@@ -941,7 +939,7 @@ pub fn handle_typedarray_constructor<'gc>(
                 } else if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
-                        (ab.clone(), 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
+                        (*ab, 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
@@ -966,7 +964,7 @@ pub fn handle_typedarray_constructor<'gc>(
                         }
                         let remaining_bytes = (**ab).borrow().data.lock().unwrap().len() - offset;
                         let length = remaining_bytes / element_size;
-                        (ab.clone(), offset, length)
+                        (*ab, offset, length)
                     } else {
                         return Err(raise_eval_error!("TypedArray byteOffset must be a number"));
                     }
@@ -997,7 +995,7 @@ pub fn handle_typedarray_constructor<'gc>(
                         if length * element_size + offset > (**ab).borrow().data.lock().unwrap().len() {
                             return Err(raise_eval_error!("TypedArray length exceeds buffer size"));
                         }
-                        (ab.clone(), offset, length)
+                        (*ab, offset, length)
                     } else {
                         return Err(raise_eval_error!("TypedArray byteOffset and length must be numbers"));
                     }
@@ -1019,7 +1017,7 @@ pub fn handle_typedarray_constructor<'gc>(
 
     // Set prototype first
     let proto = make_typedarray_prototype(mc, kind.clone())?;
-    obj.borrow_mut(mc).prototype = Some(proto.clone());
+    obj.borrow_mut(mc).prototype = Some(proto);
 
     // Create TypedArray instance
     let typed_array = Gc::new(
@@ -1049,7 +1047,7 @@ pub fn handle_dataview_method<'gc>(
     let dv_val = obj_get_key_value(object, &"__dataview".into())?;
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
-            dv.clone()
+            *dv
         } else {
             return Err(raise_eval_error!("Invalid DataView object"));
         }
@@ -1437,7 +1435,7 @@ pub fn handle_dataview_method<'gc>(
             Ok(Value::Undefined)
         }
         // Property accessors
-        "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer.clone())),
+        "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer)),
         "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
         "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
         _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented"))),
@@ -1779,7 +1777,7 @@ pub fn handle_typedarray_accessor<'gc>(
     if let Some(ta_val) = obj_get_key_value(object, &"__typedarray".into())? {
         if let Value::TypedArray(ta) = &*ta_val.borrow() {
             match property {
-                "buffer" => Ok(Value::ArrayBuffer(ta.buffer.clone())),
+                "buffer" => Ok(Value::ArrayBuffer(ta.buffer)),
                 "byteLength" => Ok(Value::Number((ta.length * ta.element_size()) as f64)),
                 "byteOffset" => Ok(Value::Number(ta.byte_offset as f64)),
                 "length" => Ok(Value::Number(ta.length as f64)),

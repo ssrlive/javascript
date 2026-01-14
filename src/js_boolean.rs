@@ -100,10 +100,10 @@ fn this_boolean_value<'gc>(value: &Value<'gc>) -> Result<bool, JSError> {
         Value::Boolean(b) => Ok(*b),
         Value::Object(obj) => {
             let val_opt = obj_get_key_value(obj, &"__value__".into())?;
-            if let Some(val) = val_opt {
-                if let Value::Boolean(b) = *val.borrow() {
-                    return Ok(b);
-                }
+            if let Some(val) = val_opt
+                && let Value::Boolean(b) = *val.borrow()
+            {
+                return Ok(b);
             }
             Err(crate::raise_type_error!("Boolean.prototype method called on incompatible receiver"))
         }

@@ -89,74 +89,74 @@ fn define_property_internal<'gc>(
     let value_rc_opt = obj_get_key_value(desc_obj, &"value".into())?;
 
     // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
-    if let Some(existing_rc) = obj_get_key_value(target_obj, &prop_key)? {
-        if !target_obj.borrow().is_configurable(&prop_key) {
-            // If descriptor explicitly sets configurable true -> throw
-            if let Some(cfg_rc) = obj_get_key_value(desc_obj, &"configurable".into())? {
-                if let Value::Boolean(true) = &*cfg_rc.borrow() {
-                    return Err(raise_type_error!("Cannot make non-configurable property configurable"));
-                }
+    if let Some(existing_rc) = obj_get_key_value(target_obj, &prop_key)?
+        && !target_obj.borrow().is_configurable(&prop_key)
+    {
+        // If descriptor explicitly sets configurable true -> throw
+        if let Some(cfg_rc) = obj_get_key_value(desc_obj, &"configurable".into())?
+            && let Value::Boolean(true) = &*cfg_rc.borrow()
+        {
+            return Err(raise_type_error!("Cannot make non-configurable property configurable"));
+        }
+
+        // If descriptor explicitly sets enumerable and it's different -> throw
+        if let Some(enum_rc) = obj_get_key_value(desc_obj, &"enumerable".into())?
+            && let Value::Boolean(new_enum) = &*enum_rc.borrow()
+        {
+            let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
+            if *new_enum != existing_enum {
+                return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
+            }
+        }
+
+        // Determine whether existing property is a data property or accessor
+        let existing_is_accessor = match &*existing_rc.borrow() {
+            Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
+            Value::Getter(..) | Value::Setter(..) => true,
+            _ => false,
+        };
+
+        // If existing is data property
+        if !existing_is_accessor {
+            // Disallow converting to accessor
+            if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+                return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
             }
 
-            // If descriptor explicitly sets enumerable and it's different -> throw
-            if let Some(enum_rc) = obj_get_key_value(desc_obj, &"enumerable".into())? {
-                if let Value::Boolean(new_enum) = &*enum_rc.borrow() {
-                    let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
-                    if *new_enum != existing_enum {
-                        return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
-                    }
-                }
+            // If writable is being set from false -> true, disallow
+            if let Some(wrc) = obj_get_key_value(desc_obj, &"writable".into())?
+                && let Value::Boolean(new_writable) = &*wrc.borrow()
+                && *new_writable
+                && !target_obj.borrow().is_writable(&prop_key)
+            {
+                return Err(raise_type_error!("Cannot make non-writable property writable"));
             }
 
-            // Determine whether existing property is a data property or accessor
-            let existing_is_accessor = match &*existing_rc.borrow() {
-                Value::Property { value: _, getter, setter } => getter.is_some() || setter.is_some(),
-                Value::Getter(..) | Value::Setter(..) => true,
-                _ => false,
-            };
+            // If attempting to change value while not writable and values differ -> throw
+            if let Some(new_val_rc) = value_rc_opt.as_ref()
+                && !target_obj.borrow().is_writable(&prop_key)
+            {
+                // get existing value for comparison
+                let existing_val = match &*existing_rc.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                if !crate::core::values_equal(mc, &existing_val, &new_val_rc.borrow().clone()) {
+                    return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
+                }
+            }
+        } else {
+            // existing is accessor
+            // Disallow converting to data property
+            if value_rc_opt.is_some() || obj_get_key_value(desc_obj, &"writable".into())?.is_some() {
+                return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
+            }
 
-            // If existing is data property
-            if !existing_is_accessor {
-                // Disallow converting to accessor
-                if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
-                    return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
-                }
-
-                // If writable is being set from false -> true, disallow
-                if let Some(wrc) = obj_get_key_value(desc_obj, &"writable".into())? {
-                    if let Value::Boolean(new_writable) = &*wrc.borrow() {
-                        if *new_writable && !target_obj.borrow().is_writable(&prop_key) {
-                            return Err(raise_type_error!("Cannot make non-writable property writable"));
-                        }
-                    }
-                }
-
-                // If attempting to change value while not writable and values differ -> throw
-                if let Some(new_val_rc) = value_rc_opt.as_ref() {
-                    if !target_obj.borrow().is_writable(&prop_key) {
-                        // get existing value for comparison
-                        let existing_val = match &*existing_rc.borrow() {
-                            Value::Property { value: Some(v), .. } => v.borrow().clone(),
-                            other => other.clone(),
-                        };
-                        if !crate::core::values_equal(mc, &existing_val, &new_val_rc.borrow().clone()) {
-                            return Err(raise_type_error!("Cannot change value of non-writable, non-configurable property"));
-                        }
-                    }
-                }
-            } else {
-                // existing is accessor
-                // Disallow converting to data property
-                if value_rc_opt.is_some() || obj_get_key_value(desc_obj, &"writable".into())?.is_some() {
-                    return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
-                }
-
-                // Disallow changing getter/setter functions on non-configurable accessor
-                if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
-                    return Err(raise_type_error!(
-                        "Cannot change getter/setter of non-configurable accessor property"
-                    ));
-                }
+            // Disallow changing getter/setter functions on non-configurable accessor
+            if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+                return Err(raise_type_error!(
+                    "Cannot change getter/setter of non-configurable accessor property"
+                ));
             }
         }
     }
@@ -179,7 +179,7 @@ fn define_property_internal<'gc>(
 
     // Create property descriptor value
     let prop_descriptor = Value::Property {
-        value: value_rc_opt.clone(),
+        value: value_rc_opt,
         getter: getter_opt,
         setter: setter_opt,
     };
@@ -321,7 +321,7 @@ pub fn handle_object_method<'gc>(
             let obj_val = args[0].clone();
             match obj_val {
                 Value::Object(obj) => {
-                    if let Some(proto_rc) = obj.borrow().prototype.clone() {
+                    if let Some(proto_rc) = obj.borrow().prototype {
                         Ok(Value::Object(proto_rc))
                     } else {
                         Ok(Value::Null)
@@ -357,10 +357,10 @@ pub fn handle_object_method<'gc>(
                 if let Some(val_rc) = obj_get_key_value(&items_obj, &i.to_string().into())? {
                     let val = val_rc.borrow().clone();
 
-                    let key_val = if let Some((params, mut body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
+                    let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
                         let args = vec![val.clone(), Value::Number(i as f64)];
                         let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params), &args, Some(env))?;
-                        crate::core::evaluate_statements(mc, &func_env, &mut body)?
+                        crate::core::evaluate_statements(mc, &func_env, &body)?
                     } else {
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
                     };
@@ -374,13 +374,13 @@ pub fn handle_object_method<'gc>(
 
                     let group_arr = if let Some(arr_rc) = obj_get_key_value(&result_obj, &key)? {
                         if let Value::Object(arr) = &*arr_rc.borrow() {
-                            arr.clone()
+                            *arr
                         } else {
                             crate::js_array::create_array(mc, env)?
                         }
                     } else {
                         let arr = crate::js_array::create_array(mc, env)?;
-                        obj_set_key_value(mc, &result_obj, &key, Value::Object(arr.clone()))?;
+                        obj_set_key_value(mc, &result_obj, &key, Value::Object(arr))?;
                         arr
                     };
 
@@ -410,7 +410,7 @@ pub fn handle_object_method<'gc>(
 
             // Set prototype
             if let Some(proto) = proto_obj {
-                new_obj.borrow_mut(mc).prototype = Some(proto.clone());
+                new_obj.borrow_mut(mc).prototype = Some(proto);
             }
 
             // If properties descriptor is provided, add properties
@@ -448,7 +448,7 @@ pub fn handle_object_method<'gc>(
                     for (key, _value) in obj.borrow().properties.iter() {
                         if let PropertyKey::Symbol(sym) = key {
                             // push symbol primitive into result array
-                            obj_set_key_value(mc, &result_obj, &idx.to_string().into(), Value::Symbol(sym.clone()))?;
+                            obj_set_key_value(mc, &result_obj, &idx.to_string().into(), Value::Symbol(*sym))?;
                             idx += 1;
                         }
                     }
@@ -626,12 +626,12 @@ pub fn handle_object_method<'gc>(
                         // Put descriptor onto result using the original key (string or symbol)
                         match key {
                             PropertyKey::String(s) => {
-                                obj_set_key_value(mc, &result_obj, &s.clone().into(), Value::Object(desc_obj.clone()))?;
+                                obj_set_key_value(mc, &result_obj, &s.clone().into(), Value::Object(desc_obj))?;
                             }
                             PropertyKey::Symbol(sym_rc) => {
                                 // Push symbol-keyed property on returned object with the same symbol key
-                                let property_key = PropertyKey::Symbol(sym_rc.clone());
-                                obj_set_key_value(mc, &result_obj, &property_key, Value::Object(desc_obj.clone()))?;
+                                let property_key = PropertyKey::Symbol(*sym_rc);
+                                obj_set_key_value(mc, &result_obj, &property_key, Value::Object(desc_obj))?;
                             }
                         }
                     }
@@ -689,7 +689,7 @@ pub fn handle_object_method<'gc>(
                 }
                 Value::Symbol(sd) => {
                     let obj = new_js_object_data(mc);
-                    obj_set_key_value(mc, &obj, &"__value__".into(), Value::Symbol(sd.clone()))?;
+                    obj_set_key_value(mc, &obj, &"__value__".into(), Value::Symbol(sd))?;
 
                     // Set prototype to Symbol.prototype if available
                     let _ = crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Symbol");
@@ -838,8 +838,8 @@ pub(crate) fn handle_to_string_method<'gc>(
         Value::Uninitialized => Ok(Value::String(utf8_to_utf16("[object Undefined]"))),
         Value::Object(object) => {
             // If this is an Error object, use Error.prototype.toString behavior
-            if crate::core::js_error::is_error(&Value::Object(object.clone())) {
-                return handle_error_to_string_method(mc, &Value::Object(object.clone()), args);
+            if crate::core::js_error::is_error(&Value::Object(*object)) {
+                return handle_error_to_string_method(mc, &Value::Object(*object), args);
             }
 
             // Check if this is a wrapped primitive object
@@ -855,7 +855,7 @@ pub(crate) fn handle_to_string_method<'gc>(
 
             // If this object looks like a Date (has __timestamp), call Date.toString()
             if is_date_object(object) {
-                return crate::js_date::handle_date_method(mc, &Value::Object(object.clone()), "toString", &[], env);
+                return crate::js_date::handle_date_method(mc, &Value::Object(*object), "toString", &[], env);
             }
 
             // If this object looks like an array, join elements with comma (Array.prototype.toString overrides Object.prototype)
@@ -880,14 +880,14 @@ pub(crate) fn handle_to_string_method<'gc>(
             }
 
             // If this object contains a Symbol.toStringTag property, honor it
-            if let Some(tag_sym_rc) = get_well_known_symbol(mc, env, "toStringTag") {
-                if let Value::Symbol(sd) = &*tag_sym_rc.borrow() {
-                    let key = PropertyKey::Symbol(sd.clone());
-                    if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
-                        && let Value::String(s) = &*tag_val_rc.borrow()
-                    {
-                        return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
-                    }
+            if let Some(tag_sym_rc) = get_well_known_symbol(mc, env, "toStringTag")
+                && let Value::Symbol(sd) = &*tag_sym_rc.borrow()
+            {
+                let key = PropertyKey::Symbol(*sd);
+                if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
+                    && let Value::String(s) = &*tag_val_rc.borrow()
+                {
+                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
                 }
             }
 
@@ -1021,18 +1021,11 @@ pub(crate) fn handle_value_of_method<'gc>(
                 match method_val {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let _params = &data.params;
-                        let mut body = data.body.clone();
+                        let body = data.body.clone();
                         let captured_env = &data.env;
-                        let func_env = prepare_function_call_env(
-                            mc,
-                            Some(captured_env),
-                            Some(Value::Object(obj.clone())),
-                            None,
-                            &[],
-                            None,
-                            Some(env),
-                        )?;
-                        let result = crate::core::evaluate_statements(mc, &func_env, &mut body)?;
+                        let func_env =
+                            prepare_function_call_env(mc, Some(captured_env), Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                        let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
                         if matches!(
                             result,
                             Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
@@ -1045,13 +1038,13 @@ pub(crate) fn handle_value_of_method<'gc>(
                         // handle it directly here to avoid recursion back into
                         // `handle_global_function` which would call us again.
                         if func_name == "Object.prototype.valueOf" {
-                            return Ok(Value::Object(obj.clone()));
+                            return Ok(Value::Object(*obj));
                         }
                         if func_name == "Object.prototype.toString" {
-                            return crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), args, env);
+                            return crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), args, env);
                         }
 
-                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj.clone())), None, &[], None, Some(env))?;
+                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj)), None, &[], None, Some(env))?;
                         // let res = crate::js_function::handle_global_function(mc, &func_name, &[], &func_env)?;
                         // if matches!(
                         //     res,
@@ -1064,32 +1057,25 @@ pub(crate) fn handle_value_of_method<'gc>(
                     _ => {}
                 }
                 // Support method stored as a function-object (object wrapping a closure)
-                if let Value::Object(func_obj_map) = &*method_rc.borrow() {
-                    if let Some(cl_rc) = obj_get_key_value(func_obj_map, &"__closure__".into())? {
-                        match &*cl_rc.borrow() {
-                            Value::Closure(data) | Value::AsyncClosure(data) => {
-                                let _params = &data.params;
-                                let mut body = data.body.clone();
-                                let captured_env = &data.env;
-                                let func_env = prepare_function_call_env(
-                                    mc,
-                                    Some(captured_env),
-                                    Some(Value::Object(obj.clone())),
-                                    None,
-                                    &[],
-                                    None,
-                                    Some(env),
-                                )?;
-                                let result = crate::core::evaluate_statements(mc, &func_env, &mut body)?;
-                                if matches!(
-                                    result,
-                                    Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
-                                ) {
-                                    return Ok(result);
-                                }
+                if let Value::Object(func_obj_map) = &*method_rc.borrow()
+                    && let Some(cl_rc) = obj_get_key_value(func_obj_map, &"__closure__".into())?
+                {
+                    match &*cl_rc.borrow() {
+                        Value::Closure(data) | Value::AsyncClosure(data) => {
+                            let _params = &data.params;
+                            let body = data.body.clone();
+                            let captured_env = &data.env;
+                            let func_env =
+                                prepare_function_call_env(mc, Some(captured_env), Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                            let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
+                            if matches!(
+                                result,
+                                Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                            ) {
+                                return Ok(result);
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
             }
@@ -1098,36 +1084,36 @@ pub(crate) fn handle_value_of_method<'gc>(
                 return crate::js_date::handle_date_method(mc, obj_val, "valueOf", &[], env);
             }
             // For regular objects, return the object itself
-            Ok(Value::Object(obj.clone()))
+            Ok(Value::Object(*obj))
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
         Value::Closure(data) | Value::AsyncClosure(data) => {
             let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
             Ok(Value::Closure(Gc::new(mc, closure_data)))
         }
-        Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(class_def.clone())),
-        Value::Getter(body, env, _) => Ok(Value::Getter(body.clone(), env.clone(), None)),
-        Value::Setter(param, body, env, _) => Ok(Value::Setter(param.clone(), body.clone(), env.clone(), None)),
+        Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(*class_def)),
+        Value::Getter(body, env, _) => Ok(Value::Getter(body.clone(), *env, None)),
+        Value::Setter(param, body, env, _) => Ok(Value::Setter(param.clone(), body.clone(), *env, None)),
         Value::Property { value, getter, setter } => Ok(Value::Property {
-            value: value.clone(),
+            value: *value,
             getter: getter.clone(),
             setter: setter.clone(),
         }),
-        Value::Promise(promise) => Ok(Value::Promise(promise.clone())),
-        Value::Symbol(symbol_data) => Ok(Value::Symbol(symbol_data.clone())),
-        Value::Map(map) => Ok(Value::Map(map.clone())),
-        Value::Set(set) => Ok(Value::Set(set.clone())),
-        Value::WeakMap(weakmap) => Ok(Value::WeakMap(weakmap.clone())),
-        Value::WeakSet(weakset) => Ok(Value::WeakSet(weakset.clone())),
+        Value::Promise(promise) => Ok(Value::Promise(*promise)),
+        Value::Symbol(symbol_data) => Ok(Value::Symbol(*symbol_data)),
+        Value::Map(map) => Ok(Value::Map(*map)),
+        Value::Set(set) => Ok(Value::Set(*set)),
+        Value::WeakMap(weakmap) => Ok(Value::WeakMap(*weakmap)),
+        Value::WeakSet(weakset) => Ok(Value::WeakSet(*weakset)),
         Value::GeneratorFunction(_, data) => {
             let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
             Ok(Value::GeneratorFunction(None, Gc::new(mc, closure_data)))
         }
-        Value::Generator(generator) => Ok(Value::Generator(generator.clone())),
-        Value::Proxy(proxy) => Ok(Value::Proxy(proxy.clone())),
-        Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(array_buffer.clone())),
-        Value::DataView(data_view) => Ok(Value::DataView(data_view.clone())),
-        Value::TypedArray(typed_array) => Ok(Value::TypedArray(typed_array.clone())),
+        Value::Generator(generator) => Ok(Value::Generator(*generator)),
+        Value::Proxy(proxy) => Ok(Value::Proxy(*proxy)),
+        Value::ArrayBuffer(array_buffer) => Ok(Value::ArrayBuffer(*array_buffer)),
+        Value::DataView(data_view) => Ok(Value::DataView(*data_view)),
+        Value::TypedArray(typed_array) => Ok(Value::TypedArray(*typed_array)),
         Value::Uninitialized => Err(raise_type_error!("Cannot convert uninitialized to object")),
     }
 }
@@ -1160,12 +1146,12 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
             let target_val = args[0].clone();
             match target_val {
                 Value::Object(target_map) => {
-                    let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> = target_map.borrow().prototype.clone();
+                    let mut current_opt: Option<Gc<'gc, GcCell<crate::core::JSObjectData<'gc>>>> = target_map.borrow().prototype;
                     while let Some(parent) = current_opt {
                         if Gc::ptr_eq(parent, *object) {
                             return Ok(Some(Value::Boolean(true)));
                         }
-                        current_opt = parent.borrow().prototype.clone();
+                        current_opt = parent.borrow().prototype;
                     }
                     Ok(Some(Value::Boolean(false)))
                 }
@@ -1182,19 +1168,19 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
         }
         "Object.prototype.toString" => Ok(Some(crate::js_object::handle_to_string_method(
             mc,
-            &Value::Object(object.clone()),
+            &Value::Object(*object),
             args,
             env,
         )?)),
         "Object.prototype.valueOf" => Ok(Some(crate::js_object::handle_value_of_method(
             mc,
-            &Value::Object(object.clone()),
+            &Value::Object(*object),
             args,
             env,
         )?)),
         "Object.prototype.toLocaleString" => Ok(Some(crate::js_object::handle_to_string_method(
             mc,
-            &Value::Object(object.clone()),
+            &Value::Object(*object),
             args,
             env,
         )?)),
@@ -1203,14 +1189,12 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
 }
 
 fn get_well_known_symbol<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
-    if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol") {
-        if let Value::Object(sym_ctor) = &*sym_ctor_val.borrow() {
-            if let Ok(Some(sym_val)) = obj_get_key_value(sym_ctor, &name.into()) {
-                if let Value::Symbol(_) = &*sym_val.borrow() {
-                    return Some(sym_val);
-                }
-            }
-        }
+    if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
+        && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
+        && let Ok(Some(sym_val)) = obj_get_key_value(sym_ctor, &name.into())
+        && let Value::Symbol(_) = &*sym_val.borrow()
+    {
+        return Some(sym_val);
     }
     None
 }

@@ -131,7 +131,7 @@ pub(crate) fn number_constructor<'gc>(
         match arg_val {
             Value::Number(n) => Ok(Value::Number(*n)),
             Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
+                let str_val = utf16_to_utf8(s);
                 match str_val.trim().parse::<f64>() {
                     Ok(n) => Ok(Value::Number(n)),
                     Err(_) => Ok(Value::Number(f64::NAN)),
@@ -142,7 +142,7 @@ pub(crate) fn number_constructor<'gc>(
             Value::Undefined => Ok(Value::Number(f64::NAN)),
             Value::Object(obj) => {
                 // Try ToPrimitive with 'number' hint
-                let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
+                let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;
                 match prim {
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {
@@ -216,7 +216,7 @@ pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Re
             if let Some(arg_val) = args.first() {
                 match arg_val {
                     Value::String(s) => {
-                        let str_val = utf16_to_utf8(&s);
+                        let str_val = utf16_to_utf8(s);
                         match str_val.trim().parse::<f64>() {
                             Ok(n) => Ok(Value::Number(n)),
                             Err(_) => Ok(Value::Number(f64::NAN)),
@@ -240,7 +240,7 @@ pub fn handle_number_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Re
 
                 match arg_val {
                     Value::String(s) => {
-                        let str_val = utf16_to_utf8(&s);
+                        let str_val = utf16_to_utf8(s);
                         let trimmed = str_val.trim();
                         if trimmed.is_empty() {
                             Ok(Value::Number(f64::NAN))

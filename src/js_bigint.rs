@@ -25,7 +25,7 @@ pub(crate) fn bigint_constructor<'gc>(
             Ok(Value::BigInt(BigInt::from(*n as i64)))
         }
         Value::String(s) => {
-            let st = utf16_to_utf8(&s);
+            let st = utf16_to_utf8(s);
             Ok(Value::BigInt(parse_bigint_string(&st)?))
         }
         Value::Boolean(b) => {
@@ -34,7 +34,7 @@ pub(crate) fn bigint_constructor<'gc>(
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
+            let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
@@ -75,7 +75,7 @@ pub fn handle_bigint_object_method<'gc>(this_val: Value<'gc>, method: &str, args
     match method {
         "toString" => {
             if args.is_empty() {
-                return Ok(Value::String(utf8_to_utf16(&h.to_string())));
+                Ok(Value::String(utf8_to_utf16(&h.to_string())))
             } else {
                 // radix support: expect a number argument
                 let arg0 = &args[0];
@@ -85,20 +85,20 @@ pub fn handle_bigint_object_method<'gc>(this_val: Value<'gc>, method: &str, args
                         return Err(raise_eval_error!("toString() radix out of range"));
                     }
                     let s = h.to_str_radix(r as u32);
-                    return Ok(Value::String(utf8_to_utf16(&s)));
+                    Ok(Value::String(utf8_to_utf16(&s)))
                 } else {
-                    return Err(raise_eval_error!("toString radix must be a number"));
+                    Err(raise_eval_error!("toString radix must be a number"))
                 }
             }
         }
         "valueOf" => {
             if args.is_empty() {
-                return Ok(Value::BigInt(h.clone()));
+                Ok(Value::BigInt(h.clone()))
             } else {
-                return Err(raise_eval_error!("valueOf expects no arguments"));
+                Err(raise_eval_error!("valueOf expects no arguments"))
             }
         }
-        _ => return Err(raise_eval_error!(format!("BigInt.prototype.{} is not implemented", method))),
+        _ => Err(raise_eval_error!(format!("BigInt.prototype.{} is not implemented", method))),
     }
 }
 
@@ -144,7 +144,7 @@ pub fn handle_bigint_static_method<'gc>(
             BigInt::from(*n as i64)
         }
         Value::String(s) => {
-            let st = utf16_to_utf8(&s);
+            let st = utf16_to_utf8(s);
             parse_bigint_string(&st)?
         }
         Value::Boolean(b) => {
@@ -156,7 +156,7 @@ pub fn handle_bigint_static_method<'gc>(
         }
         Value::Object(obj) => {
             // Try ToPrimitive with number hint first
-            let prim = to_primitive(mc, &Value::Object(obj.clone()), "number", env)?;
+            let prim = to_primitive(mc, &Value::Object(*obj), "number", env)?;
             match prim {
                 Value::Number(n) => {
                     if n.is_nan() || !n.is_finite() || n.fract() != 0.0 {
@@ -238,8 +238,8 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &bigint_proto, &"valueOf".into(), value_of)?;
 
     // Wire up
-    obj_set_key_value(mc, &bigint_ctor, &"prototype".into(), Value::Object(bigint_proto.clone()))?;
-    obj_set_key_value(mc, &bigint_proto, &"constructor".into(), Value::Object(bigint_ctor.clone()))?;
+    obj_set_key_value(mc, &bigint_ctor, &"prototype".into(), Value::Object(bigint_proto))?;
+    obj_set_key_value(mc, &bigint_proto, &"constructor".into(), Value::Object(bigint_ctor))?;
 
     // Mark prototype methods and constructor non-enumerable
     bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));

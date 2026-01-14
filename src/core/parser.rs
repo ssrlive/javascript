@@ -63,17 +63,18 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
         Token::Do => parse_do_while_statement(t, index),
         Token::Switch => parse_switch_statement(t, index),
         _ => {
-            if let Token::Identifier(name) = &start_token.token {
-                if *index + 1 < t.len() && matches!(t[*index + 1].token, Token::Colon) {
-                    let label_name = name.clone();
-                    *index += 2; // consume Identifier and Colon
-                    let stmt = parse_statement_item(t, index)?;
-                    return Ok(Statement {
-                        kind: Box::new(StatementKind::Label(label_name, Box::new(stmt))),
-                        line,
-                        column,
-                    });
-                }
+            if let Token::Identifier(name) = &start_token.token
+                && *index + 1 < t.len()
+                && matches!(t[*index + 1].token, Token::Colon)
+            {
+                let label_name = name.clone();
+                *index += 2; // consume Identifier and Colon
+                let stmt = parse_statement_item(t, index)?;
+                return Ok(Statement {
+                    kind: Box::new(StatementKind::Label(label_name, Box::new(stmt))),
+                    line,
+                    column,
+                });
             }
             let expr = parse_expression(t, index)?;
             if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
@@ -154,10 +155,8 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             let decls = parse_variable_declaration_list(t, index)?;
             init_decls = Some(decls);
         }
-    } else {
-        if !matches!(t[*index].token, Token::Semicolon) {
-            init_expr = Some(parse_expression(t, index)?);
-        }
+    } else if !matches!(t[*index].token, Token::Semicolon) {
+        init_expr = Some(parse_expression(t, index)?);
     }
 
     // Handle 'of'
@@ -229,24 +228,22 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         is_for_in = true;
         *index += 1;
         for_in_rhs = Some(parse_expression(t, index)?);
-    } else if !is_decl && init_expr.is_some() {
-        if matches!(t[*index].token, Token::RParen) {
-            // Check if init_expr is `x in y`.
-            if let Some(Expr::Binary(left, BinaryOp::In, right)) = init_expr.clone() {
-                if let Expr::Var(name, _, _) = *left {
-                    *index += 1; // consume )
-                    let body = parse_statement_item(t, index)?;
-                    let body_stmts = match *body.kind {
-                        StatementKind::Block(b) => b,
-                        _ => vec![body],
-                    };
-                    return Ok(Statement {
-                        kind: Box::new(StatementKind::ForIn(name, *right, body_stmts)),
-                        line,
-                        column,
-                    });
-                }
-            }
+    } else if !is_decl && init_expr.is_some() && matches!(t[*index].token, Token::RParen) {
+        // Check if init_expr is `x in y`.
+        if let Some(Expr::Binary(left, BinaryOp::In, right)) = init_expr.clone()
+            && let Expr::Var(name, _, _) = *left
+        {
+            *index += 1; // consume )
+            let body = parse_statement_item(t, index)?;
+            let body_stmts = match *body.kind {
+                StatementKind::Block(b) => b,
+                _ => vec![body],
+            };
+            return Ok(Statement {
+                kind: Box::new(StatementKind::ForIn(name, *right, body_stmts)),
+                line,
+                column,
+            });
         }
     }
 
@@ -640,11 +637,12 @@ fn parse_break_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     *index += 1; // consume break
 
     let mut label = None;
-    if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
-        if let Token::Identifier(name) = &t[*index].token {
-            label = Some(name.clone());
-            *index += 1;
-        }
+    if *index < t.len()
+        && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace)
+        && let Token::Identifier(name) = &t[*index].token
+    {
+        label = Some(name.clone());
+        *index += 1;
     }
 
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
@@ -663,11 +661,12 @@ fn parse_continue_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     *index += 1; // consume continue
 
     let mut label = None;
-    if *index < t.len() && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace) {
-        if let Token::Identifier(name) = &t[*index].token {
-            label = Some(name.clone());
-            *index += 1;
-        }
+    if *index < t.len()
+        && !matches!(t[*index].token, Token::Semicolon | Token::LineTerminator | Token::RBrace)
+        && let Token::Identifier(name) = &t[*index].token
+    {
+        label = Some(name.clone());
+        *index += 1;
     }
 
     if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
@@ -1709,45 +1708,43 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
 
             // Accessor get/set
-            if let Some(Token::Identifier(id)) = t.get(pos).map(|tok| &tok.token) {
-                if id == "get" || id == "set" {
-                    if let Some(Token::PrivateIdentifier(name)) = t.get(pos + 1).map(|tok| &tok.token) {
-                        current_private_names.borrow_mut().insert(name.clone());
-                    }
-                    pos += 1;
-                    if pos < t.len()
-                        && (matches!(t[pos].token, Token::Identifier(_)) || matches!(t[pos].token, Token::PrivateIdentifier(_)))
-                    {
-                        pos += 1;
-                    }
-                    // Skip params
-                    if pos < t.len() && matches!(t[pos].token, Token::LParen) {
-                        let mut depth = 1usize;
-                        pos += 1;
-                        while pos < t.len() && depth > 0 {
-                            if matches!(t[pos].token, Token::LParen) {
-                                depth += 1;
-                            } else if matches!(t[pos].token, Token::RParen) {
-                                depth -= 1;
-                            }
-                            pos += 1;
-                        }
-                    }
-                    // Skip body
-                    if pos < t.len() && matches!(t[pos].token, Token::LBrace) {
-                        let mut depth = 1usize;
-                        pos += 1;
-                        while pos < t.len() && depth > 0 {
-                            if matches!(t[pos].token, Token::LBrace) {
-                                depth += 1;
-                            } else if matches!(t[pos].token, Token::RBrace) {
-                                depth -= 1;
-                            }
-                            pos += 1;
-                        }
-                    }
-                    continue;
+            if let Some(Token::Identifier(id)) = t.get(pos).map(|tok| &tok.token)
+                && (id == "get" || id == "set")
+            {
+                if let Some(Token::PrivateIdentifier(name)) = t.get(pos + 1).map(|tok| &tok.token) {
+                    current_private_names.borrow_mut().insert(name.clone());
                 }
+                pos += 1;
+                if pos < t.len() && (matches!(t[pos].token, Token::Identifier(_)) || matches!(t[pos].token, Token::PrivateIdentifier(_))) {
+                    pos += 1;
+                }
+                // Skip params
+                if pos < t.len() && matches!(t[pos].token, Token::LParen) {
+                    let mut depth = 1usize;
+                    pos += 1;
+                    while pos < t.len() && depth > 0 {
+                        if matches!(t[pos].token, Token::LParen) {
+                            depth += 1;
+                        } else if matches!(t[pos].token, Token::RParen) {
+                            depth -= 1;
+                        }
+                        pos += 1;
+                    }
+                }
+                // Skip body
+                if pos < t.len() && matches!(t[pos].token, Token::LBrace) {
+                    let mut depth = 1usize;
+                    pos += 1;
+                    while pos < t.len() && depth > 0 {
+                        if matches!(t[pos].token, Token::LBrace) {
+                            depth += 1;
+                        } else if matches!(t[pos].token, Token::RBrace) {
+                            depth -= 1;
+                        }
+                        pos += 1;
+                    }
+                }
+                continue;
             }
 
             // Private Identifier Member
@@ -1894,17 +1891,17 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
         // Accessor check
         let mut is_accessor = false;
         let mut is_getter = false;
-        if let Some(Token::Identifier(kw)) = t.get(*index).map(|d| &d.token) {
-            if kw == "get" || kw == "set" {
-                // Check if it is used as keyword or name
-                // get x() {} -> keyword
-                // get() {} -> method name 'get'
-                if let Some(next) = t.get(*index + 1) {
-                    if matches!(next.token, Token::Identifier(_) | Token::PrivateIdentifier(_)) {
-                        is_accessor = true;
-                        is_getter = kw == "get";
-                    }
-                }
+        if let Some(Token::Identifier(kw)) = t.get(*index).map(|d| &d.token)
+            && (kw == "get" || kw == "set")
+        {
+            // Check if it is used as keyword or name
+            // get x() {} -> keyword
+            // get() {} -> method name 'get'
+            if let Some(next) = t.get(*index + 1)
+                && matches!(next.token, Token::Identifier(_) | Token::PrivateIdentifier(_))
+            {
+                is_accessor = true;
+                is_getter = kw == "get";
             }
         }
 
@@ -1935,27 +1932,21 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                     } else {
                         members.push(ClassMember::StaticGetter(prop_name, body));
                     }
+                } else if is_private {
+                    members.push(ClassMember::PrivateGetter(prop_name, body));
                 } else {
-                    if is_private {
-                        members.push(ClassMember::PrivateGetter(prop_name, body));
-                    } else {
-                        members.push(ClassMember::Getter(prop_name, body));
-                    }
+                    members.push(ClassMember::Getter(prop_name, body));
                 }
+            } else if is_static {
+                if is_private {
+                    members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
+                } else {
+                    members.push(ClassMember::StaticSetter(prop_name, params, body));
+                }
+            } else if is_private {
+                members.push(ClassMember::PrivateSetter(prop_name, params, body));
             } else {
-                if is_static {
-                    if is_private {
-                        members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
-                    } else {
-                        members.push(ClassMember::StaticSetter(prop_name, params, body));
-                    }
-                } else {
-                    if is_private {
-                        members.push(ClassMember::PrivateSetter(prop_name, params, body));
-                    } else {
-                        members.push(ClassMember::Setter(prop_name, params, body));
-                    }
-                }
+                members.push(ClassMember::Setter(prop_name, params, body));
             }
             continue;
         }
@@ -2006,12 +1997,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 } else {
                     members.push(ClassMember::StaticMethod(name, params, body));
                 }
+            } else if is_private {
+                members.push(ClassMember::PrivateMethod(name, params, body));
             } else {
-                if is_private {
-                    members.push(ClassMember::PrivateMethod(name, params, body));
-                } else {
-                    members.push(ClassMember::Method(name, params, body));
-                }
+                members.push(ClassMember::Method(name, params, body));
             }
         } else if *index < t.len() && matches!(t[*index].token, Token::Assign) {
             // Property
@@ -2026,12 +2015,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 } else {
                     members.push(ClassMember::StaticProperty(name, value));
                 }
+            } else if is_private {
+                members.push(ClassMember::PrivateProperty(name, value));
             } else {
-                if is_private {
-                    members.push(ClassMember::PrivateProperty(name, value));
-                } else {
-                    members.push(ClassMember::Property(name, value));
-                }
+                members.push(ClassMember::Property(name, value));
             }
         } else {
             // Property without initializer
@@ -2044,12 +2031,10 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
                 } else {
                     members.push(ClassMember::StaticProperty(name, Expr::Undefined));
                 }
+            } else if is_private {
+                members.push(ClassMember::PrivateProperty(name, Expr::Undefined));
             } else {
-                if is_private {
-                    members.push(ClassMember::PrivateProperty(name, Expr::Undefined));
-                } else {
-                    members.push(ClassMember::Property(name, Expr::Undefined));
-                }
+                members.push(ClassMember::Property(name, Expr::Undefined));
             }
         }
     }
@@ -2083,11 +2068,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Delete => {
             let inner = parse_primary(tokens, index, true)?;
             // Deleting a private field is a SyntaxError (e.g., `delete this.#priv`)
-            if let Expr::Property(_, prop_name) = &inner {
-                if prop_name.starts_with('#') {
-                    let msg = format!("Private field '{prop_name}' cannot be deleted");
-                    return Err(raise_parse_error_with_token!(token_data, msg));
-                }
+            if let Expr::Property(_, prop_name) = &inner
+                && prop_name.starts_with('#')
+            {
+                let msg = format!("Private field '{prop_name}' cannot be deleted");
+                return Err(raise_parse_error_with_token!(token_data, msg));
             }
             Expr::Delete(Box::new(inner))
         }
@@ -2204,12 +2189,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     return Err(raise_parse_error_at(tokens.get(*index)));
                 }
                 *index += 1; // consume ')'
-                if args.len() == 1 {
-                    if let Expr::Comma(_, _) = &args[0] {
-                        let first = args.remove(0);
-                        let new_args = flatten_commas(first);
-                        args.extend(new_args);
-                    }
+                if args.len() == 1
+                    && let Expr::Comma(_, _) = &args[0]
+                {
+                    let first = args.remove(0);
+                    let new_args = flatten_commas(first);
+                    args.extend(new_args);
                 }
                 args
             } else {
@@ -2382,12 +2367,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     }
                     *index += 1; // consume ')'
                     // Flatten accidental single-Comma argument
-                    if args.len() == 1 {
-                        if let Expr::Comma(_, _) = &args[0] {
-                            let first = args.remove(0);
-                            let new_args = flatten_commas(first);
-                            args.extend(new_args);
-                        }
+                    if args.len() == 1
+                        && let Expr::Comma(_, _) = &args[0]
+                    {
+                        let first = args.remove(0);
+                        let new_args = flatten_commas(first);
+                        args.extend(new_args);
                     }
                     Expr::SuperMethod(prop, args)
                 } else {
@@ -2969,12 +2954,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         while m < tokens.len() && matches!(tokens[m].token, Token::LineTerminator) {
                             m += 1;
                         }
-                        if m < tokens.len() && matches!(tokens[m].token, Token::Arrow) {
-                            if let Token::Identifier(name) = &tokens[j].token {
-                                *index = m + 1; // consume up to after '=>'
-                                let body = parse_arrow_body(tokens, index)?;
-                                return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
-                            }
+                        if m < tokens.len()
+                            && matches!(tokens[m].token, Token::Arrow)
+                            && let Token::Identifier(name) = &tokens[j].token
+                        {
+                            *index = m + 1; // consume up to after '=>'
+                            let body = parse_arrow_body(tokens, index)?;
+                            return Ok(Expr::ArrowFunction(vec![DestructuringElement::Variable(name.clone(), None)], body));
                         }
                     }
                 }
@@ -3191,12 +3177,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         }
                         *index += 1; // consume ')'
                         // Flatten accidental single-Comma argument
-                        if args.len() == 1 {
-                            if let Expr::Comma(_, _) = &args[0] {
-                                let first = args.remove(0);
-                                let new_args = flatten_commas(first);
-                                args.extend(new_args);
-                            }
+                        if args.len() == 1
+                            && let Expr::Comma(_, _) = &args[0]
+                        {
+                            let first = args.remove(0);
+                            let new_args = flatten_commas(first);
+                            args.extend(new_args);
                         }
                         expr = Expr::OptionalCall(Box::new(Expr::Index(Box::new(expr), Box::new(index_expr))), args);
                     } else {
@@ -3248,12 +3234,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 }
                 *index += 1; // consume ')'
                 // Flatten accidental single-Comma argument
-                if args.len() == 1 {
-                    if let Expr::Comma(_, _) = &args[0] {
-                        let first = args.remove(0);
-                        let new_args = flatten_commas(first);
-                        args.extend(new_args);
-                    }
+                if args.len() == 1
+                    && let Expr::Comma(_, _) = &args[0]
+                {
+                    let first = args.remove(0);
+                    let new_args = flatten_commas(first);
+                    args.extend(new_args);
                 }
                 expr = Expr::Call(Box::new(expr), args);
             }

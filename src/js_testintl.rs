@@ -86,7 +86,7 @@ pub fn create_mock_intl_instance<'gc>(
                     Ok(crate::core::Value::Closure(_)) | Ok(crate::core::Value::AsyncClosure(_)) | Ok(crate::core::Value::Function(_)) => {
                         match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                             Ok(CoreValue::String(canon_utf16)) => {
-                                let canon = utf16_to_utf8(&canon_utf16);
+                                let canon = utf16_to_utf8(canon_utf16);
                                 log::debug!(
                                     "isCanonicalizedStructurallyValidLanguageTag: locale='{}' canonical='{}'",
                                     locale,
@@ -177,7 +177,7 @@ pub fn create_mock_intl_instance<'gc>(
             Ok(crate::core::Value::Closure(_)) | Ok(crate::core::Value::AsyncClosure(_)) | Ok(crate::core::Value::Function(_)) => {
                 match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                     Ok(CoreValue::String(canon_utf16)) => {
-                        let canonical = utf16_to_utf8(&canon_utf16);
+                        let canonical = utf16_to_utf8(canon_utf16);
                         obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&canonical)))?;
                     }
                     _ => {
@@ -205,7 +205,7 @@ pub fn create_mock_intl_instance<'gc>(
                                 let first = Expr::Index(Box::new(lookup.clone()), Box::new(Expr::Number(0.0)));
                                 match crate::core::evaluate_expr(mc, &global_env, &first) {
                                     Ok(CoreValue::String(first_utf16)) => {
-                                        let first_str = utf16_to_utf8(&first_utf16);
+                                        let first_str = utf16_to_utf8(first_utf16);
                                         obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
                                     }
                                     _ => {
@@ -261,7 +261,7 @@ pub fn create_mock_intl_instance<'gc>(
                         let first = Expr::Index(Box::new(lookup.clone()), Box::new(Expr::Number(0.0)));
                         match crate::core::evaluate_expr(mc, &global_env, &first) {
                             Ok(CoreValue::String(first_utf16)) => {
-                                let first_str = utf16_to_utf8(&first_utf16);
+                                let first_str = utf16_to_utf8(first_utf16);
                                 obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
                             }
                             _ => {
@@ -289,7 +289,7 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
     // Get the stored locale, or default to "en-US"
     let locale = if let Some(locale_val) = obj_get_key_value(instance, &"__locale".into())? {
         match &*locale_val.borrow() {
-            Value::String(s) => utf16_to_utf8(s),
+            Value::String(s) => utf16_to_utf8(&s),
             _ => "en-US".to_string(),
         }
     } else {
@@ -396,7 +396,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                     );
                                     match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                                         Ok(Value::String(canon_utf16)) => {
-                                            let canonical = utf16_to_utf8(&canon_utf16);
+                                            let canonical = utf16_to_utf8(canon_utf16);
                                             log::debug!("supportedLocalesOf - canonical='{}'", canonical);
                                             // Check if canonical form is structurally valid / canonicalized
                                             let check_call = Expr::Call(
@@ -463,7 +463,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                         if let Ok(crate::core::Value::String(first_utf16)) =
                                             crate::core::evaluate_expr(mc, &global_env, &first)
                                         {
-                                            let canonical = utf16_to_utf8(&first_utf16);
+                                            let canonical = utf16_to_utf8(first_utf16);
                                             obj_set_key_value(
                                                 mc,
                                                 &result,

@@ -30,6 +30,8 @@ pub(crate) fn handle_weakset_constructor<'gc>(
         PropertyKey::String("__weakset__".to_string()),
         Gc::new(mc, GcCell::new(Value::WeakSet(weakset))),
     );
+    // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
+    weakset_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakset__"));
 
     // Set prototype to WeakSet.prototype if available
     if let Some(weakset_ctor) = obj_get_key_value(env, &"WeakSet".into())?
@@ -37,7 +39,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
         && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        weakset_obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+        weakset_obj.borrow_mut(mc).prototype = Some(*proto_obj);
     }
 
     Ok(Value::Object(weakset_obj))
@@ -52,20 +54,15 @@ fn initialize_weakset_from_iterable<'gc>(
     match iterable {
         Value::Object(obj) => {
             let mut i = 0;
-            loop {
-                let key = format!("{}", i);
-                if let Some(value_val) = obj_get_key_value(&obj, &key.into())? {
-                    let value = value_val.borrow().clone();
+            while let Some(value_val) = obj_get_key_value(obj, &i.to_string().into())? {
+                let value = value_val.borrow().clone();
 
-                    // Check if value is an object
-                    if let Value::Object(ref obj) = value {
-                        let weak_value = Gc::downgrade(*obj);
-                        weakset.borrow_mut(mc).values.push(weak_value);
-                    } else {
-                        return Err(raise_eval_error!("WeakSet values must be objects"));
-                    }
+                // Check if value is an object
+                if let Value::Object(ref obj) = value {
+                    let weak_value = Gc::downgrade(*obj);
+                    weakset.borrow_mut(mc).values.push(weak_value);
                 } else {
-                    break;
+                    return Err(raise_eval_error!("WeakSet values must be objects"));
                 }
                 i += 1;
             }
@@ -99,8 +96,8 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         weakset_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &weakset_ctor, &"prototype".into(), Value::Object(weakset_proto.clone()))?;
-    obj_set_key_value(mc, &weakset_proto, &"constructor".into(), Value::Object(weakset_ctor.clone()))?;
+    obj_set_key_value(mc, &weakset_ctor, &"prototype".into(), Value::Object(weakset_proto))?;
+    obj_set_key_value(mc, &weakset_proto, &"constructor".into(), Value::Object(weakset_ctor))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "toString"];
@@ -171,11 +168,10 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             if args.len() != 1 {
                 return Err(raise_eval_error!("WeakSet.prototype.add requires exactly one argument"));
             }
-            let value = args[0].clone();
 
             // Check if value is an object
-            let value_obj_rc = match value {
-                Value::Object(ref obj) => obj.clone(),
+            let value_obj_rc = match args[0] {
+                Value::Object(obj) => obj,
                 _ => return Err(raise_eval_error!("WeakSet values must be objects")),
             };
 
@@ -193,7 +189,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             // Add new entry
             weakset.borrow_mut(mc).values.push(weak_value);
 
-            Ok(Value::WeakSet(weakset.clone()))
+            Ok(Value::WeakSet(*weakset))
         }
         "has" => {
             if args.len() != 1 {
@@ -228,5 +224,14 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
             Ok(Value::String(utf8_to_utf16("[object WeakSet]")))
         }
         _ => Err(raise_eval_error!(format!("WeakSet.prototype.{} is not implemented", method))),
+    }
+}
+
+/// Check if a JS object wraps an internal WeakSet
+pub fn is_weakset_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
+    if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, &"__weakset__".into()) {
+        matches!(&*val_rc.borrow(), crate::core::Value::WeakSet(_))
+    } else {
+        false
     }
 }

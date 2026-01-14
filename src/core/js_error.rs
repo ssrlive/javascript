@@ -149,10 +149,10 @@ pub fn create_error<'gc>(
 
 /// Check if a value is an Error object.
 pub fn is_error<'gc>(val: &Value<'gc>) -> bool {
-    if let Value::Object(obj) = val {
-        if let Ok(borrowed) = obj.try_borrow() {
-            return borrowed.properties.contains_key(&PropertyKey::String("__is_error".to_string()));
-        }
+    if let Value::Object(obj) = val
+        && let Ok(borrowed) = obj.try_borrow()
+    {
+        return borrowed.properties.contains_key(&PropertyKey::String("__is_error".to_string()));
     }
     false
 }

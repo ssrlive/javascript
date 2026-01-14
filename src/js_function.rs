@@ -167,6 +167,22 @@ pub fn handle_global_function<'gc>(
         "Symbol_toString" => return symbol_prototype_to_string(mc, args, env),
         "encodeURI" => return encode_uri(args),
         "decodeURI" => return decode_uri(args),
+        "IteratorSelf" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                return Ok(this_val);
+            }
+            return Ok(Value::Undefined);
+        }
+        "ArrayIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_array::handle_array_iterator_next(mc, &obj, env);
+                }
+            }
+            return Err(raise_eval_error!("ArrayIterator.prototype.next called on non-object"));
+        }
         // "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
         // "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
         // "__internal_promise_allsettled_resolve" => return internal_promise_allsettled_resolve(mc, args, env),
@@ -453,19 +469,17 @@ pub fn handle_global_function<'gc>(
                 let this_val = this_rc.borrow().clone();
                 match this_val {
                     Value::Object(obj) => {
-                        return Ok(
-                            crate::js_array::handle_array_instance_method(mc, &obj, method, args, env).map_err(|e| match e {
-                                crate::core::js_error::EvalError::Js(j) => j,
-                                _ => crate::error::JSError::new(
-                                    crate::error::JSErrorKind::EvaluationError {
-                                        message: format!("{:?}", e),
-                                    },
-                                    "array_method".to_string(),
-                                    0,
-                                    "handle".to_string(),
-                                ),
-                            })?,
-                        );
+                        return crate::js_array::handle_array_instance_method(mc, &obj, method, args, env).map_err(|e| match e {
+                            crate::core::js_error::EvalError::Js(j) => j,
+                            _ => crate::error::JSError::new(
+                                crate::error::JSErrorKind::EvaluationError {
+                                    message: format!("{:?}", e),
+                                },
+                                "array_method".to_string(),
+                                0,
+                                "handle".to_string(),
+                            ),
+                        });
                     }
                     Value::String(s) => {
                         let str_obj = crate::core::new_js_object_data(mc);
@@ -487,12 +501,63 @@ pub fn handle_global_function<'gc>(
                             )?;
                             i += 1;
                         }
-                        return Ok(crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env).map_err(JSError::from)?);
+                        return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env).map_err(JSError::from);
                     }
                     _ => return Err(raise_type_error!("Array.prototype method called on incompatible receiver")),
                 }
             }
             Err(raise_type_error!("Array.prototype method called without this"))
+        }
+
+        "IteratorSelf" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                return Ok(this_rc.borrow().clone());
+            }
+            Ok(Value::Undefined)
+        }
+
+        "ArrayIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_array::handle_array_iterator_next(mc, &obj, env);
+                }
+                return Err(raise_type_error!("ArrayIterator.prototype.next called on non-object"));
+            }
+            Err(raise_type_error!("ArrayIterator.prototype.next called without this"))
+        }
+
+        "StringIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_string::handle_string_iterator_next(mc, &obj).map_err(JSError::from);
+                }
+                return Err(raise_type_error!("StringIterator.prototype.next called on non-object"));
+            }
+            Err(raise_type_error!("StringIterator.prototype.next called without this"))
+        }
+
+        "SetIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_set::handle_set_iterator_next(mc, &obj, env);
+                }
+                return Err(raise_type_error!("SetIterator.prototype.next called on non-object"));
+            }
+            Err(raise_type_error!("SetIterator.prototype.next called without this"))
+        }
+
+        "MapIterator.prototype.next" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    return crate::js_map::handle_map_iterator_next(mc, &obj, env);
+                }
+                return Err(raise_type_error!("MapIterator.prototype.next called on non-object"));
+            }
+            Err(raise_type_error!("MapIterator.prototype.next called without this"))
         }
 
         _ => {
@@ -841,7 +906,7 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
     let body_str = if !args.is_empty() {
         let val = args.last().unwrap();
         match val {
-            Value::String(s) => utf16_to_utf8(&s),
+            Value::String(s) => utf16_to_utf8(s),
             _ => crate::core::value_to_string(val),
         }
     } else {
@@ -855,7 +920,7 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
                 params_str.push(',');
             }
             let arg_str = match arg {
-                Value::String(s) => utf16_to_utf8(&s),
+                Value::String(s) => utf16_to_utf8(s),
                 _ => crate::core::value_to_string(arg),
             };
             params_str.push_str(&arg_str);
@@ -956,7 +1021,7 @@ fn symbol_prototype_value_of<'gc>(
             if let Some(val) = obj_get_key_value(&obj, &"__value__".into())?
                 && let Value::Symbol(s) = &*val.borrow()
             {
-                return Ok(Value::Symbol(s.clone()));
+                return Ok(Value::Symbol(*s));
             }
             Err(raise_type_error!("Symbol.prototype.valueOf requires that 'this' be a Symbol"))
         }
@@ -975,7 +1040,7 @@ fn symbol_prototype_to_string<'gc>(
         Value::Object(obj) => {
             if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
                 if let Value::Symbol(s) = &*val.borrow() {
-                    s.clone()
+                    *s
                 } else {
                     return Err(raise_type_error!("Symbol.prototype.toString requires that 'this' be a Symbol"));
                 }
@@ -1203,7 +1268,7 @@ fn internal_allsettled_state_record_fulfilled<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, value)
     validate_internal_args(args, 3)?;
-    let numbers = validate_number_args(&args, 2)?;
+    let numbers = validate_number_args(args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_fulfilled called: state_id={}, index={}, value={:?}",
         numbers[0],
@@ -1223,7 +1288,7 @@ fn internal_allsettled_state_record_rejected<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for new allSettled - requires 3 args: (state_index, index, reason)
     validate_internal_args(args, 3)?;
-    let numbers = validate_number_args(&args, 2)?;
+    let numbers = validate_number_args(args, 2)?;
     log::trace!(
         "__internal_allsettled_state_record_rejected called: state_id={}, index={}, reason={:?}",
         numbers[0],
@@ -1293,7 +1358,7 @@ fn internal_promise_all_resolve<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     // Internal function for Promise.all resolve - requires 3 args: (idx, value, state)
     validate_internal_args(args, 3)?;
-    let numbers = validate_number_args(&args, 1)?;
+    let numbers = validate_number_args(args, 1)?;
     let idx = numbers[0] as usize;
     let value = args[1].clone();
     if let Value::Object(state_obj) = args[2].clone() {
@@ -1430,8 +1495,8 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     let func_proto = new_js_object_data(mc);
 
-    obj_set_key_value(mc, &func_ctor, &"prototype".into(), Value::Object(func_proto.clone()))?;
-    obj_set_key_value(mc, &func_proto, &"constructor".into(), Value::Object(func_ctor.clone()))?;
+    obj_set_key_value(mc, &func_ctor, &"prototype".into(), Value::Object(func_proto))?;
+    obj_set_key_value(mc, &func_proto, &"constructor".into(), Value::Object(func_ctor))?;
 
     // Function.prototype.bind
     obj_set_key_value(
@@ -1460,7 +1525,7 @@ pub fn handle_function_prototype_method<'gc>(
         "bind" => {
             // function.bind(thisArg, ...args)
             if let Value::Closure(closure_gc) = this_value {
-                let this_arg = args.get(0).cloned().unwrap_or(Value::Undefined);
+                let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
 
                 let original = closure_gc;
                 // Check if already bound?
@@ -1496,7 +1561,7 @@ pub fn handle_function_prototype_method<'gc>(
                 let new_closure_data = ClosureData {
                     params: original.params.clone(),
                     body: original.body.clone(),
-                    env: original.env.clone(),
+                    env: original.env,
                     home_object: original.home_object.clone(),
                     captured_envs: original.captured_envs.clone(),
                     bound_this: effective_bound_this,

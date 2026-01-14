@@ -164,10 +164,10 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     // Parse and execute the module content
     let tokens = crate::core::tokenize(content)?;
     let mut index = 0;
-    let mut statements = crate::core::parse_statements(&tokens, &mut index)?;
+    let statements = crate::core::parse_statements(&tokens, &mut index)?;
 
     // Execute statements in module environment
-    crate::core::evaluate_statements(mc, &env, &mut statements)?;
+    crate::core::evaluate_statements(mc, &env, &statements)?;
 
     // Log the exports stored in the provided `module_exports` object at trace level
     log::trace!("Module executed, exports keys:");

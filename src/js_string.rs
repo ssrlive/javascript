@@ -38,27 +38,23 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &string_proto, &"constructor".into(), Value::Object(string_ctor))?;
 
     // Register Symbol.iterator
-    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())? {
-        if let Value::Object(sym_ctor) = &*sym_val.borrow() {
-            if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())? {
-                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
-                    obj_set_key_value(
-                        mc,
-                        &string_proto,
-                        &PropertyKey::Symbol(iter_sym.clone()),
-                        Value::Function("String.prototype.[Symbol.iterator]".to_string()),
-                    )?;
-                }
-            }
+    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())?
+        && let Value::Object(sym_ctor) = &*sym_val.borrow()
+    {
+        if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())?
+            && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
+        {
+            let val = Value::Function("String.prototype.[Symbol.iterator]".to_string());
+            obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(*iter_sym), val)?;
+        }
 
-            // Symbol.toStringTag default for String.prototype
-            if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())? {
-                if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
-                    let val = Value::String(utf8_to_utf16("String"));
-                    obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(tag_sym.clone()), val)?;
-                    string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
-                }
-            }
+        // Symbol.toStringTag default for String.prototype
+        if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())?
+            && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
+        {
+            let val = Value::String(utf8_to_utf16("String"));
+            obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(*tag_sym), val)?;
+            string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
         }
     }
 
@@ -147,7 +143,7 @@ pub(crate) fn string_constructor<'gc>(
             Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
             Value::Object(obj) => {
                 // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                let prim = to_primitive(mc, &Value::Object(obj.clone()), "string", env).map_err(EvalError::from)?;
+                let prim = to_primitive(mc, &Value::Object(obj), "string", env).map_err(EvalError::from)?;
                 match prim {
                     Value::String(s) => Ok(Value::String(s)),
                     Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
@@ -763,7 +759,7 @@ fn string_match_method<'gc>(
     // Build a RegExp object to work with (either existing object or new one)
     let regexp_obj = if let Value::Object(object) = &search_val {
         if is_regex_object(object) {
-            object.clone()
+            *object
         } else {
             // Not a regex object; create new RegExp from string coercion
             let pattern = match &search_val {
@@ -1332,18 +1328,15 @@ fn string_match_all_method<'gc>(
         match res {
             Value::Null => break,
             Value::Object(match_obj) => {
-                matches.push(Value::Object(match_obj.clone()));
+                matches.push(Value::Object(match_obj));
 
-                if let Some(m0) = obj_get_key_value(&match_obj, &"0".into())? {
-                    if let Value::String(s) = &*m0.borrow() {
-                        if s.is_empty() {
-                            if let Some(li) = obj_get_key_value(&matcher_obj, &"lastIndex".into())? {
-                                if let Value::Number(n) = *li.borrow() {
-                                    obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
-                                }
-                            }
-                        }
-                    }
+                if let Some(m0) = obj_get_key_value(&match_obj, &"0".into())?
+                    && let Value::String(s) = &*m0.borrow()
+                    && s.is_empty()
+                    && let Some(li) = obj_get_key_value(&matcher_obj, &"lastIndex".into())?
+                    && let Value::Number(n) = *li.borrow()
+                {
+                    obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
                 }
             }
             _ => break,
@@ -1667,13 +1660,11 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     let mut code_unit_count = 1;
     let mut ch_vec = vec![c1];
 
-    if (0xD800..=0xDBFF).contains(&c1) {
-        if index + 1 < len {
-            let c2 = s[index + 1];
-            if (0xDC00..=0xDFFF).contains(&c2) {
-                ch_vec.push(c2);
-                code_unit_count = 2;
-            }
+    if (0xD800..=0xDBFF).contains(&c1) && index + 1 < len {
+        let c2 = s[index + 1];
+        if (0xDC00..=0xDFFF).contains(&c2) {
+            ch_vec.push(c2);
+            code_unit_count = 2;
         }
     }
 

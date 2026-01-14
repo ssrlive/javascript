@@ -260,7 +260,7 @@ pub(crate) fn handle_date_constructor<'gc>(
         let arg_val = &args[0];
         match arg_val {
             Value::String(s) => {
-                let date_str = utf16_to_utf8(&s);
+                let date_str = utf16_to_utf8(s);
                 if let Some(timestamp) = parse_date_string(&date_str) {
                     timestamp
                 } else {

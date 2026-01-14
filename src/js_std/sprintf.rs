@@ -12,7 +12,7 @@ pub(crate) fn handle_sprintf_call<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>
     // args[0] is format string
     let format_val = &args[0];
     let format_str = match format_val {
-        Value::String(s) => utf16_to_utf8(&s),
+        Value::String(s) => utf16_to_utf8(s),
         _ => {
             return Err(raise_eval_error!("sprintf format must be a string"));
         }
@@ -190,7 +190,7 @@ pub fn sprintf_impl<'gc>(format: &str, args: &[Value<'gc>]) -> Result<String, JS
                     's' => {
                         // String
                         let val = match arg_val {
-                            Value::String(s) => utf16_to_utf8(&s),
+                            Value::String(s) => utf16_to_utf8(s),
                             Value::Number(n) => n.to_string(),
                             Value::Boolean(b) => b.to_string(),
                             _ => "".to_string(),

@@ -129,7 +129,7 @@ fn collect_names_from_object_destructuring(pattern: &[ObjectDestructuringElement
 fn bind_object_inner_for_letconst<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     obj: &JSObjectDataPtr<'gc>,
     is_const: bool,
 ) -> Result<(), EvalError<'gc>> {
@@ -141,10 +141,10 @@ fn bind_object_inner_for_letconst<'gc>(
                     if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
                         prop_val = cell.borrow().clone();
                     }
-                    if matches!(prop_val, Value::Undefined) {
-                        if let Some(def) = default_expr {
-                            prop_val = evaluate_expr(mc, env, def)?;
-                        }
+                    if matches!(prop_val, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        prop_val = evaluate_expr(mc, env, def)?;
                     }
                     env_set(mc, env, name, prop_val.clone())?;
                     if is_const {
@@ -217,7 +217,7 @@ fn bind_object_inner_for_letconst<'gc>(
 fn bind_object_inner_for_var<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     // Determine function-scope env
@@ -238,10 +238,10 @@ fn bind_object_inner_for_var<'gc>(
                     if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
                         prop_val = cell.borrow().clone();
                     }
-                    if matches!(prop_val, Value::Undefined) {
-                        if let Some(def) = default_expr {
-                            prop_val = evaluate_expr(mc, env, def)?;
-                        }
+                    if matches!(prop_val, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        prop_val = evaluate_expr(mc, env, def)?;
                     }
                     env_set_recursive(mc, &target_env, name, prop_val)?;
                 }
@@ -311,7 +311,7 @@ fn bind_object_inner_for_var<'gc>(
 fn bind_array_inner_for_letconst<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     arr_obj: &JSObjectDataPtr<'gc>,
     is_const: bool,
 ) -> Result<(), EvalError<'gc>> {
@@ -323,10 +323,10 @@ fn bind_array_inner_for_letconst<'gc>(
                 if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
                     elem_val = cell.borrow().clone();
                 }
-                if matches!(elem_val, Value::Undefined) {
-                    if let Some(def) = default_expr {
-                        elem_val = evaluate_expr(mc, env, def)?;
-                    }
+                if matches!(elem_val, Value::Undefined)
+                    && let Some(def) = default_expr
+                {
+                    elem_val = evaluate_expr(mc, env, def)?;
                 }
                 env_set(mc, env, name, elem_val.clone())?;
                 if is_const {
@@ -367,10 +367,10 @@ fn bind_array_inner_for_letconst<'gc>(
                                         if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
                                             prop_val = cell.borrow().clone();
                                         }
-                                        if matches!(prop_val, Value::Undefined) {
-                                            if let Some(def) = default_expr {
-                                                prop_val = evaluate_expr(mc, env, def)?;
-                                            }
+                                        if matches!(prop_val, Value::Undefined)
+                                            && let Some(def) = default_expr
+                                        {
+                                            prop_val = evaluate_expr(mc, env, def)?;
                                         }
                                         env_set(mc, env, name, prop_val.clone())?;
                                         if is_const {
@@ -497,7 +497,7 @@ fn bind_array_inner_for_letconst<'gc>(
 fn bind_array_inner_for_var<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
-    pattern: &Vec<DestructuringElement>,
+    pattern: &[DestructuringElement],
     arr_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     // Determine function-scope env
@@ -518,10 +518,10 @@ fn bind_array_inner_for_var<'gc>(
                 if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
                     elem_val = cell.borrow().clone();
                 }
-                if matches!(elem_val, Value::Undefined) {
-                    if let Some(def) = default_expr {
-                        elem_val = evaluate_expr(mc, env, def)?;
-                    }
+                if matches!(elem_val, Value::Undefined)
+                    && let Some(def) = default_expr
+                {
+                    elem_val = evaluate_expr(mc, env, def)?;
                 }
                 env_set_recursive(mc, &target_env, name, elem_val)?;
             }
@@ -559,10 +559,10 @@ fn bind_array_inner_for_var<'gc>(
                                         if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
                                             prop_val = cell.borrow().clone();
                                         }
-                                        if matches!(prop_val, Value::Undefined) {
-                                            if let Some(def) = default_expr {
-                                                prop_val = evaluate_expr(mc, env, def)?;
-                                            }
+                                        if matches!(prop_val, Value::Undefined)
+                                            && let Some(def) = default_expr
+                                        {
+                                            prop_val = evaluate_expr(mc, env, def)?;
                                         }
                                         env_set_recursive(mc, &target_env, name, prop_val)?;
                                     }
@@ -870,18 +870,14 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                 "Date".to_string()
             } else {
                 let mut t = "Object".to_string();
-                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into()) {
-                    if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                        if let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into()) {
-                            if let Value::Symbol(s) = &*tag_sym.borrow() {
-                                if let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(s.clone())) {
-                                    if let Value::String(s_val) = &*val.borrow() {
-                                        t = crate::unicode::utf16_to_utf8(s_val);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into())
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    && let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into())
+                    && let Value::Symbol(s) = &*tag_sym.borrow()
+                    && let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(*s))
+                    && let Value::String(s_val) = &*val.borrow()
+                {
+                    t = crate::unicode::utf16_to_utf8(s_val);
                 }
                 t
             }
@@ -1051,8 +1047,8 @@ fn eval_res<'gc>(
                 // Recursively evaluate inner statement
                 // Note: inner_stmt is a Box<Statement>. We need to call eval_res or evaluate_statements on it.
                 // Since evaluate_statements expects a slice, we can wrap it.
-                let mut stmts = vec![*stmt.clone()];
-                match evaluate_statements(mc, env, &mut stmts) {
+                let stmts = vec![*stmt.clone()];
+                match evaluate_statements(mc, env, &stmts) {
                     Ok(_) => {} // Declarations are hoisted or executed, binding should be in env
                     Err(e) => return Err(e),
                 }
@@ -1164,30 +1160,26 @@ fn eval_res<'gc>(
 
             // Simple variable-only destructuring
             for (i, elem) in pattern.iter().enumerate() {
-                match elem {
-                    DestructuringElement::Variable(name, default_expr) => {
-                        // Get element at index i if array
-                        let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                if let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into()) {
-                                    elem_val = cell.borrow().clone();
-                                }
-                            }
-                        }
-                        // Apply default if undefined and default_expr present
-                        if matches!(elem_val, Value::Undefined) {
-                            if let Some(def) = default_expr {
-                                elem_val = evaluate_expr(mc, env, def)?;
-                            }
-                        }
-                        // Bind to environment (let/const bind to current env)
-                        env_set(mc, env, name, elem_val.clone())?;
-                        if matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _)) {
-                            env.borrow_mut(mc).set_const(name.clone());
-                        }
+                if let DestructuringElement::Variable(name, default_expr) = elem {
+                    // Get element at index i if array
+                    let mut elem_val = Value::Undefined;
+                    if let Value::Object(obj) = &val
+                        && is_array(mc, obj)
+                        && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                    {
+                        elem_val = cell.borrow().clone();
                     }
-                    _ => {}
+                    // Apply default if undefined and default_expr present
+                    if matches!(elem_val, Value::Undefined)
+                        && let Some(def) = default_expr
+                    {
+                        elem_val = evaluate_expr(mc, env, def)?;
+                    }
+                    // Bind to environment (let/const bind to current env)
+                    env_set(mc, env, name, elem_val.clone())?;
+                    if matches!(*stmt.kind, StatementKind::ConstDestructuringArray(_, _)) {
+                        env.borrow_mut(mc).set_const(name.clone());
+                    }
                 }
             }
             *last_value = Value::Undefined;
@@ -1219,17 +1211,16 @@ fn eval_res<'gc>(
                 match elem {
                     DestructuringElement::Variable(name, default_expr) => {
                         let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                if let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into()) {
-                                    elem_val = cell.borrow().clone();
-                                }
-                            }
+                        if let Value::Object(obj) = &val
+                            && is_array(mc, obj)
+                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                        {
+                            elem_val = cell.borrow().clone();
                         }
-                        if matches!(elem_val, Value::Undefined) {
-                            if let Some(def) = default_expr {
-                                elem_val = evaluate_expr(mc, env, def)?;
-                            }
+                        if matches!(elem_val, Value::Undefined)
+                            && let Some(def) = default_expr
+                        {
+                            elem_val = evaluate_expr(mc, env, def)?;
                         }
                         // For var, bind in function scope
                         let mut target_env = *env;
@@ -1246,12 +1237,11 @@ fn eval_res<'gc>(
                     DestructuringElement::NestedObject(inner_pattern) => {
                         // Nested object pattern (var binding)
                         let mut elem_val = Value::Undefined;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                if let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into()) {
-                                    elem_val = cell.borrow().clone();
-                                }
-                            }
+                        if let Value::Object(obj) = &val
+                            && is_array(mc, obj)
+                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                        {
+                            elem_val = cell.borrow().clone();
                         }
 
                         if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
@@ -1282,10 +1272,10 @@ fn eval_res<'gc>(
                                                 if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
                                                     prop_val = cell.borrow().clone();
                                                 }
-                                                if matches!(prop_val, Value::Undefined) {
-                                                    if let Some(def) = default_expr {
-                                                        prop_val = evaluate_expr(mc, env, def)?;
-                                                    }
+                                                if matches!(prop_val, Value::Undefined)
+                                                    && let Some(def) = default_expr
+                                                {
+                                                    prop_val = evaluate_expr(mc, env, def)?;
                                                 }
                                                 // Bind var in function scope
                                                 let mut target_env = *env;
@@ -1318,31 +1308,31 @@ fn eval_res<'gc>(
                     }
                     DestructuringElement::Rest(name) => {
                         let arr_obj = crate::js_array::create_array(mc, env)?;
-                        if let Value::Object(obj) = &val {
-                            if is_array(mc, obj) {
-                                let len = if let Ok(Some(len_cell)) = obj_get_key_value(obj, &"length".into()) {
-                                    if let Value::Number(n) = len_cell.borrow().clone() {
-                                        n as usize
-                                    } else {
-                                        0
-                                    }
+                        if let Value::Object(obj) = &val
+                            && is_array(mc, obj)
+                        {
+                            let len = if let Ok(Some(len_cell)) = obj_get_key_value(obj, &"length".into()) {
+                                if let Value::Number(n) = len_cell.borrow().clone() {
+                                    n as usize
                                 } else {
                                     0
-                                };
-                                let mut idx2 = 0;
-                                for j in i..len {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &j.to_string().into()) {
-                                        crate::core::obj_set_key_value(
-                                            mc,
-                                            &arr_obj,
-                                            &PropertyKey::from(idx2.to_string()),
-                                            cell.borrow().clone(),
-                                        )?;
-                                        idx2 += 1;
-                                    }
                                 }
-                                obj_set_key_value(mc, &arr_obj, &"length".into(), Value::Number(idx2 as f64))?;
+                            } else {
+                                0
+                            };
+                            let mut idx2 = 0;
+                            for j in i..len {
+                                if let Ok(Some(cell)) = obj_get_key_value(obj, &j.to_string().into()) {
+                                    crate::core::obj_set_key_value(
+                                        mc,
+                                        &arr_obj,
+                                        &PropertyKey::from(idx2.to_string()),
+                                        cell.borrow().clone(),
+                                    )?;
+                                    idx2 += 1;
+                                }
                             }
+                            obj_set_key_value(mc, &arr_obj, &"length".into(), Value::Number(idx2 as f64))?;
                         }
                         // Bind var in function scope
                         let mut target_env = *env;
@@ -1399,15 +1389,15 @@ fn eval_res<'gc>(
                             DestructuringElement::Variable(name, default_expr) => {
                                 // lookup property on object
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
-                                if matches!(prop_val, Value::Undefined) {
-                                    if let Some(def) = default_expr {
-                                        prop_val = evaluate_expr(mc, env, def)?;
-                                    }
+                                if matches!(prop_val, Value::Undefined)
+                                    && let Some(def) = default_expr
+                                {
+                                    prop_val = evaluate_expr(mc, env, def)?;
                                 }
                                 env_set(mc, env, name, prop_val.clone())?;
                                 if matches!(*stmt.kind, StatementKind::ConstDestructuringObject(_, _)) {
@@ -1417,10 +1407,10 @@ fn eval_res<'gc>(
                             DestructuringElement::NestedObject(inner_pattern) => {
                                 // fetch property
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
                                 if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
                                     let prop_name = inner_pattern
@@ -1449,10 +1439,10 @@ fn eval_res<'gc>(
                             DestructuringElement::NestedArray(inner_array) => {
                                 // fetch property
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
                                 if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
                                     return Err(EvalError::Js(raise_eval_error!(format!(
@@ -1481,23 +1471,20 @@ fn eval_res<'gc>(
                         if let Value::Object(orig) = &val {
                             // copy all own properties except those in pattern keys
                             for (k, cell) in orig.borrow().properties.iter() {
-                                match k.clone() {
-                                    PropertyKey::String(s) => {
-                                        // check if s is in pattern
-                                        let mut skip = false;
-                                        for p in pattern.iter() {
-                                            if let ObjectDestructuringElement::Property { key: k2, .. } = p {
-                                                if &s == k2 {
-                                                    skip = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if !skip {
-                                            obj.borrow_mut(mc).insert(k.clone(), cell.clone());
+                                if let PropertyKey::String(s) = k.clone() {
+                                    // check if s is in pattern
+                                    let mut skip = false;
+                                    for p in pattern.iter() {
+                                        if let ObjectDestructuringElement::Property { key: k2, .. } = p
+                                            && &s == k2
+                                        {
+                                            skip = true;
+                                            break;
                                         }
                                     }
-                                    _ => {}
+                                    if !skip {
+                                        obj.borrow_mut(mc).insert(k.clone(), *cell);
+                                    }
                                 }
                             }
                         }
@@ -1540,15 +1527,15 @@ fn eval_res<'gc>(
                         match value {
                             DestructuringElement::Variable(name, default_expr) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
-                                if matches!(prop_val, Value::Undefined) {
-                                    if let Some(def) = default_expr {
-                                        prop_val = evaluate_expr(mc, env, def)?;
-                                    }
+                                if matches!(prop_val, Value::Undefined)
+                                    && let Some(def) = default_expr
+                                {
+                                    prop_val = evaluate_expr(mc, env, def)?;
                                 }
                                 // Bind var in function scope
                                 let mut target_env = *env;
@@ -1563,10 +1550,10 @@ fn eval_res<'gc>(
                             }
                             DestructuringElement::NestedObject(inner_pattern) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
                                 if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
                                     let prop_name = inner_pattern
@@ -1593,10 +1580,10 @@ fn eval_res<'gc>(
                             }
                             DestructuringElement::NestedArray(inner_array) => {
                                 let mut prop_val = Value::Undefined;
-                                if let Value::Object(obj) = &val {
-                                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
-                                        prop_val = cell.borrow().clone();
-                                    }
+                                if let Value::Object(obj) = &val
+                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                {
+                                    prop_val = cell.borrow().clone();
                                 }
                                 if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
                                     return Err(EvalError::Js(raise_eval_error!(format!(
@@ -1622,22 +1609,19 @@ fn eval_res<'gc>(
                         let obj = new_js_object_data(mc);
                         if let Value::Object(orig) = &val {
                             for (k, cell) in orig.borrow().properties.iter() {
-                                match k.clone() {
-                                    PropertyKey::String(s) => {
-                                        let mut skip = false;
-                                        for p in pattern.iter() {
-                                            if let ObjectDestructuringElement::Property { key: k2, .. } = p {
-                                                if &s == k2 {
-                                                    skip = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if !skip {
-                                            obj.borrow_mut(mc).insert(k.clone(), cell.clone());
+                                if let PropertyKey::String(s) = k.clone() {
+                                    let mut skip = false;
+                                    for p in pattern.iter() {
+                                        if let ObjectDestructuringElement::Property { key: k2, .. } = p
+                                            && &s == k2
+                                        {
+                                            skip = true;
+                                            break;
                                         }
                                     }
-                                    _ => {}
+                                    if !skip {
+                                        obj.borrow_mut(mc).insert(k.clone(), *cell);
+                                    }
                                 }
                             }
                         }
@@ -1660,37 +1644,37 @@ fn eval_res<'gc>(
         }
         StatementKind::Throw(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            if let Value::Object(obj) = val {
-                if is_error(&val) {
-                    let mut filename = String::new();
-                    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into()) {
-                        if let Value::String(s) = &*val_ptr.borrow() {
-                            filename = utf16_to_utf8(s);
-                        }
-                    }
-                    let mut frame_name = "<anonymous>".to_string();
-                    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into()) {
-                        if let Value::String(s) = &*frame_val.borrow() {
-                            frame_name = utf16_to_utf8(s);
-                        }
-                    }
-                    let frame = format!("at {} ({}:{}:{})", frame_name, filename, stmt.line, stmt.column);
-                    let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
-                    let new_stack = format!("{}\n    {}", current_stack, frame);
-                    obj.borrow_mut(mc)
-                        .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
-
-                    obj.borrow_mut(mc).set_line(stmt.line, mc)?;
-                    obj.borrow_mut(mc).set_column(stmt.column, mc)?;
+            if let Value::Object(obj) = val
+                && is_error(&val)
+            {
+                let mut filename = String::new();
+                if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into())
+                    && let Value::String(s) = &*val_ptr.borrow()
+                {
+                    filename = utf16_to_utf8(s);
                 }
+                let mut frame_name = "<anonymous>".to_string();
+                if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into())
+                    && let Value::String(s) = &*frame_val.borrow()
+                {
+                    frame_name = utf16_to_utf8(s);
+                }
+                let frame = format!("at {} ({}:{}:{})", frame_name, filename, stmt.line, stmt.column);
+                let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
+                let new_stack = format!("{}\n    {}", current_stack, frame);
+                obj.borrow_mut(mc)
+                    .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
+
+                obj.borrow_mut(mc).set_line(stmt.line, mc)?;
+                obj.borrow_mut(mc).set_column(stmt.column, mc)?;
             }
             Ok(Some(ControlFlow::Throw(val, Some(stmt.line), Some(stmt.column))))
         }
         StatementKind::Block(stmts) => {
-            let mut stmts_clone = stmts.clone();
+            let stmts_clone = stmts.clone();
             let block_env = new_js_object_data(mc);
             block_env.borrow_mut(mc).prototype = Some(*env);
-            let res = evaluate_statements_with_context(mc, &block_env, &mut stmts_clone, labels)?;
+            let res = evaluate_statements_with_context(mc, &block_env, &stmts_clone, labels)?;
             match res {
                 ControlFlow::Normal(val) => {
                     *last_value = val;
@@ -1713,10 +1697,10 @@ fn eval_res<'gc>(
             };
 
             if is_true {
-                let mut stmts = if_stmt.then_body.clone();
+                let stmts = if_stmt.then_body.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts, labels)?;
+                let res = evaluate_statements_with_context(mc, &block_env, &stmts, labels)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -1725,10 +1709,10 @@ fn eval_res<'gc>(
                     other => Ok(Some(other)),
                 }
             } else if let Some(else_stmts) = &if_stmt.else_body {
-                let mut stmts = else_stmts.clone();
+                let stmts = else_stmts.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &mut stmts, labels)?;
+                let res = evaluate_statements_with_context(mc, &block_env, &stmts, labels)?;
                 match res {
                     ControlFlow::Normal(val) => {
                         *last_value = val;
@@ -1742,8 +1726,8 @@ fn eval_res<'gc>(
         }
         StatementKind::TryCatch(tc_stmt) => {
             let tc_stmt = tc_stmt.as_ref();
-            let mut try_stmts = tc_stmt.try_body.clone();
-            let try_res = evaluate_statements_with_context(mc, env, &mut try_stmts, labels);
+            let try_stmts = tc_stmt.try_body.clone();
+            let try_res = evaluate_statements_with_context(mc, env, &try_stmts, labels);
 
             let mut result = match try_res {
                 Ok(cf) => cf,
@@ -1756,34 +1740,34 @@ fn eval_res<'gc>(
                 },
             };
 
-            if let ControlFlow::Throw(val, ..) = &result {
-                if let Some(catch_stmts) = &tc_stmt.catch_body {
-                    // Create new scope for catch
-                    let catch_env = crate::core::new_js_object_data(mc);
-                    catch_env.borrow_mut(mc).prototype = Some(*env);
+            if let ControlFlow::Throw(val, ..) = &result
+                && let Some(catch_stmts) = &tc_stmt.catch_body
+            {
+                // Create new scope for catch
+                let catch_env = crate::core::new_js_object_data(mc);
+                catch_env.borrow_mut(mc).prototype = Some(*env);
 
-                    if let Some(param_name) = &tc_stmt.catch_param {
-                        env_set(mc, &catch_env, param_name, val.clone())?;
-                    }
+                if let Some(param_name) = &tc_stmt.catch_param {
+                    env_set(mc, &catch_env, param_name, val.clone())?;
+                }
 
-                    let mut catch_stmts_clone = catch_stmts.clone();
-                    let catch_res = evaluate_statements_with_context(mc, &catch_env, &mut catch_stmts_clone, labels);
-                    match catch_res {
-                        Ok(cf) => result = cf,
-                        Err(e) => match e {
-                            EvalError::Js(js_err) => {
-                                let val = js_error_to_value(mc, env, &js_err);
-                                result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
-                            }
-                            EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
-                        },
-                    }
+                let catch_stmts_clone = catch_stmts.clone();
+                let catch_res = evaluate_statements_with_context(mc, &catch_env, &catch_stmts_clone, labels);
+                match catch_res {
+                    Ok(cf) => result = cf,
+                    Err(e) => match e {
+                        EvalError::Js(js_err) => {
+                            let val = js_error_to_value(mc, env, &js_err);
+                            result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
+                        }
+                        EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
+                    },
                 }
             }
 
             if let Some(finally_stmts) = &tc_stmt.finally_body {
-                let mut finally_stmts_clone = finally_stmts.clone();
-                let finally_res = evaluate_statements_with_context(mc, env, &mut finally_stmts_clone, labels);
+                let finally_stmts_clone = finally_stmts.clone();
+                let finally_res = evaluate_statements_with_context(mc, env, &finally_stmts_clone, labels);
                 match finally_res {
                     Ok(ControlFlow::Normal(_)) => {
                         // If finally completes normally, return the previous result (try or catch)
@@ -1811,7 +1795,7 @@ fn eval_res<'gc>(
             }
         }
         StatementKind::Label(label, stmt) => {
-            let mut stmts = vec![*stmt.clone()];
+            let stmts = vec![*stmt.clone()];
             // If inner is a loop or label, pass current label down
             let new_labels = match *stmt.kind {
                 StatementKind::For(..)
@@ -1829,7 +1813,7 @@ fn eval_res<'gc>(
             let effective_labels = if new_labels.is_empty() { labels } else { &new_labels };
             let mut new_own = own_labels.to_vec();
             new_own.push(label.clone());
-            let res = evaluate_statements_with_labels(mc, env, &mut stmts, effective_labels, &new_own)?;
+            let res = evaluate_statements_with_labels(mc, env, &stmts, effective_labels, &new_own)?;
             match res {
                 ControlFlow::Normal(val) => {
                     *last_value = val;
@@ -1992,13 +1976,13 @@ fn eval_res<'gc>(
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))? {
+                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(*iter_sym_data))? {
                         c.borrow().clone()
                     } else {
                         Value::Undefined
                     }
                 } else {
-                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(iter_sym_data.clone()))?
+                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(*iter_sym_data))?
                 };
 
                 if !matches!(method, Value::Undefined | Value::Null) {
@@ -2011,24 +1995,18 @@ fn eval_res<'gc>(
                     // Debug why method is missing
                     if matches!(iter_val, Value::String(_)) {
                         let sym_ctor = obj_get_key_value(env, &"Symbol".into())?.unwrap();
-                        let sym_obj = if let Value::Object(o) = &*sym_ctor.borrow() {
-                            o.clone()
-                        } else {
-                            panic!()
-                        };
+                        let sym_obj = if let Value::Object(o) = &*sym_ctor.borrow() { *o } else { panic!() };
                         let iter_sym = obj_get_key_value(&sym_obj, &"iterator".into())?.unwrap();
                         println!("DEBUG: ForOf String iterator missing. Symbol.iterator: {:?}", iter_sym.borrow());
                         // check if String.prototype has it
                         let str_ctor = obj_get_key_value(env, &"String".into())?.unwrap();
-                        if let Value::Object(s_obj) = &*str_ctor.borrow() {
-                            if let Some(proto) = obj_get_key_value(s_obj, &"prototype".into())? {
-                                if let Value::Object(p_obj) = &*proto.borrow() {
-                                    if let Value::Symbol(s) = &*iter_sym.borrow() {
-                                        let has = obj_get_key_value(p_obj, &PropertyKey::Symbol(s.clone()))?;
-                                        println!("DEBUG: String.prototype[@@iterator] found: {:?}", has.is_some());
-                                    }
-                                }
-                            }
+                        if let Value::Object(s_obj) = &*str_ctor.borrow()
+                            && let Some(proto) = obj_get_key_value(s_obj, &"prototype".into())?
+                            && let Value::Object(p_obj) = &*proto.borrow()
+                            && let Value::Symbol(s) = &*iter_sym.borrow()
+                        {
+                            let has = obj_get_key_value(p_obj, &PropertyKey::Symbol(*s))?;
+                            println!("DEBUG: String.prototype[@@iterator] found: {:?}", has.is_some());
                         }
                     }
                 }
@@ -2077,10 +2055,10 @@ fn eval_res<'gc>(
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
                             ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label {
-                                    if !own_labels.contains(l) {
-                                        return Ok(Some(ControlFlow::Continue(label)));
-                                    }
+                                if let Some(ref l) = label
+                                    && !own_labels.contains(l)
+                                {
+                                    return Ok(Some(ControlFlow::Continue(label)));
                                 }
                             }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -2093,40 +2071,40 @@ fn eval_res<'gc>(
                 return Ok(None);
             }
 
-            if let Value::Object(obj) = iter_val {
-                if is_array(mc, &obj) {
-                    let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap().borrow().clone();
-                    let len = match len_val {
-                        Value::Number(n) => n as usize,
-                        _ => 0,
-                    };
-                    let loop_env = new_js_object_data(mc);
-                    loop_env.borrow_mut(mc).prototype = Some(*env);
-                    for i in 0..len {
-                        let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
-                        env_set(mc, &loop_env, var_name, val)?;
-                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                        match res {
-                            ControlFlow::Normal(v) => *last_value = v,
-                            ControlFlow::Break(label) => {
-                                if label.is_none() {
-                                    break;
-                                }
-                                return Ok(Some(ControlFlow::Break(label)));
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap().borrow().clone();
+                let len = match len_val {
+                    Value::Number(n) => n as usize,
+                    _ => 0,
+                };
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+                for i in 0..len {
+                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    env_set(mc, &loop_env, var_name, val)?;
+                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Break(label) => {
+                            if label.is_none() {
+                                break;
                             }
-                            ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label {
-                                    if !own_labels.contains(l) {
-                                        return Ok(Some(ControlFlow::Continue(label)));
-                                    }
-                                }
-                            }
-                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            return Ok(Some(ControlFlow::Break(label)));
                         }
+                        ControlFlow::Continue(label) => {
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                     }
-                    return Ok(None);
                 }
+                return Ok(None);
             }
 
             Err(EvalError::Js(raise_type_error!("Value is not iterable")))
@@ -2153,7 +2131,7 @@ fn eval_res<'gc>(
                             }
                         }
                     }
-                    current = o.borrow().prototype.clone();
+                    current = o.borrow().prototype;
                 }
 
                 let loop_env = new_js_object_data(mc);
@@ -2175,10 +2153,10 @@ fn eval_res<'gc>(
                             return Ok(Some(ControlFlow::Break(label)));
                         }
                         ControlFlow::Continue(label) => {
-                            if let Some(ref l) = label {
-                                if !own_labels.contains(l) {
-                                    return Ok(Some(ControlFlow::Continue(label)));
-                                }
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
                             }
                         }
                         ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -2192,67 +2170,64 @@ fn eval_res<'gc>(
         StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
             // Hoist var declarations from destructuring pattern
             let mut names = Vec::new();
-            collect_names_from_object_destructuring(&pattern, &mut names);
+            collect_names_from_object_destructuring(pattern, &mut names);
             for name in names {
                 hoist_name(mc, env, &name)?;
             }
 
             // Simplified: assume array for now
             let iter_val = evaluate_expr(mc, env, iterable)?;
-            if let Value::Object(obj) = iter_val {
-                if is_array(mc, &obj) {
-                    let len = object_get_length(&obj).unwrap_or(0);
-                    let loop_env = new_js_object_data(mc);
-                    loop_env.borrow_mut(mc).prototype = Some(*env);
-                    for i in 0..len {
-                        let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
-                        // Perform object destructuring
-                        for elem in pattern {
-                            match elem {
-                                ObjectDestructuringElement::Property { key, value } => {
-                                    let prop_val = if let Value::Object(o) = &val {
-                                        if let Some(cell) = obj_get_key_value(o, &PropertyKey::String(key.clone()))? {
-                                            cell.borrow().clone()
-                                        } else {
-                                            Value::Undefined
-                                        }
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len = object_get_length(&obj).unwrap_or(0);
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+                for i in 0..len {
+                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    // Perform object destructuring
+                    for elem in pattern {
+                        match elem {
+                            ObjectDestructuringElement::Property { key, value } => {
+                                let prop_val = if let Value::Object(o) = &val {
+                                    if let Some(cell) = obj_get_key_value(o, &PropertyKey::String(key.clone()))? {
+                                        cell.borrow().clone()
                                     } else {
                                         Value::Undefined
-                                    };
-                                    match &*value {
-                                        DestructuringElement::Variable(name, _) => {
-                                            crate::core::env_set_recursive(mc, env, name, prop_val)?;
-                                        }
-                                        _ => {} // Simplified
                                     }
-                                }
-                                ObjectDestructuringElement::Rest(_name) => {
-                                    // Simplified rest
-                                }
-                            }
-                        }
-                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                        match res {
-                            ControlFlow::Normal(v) => *last_value = v,
-                            ControlFlow::Break(label) => {
-                                if label.is_none() {
-                                    break;
-                                }
-                                return Ok(Some(ControlFlow::Break(label)));
-                            }
-                            ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label {
-                                    if !own_labels.contains(l) {
-                                        return Ok(Some(ControlFlow::Continue(label)));
-                                    }
+                                } else {
+                                    Value::Undefined
+                                };
+                                if let DestructuringElement::Variable(name, _) = value {
+                                    crate::core::env_set_recursive(mc, env, name, prop_val)?;
                                 }
                             }
-                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            ObjectDestructuringElement::Rest(_name) => {
+                                // Simplified rest
+                            }
                         }
                     }
-                    return Ok(None);
+                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Break(label) => {
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
                 }
+                return Ok(None);
             }
             Err(EvalError::Js(raise_type_error!(
                 "ForOfDestructuringObject only supports Arrays currently"
@@ -2261,7 +2236,7 @@ fn eval_res<'gc>(
         StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
             // Hoist var declarations from destructuring pattern
             let mut names = Vec::new();
-            collect_names_from_destructuring(&pattern, &mut names);
+            collect_names_from_destructuring(pattern, &mut names);
             for name in names {
                 hoist_name(mc, env, &name)?;
             }
@@ -2277,13 +2252,13 @@ fn eval_res<'gc>(
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(iter_sym_data.clone()))? {
+                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(*iter_sym_data))? {
                         c.borrow().clone()
                     } else {
                         Value::Undefined
                     }
                 } else {
-                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(iter_sym_data.clone()))?
+                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(*iter_sym_data))?
                 };
 
                 if !matches!(method, Value::Undefined | Value::Null) {
@@ -2329,24 +2304,21 @@ fn eval_res<'gc>(
 
                         // Perform array destructuring on the iterator-provided value
                         for (j, elem) in pattern.iter().enumerate() {
-                            match elem {
-                                DestructuringElement::Variable(name, _) => {
-                                    let elem_val = if let Value::Object(o) = &value {
-                                        if is_array(mc, o) {
-                                            if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
-                                                cell.borrow().clone()
-                                            } else {
-                                                Value::Undefined
-                                            }
+                            if let DestructuringElement::Variable(name, _) = elem {
+                                let elem_val = if let Value::Object(o) = &value {
+                                    if is_array(mc, o) {
+                                        if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
+                                            cell.borrow().clone()
                                         } else {
                                             Value::Undefined
                                         }
                                     } else {
                                         Value::Undefined
-                                    };
-                                    crate::core::env_set_recursive(mc, env, name, elem_val)?;
-                                }
-                                _ => {} // Simplified
+                                    }
+                                } else {
+                                    Value::Undefined
+                                };
+                                crate::core::env_set_recursive(mc, env, name, elem_val)?;
                             }
                         }
 
@@ -2360,10 +2332,10 @@ fn eval_res<'gc>(
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
                             ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label {
-                                    if !own_labels.contains(l) {
-                                        return Ok(Some(ControlFlow::Continue(label)));
-                                    }
+                                if let Some(ref l) = label
+                                    && !own_labels.contains(l)
+                                {
+                                    return Ok(Some(ControlFlow::Continue(label)));
                                 }
                             }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
@@ -2377,57 +2349,54 @@ fn eval_res<'gc>(
             }
 
             // Simplified: assume array for now (existing fallback)
-            if let Value::Object(obj) = iter_val {
-                if is_array(mc, &obj) {
-                    let len = object_get_length(&obj).unwrap_or(0);
-                    let loop_env = new_js_object_data(mc);
-                    loop_env.borrow_mut(mc).prototype = Some(*env);
-                    for i in 0..len {
-                        let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
-                        // Perform array destructuring
-                        for (j, elem) in pattern.iter().enumerate() {
-                            match elem {
-                                DestructuringElement::Variable(name, _) => {
-                                    let elem_val = if let Value::Object(o) = &val {
-                                        if is_array(mc, o) {
-                                            if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
-                                                cell.borrow().clone()
-                                            } else {
-                                                Value::Undefined
-                                            }
-                                        } else {
-                                            Value::Undefined
-                                        }
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len = object_get_length(&obj).unwrap_or(0);
+                let loop_env = new_js_object_data(mc);
+                loop_env.borrow_mut(mc).prototype = Some(*env);
+                for i in 0..len {
+                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    // Perform array destructuring
+                    for (j, elem) in pattern.iter().enumerate() {
+                        if let DestructuringElement::Variable(name, _) = elem {
+                            let elem_val = if let Value::Object(o) = &val {
+                                if is_array(mc, o) {
+                                    if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
+                                        cell.borrow().clone()
                                     } else {
                                         Value::Undefined
-                                    };
-                                    crate::core::env_set_recursive(mc, env, name, elem_val)?;
-                                }
-                                _ => {} // Simplified
-                            }
-                        }
-                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                        match res {
-                            ControlFlow::Normal(v) => *last_value = v,
-                            ControlFlow::Break(label) => {
-                                if label.is_none() {
-                                    break;
-                                }
-                                return Ok(Some(ControlFlow::Break(label)));
-                            }
-                            ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label {
-                                    if !own_labels.contains(l) {
-                                        return Ok(Some(ControlFlow::Continue(label)));
                                     }
+                                } else {
+                                    Value::Undefined
                                 }
-                            }
-                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            } else {
+                                Value::Undefined
+                            };
+                            crate::core::env_set_recursive(mc, env, name, elem_val)?;
                         }
                     }
-                    return Ok(None);
+                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Break(label) => {
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                    }
                 }
+                return Ok(None);
             }
             Err(EvalError::Js(raise_type_error!(
                 "ForOfDestructuringArray only supports Arrays currently"
@@ -2519,19 +2488,18 @@ pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, 
     if let Some(exports_cell) = env_get(env, "exports") {
         let exports = exports_cell.borrow().clone();
         if let Value::Object(exports_obj) = exports {
-            obj_set_key_value(mc, &exports_obj, &name.into(), val).map_err(|e| EvalError::Js(e))?;
+            obj_set_key_value(mc, &exports_obj, &name.into(), val).map_err(EvalError::Js)?;
             return Ok(());
         }
     }
 
     if let Some(module_cell) = env_get(env, "module") {
         let module = module_cell.borrow().clone();
-        if let Value::Object(module_obj) = module {
-            if let Ok(Some(exports_val)) = obj_get_key_value(&module_obj, &"exports".into()) {
-                if let Value::Object(exports_obj) = &*exports_val.borrow() {
-                    obj_set_key_value(mc, exports_obj, &name.into(), val).map_err(|e| EvalError::Js(e))?;
-                }
-            }
+        if let Value::Object(module_obj) = module
+            && let Ok(Some(exports_val)) = obj_get_key_value(&module_obj, &"exports".into())
+            && let Value::Object(exports_obj) = &*exports_val.borrow()
+        {
+            obj_set_key_value(mc, exports_obj, &name.into(), val).map_err(EvalError::Js)?;
         }
     }
     Ok(())
@@ -2545,17 +2513,17 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     mut e: EvalError<'gc>,
 ) -> EvalError<'gc> {
     let mut filename = String::new();
-    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into()) {
-        if let Value::String(s) = &*val_ptr.borrow() {
-            filename = utf16_to_utf8(s);
-        }
+    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into())
+        && let Value::String(s) = &*val_ptr.borrow()
+    {
+        filename = utf16_to_utf8(s);
     }
     // Prefer an explicit frame name if the call environment has one (set in call_closure)
     let mut frame_name = "<anonymous>".to_string();
-    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into()) {
-        if let Value::String(s) = &*frame_val.borrow() {
-            frame_name = utf16_to_utf8(s);
-        }
+    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into())
+        && let Value::String(s) = &*frame_val.borrow()
+    {
+        frame_name = utf16_to_utf8(s);
     }
     let frame = format!("at {} ({}:{}:{})", frame_name, filename, line, column);
     if let EvalError::Js(js_err) = &mut e {
@@ -2588,29 +2556,25 @@ fn get_primitive_prototype_property<'gc>(
         _ => return Ok(Value::Undefined),
     };
 
-    if let Ok(ctor) = evaluate_var(mc, env, proto_name) {
-        if let Value::Object(ctor_obj) = ctor {
-            if let Some(proto_ref) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
-                if let Value::Object(proto) = &*proto_ref.borrow() {
-                    // Special-case Symbol.prototype.description: return primitive description without invoking getter
-                    if proto_name == "Symbol" {
-                        if let PropertyKey::String(s) = key {
-                            if s == "description" {
-                                if let Value::Symbol(sd) = obj_val {
-                                    if let Some(desc) = &sd.description {
-                                        return Ok(Value::String(crate::unicode::utf8_to_utf16(desc)));
-                                    }
-                                    return Ok(Value::Undefined);
-                                }
-                            }
-                        }
-                    }
-
-                    if let Some(val) = obj_get_key_value(proto, key)? {
-                        return Ok(val.borrow().clone());
-                    }
-                }
+    if let Ok(ctor) = evaluate_var(mc, env, proto_name)
+        && let Value::Object(ctor_obj) = ctor
+        && let Some(proto_ref) = obj_get_key_value(&ctor_obj, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_ref.borrow()
+    {
+        // Special-case Symbol.prototype.description: return primitive description without invoking getter
+        if proto_name == "Symbol"
+            && let PropertyKey::String(s) = key
+            && s == "description"
+            && let Value::Symbol(sd) = obj_val
+        {
+            if let Some(desc) = &sd.description {
+                return Ok(Value::String(crate::unicode::utf8_to_utf16(desc)));
             }
+            return Ok(Value::Undefined);
+        }
+
+        if let Some(val) = obj_get_key_value(proto, key)? {
+            return Ok(val.borrow().clone());
         }
     }
     Ok(Value::Undefined)
@@ -3256,14 +3220,13 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 if let Value::BigInt(_) = current {
                     return Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift")));
                 }
-                match (current, val) {
-                    (l, r) => {
-                        let l = to_uint32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
-                        let new_val = Value::Number((l >> r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
-                        Ok(new_val)
-                    }
+                let (l, r) = (current, val);
+                {
+                    let l = to_uint32_value(&l)?;
+                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let new_val = Value::Number((l >> r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key_val, new_val.clone())?;
+                    Ok(new_val)
                 }
             } else {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
@@ -3279,14 +3242,13 @@ fn evaluate_expr_urightshift_assign<'gc>(
                 if let Value::BigInt(_) = current {
                     return Err(EvalError::Js(crate::raise_type_error!("Unsigned right shift")));
                 }
-                match (current, val) {
-                    (l, r) => {
-                        let l = to_uint32_value(&l)?;
-                        let r = (to_uint32_value(&r)? & 0x1F) as u32;
-                        let new_val = Value::Number((l >> r) as f64);
-                        set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
-                        Ok(new_val)
-                    }
+                let (l, r) = (current, val);
+                {
+                    let l = to_uint32_value(&l)?;
+                    let r = (to_uint32_value(&r)? & 0x1F) as u32;
+                    let new_val = Value::Number((l >> r) as f64);
+                    set_property_with_accessors(mc, env, &obj, &key, new_val.clone())?;
+                    Ok(new_val)
                 }
             } else {
                 Err(EvalError::Js(crate::raise_type_error!("Cannot assign to property of non-object")))
@@ -3545,7 +3507,7 @@ fn evaluate_call_dispatch<'gc>(
                 return Ok(res);
             }
             if name == "eval" {
-                let first_arg = eval_args.get(0).cloned().unwrap_or(Value::Undefined);
+                let first_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
                 if let Value::String(script_str) = first_arg {
                     let script = utf16_to_utf8(&script_str);
                     let mut tokens = tokenize(&script).map_err(EvalError::Js)?;
@@ -3553,9 +3515,9 @@ fn evaluate_call_dispatch<'gc>(
                         tokens.pop();
                     }
                     let mut index = 0;
-                    let mut statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+                    let statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
                     // eval executes in the current environment
-                    match evaluate_statements(mc, env, &mut statements) {
+                    match evaluate_statements(mc, env, &statements) {
                         Ok(v) => Ok(v),
                         Err(e) => Err(e),
                     }
@@ -3647,7 +3609,7 @@ fn evaluate_call_dispatch<'gc>(
                     Ok(string_from_code_point(&eval_args)?)
                 } else if name == "String.raw" {
                     Ok(string_raw(&eval_args)?)
-                } else if name.starts_with("String.prototype.") {
+                } else if let Some(method) = name.strip_prefix("String.prototype.") {
                     // String instance methods need a 'this' value which should be the first argument if called directly?
                     // But here we are calling the function object directly.
                     // Usually instance methods are called via method call syntax (obj.method()), which sets 'this'.
@@ -3678,7 +3640,6 @@ fn evaluate_call_dispatch<'gc>(
                     // Ah, I see `Expr::Call` logic is split.
                     // Let's check `Expr::Call` implementation again.
 
-                    let method = &name[17..];
                     // Use the provided `this` value (from method call) as the receiver; fall back to ToString conversion
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     let s_vec = match this_v {
@@ -3700,8 +3661,8 @@ fn evaluate_call_dispatch<'gc>(
                 } else {
                     Err(EvalError::Js(raise_eval_error!(format!("Unknown String function: {}", name))))
                 }
-            } else if name.starts_with("Object.") {
-                if let Some(method) = name.strip_prefix("Object.prototype.") {
+            } else if let Some(suffix) = name.strip_prefix("Object.") {
+                if let Some(method) = suffix.strip_prefix("prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     match method {
                         "valueOf" => Ok(crate::js_object::handle_value_of_method(mc, &this_v, &eval_args, env).map_err(EvalError::Js)?),
@@ -3724,11 +3685,10 @@ fn evaluate_call_dispatch<'gc>(
                         _ => Err(EvalError::Js(raise_eval_error!(format!("Unknown Object function: {}", name)))),
                     }
                 } else {
-                    let method = &name[7..];
-                    Ok(crate::js_object::handle_object_method(mc, method, &eval_args, env).map_err(EvalError::Js)?)
+                    Ok(crate::js_object::handle_object_method(mc, suffix, &eval_args, env).map_err(EvalError::Js)?)
                 }
-            } else if name.starts_with("Array.") {
-                if let Some(method) = name.strip_prefix("Array.prototype.") {
+            } else if let Some(suffix) = name.strip_prefix("Array.") {
+                if let Some(method) = suffix.strip_prefix("prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
                         Ok(crate::js_array::handle_array_instance_method(mc, &obj, method, &eval_args, env)?)
@@ -3738,8 +3698,7 @@ fn evaluate_call_dispatch<'gc>(
                         )))
                     }
                 } else {
-                    let method = &name[6..];
-                    Ok(handle_array_static_method(mc, method, &eval_args, env)?)
+                    Ok(handle_array_static_method(mc, suffix, &eval_args, env)?)
                 }
             } else if name.starts_with("RegExp.") {
                 if let Some(method) = name.strip_prefix("RegExp.prototype.") {
@@ -3921,7 +3880,7 @@ fn evaluate_call_dispatch<'gc>(
                     if method == "call" {
                         // function.call(thisArg, ...args)
                         let this_v = this_val.clone().unwrap_or(Value::Undefined);
-                        let this_arg = eval_args.get(0).cloned().unwrap_or(Value::Undefined);
+                        let this_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
                         let call_args = if eval_args.len() > 1 { &eval_args[1..] } else { &[] };
                         // Call this_v with this_arg as this
                         match this_v {
@@ -3936,7 +3895,7 @@ fn evaluate_call_dispatch<'gc>(
                             Value::Object(obj) => {
                                 if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
                                     if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                                        call_closure(mc, &cl, Some(this_arg), call_args, env, None)
+                                        call_closure(mc, cl, Some(this_arg), call_args, env, None)
                                     } else {
                                         Err(EvalError::Js(raise_eval_error!("Not a function")))
                                     }
@@ -3961,19 +3920,17 @@ fn evaluate_call_dispatch<'gc>(
             if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
-                        let res = call_closure(mc, cl, this_val.clone(), &eval_args, env, Some(obj.clone()));
+                        let res = call_closure(mc, cl, this_val.clone(), &eval_args, env, Some(obj));
                         match res {
                             Ok(v) => Ok(v),
                             Err(mut e) => {
                                 let name_opt = obj.borrow().get_property("name");
-                                if let Some(name_str) = name_opt {
-                                    if let EvalError::Js(js_err) = &mut e {
-                                        if let Some(last_frame) = js_err.inner.stack.last_mut() {
-                                            if last_frame.contains("<anonymous>") {
-                                                *last_frame = last_frame.replace("<anonymous>", &name_str);
-                                            }
-                                        }
-                                    }
+                                if let Some(name_str) = name_opt
+                                    && let EvalError::Js(js_err) = &mut e
+                                    && let Some(last_frame) = js_err.inner.stack.last_mut()
+                                    && last_frame.contains("<anonymous>")
+                                {
+                                    *last_frame = last_frame.replace("<anonymous>", &name_str);
                                 }
                                 Err(e)
                             }
@@ -3981,10 +3938,10 @@ fn evaluate_call_dispatch<'gc>(
                     }
                     _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                 }
-            } else if let Some(_) = obj_get_key_value(&obj, &"__class_def__".into())? {
-                return Err(EvalError::Js(crate::raise_type_error!(
+            } else if (obj_get_key_value(&obj, &"__class_def__".into())?).is_some() {
+                Err(EvalError::Js(crate::raise_type_error!(
                     "Class constructor cannot be invoked without 'new'"
-                )));
+                )))
             } else if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
                 match &*native_name.borrow() {
                     Value::String(name) => {
@@ -4062,7 +4019,7 @@ fn evaluate_expr_call<'gc>(
 
             let key = match key_val {
                 Value::Symbol(s) => PropertyKey::Symbol(s),
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s).into()),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::from(n.to_string()),
                 _ => PropertyKey::from(value_to_string(&key_val)),
             };
@@ -4111,7 +4068,7 @@ fn evaluate_expr_call<'gc>(
 
             let key = match key_val {
                 Value::Symbol(s) => PropertyKey::Symbol(s),
-                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s).into()),
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::Number(n) => PropertyKey::from(n.to_string()),
                 _ => PropertyKey::from(value_to_string(&key_val)),
             };
@@ -4153,6 +4110,16 @@ fn evaluate_expr_call<'gc>(
             }
         } else {
             eval_args.push(evaluate_expr(mc, env, arg_expr)?);
+        }
+    }
+
+    // If callee appears to be a non-callable primitive and the callee expression is a variable,
+    // prefer a TypeError with the variable name (e.g., "a is not a function").
+    if !matches!(func_val, Value::Closure(_) | Value::Function(_) | Value::Object(_)) {
+        if let Expr::Var(name, ..) = func_expr {
+            return Err(EvalError::Js(raise_type_error!(format!("{} is not a function", name))));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!("Not a function")));
         }
     }
 
@@ -4666,22 +4633,22 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             evaluate_expr(mc, env, left)?;
             evaluate_expr(mc, env, right)
         }
-        Expr::Assign(target, value_expr) => evaluate_expr_assign(mc, env, &**target, value_expr),
-        Expr::AddAssign(target, value_expr) => evaluate_expr_add_assign(mc, env, &**target, value_expr),
-        Expr::SubAssign(target, value_expr) => evaluate_expr_sub_assign(mc, env, &**target, value_expr),
-        Expr::MulAssign(target, value_expr) => evaluate_expr_mul_assign(mc, env, &**target, value_expr),
-        Expr::DivAssign(target, value_expr) => evaluate_expr_div_assign(mc, env, &**target, value_expr),
-        Expr::ModAssign(target, value_expr) => evaluate_expr_mod_assign(mc, env, &**target, value_expr),
-        Expr::PowAssign(target, value_expr) => evaluate_expr_pow_assign(mc, env, &**target, value_expr),
-        Expr::BitAndAssign(target, value_expr) => evaluate_expr_bitand_assign(mc, env, &**target, value_expr),
-        Expr::BitOrAssign(target, value_expr) => evaluate_expr_bitor_assign(mc, env, &**target, value_expr),
-        Expr::BitXorAssign(target, value_expr) => evaluate_expr_bitxor_assign(mc, env, &**target, value_expr),
-        Expr::LeftShiftAssign(target, value_expr) => evaluate_expr_leftshift_assign(mc, env, &**target, value_expr),
-        Expr::RightShiftAssign(target, value_expr) => evaluate_expr_rightshift_assign(mc, env, &**target, value_expr),
-        Expr::UnsignedRightShiftAssign(target, value_expr) => evaluate_expr_urightshift_assign(mc, env, &**target, value_expr),
-        Expr::LogicalAndAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::And),
-        Expr::LogicalOrAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::Or),
-        Expr::NullishAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, &**target, value_expr, LogicalAssignOp::Nullish),
+        Expr::Assign(target, value_expr) => evaluate_expr_assign(mc, env, target, value_expr),
+        Expr::AddAssign(target, value_expr) => evaluate_expr_add_assign(mc, env, target, value_expr),
+        Expr::SubAssign(target, value_expr) => evaluate_expr_sub_assign(mc, env, target, value_expr),
+        Expr::MulAssign(target, value_expr) => evaluate_expr_mul_assign(mc, env, target, value_expr),
+        Expr::DivAssign(target, value_expr) => evaluate_expr_div_assign(mc, env, target, value_expr),
+        Expr::ModAssign(target, value_expr) => evaluate_expr_mod_assign(mc, env, target, value_expr),
+        Expr::PowAssign(target, value_expr) => evaluate_expr_pow_assign(mc, env, target, value_expr),
+        Expr::BitAndAssign(target, value_expr) => evaluate_expr_bitand_assign(mc, env, target, value_expr),
+        Expr::BitOrAssign(target, value_expr) => evaluate_expr_bitor_assign(mc, env, target, value_expr),
+        Expr::BitXorAssign(target, value_expr) => evaluate_expr_bitxor_assign(mc, env, target, value_expr),
+        Expr::LeftShiftAssign(target, value_expr) => evaluate_expr_leftshift_assign(mc, env, target, value_expr),
+        Expr::RightShiftAssign(target, value_expr) => evaluate_expr_rightshift_assign(mc, env, target, value_expr),
+        Expr::UnsignedRightShiftAssign(target, value_expr) => evaluate_expr_urightshift_assign(mc, env, target, value_expr),
+        Expr::LogicalAndAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, target, value_expr, LogicalAssignOp::And),
+        Expr::LogicalOrAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, target, value_expr, LogicalAssignOp::Or),
+        Expr::NullishAssign(target, value_expr) => evaluate_expr_logical_assign(mc, env, target, value_expr, LogicalAssignOp::Nullish),
         Expr::Binary(left, op, right) => evaluate_expr_binary(mc, env, left, op, right),
         Expr::LogicalNot(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
@@ -4717,14 +4684,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Create an arrow function object which captures the current `this` lexically
             let func_obj = crate::core::new_js_object_data(mc);
             // Set __proto__ to Function.prototype
-            if let Some(func_ctor_val) = env_get(env, "Function") {
-                if let Value::Object(func_ctor) = &*func_ctor_val.borrow() {
-                    if let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into()) {
-                        if let Value::Object(proto) = &*proto_val.borrow() {
-                            func_obj.borrow_mut(mc).prototype = Some(*proto);
-                        }
-                    }
-                }
+            if let Some(func_ctor_val) = env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
             // Capture current `this` value for lexical this
@@ -4748,14 +4713,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Create prototype object
             let proto_obj = crate::core::new_js_object_data(mc);
             // Set prototype of prototype object to Object.prototype
-            if let Some(obj_val) = env_get(env, "Object") {
-                if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                    if let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into()) {
-                        if let Value::Object(obj_proto) = &*obj_proto_val.borrow() {
-                            proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
-                        }
-                    }
-                }
+            if let Some(obj_val) = env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+            {
+                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
             }
 
             // Set 'constructor' on prototype and 'prototype' on function
@@ -4774,13 +4737,13 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 let val = get_property_with_accessors(mc, env, obj, &key.as_str().into())?;
                 // Special-case `__proto__` getter: if not present as an own property, return
                 // the internal prototype pointer (or null).
-                if let Value::Undefined = val {
-                    if key == "__proto__" {
-                        if let Some(proto_ptr) = obj.borrow().prototype {
-                            return Ok(Value::Object(proto_ptr));
-                        } else {
-                            return Ok(Value::Null);
-                        }
+                if let Value::Undefined = val
+                    && key == "__proto__"
+                {
+                    if let Some(proto_ptr) = obj.borrow().prototype {
+                        return Ok(Value::Object(proto_ptr));
+                    } else {
+                        return Ok(Value::Null);
                     }
                 }
                 Ok(val)
@@ -4997,16 +4960,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let left_val = evaluate_expr(mc, env, lhs)?;
             if left_val.is_null_or_undefined() {
                 Ok(Value::Undefined)
-            } else {
-                if let Value::Object(obj) = &left_val {
-                    if let Some(val_rc) = crate::core::obj_get_key_value(&obj, &prop.into()).map_err(EvalError::Js)? {
-                        Ok(val_rc.borrow().clone())
-                    } else {
-                        Ok(Value::Undefined)
-                    }
+            } else if let Value::Object(obj) = &left_val {
+                if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop.into()).map_err(EvalError::Js)? {
+                    Ok(val_rc.borrow().clone())
                 } else {
-                    get_primitive_prototype_property(mc, env, &left_val, &prop.into())
+                    Ok(Value::Undefined)
                 }
+            } else {
+                get_primitive_prototype_property(mc, env, &left_val, &prop.into())
             }
         }
         Expr::OptionalIndex(lhs, index_expr) => {
@@ -5030,7 +4991,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                 };
                 if let Value::Object(obj) = &left_val {
-                    if let Some(val_rc) = crate::core::obj_get_key_value(&obj, &prop_key).map_err(EvalError::Js)? {
+                    if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop_key).map_err(EvalError::Js)? {
                         Ok(val_rc.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
@@ -5112,7 +5073,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
 
                     let f_val = if let Value::Object(obj) = &obj_val {
-                        if let Some(val_rc) = crate::core::obj_get_key_value(&obj, &prop_key).map_err(EvalError::Js)? {
+                        if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop_key).map_err(EvalError::Js)? {
                             val_rc.borrow().clone()
                         } else {
                             Value::Undefined
@@ -5264,14 +5225,12 @@ fn evaluate_function_expression<'gc>(
     let func_obj = crate::core::new_js_object_data(mc);
 
     // Set __proto__ to Function.prototype
-    if let Some(func_ctor_val) = env_get(env, "Function") {
-        if let Value::Object(func_ctor) = &*func_ctor_val.borrow() {
-            if let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into()) {
-                if let Value::Object(proto) = &*proto_val.borrow() {
-                    func_obj.borrow_mut(mc).prototype = Some(*proto);
-                }
-            }
-        }
+    if let Some(func_ctor_val) = env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        func_obj.borrow_mut(mc).prototype = Some(*proto);
     }
 
     // For Named Function Expressions (NFE), the function's name should be bound
@@ -5296,14 +5255,12 @@ fn evaluate_function_expression<'gc>(
     // Create prototype object
     let proto_obj = crate::core::new_js_object_data(mc);
     // Set prototype of prototype object to Object.prototype
-    if let Some(obj_val) = env_get(env, "Object") {
-        if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-            if let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into()) {
-                if let Value::Object(obj_proto) = &*obj_proto_val.borrow() {
-                    proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
-                }
-            }
-        }
+    if let Some(obj_val) = env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+    {
+        proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
     }
 
     // Set 'constructor' on prototype
@@ -5325,7 +5282,7 @@ fn get_property_with_accessors<'gc>(
         match val {
             Value::Property { getter, value, .. } => {
                 if let Some(g) = getter {
-                    return call_accessor(mc, env, obj, &*g);
+                    return call_accessor(mc, env, obj, &g);
                 }
                 if let Some(v) = value {
                     return Ok(v.borrow().clone());
@@ -5348,23 +5305,23 @@ fn set_property_with_accessors<'gc>(
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     // Special-case assignment to `__proto__` to update the internal prototype pointer
-    if let PropertyKey::String(s) = key {
-        if s == "__proto__" {
-            match &val {
-                Value::Object(proto_obj) => {
-                    // Update internal prototype pointer; do NOT create an own enumerable '__proto__' property
-                    obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                    return Ok(());
-                }
-                Value::Null => {
-                    obj.borrow_mut(mc).prototype = None;
-                    return Ok(());
-                }
-                _ => {
-                    // For non-object/null, just set the property (do not change internal prototype)
-                    crate::core::obj_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
-                    return Ok(());
-                }
+    if let PropertyKey::String(s) = key
+        && s == "__proto__"
+    {
+        match &val {
+            Value::Object(proto_obj) => {
+                // Update internal prototype pointer; do NOT create an own enumerable '__proto__' property
+                obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                return Ok(());
+            }
+            Value::Null => {
+                obj.borrow_mut(mc).prototype = None;
+                return Ok(());
+            }
+            _ => {
+                // For non-object/null, just set the property (do not change internal prototype)
+                crate::core::obj_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
+                return Ok(());
             }
         }
     }
@@ -5374,7 +5331,7 @@ fn set_property_with_accessors<'gc>(
         match prop {
             Value::Property { setter, getter, .. } => {
                 if let Some(s) = setter {
-                    return call_setter(mc, obj, &*s, val);
+                    return call_setter(mc, obj, &s, val);
                 }
                 if getter.is_some() {
                     return Err(EvalError::Js(crate::raise_type_error!(
@@ -5408,7 +5365,7 @@ fn call_native_function<'gc>(
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
     if name == "call" {
         let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call call without this")))?;
-        let new_this = args.get(0).cloned().unwrap_or(Value::Undefined);
+        let new_this = args.first().cloned().unwrap_or(Value::Undefined);
         let rest_args = &args[1..];
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), rest_args, env, None)?)),
@@ -5454,18 +5411,14 @@ fn call_native_function<'gc>(
             Value::Null => "Null".to_string(),
             Value::Object(obj) => {
                 let mut t = "Object".to_string();
-                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into()) {
-                    if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                        if let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into()) {
-                            if let Value::Symbol(s) = &*tag_sym.borrow() {
-                                if let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(s.clone())) {
-                                    if let Value::String(s_val) = &*val.borrow() {
-                                        t = crate::unicode::utf16_to_utf8(s_val);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into())
+                    && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                    && let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into())
+                    && let Value::Symbol(s) = &*tag_sym.borrow()
+                    && let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(*s))
+                    && let Value::String(s_val) = &*val.borrow()
+                {
+                    t = crate::unicode::utf16_to_utf8(s_val);
                 }
                 t
             }
@@ -5555,9 +5508,9 @@ fn call_native_function<'gc>(
             Value::Object(obj) => {
                 match proto {
                     Value::Object(proto_obj) => {
-                        obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+                        obj.borrow_mut(mc).prototype = Some(proto_obj);
                         // also set the own property __proto__ for consistency
-                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Object(proto_obj.clone())).map_err(EvalError::Js)?;
+                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Object(proto_obj)).map_err(EvalError::Js)?;
                         Ok(Some(Value::Boolean(true)))
                     }
                     Value::Null => {
@@ -5576,89 +5529,87 @@ fn call_native_function<'gc>(
         };
     }
 
-    if name.starts_with("Map.") {
-        if let Some(method) = name.strip_prefix("Map.prototype.") {
-            let this_v = this_val.clone().unwrap_or(Value::Undefined);
-            if let Value::Object(obj) = this_v {
-                if let Some(map_val) = crate::core::obj_get_key_value(&obj, &"__map__".into()).map_err(EvalError::Js)? {
-                    if let Value::Map(map_ptr) = &*map_val.borrow() {
-                        return Ok(Some(
-                            crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env).map_err(EvalError::Js)?,
-                        ));
-                    } else {
-                        return Err(EvalError::Js(raise_eval_error!(
-                            "TypeError: Map.prototype method called on incompatible receiver"
-                        )));
-                    }
+    if name.starts_with("Map.")
+        && let Some(method) = name.strip_prefix("Map.prototype.")
+    {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            if let Some(map_val) = crate::core::obj_get_key_value(&obj, &"__map__".into()).map_err(EvalError::Js)? {
+                if let Value::Map(map_ptr) = &*map_val.borrow() {
+                    return Ok(Some(
+                        crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env).map_err(EvalError::Js)?,
+                    ));
                 } else {
                     return Err(EvalError::Js(raise_eval_error!(
                         "TypeError: Map.prototype method called on incompatible receiver"
                     )));
                 }
-            } else if let Value::Map(map_ptr) = this_v {
-                return Ok(Some(
-                    crate::js_map::handle_map_instance_method(mc, &map_ptr, method, args, env).map_err(EvalError::Js)?,
-                ));
             } else {
                 return Err(EvalError::Js(raise_eval_error!(
-                    "TypeError: Map.prototype method called on non-object receiver"
+                    "TypeError: Map.prototype method called on incompatible receiver"
                 )));
             }
+        } else if let Value::Map(map_ptr) = this_v {
+            return Ok(Some(
+                crate::js_map::handle_map_instance_method(mc, &map_ptr, method, args, env).map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: Map.prototype method called on non-object receiver"
+            )));
         }
     }
 
-    if name.starts_with("Set.") {
-        if let Some(method) = name.strip_prefix("Set.prototype.") {
-            let this_v = this_val.clone().unwrap_or(Value::Undefined);
-            if let Value::Object(obj) = this_v {
-                if let Some(set_val) = crate::core::obj_get_key_value(&obj, &"__set__".into()).map_err(EvalError::Js)? {
-                    if let Value::Set(set_ptr) = &*set_val.borrow() {
-                        return Ok(Some(
-                            crate::js_set::handle_set_instance_method(mc, set_ptr, this_v.clone(), method, args, env)
-                                .map_err(EvalError::Js)?,
-                        ));
-                    } else {
-                        return Err(EvalError::Js(raise_eval_error!(
-                            "TypeError: Set.prototype method called on incompatible receiver"
-                        )));
-                    }
+    if name.starts_with("Set.")
+        && let Some(method) = name.strip_prefix("Set.prototype.")
+    {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            if let Some(set_val) = crate::core::obj_get_key_value(&obj, &"__set__".into()).map_err(EvalError::Js)? {
+                if let Value::Set(set_ptr) = &*set_val.borrow() {
+                    return Ok(Some(
+                        crate::js_set::handle_set_instance_method(mc, set_ptr, this_v.clone(), method, args, env).map_err(EvalError::Js)?,
+                    ));
                 } else {
                     return Err(EvalError::Js(raise_eval_error!(
                         "TypeError: Set.prototype method called on incompatible receiver"
                     )));
                 }
-            } else if let Value::Set(set_ptr) = this_v {
-                return Ok(Some(
-                    crate::js_set::handle_set_instance_method(mc, &set_ptr, Value::Set(set_ptr.clone()), method, args, env)
-                        .map_err(EvalError::Js)?,
-                ));
             } else {
                 return Err(EvalError::Js(raise_eval_error!(
-                    "TypeError: Set.prototype method called on non-object receiver"
+                    "TypeError: Set.prototype method called on incompatible receiver"
                 )));
             }
-        }
-    }
-
-    if name.starts_with("DataView.prototype.") {
-        if let Some(method) = name.strip_prefix("DataView.prototype.") {
-            let this_v = this_val.clone().unwrap_or(Value::Undefined);
-            if let Value::Object(obj) = this_v {
-                return Ok(Some(
-                    crate::js_typedarray::handle_dataview_method(mc, &obj, method, args, env).map_err(EvalError::Js)?,
-                ));
-            } else {
-                return Err(EvalError::Js(raise_eval_error!("TypeError: DataView method called on non-object")));
-            }
-        }
-    }
-
-    if name.starts_with("Atomics.") {
-        if let Some(method) = name.strip_prefix("Atomics.") {
+        } else if let Value::Set(set_ptr) = this_v {
             return Ok(Some(
-                crate::js_typedarray::handle_atomics_method(mc, method, args, env).map_err(EvalError::Js)?,
+                crate::js_set::handle_set_instance_method(mc, &set_ptr, Value::Set(set_ptr), method, args, env).map_err(EvalError::Js)?,
             ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!(
+                "TypeError: Set.prototype method called on non-object receiver"
+            )));
         }
+    }
+
+    if name.starts_with("DataView.prototype.")
+        && let Some(method) = name.strip_prefix("DataView.prototype.")
+    {
+        let this_v = this_val.clone().unwrap_or(Value::Undefined);
+        if let Value::Object(obj) = this_v {
+            return Ok(Some(
+                crate::js_typedarray::handle_dataview_method(mc, &obj, method, args, env).map_err(EvalError::Js)?,
+            ));
+        } else {
+            return Err(EvalError::Js(raise_eval_error!("TypeError: DataView method called on non-object")));
+        }
+    }
+
+    if name.starts_with("Atomics.")
+        && let Some(method) = name.strip_prefix("Atomics.")
+    {
+        return Ok(Some(
+            crate::js_typedarray::handle_atomics_method(mc, method, args, env).map_err(EvalError::Js)?,
+        ));
     }
 
     if name == "ArrayBuffer.prototype.byteLength" {
@@ -5725,51 +5676,49 @@ fn call_accessor<'gc>(
             call_env.borrow_mut(mc).is_function_scope = true;
             crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
             // If the getter carried a home object, propagate it into call env so `super` resolves
-            if let Some(home_box) = home_opt {
-                if let Value::Object(home_obj) = &**home_box {
-                    crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
-                        .map_err(EvalError::Js)?;
-                }
+            if let Some(home_box) = home_opt
+                && let Value::Object(home_obj) = &**home_box
+            {
+                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(*home_obj))
+                    .map_err(EvalError::Js)?;
             }
-            let mut body_clone = body.clone();
-            evaluate_statements(mc, &call_env, &mut body_clone)
+            let body_clone = body.clone();
+            evaluate_statements(mc, &call_env, &body_clone)
         }
         Value::Closure(cl) => {
-            let cl_data = &*cl;
+            let cl_data = cl;
             let call_env = crate::core::new_js_object_data(mc);
             call_env.borrow_mut(mc).prototype = Some(cl_data.env);
             call_env.borrow_mut(mc).is_function_scope = true;
             crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
             // Propagate [[HomeObject]] if present on the closure
-            if let Some(home_obj) = cl_data.home_object.borrow().clone() {
-                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
-                    .map_err(EvalError::Js)?;
+            if let Some(home_obj) = *cl_data.home_object.borrow() {
+                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj)).map_err(EvalError::Js)?;
             }
-            let mut body_clone = cl_data.body.clone();
-            evaluate_statements(mc, &call_env, &mut body_clone)
+            let body_clone = cl_data.body.clone();
+            evaluate_statements(mc, &call_env, &body_clone)
         }
         Value::Object(obj) => {
             // Check for __closure__
             let cl_val_opt = crate::core::obj_get_key_value(obj, &"__closure__".into()).map_err(EvalError::Js)?;
-            if let Some(cl_val) = cl_val_opt {
-                if let Value::Closure(cl) = &*cl_val.borrow() {
-                    // If the function object has a stored __home_object__, propagate that into the call env
-                    if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(obj, &"__home_object__".into()) {
-                        if let Value::Object(home_obj) = &*home_val_rc.borrow() {
-                            let cl_data = &*cl;
-                            let call_env = crate::core::new_js_object_data(mc);
-                            call_env.borrow_mut(mc).prototype = Some(cl_data.env);
-                            call_env.borrow_mut(mc).is_function_scope = true;
-                            crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver))
-                                .map_err(EvalError::Js)?;
-                            crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
-                                .map_err(EvalError::Js)?;
-                            let mut body_clone = cl_data.body.clone();
-                            return evaluate_statements(mc, &call_env, &mut body_clone);
-                        }
-                    }
-                    return call_accessor(mc, env, receiver, &Value::Closure(*cl));
+            if let Some(cl_val) = cl_val_opt
+                && let Value::Closure(cl) = &*cl_val.borrow()
+            {
+                // If the function object has a stored __home_object__, propagate that into the call env
+                if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(obj, &"__home_object__".into())
+                    && let Value::Object(home_obj) = &*home_val_rc.borrow()
+                {
+                    let cl_data = cl;
+                    let call_env = crate::core::new_js_object_data(mc);
+                    call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                    call_env.borrow_mut(mc).is_function_scope = true;
+                    crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
+                    crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(*home_obj))
+                        .map_err(EvalError::Js)?;
+                    let body_clone = cl_data.body.clone();
+                    return evaluate_statements(mc, &call_env, &body_clone);
                 }
+                return call_accessor(mc, env, receiver, &Value::Closure(*cl));
             }
             Err(EvalError::Js(crate::raise_type_error!("Accessor is not a function")))
         }
@@ -5786,27 +5735,27 @@ fn call_setter<'gc>(
     match setter {
         Value::Setter(params, body, captured_env, _) => call_setter_raw(mc, receiver, params, body, captured_env, val),
         Value::Closure(cl) => {
-            let cl_data = &*cl;
+            let cl_data = cl;
             let call_env = crate::core::new_js_object_data(mc);
             call_env.borrow_mut(mc).prototype = Some(cl_data.env);
             call_env.borrow_mut(mc).is_function_scope = true;
             crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
 
-            if let Some(first_param) = cl_data.params.first() {
-                if let DestructuringElement::Variable(name, _) = first_param {
-                    crate::core::env_set(mc, &call_env, &name, val).map_err(EvalError::Js)?;
-                }
+            if let Some(first_param) = cl_data.params.first()
+                && let DestructuringElement::Variable(name, _) = first_param
+            {
+                crate::core::env_set(mc, &call_env, name, val).map_err(EvalError::Js)?;
             }
-            let mut body_clone = cl_data.body.clone();
-            evaluate_statements(mc, &call_env, &mut body_clone).map(|_| ())
+            let body_clone = cl_data.body.clone();
+            evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
         }
         Value::Object(obj) => {
             // Check for __closure__
             let cl_val_opt = crate::core::obj_get_key_value(obj, &"__closure__".into()).map_err(EvalError::Js)?;
-            if let Some(cl_val) = cl_val_opt {
-                if let Value::Closure(cl) = &*cl_val.borrow() {
-                    return call_setter(mc, receiver, &Value::Closure(*cl), val);
-                }
+            if let Some(cl_val) = cl_val_opt
+                && let Value::Closure(cl) = &*cl_val.borrow()
+            {
+                return call_setter(mc, receiver, &Value::Closure(*cl), val);
             }
             Err(EvalError::Js(crate::raise_type_error!("Setter is not a function")))
         }
@@ -5827,13 +5776,13 @@ fn call_setter_raw<'gc>(
     call_env.borrow_mut(mc).is_function_scope = true;
     crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver)).map_err(EvalError::Js)?;
 
-    if let Some(param) = params.first() {
-        if let DestructuringElement::Variable(name, _) = param {
-            crate::core::env_set(mc, &call_env, &name, val).map_err(EvalError::Js)?;
-        }
+    if let Some(param) = params.first()
+        && let DestructuringElement::Variable(name, _) = param
+    {
+        crate::core::env_set(mc, &call_env, name, val).map_err(EvalError::Js)?;
     }
-    let mut body_clone = body.to_vec();
-    evaluate_statements(mc, &call_env, &mut body_clone).map(|_| ())
+    let body_clone = body.to_vec();
+    evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
 }
 
 fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, js_err: &JSError) -> Value<'gc> {
@@ -5847,6 +5796,9 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         JSErrorKind::VariableNotFound { name } => ("ReferenceError", format!("{} is not defined", name)),
         JSErrorKind::TokenizationError { message } => ("SyntaxError", message.clone()),
         JSErrorKind::ParseError { message } => ("SyntaxError", message.clone()),
+        JSErrorKind::EvaluationError { message } => ("Error", message.clone()),
+        JSErrorKind::RuntimeError { message } => ("Error", message.clone()),
+        JSErrorKind::Throw(_) => ("Error", full_msg.clone()),
         _ => ("Error", full_msg.clone()),
     };
 
@@ -5883,6 +5835,12 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
     err_val
 }
 
+use std::cell::Cell;
+
+thread_local! {
+    static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
 pub fn call_closure<'gc>(
     mc: &MutationContext<'gc>,
     cl: &crate::core::ClosureData<'gc>,
@@ -5891,6 +5849,35 @@ pub fn call_closure<'gc>(
     env: &JSObjectDataPtr<'gc>,
     fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    // Increment and trace call depth for debugging runaway recursion/stack overflows
+    CALL_DEPTH.with(|d| {
+        let depth = d.get() + 1;
+        d.set(depth);
+        // Try to print first numeric argument for recursive functions like factorial
+        let first_arg = args
+            .first()
+            .map(|v| match v {
+                Value::Number(n) => n.to_string(),
+                _ => "_".to_string(),
+            })
+            .unwrap_or_else(|| "_".to_string());
+        log::trace!("call_closure enter depth={} first_arg={}", depth, first_arg);
+        if depth > 2000 {
+            // Prevent runaway recursion from completely blowing the process stack during debugging
+            log::error!("call depth exceeded threshold (depth={}). Aborting to avoid stack overflow.", depth);
+            panic!("call depth exceeded threshold");
+        }
+    });
+
+    struct DepthGuard;
+    impl Drop for DepthGuard {
+        fn drop(&mut self) {
+            CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+            CALL_DEPTH.with(|d| log::trace!("call_closure exit depth={}", d.get()));
+        }
+    }
+    let _depth_guard = DepthGuard;
+
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(cl.env);
     call_env.borrow_mut(mc).is_function_scope = true;
@@ -5908,7 +5895,7 @@ pub fn call_closure<'gc>(
             crate::core::obj_set_key_value(mc, &call_env, &"__frame".into(), Value::String(utf8_to_utf16(&name))).map_err(EvalError::Js)?;
         }
         // Link caller environment so stacks can be assembled by walking __caller
-        crate::core::obj_set_key_value(mc, &call_env, &"__caller".into(), Value::Object(env.clone())).map_err(EvalError::Js)?;
+        crate::core::obj_set_key_value(mc, &call_env, &"__caller".into(), Value::Object(*env)).map_err(EvalError::Js)?;
     }
 
     let effective_this = if let Some(bound) = &cl.bound_this {
@@ -5923,43 +5910,37 @@ pub fn call_closure<'gc>(
 
     // If the function was stored as an object with a `__home_object__` property, propagate
     // that into the call environment (this covers methods defined in object-literals).
-    if let Some(fn_obj_ptr) = fn_obj {
-        if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(&fn_obj_ptr, &"__home_object__".into()) {
-            if let Value::Object(home_obj) = &*home_val_rc.borrow() {
-                crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone()))
-                    .map_err(EvalError::Js)?;
-            }
-        }
+    if let Some(fn_obj_ptr) = fn_obj
+        && let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(&fn_obj_ptr, &"__home_object__".into())
+        && let Value::Object(home_obj) = &*home_val_rc.borrow()
+    {
+        crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(*home_obj)).map_err(EvalError::Js)?;
     }
 
     // FIX: propagate [[HomeObject]] into call_env so `super` resolves parent prototype and avoids recursive lookup
     // Propagate home object into the call environment so `super.*` can resolve
     // the proper parent prototype during method calls.
-    if let Some(home_obj) = cl.home_object.borrow().clone() {
+    if let Some(home_obj) = *cl.home_object.borrow() {
         // Debug: indicate that we are propagating the home object into the call environment
-        crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj.clone())).map_err(EvalError::Js)?;
+        crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(home_obj)).map_err(EvalError::Js)?;
     }
 
     if !cl.is_arrow {
         let args_obj = crate::core::new_js_object_data(mc);
-        if let Some(obj_val) = crate::core::env_get(env, "Object") {
-            if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                if let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into()) {
-                    if let Value::Object(proto) = &*proto_val.borrow() {
-                        args_obj.borrow_mut(mc).prototype = Some(*proto);
-                    }
-                }
-            }
+        if let Some(obj_val) = crate::core::env_get(env, "Object")
+            && let Value::Object(obj_ctor) = &*obj_val.borrow()
+            && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into())
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            args_obj.borrow_mut(mc).prototype = Some(*proto);
         }
 
-        if let Some(obj_val) = crate::core::env_get(env, "Object") {
-            if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                if let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into()) {
-                    if let Value::Object(proto) = &*proto_val.borrow() {
-                        args_obj.borrow_mut(mc).prototype = Some(*proto);
-                    }
-                }
-            }
+        if let Some(obj_val) = crate::core::env_get(env, "Object")
+            && let Value::Object(obj_ctor) = &*obj_val.borrow()
+            && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into())
+            && let Value::Object(proto) = &*proto_val.borrow()
+        {
+            args_obj.borrow_mut(mc).prototype = Some(*proto);
         }
 
         crate::core::obj_set_key_value(mc, &args_obj, &"length".into(), Value::Number(args.len() as f64)).map_err(EvalError::Js)?;
@@ -5967,31 +5948,27 @@ pub fn call_closure<'gc>(
         // Define iterator to allow spread args...
         // arguments[Symbol.iterator] = Array.prototype.values
         // This is needed for `...arguments` to work.
-        if let Some(sym_val) = crate::core::env_get(env, "Symbol") {
-            if let Value::Object(sym_ctor) = &*sym_val.borrow() {
-                if let Ok(Some(iter_sym_val)) = crate::core::obj_get_key_value(sym_ctor, &"iterator".into()) {
-                    // Get Array.prototype.values
-                    if let Some(arr_val) = crate::core::env_get(env, "Array") {
-                        if let Value::Object(arr_ctor) = &*arr_val.borrow() {
-                            if let Ok(Some(arr_proto_val)) = crate::core::obj_get_key_value(arr_ctor, &"prototype".into()) {
-                                if let Value::Object(arr_proto) = &*arr_proto_val.borrow() {
-                                    if let Ok(Some(_values_fn)) = crate::core::obj_get_key_value(arr_proto, &"values".into()) {
-                                        let key_val = iter_sym_val.borrow().clone();
-                                        let _key_str = match key_val {
-                                            Value::Symbol(s) => s.description.clone().unwrap_or_default(), // logic for symbol key?
-                                            _ => "iterator".to_string(),
-                                        };
-                                        // But obj_set_key_value takes PropertyKey.
-                                        // PropertyKey can be Symbol?
-                                        // Let's check obj_set_key_value.
-                                        // If PropertyKey is string only, we are in trouble.
-                                        // Value::Symbol IS supported in PropertyKey?
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+        if let Some(sym_val) = crate::core::env_get(env, "Symbol")
+            && let Value::Object(sym_ctor) = &*sym_val.borrow()
+            && let Ok(Some(iter_sym_val)) = crate::core::obj_get_key_value(sym_ctor, &"iterator".into())
+        {
+            // Get Array.prototype.values
+            if let Some(arr_val) = crate::core::env_get(env, "Array")
+                && let Value::Object(arr_ctor) = &*arr_val.borrow()
+                && let Ok(Some(arr_proto_val)) = crate::core::obj_get_key_value(arr_ctor, &"prototype".into())
+                && let Value::Object(arr_proto) = &*arr_proto_val.borrow()
+                && let Ok(Some(_values_fn)) = crate::core::obj_get_key_value(arr_proto, &"values".into())
+            {
+                let key_val = iter_sym_val.borrow().clone();
+                let _key_str = match key_val {
+                    Value::Symbol(s) => s.description.clone().unwrap_or_default(), // logic for symbol key?
+                    _ => "iterator".to_string(),
+                };
+                // But obj_set_key_value takes PropertyKey.
+                // PropertyKey can be Symbol?
+                // Let's check obj_set_key_value.
+                // If PropertyKey is string only, we are in trouble.
+                // Value::Symbol IS supported in PropertyKey?
             }
         }
 
@@ -6008,10 +5985,10 @@ pub fn call_closure<'gc>(
         match param {
             DestructuringElement::Variable(name, default_expr_opt) => {
                 let mut arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
-                if matches!(arg_val, Value::Undefined) {
-                    if let Some(default_expr) = default_expr_opt {
-                        arg_val = evaluate_expr(mc, &call_env, default_expr)?;
-                    }
+                if matches!(arg_val, Value::Undefined)
+                    && let Some(default_expr) = default_expr_opt
+                {
+                    arg_val = evaluate_expr(mc, &call_env, default_expr)?;
                 }
                 crate::core::env_set(mc, &call_env, name, arg_val).map_err(EvalError::Js)?;
             }
@@ -6028,8 +6005,15 @@ pub fn call_closure<'gc>(
             _ => {}
         }
     }
-    let mut body_clone = cl.body.clone();
-    evaluate_statements(mc, &call_env, &mut body_clone)
+    let body_clone = cl.body.clone();
+    // Use the lower-level evaluator to distinguish an explicit `return`
+    match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
+        ControlFlow::Return(val) => Ok(val),
+        ControlFlow::Normal(_) => Ok(Value::Undefined),
+        ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
+        ControlFlow::Break(_) => Err(EvalError::Js(raise_eval_error!("break statement not in loop or switch"))),
+        ControlFlow::Continue(_) => Err(EvalError::Js(raise_eval_error!("continue statement not in loop"))),
+    }
 }
 
 fn evaluate_update_expression<'gc>(
@@ -6108,11 +6092,11 @@ fn evaluate_update_expression<'gc>(
 pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<DestructuringElement>, Vec<Statement>, JSObjectDataPtr<'gc>)> {
     match val {
         Value::Closure(cl) => {
-            let data = &*cl;
+            let data = cl;
             Some((data.params.clone(), data.body.clone(), data.env))
         }
         Value::AsyncClosure(cl) => {
-            let data = &*cl;
+            let data = cl;
             Some((data.params.clone(), data.body.clone(), data.env))
         }
         Value::Object(obj) => {
@@ -6120,11 +6104,11 @@ pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<Destruct
                 let closure_val = closure_prop.borrow();
                 match &*closure_val {
                     Value::Closure(cl) => {
-                        let data = &*cl;
+                        let data = cl;
                         Some((data.params.clone(), data.body.clone(), data.env))
                     }
                     Value::AsyncClosure(cl) => {
-                        let data = &*cl;
+                        let data = cl;
                         Some((data.params.clone(), data.body.clone(), data.env))
                     }
                     _ => None,
@@ -6217,14 +6201,12 @@ fn evaluate_expr_new<'gc>(
                                 obj_set_key_value(mc, &instance, &"__proto__".into(), Value::Object(*proto_obj))?;
                             } else {
                                 // Fallback to Object.prototype
-                                if let Some(obj_val) = env_get(env, "Object") {
-                                    if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-                                        if let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into()) {
-                                            if let Value::Object(obj_proto) = &*obj_proto_val.borrow() {
-                                                instance.borrow_mut(mc).prototype = Some(*obj_proto);
-                                            }
-                                        }
-                                    }
+                                if let Some(obj_val) = env_get(env, "Object")
+                                    && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                                    && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                                    && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                                {
+                                    instance.borrow_mut(mc).prototype = Some(*obj_proto);
                                 }
                             }
                         }
@@ -6252,8 +6234,8 @@ fn evaluate_expr_new<'gc>(
                                 _ => {}
                             }
                         }
-                        let mut body_clone = cl.body.clone();
-                        match evaluate_statements_with_labels(mc, &call_env, &mut body_clone, &[], &[])? {
+                        let body_clone = cl.body.clone();
+                        match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
                             ControlFlow::Return(Value::Object(obj)) => Ok(Value::Object(obj)),
                             ControlFlow::Throw(val, line, col) => Err(EvalError::Throw(val, line, col)),
                             _ => Ok(Value::Object(instance)),
@@ -6261,106 +6243,106 @@ fn evaluate_expr_new<'gc>(
                     }
                     _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
                 }
-            } else if let Some(_) = obj_get_key_value(&obj, &"__class_def__".into())? {
+            } else if (obj_get_key_value(&obj, &"__class_def__".into())?).is_some() {
                 // Delegate to js_class::evaluate_new
-                let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args).map_err(|e| EvalError::Js(e))?;
-                return Ok(val);
+                let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args).map_err(EvalError::Js)?;
+                Ok(val)
             } else {
-                if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
-                    if let Value::String(name) = &*native_name.borrow() {
-                        let name_str = crate::unicode::utf16_to_utf8(name);
-                        if matches!(
-                            name_str.as_str(),
-                            "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError"
-                        ) {
-                            let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                            let prototype = if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
-                                && let Value::Object(proto_obj) = &*proto_val.borrow()
-                            {
-                                Some(*proto_obj)
-                            } else {
-                                None
-                            };
+                if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())?
+                    && let Value::String(name) = &*native_name.borrow()
+                {
+                    let name_str = crate::unicode::utf16_to_utf8(name);
+                    if matches!(
+                        name_str.as_str(),
+                        "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError"
+                    ) {
+                        let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                        let prototype = if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                            && let Value::Object(proto_obj) = &*proto_val.borrow()
+                        {
+                            Some(*proto_obj)
+                        } else {
+                            None
+                        };
 
-                            let err_val = crate::core::js_error::create_error(mc, prototype, msg)?;
-                            if let Value::Object(err_obj) = &err_val {
-                                obj_set_key_value(mc, err_obj, &"name".into(), Value::String(name.clone()))?;
-                            }
-                            return Ok(err_val);
-                        } else if name == &crate::unicode::utf8_to_utf16("String") {
-                            let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
-                                Value::String(s) => s,
-                                _ => Vec::new(),
-                            };
-                            let new_obj = crate::core::new_js_object_data(mc);
-
-                            obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::String(val.clone()))?;
-
-                            if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
-                                && let Value::Object(proto_obj) = &*proto_val.borrow()
-                            {
-                                new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                            }
-
-                            let val = Value::Number(crate::unicode::utf16_len(&val) as f64);
-                            obj_set_key_value(mc, &new_obj, &"length".into(), val)?;
-
-                            return Ok(Value::Object(new_obj));
-                        } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
-                            let val = match crate::js_boolean::boolean_constructor(&eval_args)? {
-                                Value::Boolean(b) => b,
-                                _ => false,
-                            };
-                            let new_obj = crate::core::new_js_object_data(mc);
-                            obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Boolean(val))?;
-
-                            if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
-                                && let Value::Object(proto_obj) = &*proto_val.borrow()
-                            {
-                                new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                            }
-
-                            return Ok(Value::Object(new_obj));
-                        } else if name == &crate::unicode::utf8_to_utf16("Number") {
-                            let val = match number_constructor(mc, &eval_args, env).map_err(EvalError::Js)? {
-                                Value::Number(n) => n,
-                                _ => f64::NAN,
-                            };
-                            let new_obj = crate::core::new_js_object_data(mc);
-                            obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Number(val))?;
-
-                            if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
-                                && let Value::Object(proto_obj) = &*proto_val.borrow()
-                            {
-                                new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
-                            }
-
-                            return Ok(Value::Object(new_obj));
-                        } else if name == &crate::unicode::utf8_to_utf16("Date") {
-                            return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("Array") {
-                            return Ok(crate::js_array::handle_array_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
-                            return Ok(crate::js_regexp::handle_regexp_constructor(mc, &eval_args)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("Map") {
-                            return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
-                            return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("WeakSet") {
-                            return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("Set") {
-                            return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("ArrayBuffer") {
-                            return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("SharedArrayBuffer") {
-                            return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("DataView") {
-                            return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
-                            return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
-                        } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
-                            return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
+                        let err_val = crate::core::js_error::create_error(mc, prototype, msg)?;
+                        if let Value::Object(err_obj) = &err_val {
+                            obj_set_key_value(mc, err_obj, &"name".into(), Value::String(name.clone()))?;
                         }
+                        return Ok(err_val);
+                    } else if name == &crate::unicode::utf8_to_utf16("String") {
+                        let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
+                            Value::String(s) => s,
+                            _ => Vec::new(),
+                        };
+                        let new_obj = crate::core::new_js_object_data(mc);
+
+                        obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::String(val.clone()))?;
+
+                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                            && let Value::Object(proto_obj) = &*proto_val.borrow()
+                        {
+                            new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                        }
+
+                        let val = Value::Number(crate::unicode::utf16_len(&val) as f64);
+                        obj_set_key_value(mc, &new_obj, &"length".into(), val)?;
+
+                        return Ok(Value::Object(new_obj));
+                    } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
+                        let val = match crate::js_boolean::boolean_constructor(&eval_args)? {
+                            Value::Boolean(b) => b,
+                            _ => false,
+                        };
+                        let new_obj = crate::core::new_js_object_data(mc);
+                        obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Boolean(val))?;
+
+                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                            && let Value::Object(proto_obj) = &*proto_val.borrow()
+                        {
+                            new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                        }
+
+                        return Ok(Value::Object(new_obj));
+                    } else if name == &crate::unicode::utf8_to_utf16("Number") {
+                        let val = match number_constructor(mc, &eval_args, env).map_err(EvalError::Js)? {
+                            Value::Number(n) => n,
+                            _ => f64::NAN,
+                        };
+                        let new_obj = crate::core::new_js_object_data(mc);
+                        obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Number(val))?;
+
+                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                            && let Value::Object(proto_obj) = &*proto_val.borrow()
+                        {
+                            new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                        }
+
+                        return Ok(Value::Object(new_obj));
+                    } else if name == &crate::unicode::utf8_to_utf16("Date") {
+                        return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("Array") {
+                        return crate::js_array::handle_array_constructor(mc, &eval_args, env);
+                    } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
+                        return crate::js_regexp::handle_regexp_constructor(mc, &eval_args);
+                    } else if name == &crate::unicode::utf8_to_utf16("Map") {
+                        return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
+                        return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("WeakSet") {
+                        return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("Set") {
+                        return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("ArrayBuffer") {
+                        return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("SharedArrayBuffer") {
+                        return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("DataView") {
+                        return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
+                        return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
+                        return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
                     }
                 }
                 let new_obj = crate::core::new_js_object_data(mc);
@@ -6377,14 +6359,12 @@ fn evaluate_expr_object<'gc>(
     properties: &[(Expr, Expr, bool)],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj = crate::core::new_js_object_data(mc);
-    if let Some(obj_val) = env_get(env, "Object") {
-        if let Value::Object(obj_ctor) = &*obj_val.borrow() {
-            if let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())? {
-                if let Value::Object(proto) = &*proto_val.borrow() {
-                    obj.borrow_mut(mc).prototype = Some(*proto);
-                }
-            }
-        }
+    if let Some(obj_val) = env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        obj.borrow_mut(mc).prototype = Some(*proto);
     }
 
     for (key_expr, val_expr, _is_computed) in properties {
@@ -6393,11 +6373,11 @@ fn evaluate_expr_object<'gc>(
             if let Value::Object(source_obj) = val {
                 let keys: Vec<PropertyKey> = source_obj.borrow().properties.keys().cloned().collect();
                 for k in keys {
-                    if !source_obj.borrow().non_enumerable.contains(&k) {
-                        if let Some(val_ptr) = source_obj.borrow().properties.get(&k) {
-                            let v = val_ptr.borrow().clone();
-                            obj_set_key_value(mc, &obj, &k, v)?;
-                        }
+                    if !source_obj.borrow().non_enumerable.contains(&k)
+                        && let Some(val_ptr) = source_obj.borrow().properties.get(&k)
+                    {
+                        let v = val_ptr.borrow().clone();
+                        obj_set_key_value(mc, &obj, &k, v)?;
                     }
                 }
             }
@@ -6425,15 +6405,10 @@ fn evaluate_expr_object<'gc>(
 
             // For getter/setter variants, wrap them with home object so super resolves
             Value::Getter(body, captured_env, _) => {
-                val = Value::Getter(body.clone(), *captured_env, Some(Box::new(Value::Object(obj.clone()))));
+                val = Value::Getter(body.clone(), *captured_env, Some(Box::new(Value::Object(obj))));
             }
             Value::Setter(params, body, captured_env, _) => {
-                val = Value::Setter(
-                    params.clone(),
-                    body.clone(),
-                    *captured_env,
-                    Some(Box::new(Value::Object(obj.clone()))),
-                );
+                val = Value::Setter(params.clone(), body.clone(), *captured_env, Some(Box::new(Value::Object(obj))));
             }
             _ => {}
         }
@@ -6452,10 +6427,10 @@ fn evaluate_expr_object<'gc>(
 
         // If the value is a function object (holds a __closure__), attach a __home_object__
         // own property on the function object so it can propagate [[HomeObject]] during calls
-        if let Value::Object(func_obj) = &val {
-            if let Ok(Some(_)) = obj_get_key_value(func_obj, &"__closure__".into()) {
-                let _ = obj_set_key_value(mc, func_obj, &"__home_object__".into(), Value::Object(obj.clone()));
-            }
+        if let Value::Object(func_obj) = &val
+            && let Ok(Some(_)) = obj_get_key_value(func_obj, &"__closure__".into())
+        {
+            let _ = obj_set_key_value(mc, func_obj, &"__home_object__".into(), Value::Object(obj));
         }
 
         // Merge accessors if existing property is a getter or setter; otherwise set normally

@@ -130,7 +130,7 @@ where
         tokens.pop();
     }
     let mut index = 0;
-    let mut statements = parse_statements(&tokens, &mut index)?;
+    let statements = parse_statements(&tokens, &mut index)?;
     // DEBUG: show parsed statements for troubleshooting
     log::trace!("PARSED STATEMENTS: {:#?}", statements);
 
@@ -152,19 +152,24 @@ where
             // Store __filepath
             obj_set_key_value(mc, &root.global_env, &"__filepath".into(), Value::String(utf8_to_utf16(&p_str)))?;
         }
-        match evaluate_statements(mc, &root.global_env, &mut statements) {
+        match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(result) => {
                 let out = match &result {
                     Value::String(s) => {
-                        let s_utf8 = crate::unicode::utf16_to_utf8(&s);
+                        let s_utf8 = crate::unicode::utf16_to_utf8(s);
                         match serde_json::to_string(&s_utf8) {
                             Ok(quoted) => quoted,
                             Err(_) => format!("\"{}\"", s_utf8),
                         }
                     }
                     Value::Object(obj) => {
+                        // WeakMap/WeakSet special-case to display as [object WeakMap] / [object WeakSet]
+                        if crate::js_weakmap::is_weakmap_object(mc, obj) {
+                            "[object WeakMap]".to_string()
+                        } else if crate::js_weakset::is_weakset_object(mc, obj) {
+                            "[object WeakSet]".to_string()
                         // If it's an Array, delegate to array helper for consistent formatting
-                        if crate::js_array::is_array(mc, obj) {
+                        } else if crate::js_array::is_array(mc, obj) {
                             crate::js_array::serialize_array_for_eval(mc, obj)?
                         } else if crate::js_regexp::is_regex_object(obj) {
                             // For top-level RegExp object display as [object RegExp]
@@ -174,7 +179,7 @@ where
                             // Otherwise serialize enumerable properties from the object and its prototype chain
                             let mut seen_keys = std::collections::HashSet::new();
                             let mut props: Vec<(String, String)> = Vec::new();
-                            let mut cur_obj_opt: Option<crate::core::JSObjectDataPtr<'_>> = Some(obj.clone());
+                            let mut cur_obj_opt: Option<crate::core::JSObjectDataPtr<'_>> = Some(*obj);
                             while let Some(cur_obj) = cur_obj_opt {
                                 for key in cur_obj.borrow().properties.keys() {
                                     // Skip non-enumerable and internal properties (like __proto__)
@@ -235,15 +240,15 @@ where
                     if let Some((l, c)) = line.zip(column) {
                         err.set_js_location(l, c);
                     }
-                    if let Value::Object(obj) = &val {
-                        if let Some(stack_str) = obj.borrow().get_property("stack") {
-                            let lines: Vec<String> = stack_str
-                                .lines()
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| s.starts_with("at "))
-                                .collect();
-                            err.inner.stack = lines;
-                        }
+                    if let Value::Object(obj) = &val
+                        && let Some(stack_str) = obj.borrow().get_property("stack")
+                    {
+                        let lines: Vec<String> = stack_str
+                            .lines()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| s.starts_with("at "))
+                            .collect();
+                        err.inner.stack = lines;
                     }
                     Err(err)
                 }
@@ -259,23 +264,21 @@ pub fn get_constructor_prototype<'gc>(
     name: &str,
 ) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
     // First try to find a constructor object already stored in the environment
-    if let Some(val_rc) = obj_get_key_value(env, &name.into())? {
-        if let Value::Object(ctor_obj) = &*val_rc.borrow() {
-            if let Some(proto_val_rc) = obj_get_key_value(ctor_obj, &"prototype".into())? {
-                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
-                    return Ok(Some(proto_obj.clone()));
-                }
-            }
-        }
+    if let Some(val_rc) = obj_get_key_value(env, &name.into())?
+        && let Value::Object(ctor_obj) = &*val_rc.borrow()
+        && let Some(proto_val_rc) = obj_get_key_value(ctor_obj, &"prototype".into())?
+        && let Value::Object(proto_obj) = &*proto_val_rc.borrow()
+    {
+        return Ok(Some(*proto_obj));
     }
 
     // If not found, attempt to evaluate the variable to force lazy creation
     match evaluate_expr(mc, env, &Expr::Var(name.to_string(), None, None)) {
         Ok(Value::Object(ctor_obj)) => {
-            if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())? {
-                if let Value::Object(proto_obj) = &*proto_val_rc.borrow() {
-                    return Ok(Some(proto_obj.clone()));
-                }
+            if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())?
+                && let Value::Object(proto_obj) = &*proto_val_rc.borrow()
+            {
+                return Ok(Some(*proto_obj));
             }
             Ok(None)
         }
@@ -296,9 +299,9 @@ pub fn set_internal_prototype_from_constructor<'gc>(
     if let Some(proto_obj) = get_constructor_prototype(mc, env, ctor_name)? {
         // set internal prototype pointer (store Weak to avoid cycles)
         log::trace!("setting prototype for ctor='{}' proto_obj={:p}", ctor_name, Gc::as_ptr(proto_obj));
-        obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+        obj.borrow_mut(mc).prototype = Some(proto_obj);
         // Also set the `__proto__` own property so `obj.__proto__` accesses match expectations
-        match obj_set_key_value(mc, obj, &"__proto__".into(), Value::Object(proto_obj.clone())) {
+        match obj_set_key_value(mc, obj, &"__proto__".into(), Value::Object(proto_obj)) {
             Ok(_) => {
                 // __proto__ should be non-enumerable
                 obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));

@@ -489,28 +489,27 @@ pub fn to_primitive<'gc>(
                 if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
                     if let Ok(Some(tp_sym_val)) = crate::core::obj_get_key_value(sym_obj, &"toPrimitive".into()) {
                         if let Value::Symbol(tp_sym) = &*tp_sym_val.borrow() {
-                            if let Ok(Some(func_val_rc)) =
-                                crate::core::obj_get_key_value(&obj, &crate::core::PropertyKey::Symbol(tp_sym.clone()))
-                            {
+                            if let Ok(Some(func_val_rc)) = crate::core::obj_get_key_value(obj, &crate::core::PropertyKey::Symbol(*tp_sym)) {
                                 let func_val = func_val_rc.borrow().clone();
                                 if !matches!(func_val, Value::Undefined | Value::Null) {
                                     // Call it with hint
                                     let arg = Value::String(crate::unicode::utf8_to_utf16(hint));
                                     // Support closures or function objects
+                                    use std::slice::from_ref;
                                     let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
                                         Value::Closure(cl) => {
-                                            crate::core::call_closure(mc, &cl, Some(Value::Object(obj.clone())), &[arg.clone()], env, None)
+                                            crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None)
                                         }
                                         Value::Object(func_obj) => {
                                             if let Ok(Some(cl_ptr)) = crate::core::obj_get_key_value(&func_obj, &"__closure__".into()) {
                                                 if let Value::Closure(cl) = &*cl_ptr.borrow() {
                                                     crate::core::call_closure(
                                                         mc,
-                                                        &cl,
-                                                        Some(Value::Object(obj.clone())),
-                                                        &[arg.clone()],
+                                                        cl,
+                                                        Some(Value::Object(*obj)),
+                                                        from_ref(&arg),
                                                         env,
-                                                        Some(func_obj.clone()),
+                                                        Some(func_obj),
                                                     )
                                                 } else {
                                                     return Err(crate::raise_type_error!("@@toPrimitive is not a function"));
@@ -521,10 +520,7 @@ pub fn to_primitive<'gc>(
                                         }
                                         _ => return Err(crate::raise_type_error!("@@toPrimitive is not a function")),
                                     };
-                                    let res = match res_eval {
-                                        Ok(v) => v,
-                                        Err(e) => return Err(e.into()),
-                                    };
+                                    let res = res_eval?;
                                     if is_primitive(&res) {
                                         return Ok(res);
                                     } else {
@@ -539,21 +535,21 @@ pub fn to_primitive<'gc>(
 
             if hint == "string" {
                 // toString -> valueOf
-                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
                 if is_primitive(&to_s) {
                     return Ok(to_s);
                 }
-                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
                 if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
             } else {
                 // number/default: valueOf -> toString
-                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
                 if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
-                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(obj.clone()), &[], env)?;
+                let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
                 if is_primitive(&to_s) {
                     return Ok(to_s);
                 }
@@ -629,7 +625,7 @@ fn format_js_number(n: f64) -> String {
     }
     let abs = n.abs();
     // Use exponential form for very large or very small numbers (ECMAScript style)
-    if abs >= 1e21 || abs < 1e-6 {
+    if !(1e-6..1e21).contains(&abs) {
         // Use higher precision for very large numbers to preserve digits, otherwise shorter precision
         let precision = if abs >= 1e21 { 16 } else { 15 };
         let s = format!("{:.*e}", precision, n);
@@ -756,7 +752,7 @@ pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'
         Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
         Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
         Value::Symbol(sd) => {
-            let sym_key = PropertyKey::Symbol(sd.clone());
+            let sym_key = PropertyKey::Symbol(*sd);
             get_own_property(obj, &sym_key).is_some()
         }
         other => get_own_property(obj, &value_to_string(other).into()).is_some(),

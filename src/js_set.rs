@@ -32,8 +32,8 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         set_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &set_ctor, &"prototype".into(), Value::Object(set_proto.clone()))?;
-    obj_set_key_value(mc, &set_proto, &"constructor".into(), Value::Object(set_ctor.clone()))?;
+    obj_set_key_value(mc, &set_ctor, &"prototype".into(), Value::Object(set_proto))?;
+    obj_set_key_value(mc, &set_proto, &"constructor".into(), Value::Object(set_ctor))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
@@ -66,7 +66,7 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         && let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
         && let Value::Symbol(s) = &*tag_sym.borrow()
     {
-        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(s.clone()), Value::String(utf8_to_utf16("Set")))?;
+        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Set")))?;
     }
 
     // Register size getter
@@ -113,7 +113,7 @@ pub(crate) fn handle_set_constructor<'gc>(
         && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
-        set_obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+        set_obj.borrow_mut(mc).prototype = Some(*proto_obj);
     }
 
     Ok(Value::Object(set_obj))
@@ -141,7 +141,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
                 set.borrow_mut(mc).values.push(value);
             }
 
-            Ok(Value::Set(set.clone()))
+            Ok(Value::Set(*set))
         }
         "has" => {
             if args.len() != 1 {
@@ -181,19 +181,19 @@ pub(crate) fn handle_set_instance_method<'gc>(
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.values takes no arguments"));
             }
-            create_set_iterator(mc, _env, set.clone(), "values")
+            create_set_iterator(mc, _env, *set, "values")
         }
         "keys" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.keys takes no arguments"));
             }
-            create_set_iterator(mc, _env, set.clone(), "values") // Set keys are same as values
+            create_set_iterator(mc, _env, *set, "values") // Set keys are same as values
         }
         "entries" => {
             if !args.is_empty() {
                 return Err(raise_eval_error!("Set.prototype.entries takes no arguments"));
             }
-            create_set_iterator(mc, _env, set.clone(), "entries")
+            create_set_iterator(mc, _env, *set, "entries")
         }
         "forEach" => {
             if args.is_empty() {
@@ -279,12 +279,7 @@ fn create_set_iterator<'gc>(
         if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
-            obj_set_key_value(
-                mc,
-                &iterator,
-                &PropertyKey::Symbol(s.clone()),
-                Value::Function("IteratorSelf".to_string()),
-            )?;
+            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), Value::Function("IteratorSelf".to_string()))?;
         }
 
         // Symbol.toStringTag
@@ -294,7 +289,7 @@ fn create_set_iterator<'gc>(
             obj_set_key_value(
                 mc,
                 &iterator,
-                &PropertyKey::Symbol(s.clone()),
+                &PropertyKey::Symbol(*s),
                 Value::String(utf8_to_utf16("Set Iterator")),
             )?;
         }

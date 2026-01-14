@@ -91,11 +91,8 @@ pub fn trace_stmt<'gc, T: GcTrace<'gc>>(context: &mut T, stmt: &Statement) {
                 trace_expr(context, e);
             }
         }
-        StatementKind::Return(e_opt) => {
-            if let Some(e) = e_opt {
-                trace_expr(context, e);
-            }
-        }
+        StatementKind::Return(Some(e)) => trace_expr(context, e),
+        StatementKind::Return(None) => {}
         StatementKind::Throw(e) => {
             trace_expr(context, e);
         }

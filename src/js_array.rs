@@ -236,6 +236,148 @@ pub(crate) fn handle_array_static_method<'gc>(
                     //     }
                     // } else if let Some(len) = get_array_length(mc, &object) {
 
+                    // Support generic iterables via Symbol.iterator: call the iterator method and consume next() until done
+                    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())? {
+                        if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
+                            if let Ok(Some(iter_sym_val)) = obj_get_key_value(sym_obj, &"iterator".into()) {
+                                if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
+                                    if let Ok(Some(iter_fn_val)) = obj_get_key_value(&object, &PropertyKey::Symbol(iter_sym.clone())) {
+                                        // Call iterator method on the object to get an iterator
+                                        let iterator = match &*iter_fn_val.borrow() {
+                                            Value::Function(name) => {
+                                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                                    mc,
+                                                    Some(env),
+                                                    Some(Value::Object(object.clone())),
+                                                    None,
+                                                    &[],
+                                                    None,
+                                                    Some(env),
+                                                )?;
+                                                crate::js_function::handle_global_function(mc, name, &[], &call_env)
+                                                    .map_err(EvalError::Js)?
+                                            }
+                                            Value::Closure(cl) => {
+                                                crate::core::call_closure(mc, &*cl, Some(Value::Object(object.clone())), &[], env, None)?
+                                            }
+                                            _ => return Err(EvalError::Js(raise_eval_error!("Array.from iterable is not iterable"))),
+                                        };
+
+                                        // Consume iterator by repeatedly calling its next() method
+                                        match iterator {
+                                            Value::Object(iter_obj) => {
+                                                let mut idx = 0usize;
+                                                loop {
+                                                    if let Ok(Some(next_val)) = obj_get_key_value(&iter_obj, &"next".into()) {
+                                                        let next_fn = next_val.borrow().clone();
+
+                                                        let res = match &next_fn {
+                                                            Value::Function(name) => {
+                                                                let call_env = crate::js_class::prepare_call_env_with_this(
+                                                                    mc,
+                                                                    Some(env),
+                                                                    Some(Value::Object(iter_obj.clone())),
+                                                                    None,
+                                                                    &[],
+                                                                    None,
+                                                                    Some(env),
+                                                                )?;
+                                                                crate::js_function::handle_global_function(mc, name, &[], &call_env)
+                                                                    .map_err(EvalError::Js)?
+                                                            }
+                                                            Value::Closure(cl) => crate::core::call_closure(
+                                                                mc,
+                                                                &*cl,
+                                                                Some(Value::Object(iter_obj.clone())),
+                                                                &[],
+                                                                env,
+                                                                None,
+                                                            )?,
+                                                            _ => {
+                                                                return Err(EvalError::Js(raise_eval_error!(
+                                                                    "Iterator.next is not callable"
+                                                                )));
+                                                            }
+                                                        };
+
+                                                        if let Value::Object(res_obj) = res {
+                                                            let done =
+                                                                if let Ok(Some(done_rc)) = obj_get_key_value(&res_obj, &"done".into()) {
+                                                                    if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
+                                                                } else {
+                                                                    false
+                                                                };
+
+                                                            if done {
+                                                                break;
+                                                            }
+
+                                                            let value =
+                                                                if let Ok(Some(val_rc)) = obj_get_key_value(&res_obj, &"value".into()) {
+                                                                    val_rc.borrow().clone()
+                                                                } else {
+                                                                    Value::Undefined
+                                                                };
+
+                                                            if let Some(ref fn_val) = map_fn {
+                                                                // Support closures or function names for map function
+                                                                let actual_fn = if let Value::Object(obj) = fn_val {
+                                                                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                                                        prop.borrow().clone()
+                                                                    } else {
+                                                                        fn_val.clone()
+                                                                    }
+                                                                } else {
+                                                                    fn_val.clone()
+                                                                };
+
+                                                                let call_args = vec![value, Value::Number(idx as f64)];
+                                                                let mapped = match &actual_fn {
+                                                                    Value::Closure(cl) => {
+                                                                        crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?
+                                                                    }
+                                                                    Value::Function(name) => crate::js_function::handle_global_function(
+                                                                        mc, name, &call_args, env,
+                                                                    )
+                                                                    .map_err(EvalError::Js)?,
+                                                                    _ => {
+                                                                        return Err(EvalError::Js(raise_eval_error!(
+                                                                            "Array.from map function must be a function"
+                                                                        )));
+                                                                    }
+                                                                };
+                                                                result.push(mapped);
+                                                            } else {
+                                                                result.push(value);
+                                                            }
+
+                                                            idx += 1;
+                                                            continue;
+                                                        } else {
+                                                            return Err(EvalError::Js(raise_eval_error!(
+                                                                "Iterator.next did not return an object"
+                                                            )));
+                                                        }
+                                                    } else {
+                                                        return Err(EvalError::Js(raise_eval_error!("Iterator has no next method")));
+                                                    }
+                                                }
+                                            }
+                                            _ => return Err(EvalError::Js(raise_eval_error!("Iterator call did not return an object"))),
+                                        }
+
+                                        let new_array = create_array(mc, env)?;
+                                        set_array_length(mc, &new_array, result.len())?;
+                                        for (i, val) in result.into_iter().enumerate() {
+                                            obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                                        }
+                                        return Ok(Value::Object(new_array));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(len) = get_array_length(mc, &object) {
                         for i in 0..len {
                             let val_opt = obj_get_key_value(&object, &i.to_string().into())?;

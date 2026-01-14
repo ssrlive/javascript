@@ -18,11 +18,8 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("test");
             sym1 === sym2
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b), // true
-            _ => panic!("Expected true for same key, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -32,11 +29,8 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("test2");
             sym1 !== sym2
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b), // true
-            _ => panic!("Expected true for different keys, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -45,11 +39,8 @@ mod symbol_static_tests {
             let sym = Symbol.for("myKey");
             Symbol.keyFor(sym)
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "myKey"),
-            _ => panic!("Expected string 'myKey', got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"myKey\"");
     }
 
     #[test]
@@ -58,11 +49,8 @@ mod symbol_static_tests {
             let sym = Symbol("not registered");
             Symbol.keyFor(sym)
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Undefined) => (), // Should be undefined
-            _ => panic!("Expected undefined for unregistered symbol, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "undefined");
     }
 
     #[test]
@@ -72,11 +60,8 @@ mod symbol_static_tests {
             let sym2 = Symbol.for("123");
             sym1 === sym2
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b), // true, since toString makes them same
-            _ => panic!("Expected true for number and string key '123', got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -88,11 +73,8 @@ mod symbol_static_tests {
                 "error"
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "error"),
-            _ => panic!("Expected error for no args, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"error\"");
     }
 
     #[test]
@@ -104,10 +86,7 @@ mod symbol_static_tests {
                 "error"
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "error"),
-            _ => panic!("Expected error for no args, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"error\"");
     }
 }

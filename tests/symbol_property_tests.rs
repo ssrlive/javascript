@@ -19,11 +19,8 @@ mod symbol_property_tests {
             obj[sym] = "symbol value";
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol value"),
-            _ => panic!("Expected string 'symbol value', got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"symbol value\"");
     }
 
     #[test]
@@ -36,11 +33,8 @@ mod symbol_property_tests {
             obj[sym2] = "value2";
             obj[sym1] != obj[sym2]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b), // true
-            _ => panic!("Expected number 1.0 (true), got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -52,11 +46,8 @@ mod symbol_property_tests {
             delete obj[sym];
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Undefined) => (), // Should be undefined after deletion
-            _ => panic!("Expected undefined after deletion, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "undefined");
     }
 
     #[test]
@@ -68,11 +59,8 @@ mod symbol_property_tests {
             obj[sym]++;
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
-            _ => panic!("Expected number 6.0 after increment, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "6");
     }
 
     #[test]
@@ -84,10 +72,7 @@ mod symbol_property_tests {
             obj[sym]--;
             obj[sym]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 4.0),
-            _ => panic!("Expected number 4.0 after decrement, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "4");
     }
 }

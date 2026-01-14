@@ -1,3 +1,5 @@
+"use strict";
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message || "断言失败");
@@ -41,23 +43,40 @@ for (var i = 0, j = 9; i <= j; i++, j--)
   console.log("a[" + i + "][" + j + "]= " + a[i][j]);
 
 
-xx = 42;
 var yy = 43;
-myobj = new Number();
+let myobj = new Number();
 myobj.h = 4; // create property h
-var res1 = delete xx; // returns true (can delete if declared implicitly)
-var res2 = delete yy; // returns false (cannot delete if declared with var)
-var res3 = delete Math.PI; // returns false (cannot delete predefined properties)
-var res4 = delete myobj.h; // returns true (can delete user-defined properties)
-var res5 = delete myobj; // returns true (can delete if declared implicitly)
+var res2, res3, res4, res5;
 
-console.log(res1, res2, res3, res4, res5);
+try {
+  res2 = delete yy; // throws SyntaxError in strict mode
+} catch (e) {
+  console.log("Caught expected error for delete yy:", e.message);
+  res2 = false;
+}
 
-assert(res1, "delete xx failed");
-assert(!res2, "delete yy failed");
-assert(!res3, "delete Math.PI failed");
+try {
+  res3 = delete Math.PI; // throws TypeError in strict mode
+} catch (e) {
+  console.log("Caught expected error for delete Math.PI:", e.message);
+  res3 = false;
+}
+
+res4 = delete myobj.h; // returns true (configurable)
+
+try {
+  res5 = delete myobj; // throws SyntaxError in strict mode
+} catch (e) {
+  console.log("Caught expected error for delete myobj:", e.message);
+  res5 = false;
+}
+
+console.log(res2, res3, res4, res5);
+
+assert(!res2, "delete yy should be false or throw");
+assert(!res3, "delete Math.PI should be false or throw");
 assert(res4, "delete myobj.h failed");
-assert(res5, "delete myobj failed");
+assert(!res5, "delete myobj should be false or throw");
 
 console.log("xx =", typeof xx !== "undefined" ? xx : "undefined");
 console.log("yy =", typeof yy !== "undefined" ? yy : "undefined");

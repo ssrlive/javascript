@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use javascript::*;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -12,6 +14,7 @@ mod os_tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_open_close() {
         let script = r#"
             import * as os from "os";
@@ -23,16 +26,14 @@ mod os_tests {
                 -1;
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        if let Err(e) = &result {
-            println!("Error: {:?}", e);
-        }
-        assert!(result.is_ok());
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "0");
         // Clean up
         std::fs::remove_file("test.txt").ok();
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_write_read() {
         let script = r#"
             import * as os from "os";
@@ -47,117 +48,78 @@ mod os_tests {
                 "";
             }
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        assert_eq!(
-            match result.unwrap() {
-                Value::String(vec) => utf16_to_utf8(&vec),
-                _ => panic!("Expected string result"),
-            },
-            "Hello World"
-        );
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"Hello World\"");
         // Clean up
         std::fs::remove_file("test_write.txt").ok();
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_getcwd() {
         let script = r#"
             import * as os from "os";
             os.getcwd();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::String(s) => {
-                let cwd = utf16_to_utf8(&s);
-                let expected_cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-                assert_eq!(cwd, expected_cwd);
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let expected_cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+        assert_eq!(result, format!("\"{}\"", expected_cwd));
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_getpid() {
         let script = r#"
             import * as os from "os";
             os.getpid();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::Number(pid) => {
-                assert!(pid > 0.0);
-            }
-            _ => panic!("Expected number result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert!(result.parse::<i32>().unwrap() > 0);
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_path_join() {
         let script = r#"
             import * as os from "os";
             os.path.join("a", "b", "c");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::String(s) => {
-                let joined = utf16_to_utf8(&s);
-                let expected = format!("a{}b{}c", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
-                assert_eq!(joined, expected);
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        let expected = format!("\"a{}b{}c\"", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
+        assert_eq!(result, expected);
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_path_basename() {
         let script = r#"
             import * as os from "os";
             os.path.basename("path/to/file.txt");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::String(s) => {
-                let basename = utf16_to_utf8(&s);
-                assert_eq!(basename, "file.txt");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"file.txt\"");
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_path_extname() {
         let script = r#"
             import * as os from "os";
             os.path.extname("file.txt");
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::String(s) => {
-                let ext = utf16_to_utf8(&s);
-                assert_eq!(ext, ".txt");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\".txt\"");
     }
 
     #[test]
+    #[cfg(feature = "os")]
     fn test_os_getppid() {
         let script = r#"
             import * as os from "os";
             os.getppid();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         // Just check that it doesn't crash and returns some number
-        assert!(result.is_ok());
-        match result.unwrap() {
-            Value::Number(ppid) => assert!(ppid > 0.0),
-            _ => panic!("Expected number result"),
-        }
+        assert!(result.parse::<i32>().unwrap() > 0);
     }
 }

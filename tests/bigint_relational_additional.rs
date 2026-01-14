@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::evaluate_script;
 
 #[test]
 fn bigint_nan_infinite_and_sign_edgecases() {
@@ -8,18 +8,16 @@ fn bigint_nan_infinite_and_sign_edgecases() {
         ("1n > NaN", false),
         ("1n <= NaN", false),
         ("1n >= NaN", false),
-        ("1n < Infinity", false),
+        ("1n < Infinity", true),
         ("1n > Infinity", false),
         ("1n < -Infinity", false),
-        ("1n > -Infinity", false),
+        ("1n > -Infinity", true),
     ];
 
     for (expr, expected) in cases {
         let res = evaluate_script(expr, None::<&std::path::Path>).expect("eval failed");
-        match res {
-            Value::Boolean(b) => assert_eq!(b, expected, "{} should be {}", expr, expected),
-            other => panic!("Expected boolean for '{}', got {:?}", expr, other),
-        }
+        let b = res == "true";
+        assert_eq!(b, expected, "{} should be {}", expr, expected);
     }
 }
 
@@ -40,10 +38,8 @@ fn bigint_relational_le_ge_and_negative_fractional() {
 
     for (expr, expected) in cases {
         let res = evaluate_script(expr, None::<&std::path::Path>).expect("eval failed");
-        match res {
-            Value::Boolean(b) => assert_eq!(b, expected, "{} should be {}", expr, expected),
-            other => panic!("Expected boolean for '{}', got {:?}", expr, other),
-        }
+        let b = res == "true";
+        assert_eq!(b, expected, "{} should be {}", expr, expected);
     }
 }
 
@@ -79,7 +75,7 @@ fn bigint_relational_small_fuzz_returns_boolean() {
                 let expr = format!("{} {} {}", bi, op, n);
                 let res = evaluate_script(&expr, None::<&std::path::Path>);
                 match res {
-                    Ok(Value::Boolean(_)) => {} // good
+                    Ok(s) if s == "true" || s == "false" => {} // good
                     Ok(other) => panic!("Expected boolean for '{}', got {:?}", expr, other),
                     Err(e) => panic!("Evaluation error for '{}': {:?}", expr, e),
                 }

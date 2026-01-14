@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::evaluate_script;
 
 #[test]
 fn for_of_destructuring_var_object() {
@@ -8,12 +8,6 @@ fn for_of_destructuring_var_object() {
         x;
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    assert!(result.is_ok(), "evaluation should succeed");
-    if let Ok(val) = result {
-        match val {
-            Value::Number(n) => assert_eq!(n, 2.0),
-            other => panic!("expected number result, got: {:?}", other),
-        }
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "2");
 }

@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, utf16_to_utf8};
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -13,87 +13,40 @@ mod regexp_tests {
 
     #[test]
     fn test_regexp_constructor() {
-        let result = evaluate_script("new RegExp('hello')", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Object(obj) => {
-                // Check that the object has the expected properties
-                assert!(obj.borrow().contains_key(&"__regex".into()));
-                assert!(obj.borrow().contains_key(&"__flags".into()));
-                assert!(obj.borrow().contains_key(&"toString".into()));
-                assert!(obj.borrow().contains_key(&"test".into()));
-                assert!(obj.borrow().contains_key(&"exec".into()));
-            }
-            _ => panic!("Expected object result"),
-        }
+        let result = evaluate_script("new RegExp('hello')", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[object RegExp]");
     }
 
     #[test]
     fn test_regexp_constructor_with_flags() {
-        let result = evaluate_script("new RegExp('hello', 'gi')", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Object(obj) => {
-                // Check that the object has the expected properties
-                assert!(obj.borrow().contains_key(&"__regex".into()));
-                assert!(obj.borrow().contains_key(&"__flags".into()));
-                // We can't easily check the flags value without calling toString
-            }
-            _ => panic!("Expected object result"),
-        }
+        let result = evaluate_script("new RegExp('hello', 'gi')", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[object RegExp]");
     }
 
     #[test]
     fn test_regexp_test_method() {
-        let result = evaluate_script("new RegExp('hello').test('hello world')", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Boolean(b) => assert!(b),
-            _ => panic!("Expected boolean result"),
-        }
+        let result = evaluate_script("new RegExp('hello').test('hello world')", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
     fn test_regexp_test_method_case_insensitive() {
-        let result = evaluate_script("new RegExp('hello', 'i').test('HELLO world')", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Boolean(b) => assert!(b),
-            _ => panic!("Expected boolean result"),
-        }
+        let result = evaluate_script("new RegExp('hello', 'i').test('HELLO world')", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
     fn test_regexp_exec_method() {
-        let result = evaluate_script("new RegExp('hello').exec('hello world')[0]", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                assert_eq!(str_val, "hello");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script("new RegExp('hello').exec('hello world')[0]", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"hello\"");
     }
 
     #[test]
     fn test_regexp_extract_emails() {
         // Test RegExp with a simple pattern
         // This demonstrates RegExp's ability to handle basic patterns
-        let result = evaluate_script(r#"new RegExp('test').test('test string')"#, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-
-        // Should return true since the text contains 'test'
-        match value {
-            Value::Boolean(b) => assert!(b),
-            _ => panic!("Expected boolean result"),
-        }
+        let result = evaluate_script(r#"new RegExp('test').test('test string')"#, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -101,13 +54,8 @@ mod regexp_tests {
         // Translated StackOverflow-style email regex into a Rust-regex-compatible pattern.
         // This keeps the validation strict while avoiding PCRE-only constructs.
         let script = r#"new RegExp('^([A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&\'\*+/=?^_`{|}~-]+)*@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z]{2,})+)$','i').test('john.doe@example.com')"#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Boolean(b) => assert!(b, "expected true for valid email"),
-            _ => panic!("Expected boolean result"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -126,29 +74,8 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::Object(arr_rc) => {
-                let arr = arr_rc.borrow();
-                // Expect two matches
-                let a0 = arr.get(&"0".into()).unwrap().borrow().clone();
-                let a1 = arr.get(&"1".into()).unwrap().borrow().clone();
-                match a0 {
-                    Value::String(s0) => {
-                        let s0s = utf16_to_utf8(&s0);
-                        assert_eq!(s0s, "hello@world.com");
-                    }
-                    _ => panic!("expected string at index 0"),
-                }
-                match a1 {
-                    Value::String(s1) => {
-                        let s1s = utf16_to_utf8(&s1);
-                        assert_eq!(s1s, "test123@abc.org.cn");
-                    }
-                    _ => panic!("expected string at index 1"),
-                }
-            }
-            _ => panic!("expected array/object result"),
-        }
+
+        assert_eq!(result, "[\"hello@world.com\",\"test123@abc.org.cn\"]");
     }
 
     #[test]
@@ -164,13 +91,7 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let s0 = utf16_to_utf8(&s);
-                assert_eq!(s0, "123");
-            }
-            _ => panic!("Expected string result for sticky match"),
-        }
+        assert_eq!(result, "\"123\""); // "123"
     }
 
     #[test]
@@ -186,28 +107,13 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let val = utf16_to_utf8(&s);
-                // Expect the returned match to reflect the original string with CRLF
-                assert_eq!(val, "o\r\nw");
-            }
-            _ => panic!("Expected string result for CRLF match"),
-        }
+        assert_eq!(result, "\"o\\r\\nw\""); // "o\r\nw" escaped in JSON
     }
 
     #[test]
     fn test_regexp_to_string() {
-        let result = evaluate_script("new RegExp('ab+c').toString()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let s_val = utf16_to_utf8(&s);
-                assert_eq!(s_val, "/ab+c/");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script("new RegExp('ab+c').toString()", None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"/ab+c/\""); // "/ab+c/"
     }
 
     #[test]
@@ -230,46 +136,20 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let s0 = utf16_to_utf8(&s);
-                // Expect three matches: 'a', surrogate pair (as one code point), 'b'
-                // lastIndex returns UTF-16 code-unit index after match. After 'a' index is 1, after emoji index should be 3, and after 'b' index should be 4
-                // JSON.stringify produced an array like ["a",1,"😀",3,"b",4]
-                assert!(s0.contains("\"a\",1"));
-                assert!(s0.contains("\"😀\",3"));
-                assert!(s0.contains("\"b\",4"));
-            }
-            _ => panic!("Expected stringified results for unicode lastIndex test"),
-        }
+        println!("DEBUG: regexp unicode lastindex result: {}", result);
+        assert_eq!(result, "\"[\\\"a\\\",1,\\\"😀\\\",3,\\\"b\\\",4]\"");
     }
 
     #[test]
     fn test_string_match_global_behavior() {
-        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/g)[0]"#, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let s_val = utf16_to_utf8(&s);
-                assert_eq!(s_val, "dbbd");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/g)[0]"#, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"dbbd\""); // "dbbd"
     }
 
     #[test]
     fn test_string_match_non_global_captures() {
-        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/)[1]"#, None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let s_val = utf16_to_utf8(&s);
-                assert_eq!(s_val, "bb");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let result = evaluate_script(r#"'cdbbdbsbz'.match(/d(b+)d/)[1]"#, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"bb\""); // "bb"
     }
 
     #[test]
@@ -285,14 +165,7 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let val = utf16_to_utf8(&s);
-                // Lazy match should stop at the first 'b'
-                assert_eq!(val, "a111b");
-            }
-            _ => panic!("Expected string result for lazy match"),
-        }
+        assert_eq!(result, "\"a111b\"");
     }
 
     #[test]
@@ -309,12 +182,6 @@ mod regexp_tests {
         "#;
 
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        match result {
-            Value::String(s) => {
-                let val = utf16_to_utf8(&s);
-                assert_eq!(val, "abcccx");
-            }
-            _ => panic!("Expected string result for complex lazy test"),
-        }
+        assert_eq!(result, "\"abcccx\"");
     }
 }

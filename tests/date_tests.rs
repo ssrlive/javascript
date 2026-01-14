@@ -1,5 +1,3 @@
-use javascript::*;
-
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
 #[ctor::ctor]
@@ -9,7 +7,42 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod date_tests {
-    use super::*;
+    use javascript::{JSError, evaluate_script as evaluate_script_raw, utf8_to_utf16, utf16_to_utf8};
+
+    #[derive(Debug, Clone)]
+    enum Value {
+        Number(f64),
+        String(Vec<u16>),
+        #[allow(unused)]
+        Boolean(bool),
+        Undefined,
+        Null,
+    }
+
+    fn evaluate_script(script: &str, _path: Option<&std::path::Path>) -> Result<Value, JSError> {
+        let s = evaluate_script_raw(script, None::<&std::path::Path>)?;
+        if s == "undefined" {
+            return Ok(Value::Undefined);
+        }
+        if s == "null" {
+            return Ok(Value::Null);
+        }
+        if s == "true" {
+            return Ok(Value::Boolean(true));
+        }
+        if s == "false" {
+            return Ok(Value::Boolean(false));
+        }
+        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+            let inner = &s[1..s.len() - 1];
+            return Ok(Value::String(utf8_to_utf16(inner)));
+        }
+        if let Ok(n) = s.parse::<f64>() {
+            return Ok(Value::Number(n));
+        }
+        // Fallback: return the raw string as UTF-16
+        Ok(Value::String(utf8_to_utf16(&s)))
+    }
 
     #[test]
     fn test_date_constructor_no_args() {

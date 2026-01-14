@@ -10,10 +10,10 @@ fn __init_test_logger() {
 #[test]
 fn test_weakmap_constructor() {
     let result = evaluate_script("new WeakMap()", None::<&std::path::Path>).unwrap();
-    assert!(matches!(result, Value::WeakMap(_)));
+    assert_eq!(result, "[object WeakMap]");
 
     let result = evaluate_script("new WeakMap([])", None::<&std::path::Path>).unwrap();
-    assert!(matches!(result, Value::WeakMap(_)));
+    assert_eq!(result, "[object WeakMap]");
 }
 
 #[test]
@@ -28,13 +28,7 @@ fn test_weakmap_set_get_has_delete() {
         None::<&std::path::Path>,
     )
     .unwrap();
-
-    match result {
-        Value::String(s) => {
-            assert_eq!(utf16_to_utf8(&s), "value");
-        }
-        _ => panic!("Expected string value"),
-    }
+    assert_eq!(result, "\"value\"");
 
     let result = evaluate_script(
         r#"
@@ -46,11 +40,7 @@ fn test_weakmap_set_get_has_delete() {
         None::<&std::path::Path>,
     )
     .unwrap();
-
-    match result {
-        Value::Boolean(b) => assert!(b),
-        _ => panic!("Expected boolean"),
-    }
+    assert_eq!(result, "true");
 
     let result = evaluate_script(
         r#"
@@ -64,19 +54,7 @@ fn test_weakmap_set_get_has_delete() {
         None::<&std::path::Path>,
     )
     .unwrap();
-
-    // Should return an array-like object with [true, false]
-    if let Value::Object(obj) = result {
-        let key0 = PropertyKey::from("0");
-        let deleted_val = obj.borrow().properties.get(&key0).unwrap().borrow().clone();
-        let key1 = PropertyKey::from("1");
-        let has_after_val = obj.borrow().properties.get(&key1).unwrap().borrow().clone();
-
-        assert!(matches!(deleted_val, Value::Boolean(true)));
-        assert!(matches!(has_after_val, Value::Boolean(false)));
-    } else {
-        panic!("Expected object");
-    }
+    assert_eq!(result, "[true,false]");
 }
 
 #[test]
@@ -94,22 +72,16 @@ fn test_weakmap_non_object_key() {
         None::<&std::path::Path>,
     )
     .unwrap();
-
-    match result {
-        Value::String(s) => {
-            assert_eq!(utf16_to_utf8(&s), "error");
-        }
-        _ => panic!("Expected error string"),
-    }
+    assert_eq!(result, "\"error\"");
 }
 
 #[test]
 fn test_weakset_constructor() {
     let result = evaluate_script("new WeakSet()", None::<&std::path::Path>).unwrap();
-    assert!(matches!(result, Value::WeakSet(_)));
+    assert_eq!(result, "[object WeakSet]");
 
     let result = evaluate_script("new WeakSet([])", None::<&std::path::Path>).unwrap();
-    assert!(matches!(result, Value::WeakSet(_)));
+    assert_eq!(result, "[object WeakSet]");
 }
 
 #[test]
@@ -124,11 +96,7 @@ fn test_weakset_add_has_delete() {
         None::<&std::path::Path>,
     )
     .unwrap();
-
-    match result {
-        Value::Boolean(b) => assert!(b),
-        _ => panic!("Expected boolean"),
-    }
+    assert_eq!(result, "true");
 
     let result = evaluate_script(
         r#"
@@ -143,18 +111,7 @@ fn test_weakset_add_has_delete() {
     )
     .unwrap();
 
-    // Should return an array-like object with [true, false]
-    if let Value::Object(obj) = result {
-        let key0 = PropertyKey::from("0");
-        let deleted_val = obj.borrow().properties.get(&key0).unwrap().borrow().clone();
-        let key1 = PropertyKey::from("1");
-        let has_after_val = obj.borrow().properties.get(&key1).unwrap().borrow().clone();
-
-        assert!(matches!(deleted_val, Value::Boolean(true)));
-        assert!(matches!(has_after_val, Value::Boolean(false)));
-    } else {
-        panic!("Expected object");
-    }
+    assert_eq!(result, "[true,false]");
 }
 
 #[test]
@@ -173,29 +130,14 @@ fn test_weakset_non_object_value() {
     )
     .unwrap();
 
-    match result {
-        Value::String(s) => {
-            assert_eq!(utf16_to_utf8(&s), "error");
-        }
-        _ => panic!("Expected error string"),
-    }
+    assert_eq!(result, "\"error\"");
 }
 
 #[test]
 fn test_weakmap_weakset_to_string() {
     let result = evaluate_script("new WeakMap().toString()", None::<&std::path::Path>).unwrap();
-    match result {
-        Value::String(s) => {
-            assert_eq!(utf16_to_utf8(&s), "[object WeakMap]");
-        }
-        _ => panic!("Expected string"),
-    }
+    assert_eq!(result, "\"[object WeakMap]\"");
 
     let result = evaluate_script("new WeakSet().toString()", None::<&std::path::Path>).unwrap();
-    match result {
-        Value::String(s) => {
-            assert_eq!(utf16_to_utf8(&s), "[object WeakSet]");
-        }
-        _ => panic!("Expected string"),
-    }
+    assert_eq!(result, "\"[object WeakSet]\"");
 }

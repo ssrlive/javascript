@@ -27,15 +27,9 @@ Line 2`);
         results.join('\n---\n')
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::String(s)) => {
-            let out = utf16_to_utf8(&s);
-            let expected = "this string      is broken across multiple lines.\n---\nLine1\nLine2\n---\nTab\tTab\n---\nBackslash \\\n---\nQuote \"\n---\nSingle Quote '\n---\nUnknown escape z\n---\nTemplate\nLine 1 Line 2";
-            assert_eq!(out, expected);
-        }
-        _ => panic!("Expected string, got {:?}", result),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let expected = r#""this string      is broken across multiple lines.\n---\nLine1\nLine2\n---\nTab\tTab\n---\nBackslash \\\n---\nQuote \"\n---\nSingle Quote '\n---\nUnknown escape z\n---\nTemplate\nLine 1 Line 2""#;
+    assert_eq!(result, expected);
 }
 
 #[test]

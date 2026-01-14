@@ -1,5 +1,5 @@
 use javascript::JSErrorKind;
-use javascript::{Value, evaluate_script};
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -25,10 +25,6 @@ fn test_write_to_read_only_accessor_throws() {
 #[test]
 fn test_read_write_only_accessor_returns_undefined() {
     let script = "class C { set r(v) { this._r = v } } let c = new C(); c.r = 5; c.r";
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::Undefined) => (),
-        Ok(v) => panic!("Expected undefined from reading write-only accessor, got {:?}", v),
-        Err(e) => panic!("evaluate_script error: {:?}", e),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "undefined");
 }

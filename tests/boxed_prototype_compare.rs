@@ -1,4 +1,4 @@
-use javascript::{JSError, Value, evaluate_script, utf16_to_utf8};
+use javascript::{JSError, evaluate_script};
 
 #[test]
 fn compare_proto_and_instanceof() -> Result<(), JSError> {
@@ -9,11 +9,10 @@ fn compare_proto_and_instanceof() -> Result<(), JSError> {
         protoEq + '|' + inst;
     "#;
     let res = evaluate_script(script, None::<&std::path::Path>)?;
-    match res {
-        Value::String(s) => {
-            println!("proto vs instanceof: {}", utf16_to_utf8(&s));
-            Ok(())
-        }
-        other => panic!("Unexpected result: {:?}", other),
-    }
+    assert_eq!(
+        res, "\"EQ|I\"",
+        "Expected boxed Number to have Number prototype and be instanceof Number, got {}",
+        res
+    );
+    Ok(())
 }

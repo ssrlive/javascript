@@ -1492,6 +1492,8 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
 pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let func_ctor = new_js_object_data(mc);
     obj_set_key_value(mc, &func_ctor, &"name".into(), Value::String(utf8_to_utf16("Function")))?;
+    obj_set_key_value(mc, &func_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &func_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Function")))?;
 
     let func_proto = new_js_object_data(mc);
 

@@ -11,8 +11,8 @@ fn class_extends_expression_parses() {
     "#;
 
     let tokens = tokenize(script).expect("tokenize");
-    let mut tvec = tokens;
-    let stmts = parse_statements(&mut tvec).expect("parse_statements");
+    let mut index = 0;
+    let stmts = parse_statements(&tokens, &mut index).expect("parse_statements");
     // Expect a single class statement and successful parse
     assert_eq!(stmts.len(), 1);
 }

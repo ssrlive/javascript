@@ -483,6 +483,7 @@ fn bind_array_inner_for_letconst<'gc>(
                 }
                 break;
             }
+            DestructuringElement::Empty => {}
             _ => {
                 return Err(EvalError::Js(crate::raise_syntax_error!(
                     "Nested array destructuring not implemented"
@@ -669,6 +670,7 @@ fn bind_array_inner_for_var<'gc>(
                 // bind var in function scope
                 env_set_recursive(mc, &target_env, name, Value::Object(arr_obj2))?;
             }
+            DestructuringElement::Empty => {}
             _ => {
                 return Err(EvalError::Js(crate::raise_syntax_error!(
                     "Nested array destructuring not implemented"
@@ -1344,6 +1346,19 @@ fn eval_res<'gc>(
                             }
                         }
                         env_set_recursive(mc, &target_env, name, Value::Object(arr_obj))?;
+                    }
+                    DestructuringElement::Empty => {}
+                    DestructuringElement::NestedArray(inner) => {
+                        let mut elem_val = Value::Undefined;
+                        if let Value::Object(obj) = &val
+                            && is_array(mc, obj)
+                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                        {
+                            elem_val = cell.borrow().clone();
+                        }
+                        if let Value::Object(oarr) = &elem_val {
+                            bind_array_inner_for_var(mc, env, inner, oarr)?;
+                        }
                     }
                     _ => {
                         return Err(EvalError::Js(crate::raise_syntax_error!(
@@ -3959,6 +3974,8 @@ fn evaluate_call_dispatch<'gc>(
                             Ok(crate::js_symbol::handle_symbol_call(mc, &eval_args, env).map_err(EvalError::Js)?)
                         } else if name == &crate::unicode::utf8_to_utf16("Array") {
                             Ok(crate::js_array::handle_array_constructor(mc, &eval_args, env)?)
+                        } else if name == &crate::unicode::utf8_to_utf16("Function") {
+                            Ok(crate::js_function::handle_global_function(mc, "Function", &eval_args, env)?)
                         } else {
                             Err(EvalError::Js(raise_eval_error!("Not a function")))
                         }
@@ -5126,32 +5143,58 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         Expr::Delete(target) => match &**target {
             Expr::Property(obj_expr, key) => {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                if obj_val.is_null_or_undefined() {
+                    return Err(EvalError::Js(crate::raise_type_error!(
+                        "Cannot delete property of null or undefined"
+                    )));
+                }
                 if let Value::Object(obj) = obj_val {
                     let key_val = PropertyKey::from(key.to_string());
-                    let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
-                    // Deleting a non-existent property returns true per JS semantics
-                    Ok(Value::Boolean(true))
+                    if obj.borrow().non_configurable.contains(&key_val) {
+                        Err(EvalError::Js(crate::raise_type_error!(format!(
+                            "Cannot delete non-configurable property '{key}'",
+                        ))))
+                    } else {
+                        let _ = obj.borrow_mut(mc).properties.shift_remove(&key_val);
+                        // Deleting a non-existent property returns true per JS semantics
+                        Ok(Value::Boolean(true))
+                    }
                 } else {
                     Ok(Value::Boolean(true))
                 }
             }
             Expr::Index(obj_expr, key_expr) => {
                 let obj_val = evaluate_expr(mc, env, obj_expr)?;
+                if obj_val.is_null_or_undefined() {
+                    return Err(EvalError::Js(crate::raise_type_error!(
+                        "Cannot delete property of null or undefined"
+                    )));
+                }
                 let key_val_res = evaluate_expr(mc, env, key_expr)?;
-                let key = match key_val_res {
-                    Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                let key = match &key_val_res {
+                    Value::String(s) => PropertyKey::String(utf16_to_utf8(s)),
                     Value::Number(n) => PropertyKey::String(n.to_string()),
-                    Value::Symbol(s) => PropertyKey::Symbol(s),
+                    Value::Symbol(s) => PropertyKey::Symbol(*s),
                     _ => PropertyKey::from(value_to_string(&key_val_res)),
                 };
                 if let Value::Object(obj) = obj_val {
-                    let removed = obj.borrow_mut(mc).properties.shift_remove(&key).is_some();
-                    Ok(Value::Boolean(removed))
+                    if obj.borrow().non_configurable.contains(&key) {
+                        Err(EvalError::Js(crate::raise_type_error!(format!(
+                            "Cannot delete non-configurable property '{}'",
+                            value_to_string(&key_val_res)
+                        ))))
+                    } else {
+                        let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
+                        // Deleting a non-existent property returns true per JS semantics
+                        Ok(Value::Boolean(true))
+                    }
                 } else {
                     Ok(Value::Boolean(true))
                 }
             }
-            Expr::Var(_name, _, _) => Ok(Value::Boolean(false)),
+            Expr::Var(name, _, _) => Err(EvalError::Js(crate::raise_syntax_error!(format!(
+                "Delete of an unqualified identifier '{name}' in strict mode",
+            )))),
             _ => Ok(Value::Boolean(true)),
         },
         Expr::Getter(func_expr) => {
@@ -6002,6 +6045,20 @@ pub fn call_closure<'gc>(
                 crate::js_array::set_array_length(mc, &array_obj, rest_args.len()).map_err(EvalError::Js)?;
                 crate::core::env_set(mc, &call_env, name, Value::Object(array_obj)).map_err(EvalError::Js)?;
             }
+            DestructuringElement::NestedArray(inner_pattern) => {
+                let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(obj) = &arg_val
+                    && is_array(mc, obj)
+                {
+                    bind_array_inner_for_letconst(mc, &call_env, inner_pattern, obj, false)?;
+                }
+            }
+            DestructuringElement::NestedObject(inner_pattern) => {
+                let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
+                if let Value::Object(obj) = &arg_val {
+                    bind_object_inner_for_letconst(mc, &call_env, inner_pattern, obj, false)?;
+                }
+            }
             _ => {}
         }
     }
@@ -6341,6 +6398,8 @@ fn evaluate_expr_new<'gc>(
                         return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
                     } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
                         return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("Function") {
+                        return Ok(crate::js_function::handle_global_function(mc, "Function", &eval_args, env)?);
                     } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
                         return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
                     }

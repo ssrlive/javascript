@@ -1,11 +1,11 @@
-use javascript::{Value, evaluate_script, utf16_to_utf8};
+use javascript::evaluate_script;
 
 #[test]
 fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
     // BigInt + BigInt -> BigInt
     let r1 = evaluate_script("1n + 2n", None::<&std::path::Path>);
     match r1 {
-        Ok(Value::BigInt(h)) => assert!(h.to_string() == "3"),
+        Ok(h) => assert!(h == "3"),
         _ => panic!("expected BigInt result for 1n + 2n, got {:?}", r1),
     }
 
@@ -20,39 +20,35 @@ fn bigint_arithmetic_and_mixing_should_behave_per_spec() {
     // Loose equality: 1n == 1 should be true
     let r4 = evaluate_script("1n == 1", None::<&std::path::Path>);
     match r4 {
-        Ok(Value::Boolean(b)) => assert!(b, "1n == 1 should be true"),
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0), // fallback engines that return numeric truthiness
+        Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 1n == 1: {:?}", other),
     }
 
     // Strict equality: 1n === 1 should be false
     let r5 = evaluate_script("1n === 1", None::<&std::path::Path>);
     match r5 {
-        Ok(Value::Boolean(b)) => assert!(!b, "1n === 1 should be false"),
-        Ok(Value::Number(n)) => assert_eq!(n, 0.0), // fallback
+        Ok(b) => assert_eq!(b, "false"),
         other => panic!("unexpected result for 1n === 1: {:?}", other),
     }
 
     // Relational comparison: 2n > 1 should be true
     let r6 = evaluate_script("2n > 1", None::<&std::path::Path>);
     match r6 {
-        Ok(Value::Boolean(b)) => assert!(b, "2n > 1 should be true"),
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+        Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 2n > 1: {:?}", other),
     }
 
     // Relational comparison: 1n < 1.5 should be true (1 < 1.5)
     let r7 = evaluate_script("1n < 1.5", None::<&std::path::Path>);
     match r7 {
-        Ok(Value::Boolean(b)) => assert!(b, "1n < 1.5 should be true"),
-        Ok(Value::Number(n)) => assert_eq!(n, 1.0),
+        Ok(b) => assert_eq!(b, "true"),
         other => panic!("unexpected result for 1n < 1.5: {:?}", other),
     }
 
     // String concatenation with BigInt: "x" + 1n -> "x1"
     let r8 = evaluate_script("'x' + 1n", None::<&std::path::Path>);
     match r8 {
-        Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "x1"),
+        Ok(s) => assert_eq!(s, "\"x1\""),
         other => panic!("expected string 'x1', got {:?}", other),
     }
 }

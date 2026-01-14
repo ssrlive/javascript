@@ -1,4 +1,3 @@
-use javascript::Value;
 use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -16,8 +15,8 @@ fn test_empty_array_literal() {
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 0.0),
-        _ => panic!("Expected number 0.0, got {:?}", result),
+        Ok(n) => assert_eq!(n, "0"),
+        _ => panic!("Expected number 0, got {:?}", result),
     }
 }
 
@@ -29,8 +28,8 @@ fn test_array_literal_with_elements() {
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-        _ => panic!("Expected number 3.0, got {:?}", result),
+        Ok(n) => assert_eq!(n, "3"),
+        _ => panic!("Expected number 3, got {:?}", result),
     }
 }
 
@@ -42,8 +41,8 @@ fn test_array_literal_indexing() {
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 60.0),
-        _ => panic!("Expected number 60.0, got {:?}", result),
+        Ok(n) => assert_eq!(n, "60"),
+        _ => panic!("Expected number 60, got {:?}", result),
     }
 }
 
@@ -55,8 +54,8 @@ fn test_array_literal_mixed_types() {
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-        _ => panic!("Expected number 3.0, got {:?}", result),
+        Ok(n) => assert_eq!(n, "3"),
+        _ => panic!("Expected number 3, got {:?}", result),
     }
 }
 
@@ -97,7 +96,7 @@ fn test_array_literal_nested() {
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);
     match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 10.0),
-        _ => panic!("Expected number 10.0, got {:?}", result),
+        Ok(n) => assert_eq!(n, "10"),
+        _ => panic!("Expected number 10, got {result:?}"),
     }
 }

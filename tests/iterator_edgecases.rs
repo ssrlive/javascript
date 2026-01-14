@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, utf16_to_utf8};
+use javascript::evaluate_script;
 
 #[test]
 fn for_of_missing_iterator_throws() {
@@ -35,14 +35,9 @@ fn string_iteration_surrogate_pair_behaviour() {
         for (let ch of s) { acc = acc + ch; }
         acc
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
-    match res {
-        Ok(Value::String(s)) => {
-            let rust_str = utf16_to_utf8(&s);
-            assert!(rust_str.starts_with("a"));
-            assert!(rust_str.ends_with("b"));
-            assert!(rust_str.len() >= 2);
-        }
-        other => panic!("Expected string result from iteration, got {:?}", other),
-    }
+    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    let rust_str = res.trim_start_matches('"').trim_end_matches('"');
+    assert!(rust_str.starts_with("a"));
+    assert!(rust_str.ends_with("b"));
+    assert!(rust_str.len() >= 2);
 }

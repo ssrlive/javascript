@@ -8,31 +8,22 @@ fn __init_test_logger() {
 #[test]
 fn multiple_var_declarations_without_initializers() {
     let script = "var a, b; a = 1; b = 2; a + b";
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-        _ => panic!("Expected number 3.0, got {:?}", result),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "3");
 }
 
 #[test]
 fn skip_empty_semicolons_and_let() {
     let script = ";; let x = 5; ; x";
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 5.0),
-        _ => panic!("Expected number 5.0, got {:?}", result),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "5");
 }
 
 #[test]
 fn single_line_and_block_comments_ignored() {
     let script = "// leading comment\n/* block comment */ let x = 7; x";
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 7.0),
-        _ => panic!("Expected number 7.0, got {:?}", result),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "7");
 }
 
 #[test]
@@ -48,7 +39,7 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
         Token::LineTerminator,
         Token::RBrace,
     ];
-    let mut tokens: Vec<javascript::TokenData> = raw_tokens
+    let tokens: Vec<javascript::TokenData> = raw_tokens
         .into_iter()
         .map(|t| javascript::TokenData {
             token: t,
@@ -57,41 +48,30 @@ fn trailing_comma_and_newline_before_rbrace_is_allowed() {
         })
         .collect();
 
-    let pattern = parse_object_destructuring_pattern(&mut tokens).expect("should parse pattern");
+    let mut index = 0;
+    let pattern = parse_object_destructuring_pattern(&tokens, &mut index).expect("should parse pattern");
     // pattern should contain one property
     assert_eq!(pattern.len(), 1);
-    // and the tokens left should be empty
-    assert!(tokens.is_empty());
+    // and the parser should have consumed all tokens (index at end)
+    assert_eq!(index, tokens.len());
 }
 
 #[test]
 fn exponentiation_and_numeric_separators_supported() {
     // Exponentiation for numbers
-    let res = evaluate_script("2 ** 3;", None::<&std::path::Path>);
-    match res {
-        Ok(crate::Value::Number(n)) => assert_eq!(n, 8.0),
-        _ => panic!("expected numeric result for 2 ** 3"),
-    }
+    let res = evaluate_script("2 ** 3;", None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "8");
 
-    let res2 = evaluate_script("2 ** 3 ** 2;", None::<&std::path::Path>);
-    match res2 {
-        Ok(crate::Value::Number(n)) => assert_eq!(n, 512.0),
-        _ => panic!("expected numeric result for 2 ** 3 ** 2"),
-    }
+    let res2 = evaluate_script("2 ** 3 ** 2;", None::<&std::path::Path>).unwrap();
+    assert_eq!(res2, "512");
 
     // Numeric separators
-    let res3 = evaluate_script("1_000_000 + 2000;", None::<&std::path::Path>);
-    match res3 {
-        Ok(crate::Value::Number(n)) => assert_eq!(n, 1_002_000.0),
-        _ => panic!("expected numeric result for 1_000_000 + 2000"),
-    }
+    let res3 = evaluate_script("1_000_000 + 2000;", None::<&std::path::Path>).unwrap();
+    assert_eq!(res3, "1002000");
 
     // BigInt with separators and exponentiation
-    let res4 = evaluate_script("1_000n ** 2n;", None::<&std::path::Path>);
-    match res4 {
-        Ok(crate::Value::BigInt(s)) => assert_eq!(s.to_string(), "1000000".to_string()),
-        _ => panic!("expected bigint result for 1_000n ** 2n"),
-    }
+    let res4 = evaluate_script("1_000n ** 2n;", None::<&std::path::Path>).unwrap();
+    assert_eq!(res4, "1000000");
 }
 
 #[test]
@@ -105,7 +85,8 @@ fn parse_accepts_eval_literal_at_declaration() {
         // The parser should accept the declaration and defer parsing of the
         // string literal contents until eval/runtime.
     "#;
-    let res = parse_statements(&mut tokenize(script).expect("tokenize outer"));
+    let mut index = 0;
+    let res = parse_statements(&tokenize(script).expect("tokenize outer"), &mut index);
     assert!(
         res.is_ok(),
         "Expected parser to accept static string initializer (parsing deferred until eval)"
@@ -140,6 +121,7 @@ fn parse_rejects_outside_private_access() {
     console.log((new Color()).#values);
     "#;
     let tokens = tokenize(script).expect("tokenize failed");
-    let res = parse_statements(&mut tokens.clone());
+    let mut index = 0;
+    let res = parse_statements(&tokens.clone(), &mut index);
     assert!(res.is_err(), "Expected parse to fail for outside private access");
 }

@@ -1,4 +1,3 @@
-use javascript::Value;
 use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
@@ -44,11 +43,6 @@ fn test_get_invalid_language_tags_array_parsing() {
         getInvalidLanguageTags.length
     "#;
 
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        // We added two additional entries above ("ıd" and "en\u0000"), so the
-        // correct count is now 13.
-        Ok(Value::Number(n)) => assert_eq!(n as i32, 13),
-        _ => panic!("Expected number 11.0, got {:?}", result),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "13");
 }

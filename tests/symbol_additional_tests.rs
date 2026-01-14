@@ -20,11 +20,8 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol('x')
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol"),
-            _ => panic!("Expected string 'symbol', got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"symbol\"");
     }
 
     #[test]
@@ -37,23 +34,8 @@ mod symbol_additional_tests {
             let d = Object.getOwnPropertyDescriptors(o);
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                let c = arr.borrow().get(&"2".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Boolean(na), Value::Boolean(nb), Value::Boolean(nc)) => {
-                        assert!(na);
-                        assert!(nb);
-                        assert!(nc);
-                    }
-                    _ => panic!("Expected numeric truthy results for descriptors"),
-                }
-            }
-            _ => panic!("Expected array result from descriptors test, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[true,true,true]");
     }
 
     #[test]
@@ -69,15 +51,10 @@ mod symbol_additional_tests {
             s1 + '|' + s2 + '|' + (typeof d1) + '|' + (typeof d2)
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => {
-                let out = utf16_to_utf8(&s);
-                // Expect: "Symbol(my-desc)|Symbol()|string|undefined"
-                assert!(out.starts_with("Symbol(my-desc)|Symbol()|"), "got {}", out);
-            }
-            _ => panic!("Expected string result, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+
+        // Expect: "Symbol(my-desc)|Symbol()|string|undefined"
+        assert_eq!(result, "\"Symbol(my-desc)|Symbol()|string|undefined\"");
     }
 
     #[test]
@@ -86,11 +63,8 @@ mod symbol_additional_tests {
         let script = r#"
             Symbol() !== Symbol()
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b),
-            _ => panic!("Expected true for distinct symbols, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -102,11 +76,8 @@ mod symbol_additional_tests {
             o[s] = 1;
             JSON.stringify(o);
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "{}"),
-            _ => panic!("Expected JSON '{}' for object with only symbol keys", "{}"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"{}\"");
     }
 
     #[test]
@@ -119,22 +90,8 @@ mod symbol_additional_tests {
             o[s] = 2;
             [Object.keys(o).length, Object.values(o).length]
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match &result {
-            Ok(Value::Object(arr)) => {
-                // Expect [1, 1]
-                let k = arr.borrow().get(&"0".into()).unwrap();
-                let v = arr.borrow().get(&"1".into()).unwrap();
-                match (&*k.borrow(), &*v.borrow()) {
-                    (Value::Number(nk), Value::Number(nv)) => {
-                        assert_eq!(*nk, 1.0);
-                        assert_eq!(*nv, 1.0);
-                    }
-                    _ => panic!("Expected numeric lengths"),
-                }
-            }
-            _ => panic!("Expected array response for lengths"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[1,1]");
     }
 
     #[test]
@@ -148,11 +105,8 @@ mod symbol_additional_tests {
             Object.assign(target, src);
             JSON.stringify(target)
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "{\"a\":1}"),
-            _ => panic!("Expected object string with only 'a' copied, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"{\\\"a\\\":1}\"");
     }
 
     #[test]
@@ -165,11 +119,8 @@ mod symbol_additional_tests {
             }
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "error"),
-            _ => panic!("Expected error when calling new Symbol(), got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"error\"");
     }
 
     #[test]
@@ -179,11 +130,8 @@ mod symbol_additional_tests {
             s.valueOf() === s
         "#;
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Boolean(b)) => assert!(b),
-            _ => panic!("Expected true for valueOf equality, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "true");
     }
 
     #[test]
@@ -201,24 +149,8 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                // expect [1,2,1]
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                let c = arr.borrow().get(&"2".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Number(na), Value::Number(nb), Value::Number(nc)) => {
-                        assert_eq!(*na, 1.0);
-                        assert_eq!(*nb, 2.0);
-                        assert_eq!(*nc, 1.0);
-                    }
-                    _ => panic!("Expected numeric results for prototype test"),
-                }
-            }
-            _ => panic!("Expected array from prototype test"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[1,2,1]");
     }
 
     #[test]
@@ -235,23 +167,8 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                let c = arr.borrow().get(&"2".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Number(na), Value::Number(nb), Value::Boolean(nc)) => {
-                        assert_eq!(*na, 0.0);
-                        assert_eq!(*nb, 1.0);
-                        assert!(nc);
-                    }
-                    _ => panic!("Expected numeric results for getOwnPropertySymbols test"),
-                }
-            }
-            _ => panic!("Expected array from getOwnPropertySymbols test"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[0,1,true]");
     }
 
     #[test]
@@ -265,21 +182,8 @@ mod symbol_additional_tests {
         "#;
 
         let _guard = TEST_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap();
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow()) {
-                    (Value::Number(na), Value::Boolean(nb)) => {
-                        assert_eq!(*na, 1.0);
-                        assert!(nb);
-                    }
-                    _ => panic!("Expected numeric results for getOwnPropertySymbols on object"),
-                }
-            }
-            _ => panic!("Expected array from getOwnPropertySymbols on object test"),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[1,true]");
     }
 
     #[test]
@@ -293,23 +197,8 @@ mod symbol_additional_tests {
             [d.a.value === 1, d[s].value === 2, d.a.writable === true]
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                let c = arr.borrow().get(&"2".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow(), &*c.borrow()) {
-                    (Value::Boolean(na), Value::Boolean(nb), Value::Boolean(nc)) => {
-                        assert!(na);
-                        assert!(nb);
-                        assert!(nc);
-                    }
-                    _ => panic!("Expected numeric truthy results for descriptors"),
-                }
-            }
-            _ => panic!("Expected array result from descriptors test, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[true,true,true]");
 
         // Part 2: accessor descriptors (getters/setters)
         let script2 = r#"
@@ -318,21 +207,8 @@ mod symbol_additional_tests {
             [typeof d.x.get, typeof d.x.set]
         "#;
 
-        let result2 = evaluate_script(script2, None::<&std::path::Path>);
-        match result2 {
-            Ok(Value::Object(arr)) => {
-                let a = arr.borrow().get(&"0".into()).unwrap();
-                let b = arr.borrow().get(&"1".into()).unwrap();
-                match (&*a.borrow(), &*b.borrow()) {
-                    (Value::String(sa), Value::String(sb)) => {
-                        assert_eq!(utf16_to_utf8(sa), "function");
-                        assert_eq!(utf16_to_utf8(sb), "function");
-                    }
-                    _ => panic!("Expected string results for accessor descriptor types"),
-                }
-            }
-            _ => panic!("Expected array result from accessor descriptors test"),
-        }
+        let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
+        assert_eq!(result2, "[\"function\",\"function\"]");
     }
 
     #[test]
@@ -340,11 +216,8 @@ mod symbol_additional_tests {
         let script = r#"
             typeof Symbol.iterator
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "symbol"),
-            _ => panic!("Expected string 'symbol' for Symbol.iterator, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"symbol\"");
 
         // Custom iterable using computed symbol key
         let script2 = r#"
@@ -359,11 +232,8 @@ mod symbol_additional_tests {
             sum
         "#;
 
-        let result2 = evaluate_script(script2, None::<&std::path::Path>);
-        match result2 {
-            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
-            _ => panic!("Expected number 6 from iterable for-of, got {:?}", result2),
-        }
+        let result2 = evaluate_script(script2, None::<&std::path::Path>).unwrap();
+        assert_eq!(result2, "6");
     }
 
     #[test]
@@ -375,11 +245,8 @@ mod symbol_additional_tests {
             o.toString();
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "[object MyTag]"),
-            _ => panic!("Expected [object MyTag], got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"[object MyTag]\"");
     }
 
     #[test]
@@ -391,11 +258,8 @@ mod symbol_additional_tests {
             acc
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "abc"),
-            _ => panic!("Expected 'abc' from string for-of, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"abc\"");
     }
 
     #[test]
@@ -406,21 +270,8 @@ mod symbol_additional_tests {
             [a[Symbol.toStringTag], s[Symbol.toStringTag]]
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let a0 = arr.borrow().get(&"0".into()).unwrap();
-                let a1 = arr.borrow().get(&"1".into()).unwrap();
-                match (&*a0.borrow(), &*a1.borrow()) {
-                    (Value::String(tag_a), Value::String(tag_s)) => {
-                        assert_eq!(utf16_to_utf8(tag_a), "Array");
-                        assert_eq!(utf16_to_utf8(tag_s), "String");
-                    }
-                    _ => panic!("Expected string tags in result"),
-                }
-            }
-            _ => panic!("Expected array result from tag test, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"Array\",\"String\"]");
     }
 
     #[test]
@@ -435,11 +286,8 @@ mod symbol_additional_tests {
             s
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 6.0),
-            _ => panic!("Expected 6 from manual iterator next(), got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "6");
     }
 
     #[test]
@@ -451,11 +299,8 @@ mod symbol_additional_tests {
             a
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::String(s)) => assert_eq!(utf16_to_utf8(&s), "xy"),
-            _ => panic!("Expected 'xy' from string iterator, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"xy\"");
     }
 
     #[test]
@@ -471,26 +316,7 @@ mod symbol_additional_tests {
                 let res = [String(o), Number(o), o + 2]; res
         "#;
 
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Object(arr)) => {
-                let s = arr.borrow().get(&"0".into()).unwrap();
-                let n = arr.borrow().get(&"1".into()).unwrap();
-                let sum = arr.borrow().get(&"2".into()).unwrap();
-                match (&*s.borrow(), &*n.borrow(), &*sum.borrow()) {
-                    (Value::String(ss), Value::Number(nn), Value::Number(sn)) => {
-                        assert_eq!(utf16_to_utf8(ss), "S-PRIM");
-                        assert_eq!(*nn, 40.0);
-                        assert_eq!(*sn, 42.0);
-                    }
-                    _ => panic!("Expected [string, number, number] from toPrimitive coercion test"),
-                }
-            }
-            other => panic!("Expected array result for toPrimitive test, got {:?}", other),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "[\"S-PRIM\",40,42]");
     }
-
-    // debug test removed
-
-    // debug test removed
 }

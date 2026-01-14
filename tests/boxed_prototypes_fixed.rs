@@ -1,4 +1,4 @@
-use javascript::{JSError, Value, evaluate_script};
+use javascript::{JSError, evaluate_script};
 
 #[test]
 fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
@@ -8,10 +8,9 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         n instanceof Number;
     "#;
     let res = evaluate_script(script, None::<&std::path::Path>)?;
-    println!("Number check res: {:?}", res);
-    match res {
-        Value::Boolean(true) => {}
-        other => panic!("Number prototype check failed: {:?}", other),
+    println!("Number check res: {}", res);
+    if res != "true" {
+        panic!("Number prototype check failed: {}", res);
     }
 
     // String
@@ -20,9 +19,8 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         s instanceof String;
     "#;
     let res = evaluate_script(script, None::<&std::path::Path>)?;
-    match res {
-        Value::Boolean(true) => {}
-        other => panic!("String prototype check failed: {:?}", other),
+    if res != "true" {
+        panic!("String prototype check failed: {}", res);
     }
 
     // Boolean
@@ -31,9 +29,8 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         b instanceof Boolean;
     "#;
     let res = evaluate_script(script, None::<&std::path::Path>)?;
-    match res {
-        Value::Boolean(true) => {}
-        other => panic!("Boolean prototype check failed: {:?}", other),
+    if res != "true" {
+        panic!("Boolean prototype check failed: {}", res);
     }
 
     // BigInt
@@ -42,9 +39,8 @@ fn boxed_primitives_have_constructor_prototype() -> Result<(), JSError> {
         bi instanceof Object && typeof bi === 'object';
     "#;
     let res = evaluate_script(script, None::<&std::path::Path>)?;
-    match res {
-        Value::Boolean(true) => {}
-        other => panic!("BigInt prototype check failed: {:?}", other),
+    if res != "true" {
+        panic!("BigInt prototype check failed: {}", res);
     }
 
     Ok(())

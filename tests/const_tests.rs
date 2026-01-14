@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script};
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -16,11 +16,8 @@ mod const_tests {
     #[test]
     fn test_const_declaration() {
         let script = "const x = 42; x";
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 42.0),
-            _ => panic!("Expected const x to be 42, got {:?}", result),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "42");
     }
 
     #[test]
@@ -43,11 +40,8 @@ mod const_tests {
     fn test_const_vs_let() {
         // let should allow reassignment
         let script1 = "let x = 42; x = 24; x";
-        let result = evaluate_script(script1, None::<&std::path::Path>);
-        match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 24.0),
-            _ => panic!("Expected let reassignment to work, got {:?}", result),
-        }
+        let result = evaluate_script(script1, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "24");
 
         // const should not allow reassignment
         let script2 = "const y = 42; y = 24";

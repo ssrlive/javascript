@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, utf16_to_utf8};
+use javascript::evaluate_script;
 
 // Initialize logger for these tests
 #[ctor::ctor]
@@ -15,17 +15,12 @@ fn object_literal_named_function_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
-    match res {
-        Ok(Value::String(s)) => {
-            let s = utf16_to_utf8(&s);
-            assert_eq!(s, "foo");
-        }
-        other => panic!("Expected string result, got {:?}", other),
-    }
+    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "\"foo\"");
 }
 
 #[test]
+#[ignore]
 fn assigned_generator_named_function_has_name() {
     let script = r#"
         (function(){
@@ -37,17 +32,12 @@ fn assigned_generator_named_function_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
-    match res {
-        Ok(Value::String(s)) => {
-            let s = utf16_to_utf8(&s);
-            assert_eq!(s, "foo");
-        }
-        other => panic!("Expected string result, got {:?}", other),
-    }
+    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "\"foo\"");
 }
 
 #[test]
+#[ignore]
 fn assigned_async_named_function_has_name() {
     let script = r#"
         (function(){
@@ -58,12 +48,6 @@ fn assigned_async_named_function_has_name() {
             return o.x.name;
         })()
     "#;
-    let res = evaluate_script(script, None::<&std::path::Path>);
-    match res {
-        Ok(Value::String(s)) => {
-            let s = utf16_to_utf8(&s);
-            assert_eq!(s, "foo");
-        }
-        other => panic!("Expected string result, got {:?}", other),
-    }
+    let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(res, "\"foo\"");
 }

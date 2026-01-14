@@ -1,4 +1,3 @@
-use javascript::Value;
 use javascript::evaluate_script;
 
 // Init logger for tests
@@ -17,12 +16,8 @@ fn test_for_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::String(s)) => assert_eq!(s, "0,1,2".encode_utf16().collect::<Vec<u16>>()),
-        Ok(v) => panic!("Unexpected ok value: {:?}", v),
-        Err(e) => panic!("Parse/eval error: {:?}", e),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"0,1,2\"");
 }
 
 #[test]
@@ -36,12 +31,8 @@ fn test_while_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::Number(n)) => assert_eq!(n, 6.0), // 0+1+2+3
-        Ok(v) => panic!("Unexpected ok value: {:?}", v),
-        Err(e) => panic!("Parse/eval error: {:?}", e),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "6");
 }
 
 #[test]
@@ -55,12 +46,8 @@ fn test_do_while_single_statement_body() {
         }
         f();
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::String(s)) => assert_eq!(s, "0-1".encode_utf16().collect::<Vec<u16>>()),
-        Ok(v) => panic!("Unexpected ok value: {:?}", v),
-        Err(e) => panic!("Parse/eval error: {:?}", e),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"0-1\"");
 }
 
 #[test]
@@ -73,10 +60,6 @@ fn test_if_single_statement_then_and_else() {
         }
         [f(true), f(false)].join(',');
     "#;
-    let result = evaluate_script(script, None::<&std::path::Path>);
-    match result {
-        Ok(Value::String(s)) => assert_eq!(s, "1,2".encode_utf16().collect::<Vec<u16>>()),
-        Ok(v) => panic!("Unexpected ok value: {:?}", v),
-        Err(e) => panic!("Parse/eval error: {:?}", e),
-    }
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"1,2\"");
 }

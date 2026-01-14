@@ -80,30 +80,30 @@ let result = evaluate_script(r#"
     y + 10n
 "#, None::<&std::path::Path>).unwrap();
 
-match result {
-    javascript::Value::BigInt(b) => println!("Result: {b}"), // Output: Result: 94n
-    _ => println!("Unexpected result"),
-}
+assert_eq!(result, "94");
 ```
 
 ### Using Built-in Modules
 
 ```rust
-use javascript::evaluate_script;
+// The "os" module is only available when the "os" feature is enabled
+#[cfg(feature = "os")]
+{
+    use javascript::evaluate_script;
+    let result = evaluate_script(r#"
+        import * as console from "console";
+        import * as os from "os";
 
-let result = evaluate_script(r#"
-    import * as console from "console";
-    import * as os from "os";
-
-    console.log("Hello from JavaScript!");
-    let cwd = os.getcwd();
-    cwd
-"#, None::<&std::path::Path>).unwrap();
+        console.log("Hello from JavaScript!");
+        let cwd = os.getcwd();
+        cwd
+    "#, None::<&std::path::Path>).unwrap();
+}
 ```
 
 ### Working with Promises
 
-```rust
+```rust,no_run
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"
@@ -120,7 +120,7 @@ let result = evaluate_script(r#"
 
 ### Using setTimeout
 
-```rust
+```rust,no_run
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"

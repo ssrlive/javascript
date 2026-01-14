@@ -1,4 +1,4 @@
-use javascript::{Value, evaluate_script, utf16_to_utf8};
+use javascript::evaluate_script;
 
 // Initialize logger for this integration test binary so `RUST_LOG` is honored.
 // Using `ctor` ensures initialization runs before tests start.
@@ -141,17 +141,17 @@ mod class_tests {
 
         let result = evaluate_script(script, None::<&std::path::Path>);
         match &result {
-            Ok(val) => {
-                if let Value::String(s) = val {
-                    let s = utf16_to_utf8(s);
-                    println!("{}", s);
-                    assert!(s.contains("is_person_instance: true"));
-                    assert!(s.contains("is_animal_instance: true"));
-                    assert!(s.contains("is_person_animal: false"));
-                    assert!(s.contains("is_obj_person: false"));
+            Ok(s) => {
+                let s_inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                    s[1..s.len() - 1].to_string()
                 } else {
-                    println!("Unexpected result type: {:?}", val);
-                }
+                    s.clone()
+                };
+                println!("{}", s_inner);
+                assert!(s_inner.contains("is_person_instance: true"));
+                assert!(s_inner.contains("is_animal_instance: true"));
+                assert!(s_inner.contains("is_person_animal: false"));
+                assert!(s_inner.contains("is_obj_person: false"));
             }
             Err(e) => println!("Error: {:?}", e),
         }
@@ -311,15 +311,8 @@ mod class_tests {
             class C extends P { m() { return super.value; } }
             new C().m();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match &result {
-            Ok(Value::String(s)) => {
-                let s = utf16_to_utf8(s);
-                assert_eq!(s, "parent");
-            }
-            Ok(v) => panic!("Unexpected result: {:?}", v),
-            Err(e) => panic!("Error: {:?}", e),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"parent\"", "Expected super getter property to return correct value");
     }
 
     #[test]
@@ -331,15 +324,8 @@ mod class_tests {
             let x = new C();
             x.toString();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match &result {
-            Ok(Value::String(s)) => {
-                let s = utf16_to_utf8(s);
-                assert_eq!(s, "C B A");
-            }
-            Ok(v) => panic!("Unexpected result: {:?}", v),
-            Err(e) => panic!("Error: {:?}", e),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"C B A\"", "Expected super calls through deep inheritance chain to work");
     }
 
     #[test]
@@ -349,14 +335,7 @@ mod class_tests {
             class C extends P { m() { let f = () => super.m(); return f(); } }
             new C().m();
         "#;
-        let result = evaluate_script(script, None::<&std::path::Path>);
-        match &result {
-            Ok(Value::String(s)) => {
-                let s = utf16_to_utf8(s);
-                assert_eq!(s, "P");
-            }
-            Ok(v) => panic!("Unexpected result: {:?}", v),
-            Err(e) => panic!("Error: {:?}", e),
-        }
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"P\"", "Expected super call in arrow function to work");
     }
 }

@@ -16,8 +16,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 1; let y = 2; x + y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-            _ => panic!("Expected number 3.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "3"),
+            _ => panic!("Expected number 3, got {:?}", result),
         }
     }
 
@@ -26,8 +26,8 @@ mod basic_arithmetic_tests {
         let script = "let a = 5; a";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 5.0),
-            _ => panic!("Expected number 5.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "5"),
+            _ => panic!("Expected number 5, got {:?}", result),
         }
     }
 
@@ -36,8 +36,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 10; let y = 3; x - y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 7.0),
-            _ => panic!("Expected number 7.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "7"),
+            _ => panic!("Expected number 7, got {:?}", result),
         }
     }
 
@@ -46,8 +46,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 4; let y = 5; x * y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 20.0),
-            _ => panic!("Expected number 20.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "20"),
+            _ => panic!("Expected number 20, got {:?}", result),
         }
     }
 
@@ -56,8 +56,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 1; let y = 2; x + y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 3.0),
-            _ => panic!("Expected number 3.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "3"),
+            _ => panic!("Expected number 3, got {:?}", result),
         }
     }
 
@@ -66,8 +66,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 7; let y = 3; x % y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 1.0),
-            _ => panic!("Expected number 1.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "1"),
+            _ => panic!("Expected number 1, got {:?}", result),
         }
     }
 
@@ -76,8 +76,8 @@ mod basic_arithmetic_tests {
         let script = "let x = 6; let y = 3; x % y";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::Number(n)) => assert_eq!(n, 0.0),
-            _ => panic!("Expected number 0.0, got {:?}", result),
+            Ok(n) => assert_eq!(n, "0"),
+            _ => panic!("Expected number 0, got {:?}", result),
         }
     }
 
@@ -86,11 +86,8 @@ mod basic_arithmetic_tests {
         let script = "54 + 76 + 'yyuiyu'";
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
-            Ok(Value::String(s)) => {
-                let str_val = utf16_to_utf8(&s);
-                assert_eq!(str_val, "130yyuiyu");
-            }
-            _ => panic!("Expected string '130yyuiyu', got {:?}", result),
+            Ok(n) => assert_eq!(n, "\"130yyuiyu\""),
+            _ => panic!("Expected '130yyuiyu', got {:?}", result),
         }
     }
 }

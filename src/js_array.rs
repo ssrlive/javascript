@@ -254,8 +254,13 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                     None,
                                                     Some(env),
                                                 )?;
-                                                crate::js_function::handle_global_function(mc, name, &[], &call_env)
-                                                    .map_err(EvalError::Js)?
+                                                crate::core::evaluate_call_dispatch(
+                                                    mc,
+                                                    &call_env,
+                                                    Value::Function(name.clone()),
+                                                    Some(Value::Object(object.clone())),
+                                                    vec![],
+                                                )?
                                             }
                                             Value::Closure(cl) => {
                                                 crate::core::call_closure(mc, &*cl, Some(Value::Object(object.clone())), &[], env, None)?
@@ -282,8 +287,13 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                                     None,
                                                                     Some(env),
                                                                 )?;
-                                                                crate::js_function::handle_global_function(mc, name, &[], &call_env)
-                                                                    .map_err(EvalError::Js)?
+                                                                crate::core::evaluate_call_dispatch(
+                                                                    mc,
+                                                                    &call_env,
+                                                                    Value::Function(name.clone()),
+                                                                    Some(Value::Object(iter_obj.clone())),
+                                                                    vec![],
+                                                                )?
                                                             }
                                                             Value::Closure(cl) => crate::core::call_closure(
                                                                 mc,
@@ -1951,6 +1961,8 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     obj_set_key_value(mc, &arr, &"__is_array".into(), Value::Boolean(true))?;
     arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
+    // Mark 'length' as non-enumerable on arrays per spec
+    arr.borrow_mut(mc).set_non_enumerable(PropertyKey::from("length"));
 
     // Set prototype
     let mut root_env_opt = Some(env.clone());

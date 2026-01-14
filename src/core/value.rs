@@ -702,6 +702,41 @@ pub fn obj_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>
     Ok(None)
 }
 
+// Return property keys in 'ordinary own property keys' order per ECMAScript:
+// 1) Array index keys (string keys that are canonical numeric indices) sorted numerically,
+// 2) Other string keys in insertion order,
+// 3) Symbol keys in insertion order.
+pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<PropertyKey<'gc>> {
+    let mut indices: Vec<(u64, PropertyKey<'gc>)> = Vec::new();
+    let mut string_keys: Vec<PropertyKey<'gc>> = Vec::new();
+    let mut symbol_keys: Vec<PropertyKey<'gc>> = Vec::new();
+
+    for k in obj.borrow().properties.keys() {
+        match k {
+            PropertyKey::String(s) => {
+                // Check canonical numeric index: no leading + or spaces; must roundtrip to same string
+                if let Ok(parsed) = s.parse::<u64>() {
+                    // canonical representation check (no leading zeros except "0")
+                    if parsed.to_string() == *s && parsed <= 4294967294u64 {
+                        indices.push((parsed, k.clone()));
+                        continue;
+                    }
+                }
+                string_keys.push(k.clone());
+            }
+            PropertyKey::Symbol(_) => symbol_keys.push(k.clone()),
+        }
+    }
+
+    indices.sort_by_key(|(num, _k)| *num);
+    let mut out: Vec<PropertyKey<'gc>> = Vec::new();
+    for (_n, k) in indices {
+        out.push(k);
+    }
+    out.extend(string_keys);
+    out.extend(symbol_keys);
+    out
+}
 pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>) -> Option<GcPtr<'gc, Value<'gc>>> {
     obj.borrow().properties.get(key).cloned()
 }
@@ -712,6 +747,19 @@ pub fn obj_set_key_value<'gc>(
     key: &PropertyKey<'gc>,
     val: Value<'gc>,
 ) -> Result<(), JSError> {
+    // If obj is an array and we're setting a numeric index, update length accordingly
+    if let PropertyKey::String(s) = key {
+        if let Ok(idx) = s.parse::<usize>() {
+            if crate::js_array::is_array(mc, obj) {
+                let current_len = object_get_length(obj).unwrap_or(0);
+                if idx >= current_len {
+                    // Set internal length to idx + 1
+                    object_set_length(mc, obj, idx + 1)?;
+                }
+            }
+        }
+    }
+
     let val_ptr = Gc::new(mc, GcCell::new(val));
     obj.borrow_mut(mc).insert(key.clone(), val_ptr);
     Ok(())
@@ -727,8 +775,19 @@ pub fn obj_set_rc<'gc>(
     Ok(())
 }
 
-pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+pub fn env_get_own<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
     env.borrow().properties.get(&PropertyKey::String(key.to_string())).cloned()
+}
+
+pub fn env_get<'gc>(env: &JSObjectDataPtr<'gc>, key: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let mut current = Some(*env);
+    while let Some(cur) = current {
+        if let Some(val) = cur.borrow().properties.get(&PropertyKey::String(key.to_string())) {
+            return Some(*val);
+        }
+        current = cur.borrow().prototype;
+    }
+    None
 }
 
 pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: &str, val: Value<'gc>) -> Result<(), JSError> {
@@ -787,6 +846,16 @@ pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
 }
 
 pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
+    // When reducing array length, delete indexed properties >= new length
+    if let Some(cur_len) = object_get_length(obj) {
+        if length < cur_len {
+            for i in length..cur_len {
+                let key = PropertyKey::from(i.to_string());
+                // Use shift_remove to preserve insertion order (avoid deprecated remove)
+                let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
+            }
+        }
+    }
     obj_set_key_value(mc, obj, &"length".into(), Value::Number(length as f64))?;
     Ok(())
 }

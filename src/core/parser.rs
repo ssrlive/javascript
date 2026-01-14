@@ -2235,8 +2235,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     TemplatePart::Expr(expr_tokens) => {
                         let expr_tokens = expr_tokens.clone();
                         let e = parse_expression(&expr_tokens, &mut 0)?;
-                        // Force string context by prepending "" + e
-                        Expr::Binary(Box::new(Expr::StringLit(Vec::new())), BinaryOp::Add, Box::new(e))
+                        // For a single substitution, TemplateString semantics use ToString on the
+                        // expression (hint 'string'), not the default addition coercion.
+                        // Use an explicit call to String(e) to get proper ToString behavior.
+                        Expr::Call(Box::new(Expr::Var("String".to_string(), None, None)), vec![e])
                     }
                 }
             } else {
@@ -2255,7 +2257,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         TemplatePart::String(s) => Expr::StringLit(s.clone()),
                         TemplatePart::Expr(expr_tokens) => {
                             let expr_tokens = expr_tokens.clone();
-                            parse_expression(&expr_tokens, &mut 0)?
+                            let e = parse_expression(&expr_tokens, &mut 0)?;
+                            // Each substitution in a template literal should be ToString(value)
+                            // which corresponds to calling String(e) (hint 'string').
+                            Expr::Call(Box::new(Expr::Var("String".to_string(), None, None)), vec![e])
                         }
                     };
                     expr = Expr::Binary(Box::new(expr), BinaryOp::Add, Box::new(right));

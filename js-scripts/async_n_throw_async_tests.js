@@ -208,3 +208,13 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
     return true;
   })();
 }
+
+{
+  // 3. Async function
+  async function asyncFunc(a, ...rest) {
+    return [a, rest];
+  }
+  asyncFunc(1, 2, 3).then(res => {
+    assert(res, [1, [2, 3]], "Async function with rest");
+  });
+}

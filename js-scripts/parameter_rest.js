@@ -17,14 +17,6 @@ assert(regular(1, 2, 3), [1, [2, 3]], "Regular function with rest");
 const arrow = (a, ...rest) => [a, rest];
 assert(arrow(1, 2, 3), [1, [2, 3]], "Arrow function with rest");
 
-// 3. Async function
-async function asyncFunc(a, ...rest) {
-    return [a, rest];
-}
-asyncFunc(1, 2, 3).then(res => {
-    assert(res, [1, [2, 3]], "Async function with rest");
-});
-
 // 4. Optional call
 const obj = {
     method(a, ...rest) {

@@ -46,10 +46,20 @@ assert(
 - 学习 Web API
 - 构建网站
 - 利润！
-当前进度为：{"css":10,"html":50,"javascript":20}
+当前进度为：{"javascript":20,"html":50,"css":10}
 `),
   "模板字面量标签功能错误"
 );
 
 // let res = print(["我需要做：\n", "\n当前进度为：", "\n"], todos, progress);
 // console.log(res);
+
+{
+  let o = {a:1};
+  console.log('o.toString === Object.prototype.toString ->', o.toString === Object.prototype.toString);
+  console.log('o.toString:', o.toString);
+  console.log('Object.prototype.toString:', Object.prototype.toString);
+  console.log('o.toString() ->', o.toString());
+}
+
+true;

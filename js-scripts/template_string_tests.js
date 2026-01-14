@@ -1,3 +1,5 @@
+"use strict";
+
 function assert(condition, message) {
     if (!condition) {
         throw new Error(message || "Assertion failed");
@@ -36,5 +38,14 @@ var c = {
     toString: function() { return "20"; }
 };
 var s2 = `${c}`;
-console.log("Object Result:", s2);
-assert(s2 === "10", "Template string object interpolation failed");
+console.log("Object Result:", s2, "Typeof s2:", typeof s2);
+assert(s2 === "20", "Template string object interpolation failed");
+
+{
+    let ct = { valueOf: function() { return 10; }, toString: function() { return "20"; } };
+    console.log("ct.toString():", ct.toString());
+    console.log("String(ct):", String(ct));
+    console.log("`${ct}`:", `${ct}`);
+    console.log("valueOf ct:", ct.valueOf(), "toString ct:", ct.toString());
+    console.log("Primitive ct:", ct);
+}

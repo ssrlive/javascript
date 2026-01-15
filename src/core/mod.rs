@@ -89,6 +89,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_weakset(mc, env)?;
     initialize_set(mc, env)?;
 
+    // Initialize generator prototype/constructor
+    crate::js_generator::initialize_generator(mc, env)?;
+
     env_set(mc, env, "undefined", Value::Undefined)?;
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;

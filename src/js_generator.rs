@@ -1,45 +1,50 @@
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Gc, GcCell, MutationContext};
 use crate::{
-    core::{
-        DestructuringElement, Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, evaluate_expr, prepare_function_call_env,
-    },
+    core::{Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, prepare_function_call_env},
     error::JSError,
 };
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
 /// Handle generator function constructor (when called as `new GeneratorFunction(...)`)
-pub fn _handle_generator_function_constructor(_args: &[Expr], _env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn _handle_generator_function_constructor<'gc>(
+    _mc: &MutationContext<'gc>,
+    _args: &[Expr],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     // Generator functions cannot be constructed with `new`
     Err(raise_eval_error!("GeneratorFunction is not a constructor"))
 }
 
 /// Handle generator function calls (creating generator objects)
-pub fn handle_generator_function_call(
-    params: &[DestructuringElement],
-    body: &[Statement],
-    _args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
-    // Create a new generator object
+pub fn handle_generator_function_call<'gc>(
+    mc: &MutationContext<'gc>,
+    closure: &crate::core::ClosureData<'gc>,
+    _args: &[Value<'gc>],
+) -> Result<Value<'gc>, JSError> {
+    // Create a new generator object (internal data)
     let generator = Gc::new(
         mc,
         GcCell::new(crate::core::JSGenerator {
-            params: params.to_vec(),
-            body: body.to_vec(),
-            env: env.clone(),
+            params: closure.params.clone(),
+            body: closure.body.clone(),
+            env: closure.env,
             state: crate::core::GeneratorState::NotStarted,
         }),
     );
 
     // Create a wrapper object for the generator
-    let gen_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+    let gen_obj = crate::core::new_js_object_data(mc);
+
     // Store the actual generator data
-    gen_obj.borrow_mut(mc).insert(
-        crate::core::PropertyKey::String("__generator__".to_string()),
-        Gc::new(mc, GcCell::new(Value::Generator(generator))),
-    );
+    crate::core::obj_set_key_value(mc, &gen_obj, &"__generator__".into(), Value::Generator(generator))?;
+
+    // Set prototype to Generator.prototype if available
+    if let Some(gen_ctor_val) = crate::core::env_get(&closure.env, "Generator")
+        && let Value::Object(gen_ctor_obj) = &*gen_ctor_val.borrow()
+        && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(gen_ctor_obj, &"prototype".into())
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        gen_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+    }
 
     Ok(Value::Object(gen_obj))
 }
@@ -47,41 +52,29 @@ pub fn handle_generator_function_call(
 /// Handle generator instance method calls (like `gen.next()`, `gen.return()`, etc.)
 pub fn handle_generator_instance_method<'gc>(
     mc: &MutationContext<'gc>,
-    generator: &Rc<RefCell<crate::core::JSGenerator>>,
+    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
     method: &str,
-    args: &[Expr],
-    env: &JSObjectDataPtr,
-) -> Result<Value, JSError> {
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "next" => {
             // Get optional value to send to the generator
-            let send_value = if args.is_empty() {
-                Value::Undefined
-            } else {
-                evaluate_expr(mc, env, &args[0])?
-            };
+            let send_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
 
-            generator_next(generator, send_value)
+            generator_next(mc, generator, send_value)
         }
         "return" => {
             // Return a value and close the generator
-            let return_value = if args.is_empty() {
-                Value::Undefined
-            } else {
-                evaluate_expr(mc, env, &args[0])?
-            };
+            let return_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
 
-            generator_return(generator, return_value)
+            generator_return(mc, generator, return_value)
         }
         "throw" => {
             // Throw an exception into the generator
-            let throw_value = if args.is_empty() {
-                Value::Undefined
-            } else {
-                evaluate_expr(mc, env, &args[0])?
-            };
+            let throw_value = if args.is_empty() { Value::Undefined } else { args[0].clone() };
 
-            generator_throw(generator, throw_value)
+            generator_throw(mc, generator, throw_value)
         }
         _ => Err(raise_eval_error!(format!("Generator.prototype.{} is not implemented", method))),
     }
@@ -89,7 +82,7 @@ pub fn handle_generator_instance_method<'gc>(
 
 // Helper to replace the first `yield` occurrence inside an Expr with a
 // provided `send_value`. `replaced` becomes true once a replacement is made.
-fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut bool) -> Expr {
+fn replace_first_yield_in_expr(expr: &Expr, _send_value: &Value, replaced: &mut bool) -> Expr {
     use crate::core::Expr;
     match expr {
         Expr::Yield(_) => {
@@ -109,23 +102,23 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
             }
         }
         Expr::Binary(a, op, b) => Expr::Binary(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            op.clone(),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            *op,
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
         Expr::Assign(a, b) => Expr::Assign(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
         Expr::Index(a, b) => Expr::Index(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
-        Expr::Property(a, s) => Expr::Property(Box::new(replace_first_yield_in_expr(a, send_value, replaced)), s.clone()),
+        Expr::Property(a, s) => Expr::Property(Box::new(replace_first_yield_in_expr(a, _send_value, replaced)), s.clone()),
         Expr::Call(a, args) => Expr::Call(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
             args.iter()
-                .map(|arg| replace_first_yield_in_expr(arg, send_value, replaced))
+                .map(|arg| replace_first_yield_in_expr(arg, _send_value, replaced))
                 .collect(),
         ),
         Expr::Object(pairs) => Expr::Object(
@@ -133,8 +126,8 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
                 .iter()
                 .map(|(k, v, is_method)| {
                     (
-                        replace_first_yield_in_expr(k, send_value, replaced),
-                        replace_first_yield_in_expr(v, send_value, replaced),
+                        replace_first_yield_in_expr(k, _send_value, replaced),
+                        replace_first_yield_in_expr(v, _send_value, replaced),
                         *is_method,
                     )
                 })
@@ -143,44 +136,44 @@ fn replace_first_yield_in_expr(expr: &Expr, send_value: &Value, replaced: &mut b
         Expr::Array(items) => Expr::Array(
             items
                 .iter()
-                .map(|it| it.as_ref().map(|e| replace_first_yield_in_expr(e, send_value, replaced)))
+                .map(|it| it.as_ref().map(|e| replace_first_yield_in_expr(e, _send_value, replaced)))
                 .collect(),
         ),
-        Expr::LogicalNot(a) => Expr::LogicalNot(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::TypeOf(a) => Expr::TypeOf(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::Delete(a) => Expr::Delete(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::Void(a) => Expr::Void(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::Increment(a) => Expr::Increment(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::Decrement(a) => Expr::Decrement(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::PostIncrement(a) => Expr::PostIncrement(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
-        Expr::PostDecrement(a) => Expr::PostDecrement(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
+        Expr::LogicalNot(a) => Expr::LogicalNot(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::TypeOf(a) => Expr::TypeOf(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::Delete(a) => Expr::Delete(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::Void(a) => Expr::Void(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::Increment(a) => Expr::Increment(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::Decrement(a) => Expr::Decrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::PostIncrement(a) => Expr::PostIncrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
+        Expr::PostDecrement(a) => Expr::PostDecrement(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
         Expr::LogicalAnd(a, b) => Expr::LogicalAnd(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
         Expr::LogicalOr(a, b) => Expr::LogicalOr(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
         Expr::Comma(a, b) => Expr::Comma(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
-        Expr::Spread(a) => Expr::Spread(Box::new(replace_first_yield_in_expr(a, send_value, replaced))),
+        Expr::Spread(a) => Expr::Spread(Box::new(replace_first_yield_in_expr(a, _send_value, replaced))),
         Expr::OptionalCall(a, args) => Expr::OptionalCall(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
             args.iter()
-                .map(|arg| replace_first_yield_in_expr(arg, send_value, replaced))
+                .map(|arg| replace_first_yield_in_expr(arg, _send_value, replaced))
                 .collect(),
         ),
         Expr::OptionalIndex(a, b) => Expr::OptionalIndex(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
         ),
         Expr::Conditional(a, b, c) => Expr::Conditional(
-            Box::new(replace_first_yield_in_expr(a, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(b, send_value, replaced)),
-            Box::new(replace_first_yield_in_expr(c, send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(a, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(b, _send_value, replaced)),
+            Box::new(replace_first_yield_in_expr(c, _send_value, replaced)),
         ),
         _ => expr.clone(),
     }
@@ -308,7 +301,7 @@ fn expr_contains_yield(e: &Expr) -> bool {
 
 // Replace the first nested statement containing a yield with a Throw statement
 // holding `throw_value`. Returns true if a replacement was performed.
-fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &Value) -> bool {
+fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _throw_value: &Value) -> bool {
     match stmt.kind.as_mut() {
         StatementKind::Expr(e) => {
             if expr_contains_yield(e) {
@@ -340,13 +333,13 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         StatementKind::If(if_stmt) => {
             let if_stmt = if_stmt.as_mut();
             for s in if_stmt.then_body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
             if let Some(else_body) = if_stmt.else_body.as_mut() {
                 for s in else_body.iter_mut() {
-                    if replace_first_yield_statement_with_throw(s, throw_value) {
+                    if replace_first_yield_statement_with_throw(s, _throw_value) {
                         return true;
                     }
                 }
@@ -355,7 +348,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         }
         StatementKind::Block(stmts) => {
             for s in stmts.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
@@ -363,7 +356,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         }
         StatementKind::For(for_stmt) => {
             for s in for_stmt.as_mut().body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
@@ -375,7 +368,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         | StatementKind::ForOfDestructuringArray(_, _, body)
         | StatementKind::While(_, body) => {
             for s in body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
@@ -383,7 +376,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         }
         StatementKind::DoWhile(body, _) => {
             for s in body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
@@ -392,20 +385,20 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, throw_value: &
         StatementKind::TryCatch(tc_stmt) => {
             let tc_stmt = tc_stmt.as_mut();
             for s in tc_stmt.try_body.iter_mut() {
-                if replace_first_yield_statement_with_throw(s, throw_value) {
+                if replace_first_yield_statement_with_throw(s, _throw_value) {
                     return true;
                 }
             }
             if let Some(catch_body) = tc_stmt.catch_body.as_mut() {
                 for s in catch_body.iter_mut() {
-                    if replace_first_yield_statement_with_throw(s, throw_value) {
+                    if replace_first_yield_statement_with_throw(s, _throw_value) {
                         return true;
                     }
                 }
             }
             if let Some(finally) = tc_stmt.finally_body.as_mut() {
                 for s in finally.iter_mut() {
-                    if replace_first_yield_statement_with_throw(s, throw_value) {
+                    if replace_first_yield_statement_with_throw(s, _throw_value) {
                         return true;
                     }
                 }
@@ -471,7 +464,11 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
 }
 
 /// Execute generator.next()
-fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value: Value) -> Result<Value, JSError> {
+fn generator_next<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
+    _send_value: Value<'gc>,
+) -> Result<Value<'gc>, JSError> {
     let mut gen_obj = generator.borrow_mut(mc);
 
     match &mut gen_obj.state {
@@ -489,8 +486,8 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 // If the yield has an inner expression, evaluate it in a fresh
                 // function-like frame whose prototype is the captured env.
                 if let Some(inner_expr_box) = yield_inner {
-                    let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
-                    crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
+                    let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), None, None, &[], None, None)?;
+                    crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), Value::Undefined)?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => return Ok(create_iterator_result(mc, val, false)),
                         Err(_) => return Ok(create_iterator_result(mc, Value::Undefined, false)),
@@ -521,8 +518,8 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
                 replace_first_yield_in_statement(first_stmt, &_send_value, &mut replaced);
             }
 
-            let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
-            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
+            let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), None, None, &[], None, None)?;
+            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), _send_value.clone())?;
             // Execute the (possibly modified) tail
             let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             gen_obj.state = crate::core::GeneratorState::Completed;
@@ -537,14 +534,22 @@ fn generator_next(generator: &Rc<RefCell<crate::core::JSGenerator>>, _send_value
 }
 
 /// Execute generator.return()
-fn generator_return(generator: &Rc<RefCell<crate::core::JSGenerator>>, return_value: Value) -> Result<Value, JSError> {
+fn generator_return<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
+    return_value: Value<'gc>,
+) -> Result<Value<'gc>, JSError> {
     let mut gen_obj = generator.borrow_mut(mc);
     gen_obj.state = crate::core::GeneratorState::Completed;
     Ok(create_iterator_result(mc, return_value, true))
 }
 
 /// Execute generator.throw()
-fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_value: Value) -> Result<Value, JSError> {
+fn generator_throw<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: &crate::core::GcPtr<'gc, crate::core::JSGenerator<'gc>>,
+    throw_value: Value<'gc>,
+) -> Result<Value<'gc>, JSError> {
     let mut gen_obj = generator.borrow_mut(mc);
     match &mut gen_obj.state {
         crate::core::GeneratorState::NotStarted => {
@@ -573,7 +578,7 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
                 tail[0] = StatementKind::Throw(Expr::Var("__gen_throw_val".to_string(), None, None)).into();
             }
 
-            let func_env = prepare_function_call_env(Some(&gen_obj.env), None, None, &[], None, None)?;
+            let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), None, None, &[], None, None)?;
             crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
@@ -582,7 +587,7 @@ fn generator_throw(generator: &Rc<RefCell<crate::core::JSGenerator>>, throw_valu
             gen_obj.state = crate::core::GeneratorState::Completed;
             match result {
                 Ok(val) => Ok(create_iterator_result(mc, val, true)),
-                Err(e) => Err(e),
+                Err(e) => Err(e.into()),
             }
         }
         crate::core::GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running")),
@@ -606,4 +611,42 @@ fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, don
     );
 
     Value::Object(obj)
+}
+
+/// Initialize Generator constructor/prototype and attach prototype methods
+pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    // Create constructor object and generator prototype
+    let gen_ctor = crate::core::new_js_object_data(mc);
+    // Set __proto__ to Function.prototype if present
+    if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
+        && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+        && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(func_ctor, &"prototype".into())
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        gen_ctor.borrow_mut(mc).prototype = Some(*proto_obj);
+    }
+
+    let gen_proto = crate::core::new_js_object_data(mc);
+
+    // Attach prototype methods as named functions that dispatch to the generator handler
+    let val = Value::Function("Generator.prototype.next".to_string());
+    crate::core::obj_set_key_value(mc, &gen_proto, &"next".into(), val)?;
+
+    crate::core::obj_set_key_value(
+        mc,
+        &gen_proto,
+        &"return".into(),
+        Value::Function("Generator.prototype.return".to_string()),
+    )?;
+    crate::core::obj_set_key_value(
+        mc,
+        &gen_proto,
+        &"throw".into(),
+        Value::Function("Generator.prototype.throw".to_string()),
+    )?;
+
+    // link prototype to constructor and expose on global env
+    crate::core::obj_set_key_value(mc, &gen_ctor, &"prototype".into(), Value::Object(gen_proto))?;
+    crate::core::env_set(mc, env, "Generator", Value::Object(gen_ctor))?;
+    Ok(())
 }

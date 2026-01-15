@@ -43,7 +43,6 @@ fn object_prototype_to_string_with_primitive_receiver() {
 }
 
 #[test]
-#[ignore]
 fn reflect_apply_binds_this_for_closures() {
     let script = r#"
         function f(a, b) { return this.x + a + b; }

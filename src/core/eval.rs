@@ -834,13 +834,53 @@ fn hoist_var_declarations<'gc>(
 fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
     // 1. Hoist FunctionDeclarations (only top-level in this list of statements)
     for stmt in statements {
-        if let StatementKind::FunctionDeclaration(name, params, body, _) = &*stmt.kind {
+        if let StatementKind::FunctionDeclaration(name, params, body, is_generator) = &*stmt.kind {
             let mut body_clone = body.clone();
-            let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
-            if let Value::Object(func_obj) = &func {
-                obj_set_key_value(mc, func_obj, &"name".into(), Value::String(utf8_to_utf16(name))).map_err(EvalError::Js)?;
+            if *is_generator {
+                // Create a generator function object (hoisted)
+                let func_obj = crate::core::new_js_object_data(mc);
+                // Set __proto__ to Function.prototype
+                if let Some(func_ctor_val) = env_get(env, "Function")
+                    && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                    && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    func_obj.borrow_mut(mc).prototype = Some(*proto);
+                }
+
+                let closure_data = ClosureData {
+                    params: params.clone(),
+                    body: body.clone(),
+                    env: *env,
+                    home_object: GcCell::new(None),
+                    captured_envs: Vec::new(),
+                    bound_this: None,
+                    is_arrow: false,
+                };
+                let closure_val = Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data));
+                obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
+
+                // Create prototype object
+                let proto_obj = crate::core::new_js_object_data(mc);
+                if let Some(obj_val) = env_get(env, "Object")
+                    && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                    && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                    && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+                {
+                    proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+                }
+
+                obj_set_key_value(mc, &proto_obj, &"constructor".into(), Value::Object(func_obj))?;
+                obj_set_key_value(mc, &func_obj, &"prototype".into(), Value::Object(proto_obj))?;
+                env_set(mc, env, name, Value::Object(func_obj))?;
+            } else {
+                let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
+                if let Value::Object(func_obj) = &func {
+                    obj_set_key_value(mc, func_obj, &"name".into(), Value::String(utf8_to_utf16(name))).map_err(EvalError::Js)?;
+                }
+                env_set(mc, env, name, func)?;
             }
-            env_set(mc, env, name, func)?;
         }
     }
 
@@ -3580,6 +3620,10 @@ pub fn evaluate_call_dispatch<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match func_val {
         Value::Closure(cl) => call_closure(mc, &cl, this_val.clone(), &eval_args, env, None),
+        Value::GeneratorFunction(_, cl) => match crate::js_generator::handle_generator_function_call(mc, &cl, &eval_args) {
+            Ok(v) => Ok(v),
+            Err(e) => Err(EvalError::Js(e)),
+        },
         Value::Function(name) => {
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
                 return Ok(res);
@@ -3792,6 +3836,28 @@ pub fn evaluate_call_dispatch<'gc>(
                     }
                 } else {
                     Err(EvalError::Js(raise_eval_error!(format!("Unknown RegExp function: {}", name))))
+                }
+            } else if name.starts_with("Generator.") {
+                if let Some(method) = name.strip_prefix("Generator.prototype.") {
+                    let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                    if let Value::Object(obj) = this_v {
+                        if let Some(gen_rc) = obj_get_key_value(&obj, &"__generator__".into())? {
+                            let gen_val = gen_rc.borrow().clone();
+                            if let Value::Generator(gen_ptr) = gen_val {
+                                return crate::js_generator::handle_generator_instance_method(mc, &gen_ptr, method, &eval_args, env)
+                                    .map_err(EvalError::Js);
+                            }
+                        }
+                        Err(EvalError::Js(raise_eval_error!(
+                            "TypeError: Generator.prototype method called on incompatible receiver"
+                        )))
+                    } else {
+                        Err(EvalError::Js(raise_eval_error!(
+                            "TypeError: Generator.prototype method called on incompatible receiver"
+                        )))
+                    }
+                } else {
+                    Err(EvalError::Js(raise_eval_error!(format!("Unknown Generator function: {}", name))))
                 }
             } else if name.starts_with("Map.") {
                 if let Some(method) = name.strip_prefix("Map.prototype.") {
@@ -4016,6 +4082,10 @@ pub fn evaluate_call_dispatch<'gc>(
                             }
                         }
                     }
+                    Value::GeneratorFunction(_, cl) => match crate::js_generator::handle_generator_function_call(mc, cl, &eval_args) {
+                        Ok(v) => Ok(v),
+                        Err(e) => Err(EvalError::Js(e)),
+                    },
                     _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                 }
             } else if (obj_get_key_value(&obj, &"__class_def__".into())?).is_some() {
@@ -4828,6 +4898,51 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let mut body_clone = body.clone();
             Ok(evaluate_function_expression(mc, env, name.clone(), params, &mut body_clone)?)
         }
+        Expr::GeneratorFunction(name, params, body) => {
+            // Similar to Function but produces a GeneratorFunction value
+            let func_obj = crate::core::new_js_object_data(mc);
+            // Set __proto__ to Function.prototype
+            if let Some(func_ctor_val) = env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
+            let closure_data = ClosureData {
+                params: params.to_vec(),
+                body: body.clone(),
+                env: *env,
+                home_object: GcCell::new(None),
+                captured_envs: Vec::new(),
+                bound_this: None,
+                is_arrow: false,
+            };
+            let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
+            obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+            if let Some(n) = name {
+                obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(n)))?;
+            }
+
+            // Create prototype object
+            let proto_obj = crate::core::new_js_object_data(mc);
+            // Set prototype of prototype object to Object.prototype
+            if let Some(obj_val) = env_get(env, "Object")
+                && let Value::Object(obj_ctor) = &*obj_val.borrow()
+                && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+            {
+                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+            }
+
+            // Set 'constructor' on prototype
+            obj_set_key_value(mc, &proto_obj, &"constructor".into(), Value::Object(func_obj))?;
+            // Set 'prototype' on function
+            obj_set_key_value(mc, &func_obj, &"prototype".into(), Value::Object(proto_obj))?;
+
+            Ok(Value::Object(func_obj))
+        }
         Expr::ArrowFunction(params, body) => {
             // Create an arrow function object which captures the current `this` lexically
             let func_obj = crate::core::new_js_object_data(mc);
@@ -5445,6 +5560,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let res = crate::core::evaluate_call_dispatch(mc, env, func_val, Some(Value::Undefined), call_args)?;
             Ok(res)
         }
+        Expr::Yield(_) | Expr::YieldStar(_) => Err(EvalError::Js(raise_eval_error!("`yield` is only valid inside generator functions"))),
         _ => todo!("{expr:?}"),
     }
 }

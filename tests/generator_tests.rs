@@ -1,7 +1,6 @@
 use javascript::evaluate_script;
 
 #[test]
-#[ignore]
 fn test_generator_function_syntax() {
     // Test basic generator function syntax parsing
     let result = evaluate_script(
@@ -16,11 +15,10 @@ fn test_generator_function_syntax() {
         None::<&std::path::Path>,
     )
     .unwrap();
-    assert_eq!(result, "function");
+    assert_eq!(result, "\"function\"");
 }
 
 #[test]
-#[ignore]
 fn test_generator_function_call() {
     // Test calling a generator function returns a generator object
     let result = evaluate_script(
@@ -34,11 +32,10 @@ fn test_generator_function_call() {
         None::<&std::path::Path>,
     )
     .unwrap();
-    assert_eq!(result, "object");
+    assert_eq!(result, "\"object\"");
 }
 
 #[test]
-#[ignore]
 fn test_generator_next() {
     // Test generator.next() method
     let result = evaluate_script(
@@ -57,7 +54,6 @@ fn test_generator_next() {
 }
 
 #[test]
-#[ignore]
 fn test_generator_done() {
     // Test generator completion
     let result = evaluate_script(
@@ -77,7 +73,6 @@ fn test_generator_done() {
 }
 
 #[test]
-#[ignore]
 fn test_generator_next_with_value() {
     // Test sending a value back into a generator via next(value)
     let result = evaluate_script(
@@ -98,7 +93,6 @@ fn test_generator_next_with_value() {
 }
 
 #[test]
-#[ignore]
 fn test_generator_throw_caught() {
     let result = evaluate_script(
         r#"
@@ -121,7 +115,6 @@ fn test_generator_throw_caught() {
 }
 
 #[test]
-#[ignore]
 fn test_generator_throw_uncaught() {
     let result = evaluate_script(
         r#"
@@ -138,7 +131,6 @@ fn test_generator_throw_uncaught() {
 }
 
 #[test]
-#[ignore]
 fn test_yield_without_generator() {
     // Test that yield outside generator throws error
     let result = evaluate_script(

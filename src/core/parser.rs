@@ -46,7 +46,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
     match start_token.token {
         Token::Import if !matches!(t.get(*index + 1).map(|d| &d.token), Some(Token::LParen)) => parse_import_statement(t, index),
         Token::Export => parse_export_statement(t, index),
-        Token::Function => parse_function_declaration(t, index),
+        Token::Function | Token::FunctionStar => parse_function_declaration(t, index),
         Token::Class => parse_class_declaration(t, index),
         Token::If => parse_if_statement(t, index),
         Token::Return => parse_return_statement(t, index),
@@ -373,7 +373,8 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
 
 fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
-    *index += 1; // consume function
+    let is_generator = matches!(t[start].token, Token::FunctionStar);
+    *index += 1; // consume function or function*
     let name = if let Token::Identifier(name) = &t[*index].token {
         name.clone()
     } else {
@@ -396,7 +397,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     let body = parse_statement_block(t, index)?;
 
     Ok(Statement {
-        kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, false)),
+        kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator)),
         line: t[start].line,
         column: t[start].column,
     })

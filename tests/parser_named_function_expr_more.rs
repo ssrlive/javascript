@@ -20,7 +20,6 @@ fn object_literal_named_function_has_name() {
 }
 
 #[test]
-#[ignore]
 fn assigned_generator_named_function_has_name() {
     let script = r#"
         (function(){

@@ -119,7 +119,6 @@ fn stage1_weakmap_weakset() {
 }
 
 #[test]
-#[ignore = "Generator functions implementation is incomplete"]
 fn stage1_generator_functions() {
     // Test basic generator function - copy from working test
     let result = evaluate_script(
@@ -163,7 +162,7 @@ fn stage1_generator_functions() {
         None::<&std::path::Path>,
     )
     .unwrap();
-    assert_eq!(result, "function");
+    assert_eq!(result, "\"function\"");
 
     // Test generator object creation
     let result = evaluate_script(
@@ -177,7 +176,7 @@ fn stage1_generator_functions() {
         None::<&std::path::Path>,
     )
     .unwrap();
-    assert_eq!(result, "object");
+    assert_eq!(result, "\"object\"");
 }
 
 #[test]
@@ -353,7 +352,6 @@ fn stage1_proxy_delete_trap() {
 }
 
 #[test]
-#[ignore = "Comprehensive test combining multiple Phase 1 features - some features incomplete"]
 fn stage1_integration_all_features() {
     // Comprehensive test combining multiple Phase 1 features
     let result = evaluate_script(

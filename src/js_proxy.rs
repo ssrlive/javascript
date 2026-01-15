@@ -1,21 +1,20 @@
-use crate::core::JSProxy;
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
+use crate::core::{Expr, JSProxy, Statement, StatementKind};
+use crate::core::{Gc, GcCell, MutationContext};
+use crate::env_set;
 use crate::{
     core::{
-        Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, evaluate_statements, extract_closure_from_value, new_js_object_data,
-        obj_get_key_value, obj_set_key_value,
+        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data, obj_get_key_value,
+        obj_set_key_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
 };
-use std::cell::RefCell;
-use std::rc::Rc;
 
-/// Handle Proxy constructor calls
+/// Handle Proxy constructor calls (arguments already evaluated)
 pub(crate) fn handle_proxy_constructor<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if args.len() != 2 {
         return Err(raise_eval_error!(
@@ -23,8 +22,8 @@ pub(crate) fn handle_proxy_constructor<'gc>(
         ));
     }
 
-    let target = evaluate_expr(mc, env, &args[0])?;
-    let handler = evaluate_expr(mc, env, &args[1])?;
+    let target = args[0].clone();
+    let handler = args[1].clone();
 
     // Create the proxy
     let proxy = Gc::new(
@@ -47,11 +46,11 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     Ok(Value::Object(proxy_obj))
 }
 
-/// Handle Proxy.revocable static method
+/// Handle Proxy.revocable static method (arguments already evaluated)
 pub(crate) fn handle_proxy_revocable<'gc>(
     mc: &MutationContext<'gc>,
-    args: &[Expr],
-    env: &JSObjectDataPtr<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     if args.len() != 2 {
         return Err(raise_eval_error!(
@@ -59,8 +58,8 @@ pub(crate) fn handle_proxy_revocable<'gc>(
         ));
     }
 
-    let target = evaluate_expr(mc, env, &args[0])?;
-    let handler = evaluate_expr(mc, env, &args[1])?;
+    let target = args[0].clone();
+    let handler = args[1].clone();
 
     // Create the proxy
     let proxy = Gc::new(
@@ -73,11 +72,10 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     );
 
     // Create the revoke function as a closure that captures the proxy
-    let revoke_proxy_ref = proxy.clone();
     let revoke_body = vec![
-        // This is a special statement that will be handled in evaluate_call
-        crate::core::Statement::from(crate::core::StatementKind::Expr(crate::core::Expr::Call(
-            Box::new(crate::core::Expr::Var("__revoke_proxy".to_string(), None, None)),
+        // Call internal builtin to perform the actual revoke (mutates underlying proxy wrapper)
+        Statement::from(StatementKind::Expr(Expr::Call(
+            Box::new(Expr::Var("__internal_revoke".to_string(), None, None)),
             Vec::new(),
         ))),
     ];
@@ -85,9 +83,7 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     let revoke_env = new_js_object_data(mc);
     revoke_env
         .borrow_mut(mc)
-        .insert("__revoke_proxy".into(), Gc::new(mc, GcCell::new(Value::Proxy(revoke_proxy_ref))));
-
-    let revoke_func = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
+        .insert("__revoke_proxy".into(), Gc::new(mc, GcCell::new(Value::Proxy(proxy))));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data(mc);
@@ -96,6 +92,19 @@ pub(crate) fn handle_proxy_revocable<'gc>(
         PropertyKey::String("__proxy__".to_string()),
         Gc::new(mc, GcCell::new(Value::Proxy(proxy))),
     );
+
+    // Also capture the wrapper object so the internal revoke helper can replace the stored proxy
+    revoke_env
+        .borrow_mut(mc)
+        .insert("__proxy_wrapper".into(), Gc::new(mc, GcCell::new(Value::Object(proxy_wrapper))));
+
+    // Provide a callable function in the revoke env that dispatches to the internal revoke helper
+    revoke_env.borrow_mut(mc).insert(
+        "__internal_revoke".into(),
+        Gc::new(mc, GcCell::new(Value::Function("Proxy.__internal_revoke".to_string()))),
+    );
+
+    let revoke_func = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
 
     // Create the revocable result object
     let result_obj = new_js_object_data(mc);
@@ -108,26 +117,25 @@ pub(crate) fn handle_proxy_revocable<'gc>(
 /// Apply a proxy trap if available, otherwise fall back to default behavior
 pub(crate) fn apply_proxy_trap<'gc>(
     mc: &MutationContext<'gc>,
-    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
     trap_name: &str,
     args: Vec<Value<'gc>>,
     default_fn: impl FnOnce() -> Result<Value<'gc>, JSError>,
 ) -> Result<Value<'gc>, JSError> {
-    let proxy_borrow = proxy.borrow();
-    if proxy_borrow.revoked {
+    if proxy.revoked {
         return Err(raise_eval_error!("Cannot perform operation on a revoked proxy"));
     }
 
     // Check if handler has the trap
-    if let Value::Object(handler_obj) = &*proxy_borrow.handler
-        && let Some(trap_val) = obj_get_key_value(&handler_obj, &trap_name.into())?
+    if let Value::Object(handler_obj) = &*proxy.handler
+        && let Some(trap_val) = obj_get_key_value(handler_obj, &trap_name.into())?
     {
         let trap = trap_val.borrow().clone();
         // Accept either a direct `Value::Closure` or a function-object that
         // stores the executable closure under the internal `__closure__` key.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
             // Create execution environment for the trap and bind parameters
-            let trap_env = crate::core::prepare_closure_call_env(&captured_env, Some(&params), &args, None)?;
+            let trap_env = crate::core::prepare_closure_call_env(mc, &captured_env, Some(&params), &args, None)?;
 
             // Evaluate the body
             return Ok(evaluate_statements(mc, &trap_env, &body)?);
@@ -146,28 +154,22 @@ pub(crate) fn apply_proxy_trap<'gc>(
 /// Get property from proxy target, applying get trap if available
 pub(crate) fn proxy_get_property<'gc>(
     mc: &MutationContext<'gc>,
-    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<Option<Value<'gc>>, JSError> {
-    let result = apply_proxy_trap(
-        mc,
-        proxy,
-        "get",
-        vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
-        || {
-            // Default behavior: get property from target
-            match &*proxy.borrow().target {
-                Value::Object(obj) => {
-                    let val_opt = obj_get_key_value(obj, key)?;
-                    match val_opt {
-                        Some(val_rc) => Ok(val_rc.borrow().clone()),
-                        None => Ok(Value::Undefined),
-                    }
+    let result = apply_proxy_trap(mc, proxy, "get", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
+        // Default behavior: get property from target
+        match &*proxy.target {
+            Value::Object(obj) => {
+                let val_opt = obj_get_key_value(obj, key)?;
+                match val_opt {
+                    Some(val_rc) => Ok(val_rc.borrow().clone()),
+                    None => Ok(Value::Undefined),
                 }
-                _ => Ok(Value::Undefined), // Non-objects don't have properties
             }
-        },
-    )?;
+            _ => Ok(Value::Undefined), // Non-objects don't have properties
+        }
+    })?;
 
     match result {
         Value::Undefined => Ok(None),
@@ -178,7 +180,7 @@ pub(crate) fn proxy_get_property<'gc>(
 /// Set property on proxy target, applying set trap if available
 pub(crate) fn proxy_set_property<'gc>(
     mc: &MutationContext<'gc>,
-    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
     value: Value<'gc>,
 ) -> Result<bool, JSError> {
@@ -186,12 +188,12 @@ pub(crate) fn proxy_set_property<'gc>(
         mc,
         proxy,
         "set",
-        vec![(*proxy.borrow().target).clone(), property_key_to_value(key), value.clone()],
+        vec![(*proxy.target).clone(), property_key_to_value(key), value.clone()],
         || {
             // Default behavior: set property on target
-            match &*proxy.borrow().target {
+            match &*proxy.target {
                 Value::Object(obj) => {
-                    obj_set_key_value(mc, &obj, key, value)?;
+                    obj_set_key_value(mc, obj, key, value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
@@ -208,22 +210,16 @@ pub(crate) fn proxy_set_property<'gc>(
 /// Check if property exists on proxy target, applying has trap if available
 pub(crate) fn _proxy_has_property<'gc>(
     mc: &MutationContext<'gc>,
-    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<bool, JSError> {
-    let result = apply_proxy_trap(
-        mc,
-        proxy,
-        "has",
-        vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
-        || {
-            // Default behavior: check if property exists on target
-            match &*proxy.borrow().target {
-                Value::Object(obj) => Ok(Value::Boolean(obj_get_key_value(obj, key)?.is_some())),
-                _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
-            }
-        },
-    )?;
+    let result = apply_proxy_trap(mc, proxy, "has", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
+        // Default behavior: check if property exists on target
+        match &*proxy.target {
+            Value::Object(obj) => Ok(Value::Boolean(obj_get_key_value(obj, key)?.is_some())),
+            _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
+        }
+    })?;
 
     match result {
         Value::Boolean(b) => Ok(b),
@@ -234,17 +230,17 @@ pub(crate) fn _proxy_has_property<'gc>(
 /// Delete property from proxy target, applying deleteProperty trap if available
 pub(crate) fn proxy_delete_property<'gc>(
     mc: &MutationContext<'gc>,
-    proxy: &Gc<'gc, GcCell<JSProxy<'gc>>>,
+    proxy: &Gc<'gc, JSProxy<'gc>>,
     key: &PropertyKey<'gc>,
 ) -> Result<bool, JSError> {
     let result = apply_proxy_trap(
         mc,
         proxy,
         "deleteProperty",
-        vec![(*proxy.borrow().target).clone(), property_key_to_value(key)],
+        vec![(*proxy.target).clone(), property_key_to_value(key)],
         || {
             // Default behavior: delete property from target
-            match &*proxy.borrow().target {
+            match &*proxy.target {
                 Value::Object(obj) => {
                     let mut obj_borrow = obj.borrow_mut(mc);
                     let existed = obj_borrow.properties.contains_key(key);
@@ -266,6 +262,38 @@ pub(crate) fn proxy_delete_property<'gc>(
 fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
     match key {
         PropertyKey::String(s) => Value::String(utf8_to_utf16(s)),
-        PropertyKey::Symbol(sd) => Value::Symbol(sd.clone()),
+        PropertyKey::Symbol(sd) => Value::Symbol(*sd),
     }
+}
+
+/// Initialize Proxy constructor and prototype
+pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
+    let proxy_ctor = new_js_object_data(mc);
+    obj_set_key_value(mc, &proxy_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
+    obj_set_key_value(mc, &proxy_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Proxy")))?;
+
+    // Set up prototype linked to Object.prototype if available
+    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else {
+        None
+    };
+
+    let proxy_proto = new_js_object_data(mc);
+    if let Some(proto) = object_proto {
+        proxy_proto.borrow_mut(mc).prototype = Some(proto);
+    }
+
+    obj_set_key_value(mc, &proxy_ctor, &"prototype".into(), Value::Object(proxy_proto))?;
+    obj_set_key_value(mc, &proxy_proto, &"constructor".into(), Value::Object(proxy_ctor))?;
+
+    // Register revocable static method
+    obj_set_key_value(mc, &proxy_ctor, &"revocable".into(), Value::Function("Proxy.revocable".to_string()))?;
+
+    env_set(mc, env, "Proxy", Value::Object(proxy_ctor))?;
+    Ok(())
 }

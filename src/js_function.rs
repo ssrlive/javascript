@@ -160,6 +160,32 @@ pub fn handle_global_function<'gc>(
         "BigInt" => return crate::js_bigint::bigint_constructor(mc, args, env),
         "Number" => return crate::js_number::number_constructor(mc, args, env),
         "Boolean" => return boolean_constructor(args),
+        "Proxy.revocable" => return crate::js_proxy::handle_proxy_revocable(mc, args, env),
+        "Proxy.__internal_revoke" => {
+            // Revoke the proxy stored in the captured closure environment
+            if let Some(revoke_rc) = crate::core::env_get(env, "__proxy_wrapper") {
+                let revoke_val = revoke_rc.borrow().clone();
+                if let Value::Object(wrapper_obj) = revoke_val {
+                    // Get the stored __proxy__ property on the wrapper
+                    if let Ok(Some(proxy_prop)) = crate::core::obj_get_key_value(&wrapper_obj, &"__proxy__".into()) {
+                        let proxy_val = proxy_prop.borrow().clone();
+                        if let Value::Proxy(p) = proxy_val {
+                            // Create a new proxy with revoked=true and same target/handler
+                            let new_proxy = Gc::new(
+                                mc,
+                                crate::core::JSProxy {
+                                    target: p.target.clone(),
+                                    handler: p.handler.clone(),
+                                    revoked: true,
+                                },
+                            );
+                            *proxy_prop.borrow_mut(mc) = Value::Proxy(new_proxy);
+                        }
+                    }
+                }
+            }
+            return Ok(Value::Undefined);
+        }
         "Boolean_toString" => return crate::js_class::boolean_prototype_to_string(mc, args, env),
         "Boolean_valueOf" => return crate::js_class::boolean_prototype_value_of(mc, args, env),
         "Symbol" => return symbol_constructor(mc, args),

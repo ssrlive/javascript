@@ -84,6 +84,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     initialize_bigint(mc, env)?;
     initialize_json(mc, env)?;
     initialize_map(mc, env)?;
+    crate::js_proxy::initialize_proxy(mc, env)?;
     initialize_weakmap(mc, env)?;
     initialize_weakset(mc, env)?;
     initialize_set(mc, env)?;

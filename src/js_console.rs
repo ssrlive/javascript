@@ -243,7 +243,7 @@ fn format_value_pretty<'gc>(
         // Value::WeakSet(_) => Ok("[object WeakSet]".to_string()),
         // Value::GeneratorFunction(..) => Ok("[GeneratorFunction]".to_string()),
         // Value::Generator(_) => Ok("[object Generator]".to_string()),
-        // Value::Proxy(_) => Ok("[object Proxy]".to_string()),
+        Value::Proxy(_) => Ok("[object Proxy]".to_string()),
         // Value::ArrayBuffer(_) => Ok("[object ArrayBuffer]".to_string()),
         // Value::DataView(_) => Ok("[object DataView]".to_string()),
         // Value::TypedArray(_) => Ok("[object TypedArray]".to_string()),

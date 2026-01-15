@@ -260,7 +260,6 @@ fn stage1_iterator_protocol() {
 }
 
 #[test]
-#[ignore = "Proxy implementation is incomplete"]
 fn stage1_proxy_basic() {
     // Test basic Proxy creation and get trap
     let result = evaluate_script(
@@ -303,7 +302,6 @@ fn stage1_proxy_basic() {
 }
 
 #[test]
-#[ignore = "Proxy.revocable implementation is incomplete"]
 fn stage1_proxy_revocable() {
     // Test Proxy.revocable
     let result = evaluate_script(
@@ -328,7 +326,6 @@ fn stage1_proxy_revocable() {
 }
 
 #[test]
-#[ignore = "Proxy deleteProperty trap implementation is incomplete"]
 fn stage1_proxy_delete_trap() {
     // Test Proxy deleteProperty trap
     let result = evaluate_script(
@@ -407,7 +404,6 @@ fn stage1_integration_all_features() {
 }
 
 #[test]
-#[ignore = "Error handling tests for Phase 1 features - some features incomplete"]
 fn stage1_error_handling() {
     // Test error handling in Phase 1 features
     // Test Proxy with invalid handler - should not throw in current implementation

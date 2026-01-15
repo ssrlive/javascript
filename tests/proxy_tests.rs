@@ -8,7 +8,6 @@ fn __init_test_logger() {
 }
 
 #[test]
-#[ignore = "Proxy not yet implemented"]
 fn test_proxy_basic() {
     // Test basic Proxy creation
     let result = evaluate_script(
@@ -32,7 +31,6 @@ fn test_proxy_basic() {
 }
 
 #[test]
-#[ignore = "Proxy not yet implemented"]
 fn test_proxy_revocable() {
     // Test Proxy.revocable
     let result = evaluate_script(

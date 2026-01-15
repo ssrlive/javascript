@@ -4457,6 +4457,13 @@ fn evaluate_expr_binary<'gc>(
                     Value::Number(n) => n.to_string(),
                     _ => value_to_string(&l_val),
                 };
+                // Handle Proxy's has trap if present
+                if let Some(proxy_ptr) = crate::core::get_own_property(&obj, &"__proxy__".into())
+                    && let Value::Proxy(p) = &*proxy_ptr.borrow()
+                {
+                    let present = crate::js_proxy::_proxy_has_property(mc, p, &PropertyKey::from(key.clone())).map_err(EvalError::Js)?;
+                    return Ok(Value::Boolean(present));
+                }
                 let present = obj_get_key_value(&obj, &key.into())?.is_some();
                 Ok(Value::Boolean(present))
             } else {
@@ -5308,6 +5315,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 }
                 if let Value::Object(obj) = obj_val {
                     let key_val = PropertyKey::from(key.to_string());
+                    // Proxy wrapper: delegate to deleteProperty trap
+                    if let Some(proxy_ptr) = crate::core::get_own_property(&obj, &"__proxy__".into())
+                        && let Value::Proxy(p) = &*proxy_ptr.borrow()
+                    {
+                        let deleted = crate::js_proxy::proxy_delete_property(mc, p, &key_val).map_err(EvalError::Js)?;
+                        return Ok(Value::Boolean(deleted));
+                    }
+
                     if obj.borrow().non_configurable.contains(&key_val) {
                         Err(EvalError::Js(crate::raise_type_error!(format!(
                             "Cannot delete non-configurable property '{key}'",
@@ -5507,6 +5522,18 @@ fn get_property_with_accessors<'gc>(
     obj: &JSObjectDataPtr<'gc>,
     key: &PropertyKey<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    // If this object is a Proxy wrapper, delegate to proxy hooks
+    if let Some(proxy_ptr) = crate::core::get_own_property(obj, &"__proxy__".into())
+        && let Value::Proxy(p) = &*proxy_ptr.borrow()
+    {
+        let res_opt = crate::js_proxy::proxy_get_property(mc, p, key).map_err(EvalError::Js)?;
+        if let Some(v) = res_opt {
+            return Ok(v);
+        } else {
+            return Ok(Value::Undefined);
+        }
+    }
+
     if let Some(val_ptr) = crate::core::obj_get_key_value(obj, key).map_err(EvalError::Js)? {
         let val = val_ptr.borrow().clone();
         match val {
@@ -5580,6 +5607,15 @@ fn set_property_with_accessors<'gc>(
                 return Err(EvalError::Js(crate::raise_range_error!("Invalid array length")));
             }
         }
+    }
+
+    // If this object is a Proxy wrapper, delegate to its set trap
+    if let Some(proxy_ptr) = crate::core::get_own_property(obj, &"__proxy__".into())
+        && let Value::Proxy(p) = &*proxy_ptr.borrow()
+    {
+        // Proxy#set returns boolean; ignore the boolean here but propagate errors
+        let _ok = crate::js_proxy::proxy_set_property(mc, p, key, val).map_err(EvalError::Js)?;
+        return Ok(());
     }
 
     if let Some(prop_ptr) = crate::core::obj_get_key_value(obj, key).map_err(EvalError::Js)? {
@@ -6734,6 +6770,8 @@ fn evaluate_expr_new<'gc>(
                         return crate::js_regexp::handle_regexp_constructor(mc, &eval_args);
                     } else if name == &crate::unicode::utf8_to_utf16("Map") {
                         return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
+                    } else if name == &crate::unicode::utf8_to_utf16("Proxy") {
+                        return Ok(crate::js_proxy::handle_proxy_constructor(mc, &eval_args, env)?);
                     } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
                         return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
                     } else if name == &crate::unicode::utf8_to_utf16("WeakSet") {

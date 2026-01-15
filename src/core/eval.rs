@@ -3670,6 +3670,8 @@ pub fn evaluate_call_dispatch<'gc>(
                 Ok(handle_math_call(mc, method, &eval_args, env).map_err(EvalError::Js)?)
             } else if let Some(method) = name.strip_prefix("JSON.") {
                 Ok(handle_json_method(mc, method, &eval_args, env).map_err(EvalError::Js)?)
+            } else if let Some(method) = name.strip_prefix("Reflect.") {
+                Ok(crate::js_reflect::handle_reflect_method(mc, method, &eval_args, env).map_err(EvalError::Js)?)
             } else if let Some(method) = name.strip_prefix("Date.prototype.") {
                 if let Some(this_obj) = this_val {
                     Ok(handle_date_method(mc, &this_obj, method, &eval_args, env).map_err(EvalError::Js)?)
@@ -5749,38 +5751,6 @@ fn call_native_function<'gc>(
     if name == "Symbol.prototype.valueOf" {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         return Ok(Some(crate::js_symbol::handle_symbol_valueof(mc, this_v).map_err(EvalError::Js)?));
-    }
-
-    if name == "Reflect.setPrototypeOf" {
-        // Reflect.setPrototypeOf(obj, proto)
-        if args.len() != 2 {
-            return Err(EvalError::Js(raise_eval_error!("Reflect.setPrototypeOf requires two arguments")));
-        }
-        let target = args[0].clone();
-        let proto = args[1].clone();
-        return match target {
-            Value::Object(obj) => {
-                match proto {
-                    Value::Object(proto_obj) => {
-                        obj.borrow_mut(mc).prototype = Some(proto_obj);
-                        // also set the own property __proto__ for consistency
-                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Object(proto_obj)).map_err(EvalError::Js)?;
-                        Ok(Some(Value::Boolean(true)))
-                    }
-                    Value::Null => {
-                        obj.borrow_mut(mc).prototype = None;
-                        obj_set_key_value(mc, &obj, &"__proto__".into(), Value::Null).map_err(EvalError::Js)?;
-                        Ok(Some(Value::Boolean(true)))
-                    }
-                    _ => Err(EvalError::Js(raise_eval_error!(
-                        "Reflect.setPrototypeOf expects an object or null as second argument"
-                    ))),
-                }
-            }
-            _ => Err(EvalError::Js(raise_eval_error!(
-                "Reflect.setPrototypeOf requires an object as first argument"
-            ))),
-        };
     }
 
     if name.starts_with("Map.")

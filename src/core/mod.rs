@@ -68,15 +68,8 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     initialize_number_module(mc, env)?;
 
-    // Minimal Reflect object so Reflect.setPrototypeOf is available in tests
-    let reflect_obj = new_js_object_data(mc);
-    obj_set_key_value(
-        mc,
-        &reflect_obj,
-        &"setPrototypeOf".into(),
-        Value::Function("Reflect.setPrototypeOf".to_string()),
-    )?;
-    env_set(mc, env, "Reflect", Value::Object(reflect_obj))?;
+    // Initialize Reflect object with full (implemented) methods
+    crate::js_reflect::initialize_reflect(mc, env)?;
 
     initialize_math(mc, env)?;
     initialize_symbol(mc, env)?;

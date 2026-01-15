@@ -15,7 +15,6 @@ fn test_reflect_apply_with_non_array_arguments_list_errors() {
 }
 
 #[test]
-#[ignore = "Reflect.construct with newTarget not yet implemented"]
 fn test_reflect_construct_with_new_target_parameter() {
     let script = r#"
         class A { constructor(v) { this.v = v } full() { return this.v; } }
@@ -48,7 +47,6 @@ fn test_reflect_apply_with_non_callable_target_errors() {
 }
 
 #[test]
-#[ignore = "Reflect.apply with closure and this not yet implemented"]
 fn test_reflect_apply_with_closure_and_this() {
     let script = r#"
         const obj = { x: 10 };
@@ -63,7 +61,6 @@ fn test_reflect_apply_with_closure_and_this() {
 }
 
 #[test]
-#[ignore = "Reflect.apply with native function not yet implemented"]
 fn test_reflect_apply_with_native_function() {
     let script = r#"
         // Use Reflect.apply to call a global function (String) as a function
@@ -72,12 +69,11 @@ fn test_reflect_apply_with_native_function() {
         res;
     "#;
 
-    let v = evaluate_script(script, None::<&std::path::Path>).expect("script ran");
-    assert_eq!(v, "123");
+    let v = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(v, "\"123\"");
 }
 
 #[test]
-#[ignore = "Reflect.construct with constructor args not yet implemented"]
 fn test_reflect_construct_with_constructor_args() {
     let script = r#"
         class Person {

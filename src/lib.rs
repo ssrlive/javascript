@@ -22,7 +22,7 @@ pub(crate) mod js_object;
 pub(crate) mod js_os;
 // pub(crate) mod js_promise;
 // pub(crate) mod js_proxy;
-// pub(crate) mod js_reflect;
+pub(crate) mod js_reflect;
 pub(crate) mod js_regexp;
 pub(crate) mod js_set;
 #[cfg(feature = "std")]

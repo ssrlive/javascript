@@ -1,15 +1,13 @@
+use crate::core::MutationContext;
 use crate::core::{
-    Expr, JSObjectDataPtr, PropertyKey, Value, evaluate_expr, new_js_object_data, obj_delete, obj_get_key_value, obj_set_key_value,
-    prepare_function_call_env,
+    JSObjectDataPtr, PropertyKey, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_function_call_env,
 };
 use crate::error::JSError;
-use crate::js_array::set_array_length;
-use crate::unicode::utf8_to_utf16;
-use std::cell::RefCell;
-use std::rc::Rc;
+use crate::js_array::{get_array_length, set_array_length};
+use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
-/// Create the Reflect object with all reflection methods
-pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
+/// Initialize the Reflect object with all reflection methods
+pub fn initialize_reflect<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let reflect_obj = new_js_object_data(mc);
     obj_set_key_value(
         mc,
@@ -89,41 +87,39 @@ pub fn make_reflect_object() -> Result<JSObjectDataPtr, JSError> {
         &crate::core::PropertyKey::String("setPrototypeOf".to_string()),
         Value::Function("Reflect.setPrototypeOf".to_string()),
     )?;
-    Ok(reflect_obj)
+
+    crate::core::env_set(mc, env, "Reflect", Value::Object(reflect_obj))?;
+    Ok(())
 }
 
 /// Handle Reflect object method calls
-pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args: &[Expr], env: &JSObjectDataPtr) -> Result<Value, JSError> {
+pub fn handle_reflect_method<'gc>(
+    mc: &MutationContext<'gc>,
+    method: &str,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
     match method {
         "apply" => {
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.apply requires at least 2 arguments"));
             }
-            let _target = evaluate_expr(mc, env, &args[0])?;
-            let _this_arg = evaluate_expr(mc, env, &args[1])?;
-            let _arguments_list = if args.len() > 2 {
-                evaluate_expr(mc, env, &args[2])?
-            } else {
-                Value::Undefined
-            };
+            let target = args[0].clone();
+            let this_arg = args[1].clone();
+            let arguments_list = if args.len() > 2 { args[2].clone() } else { Value::Undefined };
 
-            // Implement Reflect.apply: call the target with given thisArg and argument list
-            let target = _target;
-            let this_arg = _this_arg;
-            let arguments_list = _arguments_list;
-
-            // Build argument Expr list from array-like arguments_list
-            let mut arg_exprs: Vec<Expr> = Vec::new();
+            // Build argument Value list from array-like arguments_list
+            let mut arg_values: Vec<Value> = Vec::new();
             match arguments_list {
                 Value::Object(arr_obj) => {
                     // Expect an array-like object
                     if crate::js_array::is_array(mc, &arr_obj) {
-                        if let Some(len) = crate::js_array::get_array_length(mc, &arr_obj) {
+                        if let Some(len) = get_array_length(mc, &arr_obj) {
                             for i in 0..len {
                                 if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
-                                    arg_exprs.push(Expr::Undefined);
+                                    arg_values.push(val_rc.borrow().clone());
                                 } else {
-                                    arg_exprs.push(Expr::Undefined);
+                                    arg_values.push(Value::Undefined);
                                 }
                             }
                         }
@@ -135,162 +131,54 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                 _ => return Err(raise_type_error!("Reflect.apply argumentsList must be an array-like object")),
             }
 
-            // If target is a closure or function, invoke appropriately
+            // If target is a native constructor object (e.g., String), call its native handler
+            if let Value::Object(obj) = &target
+                && let Some(native_rc) = obj_get_key_value(obj, &"__native_ctor".into())?
+                && let Value::String(name_utf16) = &*native_rc.borrow()
+            {
+                let name = utf16_to_utf8(name_utf16);
+                return crate::js_function::handle_global_function(mc, &name, &arg_values, env);
+            }
+
+            // If target is a closure (sync or async) or an object wrapping a closure, invoke appropriately
+            if let Some((_params, _body, _captured_env)) = crate::core::extract_closure_from_value(&target) {
+                // Detect async closure (unused here; dispatcher handles it internally)
+                let _is_async = matches!(target, Value::AsyncClosure(_))
+                    || (if let Value::Object(obj) = &target {
+                        if let Ok(Some(cl_ptr)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            matches!(&*cl_ptr.borrow(), Value::AsyncClosure(_))
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    });
+
+                // Delegate invocation to existing call dispatcher which handles sync/async/native functions
+                return crate::core::evaluate_call_dispatch(mc, env, target.clone(), Some(this_arg.clone()), arg_values)
+                    .map_err(|e| e.into());
+            }
+
             match target {
-                Value::Closure(data) => {
-                    let params = &data.params;
-                    let body = &data.body;
-                    let captured_env = &data.env;
-                    // Collect all arguments, expanding spreads
-                    let mut evaluated_args = Vec::new();
-                    crate::core::expand_spread_in_call_args(env, &arg_exprs, &mut evaluated_args)?;
-
-                    // Create function environment and bind 'this'
-                    let func_env = prepare_function_call_env(
-                        Some(captured_env),
-                        Some(this_arg.clone()),
-                        Some(params),
-                        &evaluated_args,
-                        None,
-                        Some(env),
-                    )?;
-
-                    // Execute function body
-                    crate::core::evaluate_statements(mc, &func_env, body)
-                }
-                Value::AsyncClosure(data) => {
-                    let params = &data.params;
-                    let body = &data.body;
-                    let captured_env = &data.env;
-                    // Similar handling to async closures in evaluate_call: return a Promise object
-                    let mut evaluated_args = Vec::new();
-                    for ae in &arg_exprs {
-                        evaluated_args.push(evaluate_expr(mc, env, ae)?);
-                    }
-                    let promise = Rc::new(RefCell::new(crate::js_promise::JSPromise::new()));
-                    let promise_obj = Value::Object(new_js_object_data(mc));
-                    if let Value::Object(obj) = &promise_obj {
-                        obj.borrow_mut(mc);
-                        // .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
-                    }
-
-                    let func_env = prepare_function_call_env(
-                        Some(captured_env),
-                        Some(this_arg.clone()),
-                        Some(params),
-                        &evaluated_args,
-                        None,
-                        Some(env),
-                    )?;
-                    // Execute function body
-                    let result = crate::core::evaluate_statements(mc, &func_env, body);
-                    match result {
-                        Ok(val) => {
-                            crate::js_promise::resolve_promise(mc, &promise, val);
-                        }
-                        Err(e) => match e {
-                            crate::core::EvalError::Throw(value, _, _) => {
-                                // crate::js_promise::reject_promise(&promise, value.clone());
-                            }
-                            _ => {
-                                // crate::js_promise::reject_promise(&promise, Value::String(utf8_to_utf16(&format!("{:?}", e))));
-                            }
-                        },
-                    }
-                    Ok(promise_obj)
-                }
-                Value::Function(func_name) => {
-                    // For native/global functions, build Expr args and call handler
-                    let expr_args: Vec<Expr> = arg_exprs.into_iter().collect();
-                    crate::js_function::handle_global_function(mc, &func_name, &expr_args, env)
-                }
+                Value::Function(func_name) => crate::js_function::handle_global_function(mc, &func_name, &arg_values, env),
                 Value::Object(object) => {
-                    // If this object wraps an internal closure (function-object),
-                    // invoke that closure with `this` bound to `this_arg` and
-                    // the provided argument list. This preserves the correct
-                    // `this` binding for `Reflect.apply` when the target is a
-                    // script-defined function stored as an object.
-                    if let Some(cl_rc) = obj_get_key_value(&object, &crate::core::PropertyKey::String("__closure__".to_string()))? {
-                        match &*cl_rc.borrow() {
-                            Value::Closure(data) => {
-                                let params = &data.params;
-                                let body = &data.body;
-                                let captured_env = &data.env;
-                                // Evaluate argument expressions to Values
-                                let mut evaluated_args: Vec<Value> = Vec::new();
-                                for ae in &arg_exprs {
-                                    evaluated_args.push(evaluate_expr(mc, env, ae)?);
-                                }
-
-                                // Prepare function environment and bind parameters (bind `this` directly)
-                                let func_env = prepare_function_call_env(
-                                    Some(captured_env),
-                                    Some(this_arg.clone()),
-                                    Some(params),
-                                    &evaluated_args,
-                                    None,
-                                    Some(env),
-                                )?;
-
-                                // Execute function body
-                                return crate::core::evaluate_statements(mc, &func_env, body);
-                            }
-                            Value::AsyncClosure(data) => {
-                                let params = &data.params;
-                                let body = &data.body;
-                                let captured_env = &data.env;
-                                // Evaluate argument expressions to Values
-                                let mut evaluated_args: Vec<Value> = Vec::new();
-                                for ae in &arg_exprs {
-                                    evaluated_args.push(evaluate_expr(mc, env, ae)?);
-                                }
-
-                                // Create promise and wrapper object
-                                let promise = Rc::new(RefCell::new(crate::js_promise::JSPromise::new()));
-                                let promise_obj = Value::Object(new_js_object_data(mc));
-                                if let Value::Object(obj) = &promise_obj {
-                                    obj.borrow_mut(mc);
-                                    // .insert("__promise".into(), Rc::new(RefCell::new(Value::Promise(promise.clone()))));
-                                }
-
-                                // Prepare function environment and bind parameters (bind `this` directly)
-                                let func_env = prepare_function_call_env(
-                                    Some(captured_env),
-                                    Some(this_arg.clone()),
-                                    Some(params),
-                                    &evaluated_args,
-                                    None,
-                                    Some(env),
-                                )?;
-
-                                // Execute function body and resolve/reject promise
-                                let result = crate::core::evaluate_statements(mc, &func_env, body);
-                                match result {
-                                    Ok(val) => {
-                                        promise.borrow_mut(mc).state = crate::js_promise::PromiseState::Fulfilled(val);
-                                    }
-                                    Err(e) => match e {
-                                        crate::core::EvalError::Throw(value, _, _) => {
-                                            promise.borrow_mut(mc).state = crate::js_promise::PromiseState::Rejected(value.clone());
-                                        }
-                                        _ => {
-                                            promise.borrow_mut(mc).state = crate::js_promise::PromiseState::Rejected(Value::String(
-                                                utf8_to_utf16(&format!("{:?}", e)),
-                                            ));
-                                        }
-                                    },
-                                }
-                                return Ok(promise_obj);
-                            }
-                            _ => {
-                                // Not callable - fall through to generic error below
-                            }
+                    // If this object wraps an internal closure (function-object), invoke it
+                    if let Some(cl_rc) = obj_get_key_value(&object, &"__closure__".into())? {
+                        let cl_val = cl_rc.borrow().clone();
+                        if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&cl_val) {
+                            let func_env = prepare_function_call_env(
+                                mc,
+                                Some(&captured_env),
+                                Some(this_arg.clone()),
+                                Some(&params),
+                                &arg_values,
+                                None,
+                                Some(env),
+                            )?;
+                            return Ok(crate::core::evaluate_statements(mc, &func_env, &body)?);
                         }
                     }
-
-                    // If not an internal closure, fall back to building a call expression
-                    let call_expr = Expr::Call(Box::new(Expr::Undefined), arg_exprs);
-                    crate::core::evaluate_expr(mc, env, &call_expr)
+                    Err(raise_type_error!("Reflect.apply target is not callable"))
                 }
                 _ => Err(raise_type_error!("Reflect.apply target is not callable")),
             }
@@ -299,29 +187,21 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.is_empty() {
                 return Err(raise_type_error!("Reflect.construct requires at least 1 argument"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let _arguments_list = if args.len() > 1 {
-                evaluate_expr(mc, env, &args[1])?
-            } else {
-                Value::Undefined
-            };
-            let _new_target = if args.len() > 2 {
-                evaluate_expr(mc, env, &args[2])?
-            } else {
-                target.clone()
-            };
+            let target = args[0].clone();
+            let arguments_list = if args.len() > 1 { args[1].clone() } else { Value::Undefined };
+            let _new_target = if args.len() > 2 { args[2].clone() } else { target.clone() };
 
-            // Implement Reflect.construct: use evaluate_new by building Expr::Value for constructor and argument list
-            let mut arg_exprs: Vec<Expr> = Vec::new();
-            match _arguments_list {
+            // Build argument list from array-like arguments_list
+            let mut arg_values: Vec<Value> = Vec::new();
+            match arguments_list {
                 Value::Object(arr_obj) => {
                     if crate::js_array::is_array(mc, &arr_obj) {
-                        if let Some(len) = crate::js_array::get_array_length(mc, &arr_obj) {
+                        if let Some(len) = get_array_length(mc, &arr_obj) {
                             for i in 0..len {
                                 if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
-                                    arg_exprs.push(Expr::Undefined);
+                                    arg_values.push(val_rc.borrow().clone());
                                 } else {
-                                    arg_exprs.push(Expr::Undefined);
+                                    arg_values.push(Value::Undefined);
                                 }
                             }
                         }
@@ -333,17 +213,15 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                 _ => return Err(raise_type_error!("Reflect.construct argumentsList must be an array-like object")),
             }
 
-            // Call evaluate_new with /* Expr::Value removed */ Expr::Undefinedtarget)
-            let ctor_expr = Expr::Undefined;
-            crate::js_class::evaluate_new(env, &ctor_expr, &arg_exprs)
+            crate::js_class::evaluate_new(mc, env, target, &arg_values)
         }
         "defineProperty" => {
             if args.len() < 3 {
                 return Err(raise_type_error!("Reflect.defineProperty requires 3 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
-            let attributes = evaluate_expr(mc, env, &args[2])?;
+            let target = args[0].clone();
+            let property_key = args[1].clone();
+            let attributes = args[2].clone();
 
             match target {
                 Value::Object(obj) => {
@@ -352,7 +230,7 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
                     if let Value::Object(attr_obj) = &attributes {
                         if let Some(value_rc) = obj_get_key_value(attr_obj, &crate::core::PropertyKey::String("value".to_string()))? {
                             let prop_key = match property_key {
-                                Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(s)),
+                                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                                 Value::Number(n) => PropertyKey::String(n.to_string()),
                                 _ => return Err(raise_type_error!("Invalid property key")),
                             };
@@ -372,18 +250,18 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.deleteProperty requires 2 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
+            let target = args[0].clone();
+            let property_key = args[1].clone();
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
                     // For now, always return true as we don't have configurable properties
-                    obj_delete(&obj, &prop_key)?;
+                    let _ = obj.borrow_mut(mc).properties.shift_remove(&prop_key);
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.deleteProperty target must be an object")),
@@ -393,18 +271,14 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.get requires at least 2 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
-            let _receiver = if args.len() > 2 {
-                evaluate_expr(mc, env, &args[2])?
-            } else {
-                target.clone()
-            };
+            let target = args[0].clone();
+            let property_key = args[1].clone();
+            let _receiver = if args.len() > 2 { args[2].clone() } else { target.clone() };
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
@@ -421,13 +295,13 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.getOwnPropertyDescriptor requires 2 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
+            let target = args[0].clone();
+            let property_key = args[1].clone();
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
@@ -470,11 +344,9 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.is_empty() {
                 return Err(raise_type_error!("Reflect.getPrototypeOf requires 1 argument"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-
-            match target {
+            match &args[0] {
                 Value::Object(obj) => {
-                    if let Some(proto_rc) = obj.borrow().prototype.clone() {
+                    if let Some(proto_rc) = obj.borrow().prototype {
                         Ok(Value::Object(proto_rc))
                     } else {
                         Ok(Value::Undefined)
@@ -487,13 +359,13 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.has requires 2 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
+            let target = args[0].clone();
+            let property_key = args[1].clone();
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
@@ -507,7 +379,7 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.is_empty() {
                 return Err(raise_type_error!("Reflect.isExtensible requires 1 argument"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
+            let target = args[0].clone();
 
             match target {
                 Value::Object(_) => {
@@ -521,14 +393,12 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.is_empty() {
                 return Err(raise_type_error!("Reflect.ownKeys requires 1 argument"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-
-            match target {
+            match args[0] {
                 Value::Object(obj) => {
                     let mut keys = Vec::new();
                     for key in obj.borrow().properties.keys() {
                         if let PropertyKey::String(s) = key {
-                            keys.push(Value::String(utf8_to_utf16(&s)));
+                            keys.push(Value::String(utf8_to_utf16(s)));
                         }
                     }
                     let keys_len = keys.len();
@@ -548,7 +418,7 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.is_empty() {
                 return Err(raise_type_error!("Reflect.preventExtensions requires 1 argument"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
+            let target = args[0].clone();
 
             match target {
                 Value::Object(_) => {
@@ -562,19 +432,15 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 3 {
                 return Err(raise_type_error!("Reflect.set requires at least 3 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let property_key = evaluate_expr(mc, env, &args[1])?;
-            let value = evaluate_expr(mc, env, &args[2])?;
-            let _receiver = if args.len() > 3 {
-                evaluate_expr(mc, env, &args[3])?
-            } else {
-                target.clone()
-            };
+            let target = args[0].clone();
+            let property_key = args[1].clone();
+            let value = args[2].clone();
+            let _receiver = if args.len() > 3 { args[3].clone() } else { target.clone() };
 
             match target {
                 Value::Object(obj) => {
                     let prop_key = match property_key {
-                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
@@ -588,13 +454,10 @@ pub fn handle_reflect_method<'gc>(mc: &MutationContext<'gc>, method: &str, args:
             if args.len() < 2 {
                 return Err(raise_type_error!("Reflect.setPrototypeOf requires 2 arguments"));
             }
-            let target = evaluate_expr(mc, env, &args[0])?;
-            let prototype = evaluate_expr(mc, env, &args[1])?;
-
-            match target {
-                Value::Object(obj) => match prototype {
+            match &args[0] {
+                Value::Object(obj) => match args[1] {
                     Value::Object(proto_obj) => {
-                        obj.borrow_mut(mc).prototype = Some(proto_obj.clone());
+                        obj.borrow_mut(mc).prototype = Some(proto_obj);
                         Ok(Value::Boolean(true))
                     }
                     Value::Undefined => {

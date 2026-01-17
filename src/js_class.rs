@@ -177,6 +177,16 @@ pub(crate) fn evaluate_new<'gc>(
                 }
             }
 
+            // Check for generic native constructor via __native_ctor
+            if let Some(native_ctor_rc) = obj_get_key_value(&class_obj, &"__native_ctor".into())? {
+                if let Value::String(name) = &*native_ctor_rc.borrow() {
+                    let name_desc = utf16_to_utf8(name);
+                    if name_desc.as_str() == "Promise" {
+                        return crate::js_promise::handle_promise_constructor_val(mc, evaluated_args, env);
+                    }
+                }
+            }
+
             // Check if this is Array constructor
             if get_own_property(&class_obj, &"__is_array_constructor".into()).is_some() {
                 return Ok(crate::js_array::handle_array_constructor(mc, evaluated_args, env)?);

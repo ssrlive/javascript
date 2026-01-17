@@ -43,7 +43,8 @@ jobs:
     - name: run js scripts tests
       if: ${{ !cancelled() }}
       run: |
-        # cargo run --all-features --example js -- js-scripts/async_n_throw_async_tests.js
+        cargo run --all-features --example js -- js-scripts/async_n_throw_async_tests_regression.js
+        cargo run --all-features --example js -- js-scripts/async_n_throw_async_tests.js
         cargo run --all-features --example js -- js-scripts/atomics_test.js
         cargo run --all-features --example js -- js-scripts/atomics_wait_notify_test.js
         cargo run --all-features --example js -- js-scripts/bigint_test.js

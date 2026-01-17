@@ -18,7 +18,7 @@ pub enum StatementKind {
     Throw(Expr),           // throw expression
     Block(Vec<Statement>), // block statement `{ ... }`
     If(Box<IfStatement>),
-    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool), // name, params, body, is_generator
+    FunctionDeclaration(String, Vec<DestructuringElement>, Vec<Statement>, bool, bool), // name, params, body, is_generator, is_async
     TryCatch(Box<TryCatchStatement>),
     LetDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: let [a, b] = [1, 2];
     VarDestructuringArray(Vec<DestructuringElement>, Expr), // array destructuring: var [a, b] = [1, 2];

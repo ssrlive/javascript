@@ -40,6 +40,9 @@ pub struct JSGenerator<'gc> {
     pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
     pub env: JSObjectDataPtr<'gc>,
+    // Capture the call-time arguments so that parameter bindings can be
+    // created when the generator starts executing.
+    pub args: Vec<Value<'gc>>,
     pub state: GeneratorState<'gc>,
 }
 
@@ -92,12 +95,22 @@ pub struct JSTypedArray<'gc> {
     pub length: usize,
 }
 
-#[derive(Clone, Debug, Collect)]
+#[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub enum GeneratorState<'gc> {
     NotStarted,
-    Running { pc: usize, stack: Vec<Value<'gc>> },
-    Suspended { pc: usize, stack: Vec<Value<'gc>> },
+    Running {
+        pc: usize,
+        stack: Vec<Value<'gc>>,
+    },
+    // When suspended, optionally keep the environment that was used to
+    // execute statements before the first `yield`. This lets resume use the
+    // same bindings when executing the remainder of the generator body.
+    Suspended {
+        pc: usize,
+        stack: Vec<Value<'gc>>,
+        pre_env: Option<JSObjectDataPtr<'gc>>,
+    },
     Completed,
 }
 
@@ -288,20 +301,44 @@ pub struct ClosureData<'gc> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 pub struct JSPromise<'gc> {
+    pub id: usize,
     pub state: PromiseState<'gc>,
     pub value: Option<Value<'gc>>,
     pub on_fulfilled: Vec<(Value<'gc>, GcPtr<'gc, JSPromise<'gc>>, Option<JSObjectDataPtr<'gc>>)>,
     pub on_rejected: Vec<(Value<'gc>, GcPtr<'gc, JSPromise<'gc>>, Option<JSObjectDataPtr<'gc>>)>,
+    /// Whether a rejection handler has been attached or a rejection handler
+    /// has already executed for this promise. Used to avoid reporting
+    /// unhandled rejections after the promise has been handled.
+    pub handled: bool,
+}
+
+static UNIQUE_ID_SEED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+pub fn generate_unique_id() -> usize {
+    UNIQUE_ID_SEED.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
 impl<'gc> JSPromise<'gc> {
     pub fn new() -> Self {
         Self {
+            id: generate_unique_id(),
             state: PromiseState::Pending,
             value: None,
             on_fulfilled: Vec::new(),
             on_rejected: Vec::new(),
+            handled: false,
         }
+    }
+}
+
+impl std::fmt::Debug for JSPromise<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "JSPromise {{ on_fulfilled: {}, on_rejected: {} }}",
+            self.on_fulfilled.len(),
+            self.on_rejected.len()
+        )
     }
 }
 

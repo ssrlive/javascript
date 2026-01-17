@@ -12,7 +12,6 @@ mod deep_chain_tests {
     use super::*;
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_deep_promise_chain_no_stack_overflow() {
         // Build a script that chains many .then() calls where each step
         // returns a Promise that resolves to the previous value + 1.
@@ -39,7 +38,6 @@ mod deep_chain_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_then_with_closure() {
         // Test using closures inside then statements that capture variables
         let script = r#"
@@ -61,7 +59,6 @@ mod deep_chain_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn promise_complex_chain_another() {
         let script = r#"
                 function asyncOperation(value) {

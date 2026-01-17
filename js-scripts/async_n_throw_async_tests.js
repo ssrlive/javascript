@@ -1,3 +1,5 @@
+"use strict";
+
 // Copyright (C) 2022 Igalia, S.L. All rights reserved.
 // This code is governed by the BSD license found in the LICENSE file.
 /*---
@@ -6,8 +8,37 @@ description: |
 defines: [asyncTest, assert.throwsAsync]
 ---*/
 
-// Ensure a minimal `assert` object exists when running outside Test262
-if (typeof assert === 'undefined') var assert = {};
+// Ensure a minimal `assert` function exists when running outside Test262
+if (typeof assert === 'undefined') {
+  var assert = function (actual, expected, message) {
+    function deepEqual(a, b) {
+      if (a === b) return true;
+      if (typeof a === 'number' && typeof b === 'number' && isNaN(a) && isNaN(b)) return true;
+      if (a && b && typeof a === 'object' && typeof b === 'object') {
+        if (Array.isArray(a) && Array.isArray(b)) {
+          if (a.length !== b.length) return false;
+          for (var i = 0; i < a.length; i++) {
+            if (!deepEqual(a[i], b[i])) return false;
+          }
+          return true;
+        }
+        var aKeys = Object.keys(a);
+        var bKeys = Object.keys(b);
+        if (aKeys.length !== bKeys.length) return false;
+        for (var i = 0; i < aKeys.length; i++) {
+          var k = aKeys[i];
+          if (!b.hasOwnProperty(k) || !deepEqual(a[k], b[k])) return false;
+        }
+        return true;
+      }
+      return false;
+    }
+
+    if (!deepEqual(actual, expected)) {
+      throw new Test262Error(message || 'assertion failed');
+    }
+  };
+}
 
 // Minimal Test262 shims used by helpers
 function Test262Error(message) {
@@ -33,25 +64,27 @@ function asyncTest(testFunc) {
     return;
   }
   try {
-    testFunc().then(
-      function () {
-        $DONE();
-      },
-      function (error) {
-        $DONE(error);
-      }
-    );
-  } catch (syncError) {
-    $DONE(syncError);
+      console.log('asyncTest: invoking testFunc');
+      var res = testFunc();
+      console.log('asyncTest: testFunc result', res && res.constructor ? res.constructor.name : typeof res);
+      res.then(
+        function () {
+          console.log('asyncTest: resolved, calling $DONE');
+          $DONE();
+        },
+        function (error) {
+          console.log('asyncTest: rejected, calling $DONE with', error);
+          $DONE(error);
+        }
+      );
+    } catch (syncError) {
+      console.log('asyncTest: threw synchronously', syncError);
+      $DONE(syncError);
+    }
   }
-}
 
 /**
  * Asserts that a callback asynchronously throws an instance of a particular
- * error (i.e., returns a promise whose rejection value is an object referencing
- * the constructor).
- *
- * @param {Function} expectedErrorConstructor the expected constructor of the
  *   rejection value
  * @param {Function} func the callback
  * @param {string} [message] the prefix to use for failure messages
@@ -116,14 +149,45 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
 
 // --- Test harness for running ---
 {
+  // Install a persistent $DONE dispatcher to avoid handler overwrite races
+  if (!globalThis.__done_dispatcher_installed) {
+    (function () {
+      var handlers = [];
+      globalThis.$register_done = function (fn) {
+        var id = handlers.length;
+        handlers.push({ fn: fn, settled: false });
+        return id;
+      };
+      globalThis.$unregister_done = function (id) {
+        if (handlers[id]) handlers[id].settled = true;
+      };
+      globalThis.$DONE = function (err) {
+        // Deliver the call to the earliest un-settled registered handler
+        for (var i = 0; i < handlers.length; i++) {
+          if (!handlers[i].settled) {
+            handlers[i].settled = true;
+            // Schedule handler invocation as a microtask to avoid deep synchronous
+            // re-entrancy when handlers call $DONE recursively. This aligns with
+            // Node's behavior and prevents stack overflow for many nested handlers.
+            Promise.resolve().then(function() { try { handlers[i].fn(err); } catch (e) { /* swallow */ } });
+            break;
+          }
+        }
+      };
+    })();
+    globalThis.__done_dispatcher_installed = true;
+  }
   // Run a single asyncTest and return a promise that resolves/rejects when $DONE is called
   // expectError: when true, the test is expected to call $DONE with an error
   function runSingleAsyncTest(name, testFunc, expectError) {
+    console.log('runSingleAsyncTest: start ->', name);
     return new Promise((resolve) => {
       var settled = false;
-      globalThis.$DONE = function (err) {
+      var doneId = globalThis.$register_done(function (err) {
+        console.log('runSingleAsyncTest: $DONE called for', name, 'err=', err);
         if (settled) return;
         settled = true;
+        globalThis.$unregister_done(doneId);
         if (expectError) {
           if (err === undefined) {
             console.log('asyncTest:', name, '-> FAIL (expected error)');
@@ -141,7 +205,7 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
             resolve({name: name, ok: false, err});
           }
         }
-      };
+      });
 
       try {
         asyncTest(testFunc);
@@ -201,6 +265,10 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
 
     await runThrowTests();
 
+    for (let i = 0; i < results.length; i++) {
+      results[i] = await Promise.resolve(results[i]);
+    }
+    console.log('DEBUG results:', results);
     const passed = results.filter(r => r.ok).length;
     const failed = results.length - passed;
     console.log('\nSummary:', passed, 'passed,', failed, 'failed');
@@ -218,3 +286,18 @@ assert.throwsAsync = function (expectedErrorConstructor, func, message) {
     assert(res, [1, [2, 3]], "Async function with rest");
   });
 }
+
+console.log('=== All async_n_throw_async_tests.js tests setup done ===');
+
+try {
+    var p = Promise.resolve(1);
+    console.log("Promise.name:", Promise.name);
+    console.log("p.constructor === Promise:", p.constructor === Promise);
+    console.log("p.constructor.name:", p.constructor.name);
+} catch (e) {
+    console.log("Error:", e);
+}
+
+console.log('=== Running async_n_throw_async_tests_regression.js ===');
+
+return true;

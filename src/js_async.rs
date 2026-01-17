@@ -1,0 +1,207 @@
+use crate::core::{ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, obj_get_key_value, obj_set_key_value};
+use crate::core::{Gc, GcPtr, MutationContext};
+use crate::error::JSError;
+use crate::js_generator::handle_generator_function_call;
+use crate::js_promise::{call_function_with_this, make_promise_js_object};
+use crate::unicode::utf8_to_utf16;
+
+pub fn handle_async_closure_call<'gc>(
+    mc: &MutationContext<'gc>,
+    closure: &ClosureData<'gc>,
+    _this_val: Option<Value<'gc>>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+    _fn_obj: Option<JSObjectDataPtr<'gc>>,
+) -> Result<Value<'gc>, JSError> {
+    // 1. Create a generator for the async function
+    // Pass the closure as is (containing the async body)
+    let generator_val = handle_generator_function_call(mc, closure, args)?;
+
+    // 2. Create the wrapper promise that will be returned
+    let (promise, resolve, reject) = crate::js_promise::create_promise_capability(mc, env)?;
+
+    // 3. Define the step function that drives the generator
+
+    // We need to keep the generator alive
+    let generator_root = if let Value::Object(obj) = generator_val {
+        if let Ok(Some(gen_ptr)) = obj_get_key_value(&obj, &"__generator__".into()) {
+            gen_ptr.borrow().clone()
+        } else {
+            return Err(crate::raise_eval_error!("Async function failed to create generator"));
+        }
+    } else {
+        return Err(crate::raise_eval_error!("Async function failed to create generator object"));
+    };
+
+    let generator_ref = if let Value::Generator(g) = generator_root {
+        g
+    } else {
+        return Err(crate::raise_eval_error!("Async function internal error"));
+    };
+
+    // Initial step
+    step(mc, generator_ref, resolve, reject, env, Ok(Value::Undefined))?;
+
+    // Return the JS-visible Promise object that wraps the internal promise
+    let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
+    Ok(Value::Object(promise_obj))
+}
+
+fn step<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: GcPtr<'gc, JSGenerator<'gc>>,
+    resolve: Value<'gc>,
+    reject: Value<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    next_val: Result<Value<'gc>, Value<'gc>>, // Ok(val) for next(val), Err(err) for throw(err)
+) -> Result<(), JSError> {
+    log::trace!("DEBUG: step called");
+    // Invoke generator.next(val) or generator.throw(err)
+    // println!("STEP: next_val={:?}", next_val);
+    let result = match next_val {
+        Ok(val) => crate::js_generator::generator_next(mc, &generator, val),
+        Err(err) => crate::js_generator::generator_throw(mc, &generator, err),
+    };
+
+    match result {
+        Ok(res_obj) => {
+            // Check if done
+            let done = if let Value::Object(obj) = &res_obj {
+                if let Ok(Some(d)) = crate::core::obj_get_key_value(obj, &"done".into()) {
+                    crate::js_boolean::to_boolean(&d.borrow())
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            let value = if let Value::Object(obj) = &res_obj {
+                if let Ok(Some(v)) = crate::core::obj_get_key_value(obj, &"value".into()) {
+                    v.borrow().clone()
+                } else {
+                    Value::Undefined
+                }
+            } else {
+                Value::Undefined
+            };
+
+            if done {
+                // Resolve the outer promise with the return value
+                crate::js_promise::call_function(mc, &resolve, &[value], env)?;
+            } else {
+                // Not done, "value" is the yielded promise (or value to be awaited)
+                // Promise.resolve(value).then(res => step(next(res)), err => step(throw(err)))
+
+                let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
+                    if let Ok(Some(resolve_method)) = crate::core::obj_get_key_value(
+                        &match ctor.borrow().clone() {
+                            Value::Object(o) => o,
+                            _ => return Err(crate::raise_eval_error!("Promise not object")),
+                        },
+                        &"resolve".into(),
+                    ) {
+                        resolve_method.borrow().clone()
+                    } else {
+                        return Err(crate::raise_eval_error!("Promise.resolve missing"));
+                    }
+                } else {
+                    return Err(crate::raise_eval_error!("Promise not found"));
+                };
+
+                let p_val = crate::js_promise::call_function(mc, &promise_resolve, &[value], env)?;
+
+                let on_fulfilled = create_async_step_callback(mc, generator, resolve.clone(), reject.clone(), *env, false);
+                let on_rejected = create_async_step_callback(mc, generator, resolve.clone(), reject.clone(), *env, true);
+
+                log::trace!("DEBUG: p_val type: {:?}", p_val);
+
+                if let Value::Object(p_obj) = p_val
+                    && let Ok(Some(then_method)) = crate::core::obj_get_key_value(&p_obj, &"then".into())
+                {
+                    // eprintln!("DEBUG: Calling then method with this");
+                    call_function_with_this(mc, &then_method.borrow(), Some(p_val), &[on_fulfilled, on_rejected], env)?;
+                }
+            }
+        }
+        Err(e) => {
+            // Generator threw an error synchronously (or during processing), reject the promise
+            let msg = e.to_string();
+            let val = Value::String(utf8_to_utf16(&msg));
+            crate::js_promise::call_function(mc, &reject, &[val], env)?;
+        }
+    }
+    Ok(())
+}
+
+fn create_async_step_callback<'gc>(
+    mc: &MutationContext<'gc>,
+    generator: GcPtr<'gc, JSGenerator<'gc>>,
+    resolve: Value<'gc>,
+    reject: Value<'gc>,
+    global_env: JSObjectDataPtr<'gc>,
+    is_reject: bool,
+) -> Value<'gc> {
+    let env = crate::new_js_object_data(mc);
+    env.borrow_mut(mc).prototype = Some(global_env);
+
+    obj_set_key_value(mc, &env, &"__async_generator".into(), Value::Generator(generator)).unwrap();
+    obj_set_key_value(mc, &env, &"__async_resolve".into(), resolve).unwrap();
+    obj_set_key_value(mc, &env, &"__async_reject".into(), reject).unwrap();
+
+    let func_name = if is_reject {
+        "__internal_async_step_reject"
+    } else {
+        "__internal_async_step_resolve"
+    };
+
+    let body = vec![crate::js_promise::stmt_expr(Expr::Call(
+        Box::new(Expr::Var(func_name.to_string(), None, None)),
+        vec![Expr::Var("value".to_string(), None, None)],
+    ))];
+
+    Value::Closure(Gc::new(
+        mc,
+        ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, &env, None),
+    ))
+}
+
+pub fn __internal_async_step_resolve<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    log::trace!("DEBUG: __internal_async_step_resolve called with arg count {}", args.len());
+    if !args.is_empty() {
+        log::trace!("DEBUG: __internal_async_step_resolve arg[0]={:?}", args[0]);
+    }
+    let value = args.first().cloned().unwrap_or(Value::Undefined);
+    continue_async_step(mc, env, Ok(value))
+}
+
+pub fn __internal_async_step_reject<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    log::trace!("DEBUG: __internal_async_step_reject called with arg count {}", args.len());
+    let reason = args.first().cloned().unwrap_or(Value::Undefined);
+    continue_async_step(mc, env, Err(reason))
+}
+
+fn continue_async_step<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    result: Result<Value<'gc>, Value<'gc>>,
+) -> Result<Value<'gc>, JSError> {
+    let generator_val = obj_get_key_value(env, &"__async_generator".into())?.unwrap().borrow().clone();
+    let resolve_val = obj_get_key_value(env, &"__async_resolve".into())?.unwrap().borrow().clone();
+    let reject_val = obj_get_key_value(env, &"__async_reject".into())?.unwrap().borrow().clone();
+
+    if let Value::Generator(gen_ref) = generator_val {
+        let global_env = env.borrow().prototype.unwrap();
+        step(mc, gen_ref, resolve_val, reject_val, &global_env, result)?;
+    }
+
+    Ok(Value::Undefined)
+}

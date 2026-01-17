@@ -2117,7 +2117,54 @@ pub fn serialize_array_for_eval<'gc>(mc: &MutationContext<'gc>, object: &JSObjec
                     if is_array(mc, o) {
                         parts.push(serialize_array_for_eval(mc, o)?);
                     } else {
-                        parts.push("[object Object]".to_string());
+                        // Serialize nested object properties similarly to top-level object serialization
+                        let mut seen_keys = std::collections::HashSet::new();
+                        let mut props: Vec<(String, String)> = Vec::new();
+                        let mut cur_obj_opt: Option<crate::core::JSObjectDataPtr<'_>> = Some(*o);
+                        while let Some(cur_obj) = cur_obj_opt {
+                            for key in cur_obj.borrow().properties.keys() {
+                                // Skip non-enumerable and internal properties
+                                if !cur_obj.borrow().is_enumerable(key)
+                                    || matches!(key, crate::core::PropertyKey::String(s) if s == "__proto__")
+                                {
+                                    continue;
+                                }
+                                if seen_keys.contains(key) {
+                                    continue;
+                                }
+                                seen_keys.insert(key.clone());
+                                if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(&cur_obj, key) {
+                                    let val = val_rc.borrow().clone();
+                                    let val_str = match val {
+                                        Value::String(s) => format!("\"{}\"", crate::unicode::utf16_to_utf8(&s)),
+                                        Value::Number(n) => n.to_string(),
+                                        Value::Boolean(b) => b.to_string(),
+                                        Value::BigInt(b) => b.to_string(),
+                                        Value::Undefined => "undefined".to_string(),
+                                        Value::Null => "null".to_string(),
+                                        Value::Object(o2) => {
+                                            if is_array(mc, &o2) {
+                                                serialize_array_for_eval(mc, &o2)?
+                                            } else {
+                                                "[object Object]".to_string()
+                                            }
+                                        }
+                                        _ => "[object Object]".to_string(),
+                                    };
+                                    props.push((key.to_string(), val_str));
+                                }
+                            }
+                            cur_obj_opt = cur_obj.borrow().prototype;
+                        }
+                        if props.is_empty() {
+                            parts.push("{}".to_string());
+                        } else {
+                            let mut pairs: Vec<String> = Vec::new();
+                            for (k, v) in props.iter() {
+                                pairs.push(format!("\"{}\":{}", k, v));
+                            }
+                            parts.push(format!("{{{}}}", pairs.join(",")));
+                        }
                     }
                 }
                 _ => parts.push("[object Object]".to_string()),

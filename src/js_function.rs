@@ -220,6 +220,43 @@ pub fn handle_global_function<'gc>(
         // "__internal_promise_race_resolve" => return internal_promise_race_resolve(mc, args, env),
         // "__internal_promise_all_resolve" => return internal_promise_all_resolve(mc, args, env),
         // "__internal_promise_all_reject" => return internal_promise_all_reject(mc, args, env),
+        "Promise.resolve" => return crate::js_promise::handle_promise_static_method_val(mc, "resolve", args, env),
+        "Promise.reject" => return crate::js_promise::handle_promise_static_method_val(mc, "reject", args, env),
+        "Promise.all" => return crate::js_promise::handle_promise_static_method_val(mc, "all", args, env),
+        "Promise.race" => return crate::js_promise::handle_promise_static_method_val(mc, "race", args, env),
+        "Promise.any" => return crate::js_promise::handle_promise_static_method_val(mc, "any", args, env),
+        "Promise.allSettled" => return crate::js_promise::handle_promise_static_method_val(mc, "allSettled", args, env),
+
+        "__internal_promise_resolve_captured" => return crate::js_promise::__internal_promise_resolve_captured(mc, args, env),
+        "__internal_promise_reject_captured" => return crate::js_promise::__internal_promise_reject_captured(mc, args, env),
+
+        "__internal_promise_finally_resolve" => return crate::js_promise::__internal_promise_finally_resolve(mc, args, env),
+        "__internal_promise_finally_reject" => return crate::js_promise::__internal_promise_finally_reject(mc, args, env),
+
+        "__internal_async_step_resolve" => return crate::js_async::__internal_async_step_resolve(mc, args, env),
+        "__internal_async_step_reject" => return crate::js_async::__internal_async_step_reject(mc, args, env),
+
+        "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
+        "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
+
+        "Promise.prototype.then" | "Promise.prototype.catch" | "Promise.prototype.finally" => {
+            if let Some(this_rc) = crate::core::env_get(env, "this") {
+                let this_val = this_rc.borrow().clone();
+                if let Value::Object(obj) = this_val {
+                    let method = if func_name == "Promise.prototype.then" {
+                        "then"
+                    } else if func_name == "Promise.prototype.catch" {
+                        "catch"
+                    } else {
+                        "finally"
+                    };
+                    return crate::js_promise::handle_promise_prototype_method(mc, &obj, method, args, env);
+                }
+            }
+            return Err(crate::raise_type_error!("Promise prototype method called without object this"));
+        }
+
+        /*
         "Promise.prototype.then" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -250,6 +287,7 @@ pub fn handle_global_function<'gc>(
             }
             return Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver"));
         }
+        // */
         // "setTimeout" => return crate::js_promise::handle_set_timeout(mc, args, env),
         // "clearTimeout" => return crate::js_promise::handle_clear_timeout(mc, args, env),
         // "setInterval" => return crate::js_promise::handle_set_interval(mc, args, env),
@@ -960,7 +998,7 @@ fn function_constructor<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
     if let Some(Statement { kind, .. }) = stmts.first() {
-        if let StatementKind::FunctionDeclaration(_n, params, body, _i) = &**kind {
+        if let StatementKind::FunctionDeclaration(_n, params, body, _i, _a) = &**kind {
             // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
             Ok(Value::Closure(Gc::new(mc, ClosureData::new(params, body, env, None))))
         } else {
@@ -1222,37 +1260,31 @@ fn decode_uri<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
 fn internal_resolve_promise<'gc>(
     _mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Internal function to resolve a promise - requires 2 args: (promise, value)
     validate_internal_args(args, 2)?;
     log::trace!("__internal_resolve_promise called with value: {:?}", args[1]);
 
     match &args[0] {
-        Value::Promise(_promise) => {
-            // crate::js_promise::resolve_promise(mc, promise, args[1].clone());
-            // Ok(Value::Undefined)
-            todo!()
+        Value::Promise(promise) => {
+            crate::js_promise::resolve_promise(_mc, promise, args[1].clone(), env);
+            Ok(Value::Undefined)
         }
         _ => Err(raise_type_error!("First argument must be a promise")),
     }
 }
 
 #[allow(dead_code)]
-fn internal_reject_promise<'gc>(
-    _mc: &MutationContext<'gc>,
-    args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+fn internal_reject_promise<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // Internal function to reject a promise - requires 2 args: (promise, reason)
     validate_internal_args(args, 2)?;
     log::trace!("__internal_reject_promise called with reason: {:?}", args[1]);
 
     match &args[0] {
-        Value::Promise(_promise) => {
-            // crate::js_promise::reject_promise(mc, promise, args[1].clone());
-            // Ok(Value::Undefined)
-            todo!()
+        Value::Promise(promise) => {
+            crate::js_promise::reject_promise(mc, promise, args[1].clone(), env);
+            Ok(Value::Undefined)
         }
         _ => Err(raise_type_error!("First argument must be a promise")),
     }

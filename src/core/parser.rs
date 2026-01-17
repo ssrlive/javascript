@@ -62,6 +62,21 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
         Token::While => parse_while_statement(t, index),
         Token::Do => parse_do_while_statement(t, index),
         Token::Switch => parse_switch_statement(t, index),
+        Token::Async => {
+            if *index + 1 < t.len() && matches!(t[*index + 1].token, Token::Function | Token::FunctionStar) {
+                parse_function_declaration(t, index)
+            } else {
+                let expr = parse_expression(t, index)?;
+                if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                    *index += 1;
+                }
+                Ok(Statement {
+                    kind: Box::new(StatementKind::Expr(expr)),
+                    line,
+                    column,
+                })
+            }
+        }
         _ => {
             if let Token::Identifier(name) = &start_token.token
                 && *index + 1 < t.len()
@@ -373,7 +388,16 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
 
 fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
-    let is_generator = matches!(t[start].token, Token::FunctionStar);
+    let mut is_async = false;
+    if matches!(t[*index].token, Token::Async) {
+        is_async = true;
+        *index += 1;
+    }
+
+    let is_generator = matches!(t[*index].token, Token::FunctionStar);
+    if !is_generator && !matches!(t[*index].token, Token::Function) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
     *index += 1; // consume function or function*
     let name = if let Token::Identifier(name) = &t[*index].token {
         name.clone()
@@ -397,7 +421,7 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
     let body = parse_statement_block(t, index)?;
 
     Ok(Statement {
-        kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator)),
+        kind: Box::new(StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async)),
         line: t[start].line,
         column: t[start].column,
     })

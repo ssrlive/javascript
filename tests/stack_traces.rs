@@ -41,7 +41,6 @@ fn throw_stack_includes_decl_site() {
 }
 
 #[test]
-#[ignore = "async stack traces not yet implemented"]
 fn async_unhandled_rejection_points_to_throw_site() {
     // A Promise chain where a callback throws should surface as an unhandled
     // rejection and the reported error should point to the actual throw site.

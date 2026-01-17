@@ -10,8 +10,8 @@ use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
         BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, ImportSpecifier, JSObjectDataPtr, ObjectDestructuringElement,
-        Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, is_error, new_js_object_data,
-        obj_get_key_value, obj_set_key_value, value_to_string,
+        PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, is_error,
+        new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -834,7 +834,7 @@ fn hoist_var_declarations<'gc>(
 fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
     // 1. Hoist FunctionDeclarations (only top-level in this list of statements)
     for stmt in statements {
-        if let StatementKind::FunctionDeclaration(name, params, body, is_generator) = &*stmt.kind {
+        if let StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) = &*stmt.kind {
             let mut body_clone = body.clone();
             if *is_generator {
                 // Create a generator function object (hoisted)
@@ -871,8 +871,32 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
                 }
 
-                obj_set_key_value(mc, &proto_obj, &"constructor".into(), Value::Object(func_obj))?;
                 obj_set_key_value(mc, &func_obj, &"prototype".into(), Value::Object(proto_obj))?;
+                env_set(mc, env, name, Value::Object(func_obj))?;
+            } else if *is_async {
+                let func_obj = crate::core::new_js_object_data(mc);
+
+                if let Some(func_ctor_val) = env_get(env, "Function")
+                    && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                    && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                    && let Value::Object(proto) = &*proto_val.borrow()
+                {
+                    func_obj.borrow_mut(mc).prototype = Some(*proto);
+                }
+
+                let closure_data = ClosureData {
+                    params: params.clone(),
+                    body: body.clone(),
+                    env: *env,
+                    home_object: GcCell::new(None),
+                    captured_envs: Vec::new(),
+                    bound_this: None,
+                    is_arrow: false,
+                };
+                let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
+
+                obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+                obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(name)))?;
                 env_set(mc, env, name, Value::Object(func_obj))?;
             } else {
                 let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
@@ -1026,13 +1050,21 @@ fn eval_res<'gc>(
     own_labels: &[String],
 ) -> Result<Option<ControlFlow<'gc>>, EvalError<'gc>> {
     match &*stmt.kind {
-        StatementKind::Expr(expr) => match evaluate_expr(mc, env, expr) {
-            Ok(val) => {
-                *last_value = val;
-                Ok(None)
+        StatementKind::Expr(expr) => {
+            log::trace!(
+                "DEBUG: executing statement Expr: {:?} (line={}, col={})",
+                expr,
+                stmt.line,
+                stmt.column
+            );
+            match evaluate_expr(mc, env, expr) {
+                Ok(val) => {
+                    *last_value = val;
+                    Ok(None)
+                }
+                Err(e) => Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
             }
-            Err(e) => Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
-        },
+        }
         StatementKind::Let(decls) => {
             let mut last_init = Value::Undefined;
             for (name, expr_opt) in decls {
@@ -1188,7 +1220,7 @@ fn eval_res<'gc>(
                             }
                         }
                     }
-                    StatementKind::FunctionDeclaration(name, _, _, _) => {
+                    StatementKind::FunctionDeclaration(name, ..) => {
                         if let Some(cell) = env_get(env, name) {
                             let val = cell.borrow().clone();
                             export_value(mc, env, name, val)?;
@@ -1234,7 +1266,7 @@ fn eval_res<'gc>(
             };
             Ok(Some(ControlFlow::Return(val)))
         }
-        StatementKind::FunctionDeclaration(_name, _params, _body, _) => {
+        StatementKind::FunctionDeclaration(..) => {
             // Function declarations are hoisted, so they are already defined.
             Ok(None)
         }
@@ -4059,7 +4091,8 @@ pub fn evaluate_call_dispatch<'gc>(
                     Err(EvalError::Js(raise_eval_error!(format!("Unknown Function method: {}", name))))
                 }
             } else {
-                Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, env).map_err(EvalError::Js)?)
+                let call_env = crate::js_class::prepare_call_env_with_this(mc, Some(env), this_val.clone(), None, &[], None, Some(env))?;
+                Ok(crate::js_function::handle_global_function(mc, &name, &eval_args, &call_env).map_err(EvalError::Js)?)
             }
         }
         Value::Object(obj) => {
@@ -4080,6 +4113,12 @@ pub fn evaluate_call_dispatch<'gc>(
                                 }
                                 Err(e)
                             }
+                        }
+                    }
+                    Value::AsyncClosure(cl) => {
+                        match crate::js_async::handle_async_closure_call(mc, cl, this_val.clone(), &eval_args, env, Some(obj)) {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(EvalError::Js(e)),
                         }
                     }
                     Value::GeneratorFunction(_, cl) => match crate::js_generator::handle_generator_function_call(mc, cl, &eval_args) {
@@ -4347,7 +4386,9 @@ fn evaluate_expr_call<'gc>(
                 return Err(EvalError::Js(raise_type_error!("Spread only implemented for Objects")));
             }
         } else {
-            eval_args.push(evaluate_expr(mc, env, arg_expr)?);
+            let val = evaluate_expr(mc, env, arg_expr)?;
+            log::trace!("DEBUG: evaluated arg_expr {:?} -> {:?}", arg_expr, val);
+            eval_args.push(val);
         }
     }
 
@@ -4360,6 +4401,14 @@ fn evaluate_expr_call<'gc>(
             return Err(EvalError::Js(raise_eval_error!("Not a function")));
         }
     }
+
+    // Debug: log callee & evaluated args for every call to trace argument flow
+    log::trace!(
+        "DEBUG: evaluate_expr_call func_expr={:?} eval_args={:?} this_val={:?}",
+        func_expr,
+        eval_args,
+        this_val
+    );
 
     // Debug: log type of callable (removed temporary prints)
     evaluate_call_dispatch(mc, env, func_val, this_val, eval_args)
@@ -4829,7 +4878,10 @@ fn is_truthy(val: &Value) -> bool {
 
 pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, expr: &Expr) -> Result<Value<'gc>, EvalError<'gc>> {
     match expr {
-        Expr::Number(n) => Ok(Value::Number(*n)),
+        Expr::Number(n) => {
+            log::trace!("DEBUG: evaluate_expr Number -> {n}");
+            Ok(Value::Number(*n))
+        }
         Expr::BigInt(chars) => {
             let s = utf16_to_utf8(chars);
             // Assuming the parser gives us a valid integer string.
@@ -4940,6 +4992,37 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             obj_set_key_value(mc, &proto_obj, &"constructor".into(), Value::Object(func_obj))?;
             // Set 'prototype' on function
             obj_set_key_value(mc, &func_obj, &"prototype".into(), Value::Object(proto_obj))?;
+
+            Ok(Value::Object(func_obj))
+        }
+        Expr::AsyncFunction(name, params, body) => {
+            // Async functions are represented as objects with an AsyncClosure stored
+            // under the hidden '__closure__' property. They inherit from Function.prototype.
+            let func_obj = new_js_object_data(mc);
+
+            // Set __proto__ to Function.prototype
+            if let Some(func_ctor_val) = env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
+            let closure_data = ClosureData {
+                params: params.to_vec(),
+                body: body.clone(),
+                env: *env,
+                home_object: GcCell::new(None),
+                captured_envs: Vec::new(),
+                bound_this: None,
+                is_arrow: false,
+            };
+            let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
+            obj_set_key_value(mc, &func_obj, &"__closure__".into(), closure_val)?;
+            if let Some(n) = name {
+                obj_set_key_value(mc, &func_obj, &"name".into(), Value::String(utf8_to_utf16(n)))?;
+            }
 
             Ok(Value::Object(func_obj))
         }
@@ -5560,6 +5643,71 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let res = crate::core::evaluate_call_dispatch(mc, env, func_val, Some(Value::Undefined), call_args)?;
             Ok(res)
         }
+        Expr::Await(expr) => {
+            log::trace!("DEBUG: Evaluating Await");
+            // Evaluate the inner expression and normalize to a Promise using Promise.resolve
+            let value = evaluate_expr(mc, env, expr)?;
+
+            // Obtain Promise.resolve from the current environment
+            let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
+                if let Ok(Some(resolve_method)) = crate::core::obj_get_key_value(
+                    &match ctor.borrow().clone() {
+                        Value::Object(o) => o,
+                        _ => return Err(EvalError::Js(crate::raise_eval_error!("Promise not object"))),
+                    },
+                    &"resolve".into(),
+                ) {
+                    resolve_method.borrow().clone()
+                } else {
+                    return Err(EvalError::Js(crate::raise_eval_error!("Promise.resolve missing")));
+                }
+            } else {
+                return Err(EvalError::Js(crate::raise_eval_error!("Promise not found")));
+            };
+
+            // Call Promise.resolve(value)
+            let p_val = crate::js_promise::call_function(mc, &promise_resolve, std::slice::from_ref(&value), env)?;
+
+            // If we got a real Promise object, wait until it settles by running the event loop
+            if let Value::Object(p_obj) = &p_val
+                && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(p_obj)
+            {
+                use crate::js_promise::{PollResult, run_event_loop};
+
+                loop {
+                    // Check current state
+                    let state = promise_ref.borrow().state.clone();
+                    match state {
+                        PromiseState::Pending => {
+                            match run_event_loop(mc)? {
+                                PollResult::Executed => continue,
+                                // If event loop reports a timed wait, sleep briefly and then
+                                // continue polling so we wait for the promise to settle.
+                                PollResult::Wait(d) => {
+                                    std::thread::sleep(d);
+                                    continue;
+                                }
+                                // No tasks currently queued. Yield the thread briefly
+                                // and continue polling instead of returning early. This
+                                // ensures `await` blocks until the promise actually
+                                // settles (matching Node.js behavior) rather than
+                                // observing a still-pending promise when the loop is
+                                // momentarily idle.
+                                PollResult::Empty => {
+                                    std::thread::yield_now();
+                                    continue;
+                                }
+                            }
+                        }
+                        PromiseState::Fulfilled(v) => return Ok(v.clone()),
+                        PromiseState::Rejected(r) => return Err(EvalError::Throw(r.clone(), None, None)),
+                    }
+                }
+            }
+
+            // Not a promise object; return the resolved value
+            Ok(p_val)
+        }
         Expr::Yield(_) | Expr::YieldStar(_) => Err(EvalError::Js(raise_eval_error!("`yield` is only valid inside generator functions"))),
         _ => todo!("{expr:?}"),
     }
@@ -5764,7 +5912,7 @@ fn set_property_with_accessors<'gc>(
     }
 }
 
-fn call_native_function<'gc>(
+pub fn call_native_function<'gc>(
     mc: &MutationContext<'gc>,
     name: &str,
     this_val: Option<Value<'gc>>,
@@ -6253,6 +6401,14 @@ pub fn call_closure<'gc>(
         }
     }
     let _depth_guard = DepthGuard;
+
+    // Debug: if this closure looks like a promise resolve function (param named "value"), log the incoming args
+    if !cl.params.is_empty()
+        && let DestructuringElement::Variable(name, _) = &cl.params[0]
+        && name == "value"
+    {
+        log::trace!("DEBUG: call_closure candidate 'resolve' called with args={:?}", args);
+    }
 
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(cl.env);
@@ -6829,6 +6985,8 @@ fn evaluate_expr_new<'gc>(
                             obj_set_key_value(mc, err_obj, &"name".into(), Value::String(name.clone()))?;
                         }
                         return Ok(err_val);
+                    } else if name_str == "Promise" {
+                        return crate::js_promise::handle_promise_constructor_val(mc, &eval_args, env).map_err(EvalError::Js);
                     } else if name == &crate::unicode::utf8_to_utf16("String") {
                         let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
                             Value::String(s) => s,

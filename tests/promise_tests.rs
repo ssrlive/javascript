@@ -12,7 +12,6 @@ mod promise_tests {
     use super::*;
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_then_basic() {
         let code = r#"
             let result = null;
@@ -29,7 +28,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_chaining() {
         let code = r#"
             let finalResult = null;
@@ -50,7 +48,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_all_resolved() {
         let code = r#"
             let result = null;
@@ -73,7 +70,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_race_resolved() {
         let code = r#"
             let result = null;
@@ -93,7 +89,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_async_execution_order() {
         // Test that Promise then callbacks execute asynchronously after synchronous code
         let code = r#"
@@ -113,7 +108,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_finally() {
         let code = r#"new Promise(function(resolve, reject) { resolve(42); }).finally(function() { console.log('finally executed'); })"#;
         let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
@@ -121,7 +115,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_allsettled_mixed() {
         let code = r#"
             let p1 = new Promise(function(resolve, reject) {
@@ -146,7 +139,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_constructor_direct_functionality() {
         // Test that the direct constructor path works by creating a promise that resolves
         let code = r#"
@@ -163,7 +155,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_then_direct_functionality() {
         // Test that the direct then handler works
         let code = r#"
@@ -181,7 +172,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_catch_direct_functionality() {
         // Test that the direct catch handler works
         let code = r#"
@@ -199,7 +189,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_finally_direct_functionality() {
         // Test that the direct finally handler works
         let code = r#"
@@ -216,7 +205,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_resolve_reject_functions_direct() {
         // Test that the direct resolve/reject functions work
         let code = r#"
@@ -242,7 +230,6 @@ mod promise_tests {
     }
 
     #[test]
-    #[ignore = "not implemented yet"]
     fn test_promise_constructor_with_arrow_function() {
         // Test that arrow functions work in Promise constructor
         let code = r#"

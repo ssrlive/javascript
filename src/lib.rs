@@ -4,6 +4,7 @@ pub(crate) mod core;
 #[macro_use]
 pub(crate) mod error;
 pub(crate) mod js_array;
+pub(crate) mod js_async;
 // pub(crate) mod js_assert;
 pub(crate) mod js_bigint;
 pub(crate) mod js_boolean;
@@ -20,7 +21,7 @@ pub(crate) mod js_number;
 pub(crate) mod js_object;
 #[cfg(feature = "os")]
 pub(crate) mod js_os;
-// pub(crate) mod js_promise;
+pub(crate) mod js_promise;
 pub(crate) mod js_proxy;
 pub(crate) mod js_reflect;
 pub(crate) mod js_regexp;

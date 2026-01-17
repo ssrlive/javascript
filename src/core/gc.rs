@@ -113,7 +113,7 @@ pub fn trace_stmt<'gc, T: GcTrace<'gc>>(context: &mut T, stmt: &Statement) {
                 }
             }
         }
-        StatementKind::FunctionDeclaration(_, _, body, _) => {
+        StatementKind::FunctionDeclaration(_, _, body, _, _) => {
             for s in body {
                 trace_stmt(context, s);
             }

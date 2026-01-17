@@ -1,9 +1,10 @@
 #![allow(warnings)]
 
 use crate::core::{
-    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Value, new_js_object_data, obj_get_key_value,
+    obj_set_key_value,
 };
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, GcPtr, MutationContext};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array};
 // use crate::js_promise;
@@ -50,14 +51,10 @@ fn format_value_pretty<'gc>(
         Value::Undefined => Ok("undefined".to_string()),
         Value::Null => Ok("null".to_string()),
         Value::Object(obj) => {
-            // If this object is a Promise wrapper (stores inner promise under "__promise"),
-            // print it compactly like Node: `Promise { <pending> }` and avoid listing internal helpers.
-            if let Ok(Some(_inner_rc)) = obj_get_key_value(obj, &"__promise".into()) {
-                // if let Value::Promise(p_rc) = &*inner_rc.borrow() {
-                //     return format_promise(mc, p_rc, env, depth, seen);
-                // }
-                todo!("Promise wrapper formatting not implemented");
+            if let Some(promise) = crate::js_promise::get_promise_from_js_object(obj) {
+                return format_promise(mc, &promise, _env, _depth, seen);
             }
+
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
             if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
                 if let Value::String(s) = &*stack_rc.borrow() {
@@ -235,7 +232,7 @@ fn format_value_pretty<'gc>(
             s.push(']');
             Ok(s)
         }
-        // Value::Promise(p_rc) => format_promise(p_rc, env, _depth, seen),
+        Value::Promise(p_rc) => format_promise(mc, p_rc, _env, _depth, seen),
         Value::Symbol(s) => Ok(format!("Symbol({})", s.description.as_deref().unwrap_or(""))),
         // Value::Map(_) => Ok("[object Map]".to_string()),
         // Value::Set(_) => Ok("[object Set]".to_string()),
@@ -253,27 +250,27 @@ fn format_value_pretty<'gc>(
     }
 }
 
-// Helper to format a Promise (or an Rc<RefCell<JSPromise>>) in Node-like style.
-// fn format_promise<'gc>(
-//     mc: &MutationContext<'gc>,
-//     p_rc: &Rc<RefCell<crate::js_promise::JSPromise<'gc>>>,
-//     env: &JSObjectDataPtr<'gc>,
-//     depth: usize,
-//     seen: &mut HashSet<*const RefCell<crate::core::JSObjectData>>,
-// ) -> Result<String, JSError> {
-//     let p = p_rc.borrow();
-//     match &p.state {
-//         crate::js_promise::PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
-//         crate::js_promise::PromiseState::Fulfilled(val) => {
-//             let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
-//             Ok(format!("Promise {{ {} }}", inner))
-//         }
-//         crate::js_promise::PromiseState::Rejected(val) => {
-//             let inner = format_value_pretty(mc, val, env, depth + 1, seen, false)?;
-//             Ok(format!("Promise {{ <rejected> {} }}", inner))
-//         }
-//     }
-// }
+// Helper to format a Promise (or an GcPtr<RefCell<JSPromise>>) in Node-like style.
+fn format_promise<'gc>(
+    mc: &MutationContext<'gc>,
+    p_rc: &GcPtr<'gc, JSPromise<'gc>>,
+    _env: &JSObjectDataPtr<'gc>,
+    depth: usize,
+    seen: &mut HashSet<*const GcCell<JSObjectData<'gc>>>,
+) -> Result<String, JSError> {
+    let p = p_rc.borrow();
+    match &p.state {
+        PromiseState::Pending => Ok("Promise { <pending> }".to_string()),
+        PromiseState::Fulfilled(val) => {
+            let inner = format_value_pretty(mc, val, _env, depth + 1, seen, false)?;
+            Ok(format!("Promise {{ {} }}", inner))
+        }
+        PromiseState::Rejected(val) => {
+            let inner = format_value_pretty(mc, val, _env, depth + 1, seen, false)?;
+            Ok(format!("Promise {{ <rejected> {} }}", inner))
+        }
+    }
+}
 
 // pub fn handle_console_method<'gc>(
 //     mc: &MutationContext<'gc>, // added mc

@@ -5,7 +5,7 @@ use crate::core::{
     ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data,
 };
 use crate::core::{Gc, GcCell, MutationContext};
-use crate::core::{obj_get_key_value, obj_set_key_value, value_to_string};
+use crate::core::{obj_set_key_value, object_get_key_value, value_to_string};
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
 // use crate::core::error::{create_js_error, raise_type_error};
@@ -16,11 +16,11 @@ use crate::{error::JSError, unicode::utf8_to_utf16};
 pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> {
     // Check if the object's prototype has a __class_def__ property
     // This means the object was created with 'new ClassName()'
-    if let Some(proto_val) = obj_get_key_value(obj, &"__proto__".into())?
+    if let Some(proto_val) = object_get_key_value(obj, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Check if the prototype object has __class_def__
-        if let Some(class_def_val) = obj_get_key_value(proto_obj, &"__class_def__".into())?
+        if let Some(class_def_val) = object_get_key_value(proto_obj, "__class_def__")
             && let Value::ClassDefinition(_) = *class_def_val.borrow()
         {
             return Ok(true);
@@ -31,7 +31,7 @@ pub(crate) fn is_class_instance(obj: &JSObjectDataPtr) -> Result<bool, JSError> 
 
 #[allow(dead_code)]
 pub(crate) fn get_class_proto_obj<'gc>(class_obj: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    if let Some(proto_val) = obj_get_key_value(class_obj, &"__proto__".into())?
+    if let Some(proto_val) = object_get_key_value(class_obj, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         return Ok(*proto_obj);
@@ -82,7 +82,7 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     let mut last_seen: JSObjectDataPtr = *env;
     while let Some(env_ptr) = env_opt {
         last_seen = env_ptr;
-        if let Some(this_val_rc) = obj_get_key_value(&env_ptr, &"this".into())? {
+        if let Some(this_val_rc) = object_get_key_value(&env_ptr, "this") {
             return Ok(this_val_rc.borrow().clone());
         }
         env_opt = env_ptr.borrow().prototype;
@@ -123,7 +123,7 @@ pub(crate) fn evaluate_new<'gc>(
             // constructor. This allows script-defined functions stored
             // as objects to be used with `new` while still exposing
             // assignable `prototype` properties.
-            if let Some(cl_val_rc) = obj_get_key_value(&class_obj, &"__closure__".into())? {
+            if let Some(cl_val_rc) = object_get_key_value(&class_obj, "__closure__") {
                 let closure_data = match &*cl_val_rc.borrow() {
                     Value::Closure(data) | Value::AsyncClosure(data) => Some(*data),
                     _ => None,
@@ -147,7 +147,7 @@ pub(crate) fn evaluate_new<'gc>(
                     );
 
                     // Set prototype from the constructor object's `.prototype` if available
-                    if let Some(prototype_val) = obj_get_key_value(&class_obj, &"prototype".into())? {
+                    if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                         if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                             instance.borrow_mut(mc).prototype = Some(*proto_obj);
                             obj_set_key_value(mc, &instance, &"__proto__".into(), Value::Object(*proto_obj))?;
@@ -178,7 +178,7 @@ pub(crate) fn evaluate_new<'gc>(
             }
 
             // Check for generic native constructor via __native_ctor
-            if let Some(native_ctor_rc) = obj_get_key_value(&class_obj, &"__native_ctor".into())? {
+            if let Some(native_ctor_rc) = object_get_key_value(&class_obj, "__native_ctor") {
                 if let Value::String(name) = &*native_ctor_rc.borrow() {
                     let name_desc = utf16_to_utf8(name);
                     if name_desc.as_str() == "Promise" {
@@ -208,14 +208,14 @@ pub(crate) fn evaluate_new<'gc>(
             // }
 
             // Check if this is a class object
-            if let Some(class_def_val) = obj_get_key_value(&class_obj, &"__class_def__".into())?
+            if let Some(class_def_val) = object_get_key_value(&class_obj, "__class_def__")
                 && let Value::ClassDefinition(ref class_def) = *class_def_val.borrow()
             {
                 // Create instance
                 let instance = new_js_object_data(mc);
 
                 // Set prototype (both internal pointer and __proto__ property)
-                if let Some(prototype_val) = obj_get_key_value(&class_obj, &"prototype".into())? {
+                if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
                         obj_set_key_value(mc, &instance, &"__proto__".into(), Value::Object(*proto_obj))?;
@@ -262,7 +262,7 @@ pub(crate) fn evaluate_new<'gc>(
                         }
 
                         // Retrieve 'this' from env, as it might have been changed by super()
-                        if let Some(final_this) = obj_get_key_value(&func_env, &"this".into())? {
+                        if let Some(final_this) = object_get_key_value(&func_env, "this") {
                             if let Value::Object(final_instance) = &*final_this.borrow() {
                                 // Ensure instance.constructor points back to the constructor object
                                 obj_set_key_value(mc, final_instance, &"constructor".into(), Value::Object(class_obj))?;
@@ -280,7 +280,7 @@ pub(crate) fn evaluate_new<'gc>(
                 return Ok(Value::Object(instance));
             }
             // Check if this is the Number constructor object
-            if obj_get_key_value(&class_obj, &"MAX_VALUE".into())?.is_some() {
+            if object_get_key_value(&class_obj, "MAX_VALUE").is_some() {
                 return handle_number_constructor(mc, evaluated_args, env);
             }
             // Check for constructor-like singleton objects created by the evaluator
@@ -323,7 +323,7 @@ pub(crate) fn evaluate_new<'gc>(
                 );
 
                 // Set prototype from the canonical constructor's `.prototype` if available
-                if let Some(prototype_val) = obj_get_key_value(&canonical_ctor, &"prototype".into())? {
+                if let Some(prototype_val) = object_get_key_value(&canonical_ctor, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
                         obj_set_key_value(mc, &instance, &"__proto__".into(), Value::Object(*proto_obj))?;
@@ -360,7 +360,7 @@ pub(crate) fn evaluate_new<'gc>(
                 }
 
                 // Ensure prototype.constructor points back to the canonical constructor
-                if let Some(prototype_val) = obj_get_key_value(&canonical_ctor, &"prototype".into())? {
+                if let Some(prototype_val) = object_get_key_value(&canonical_ctor, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         match crate::core::get_own_property(proto_obj, &"constructor".into()) {
                             Some(existing_rc) => {
@@ -413,13 +413,13 @@ pub(crate) fn evaluate_new<'gc>(
                 // Walk caller chain starting from current env
                 let mut env_opt: Option<crate::core::JSObjectDataPtr> = Some(*env);
                 while let Some(env_ptr) = env_opt {
-                    if let Ok(Some(frame_val_rc)) = obj_get_key_value(&env_ptr, &"__frame".into()) {
+                    if let Some(frame_val_rc) = object_get_key_value(&env_ptr, "__frame") {
                         if let Value::String(s_utf16) = &*frame_val_rc.borrow() {
                             stack_lines.push(format!("    at {}", utf16_to_utf8(s_utf16)));
                         }
                     }
                     // follow caller link if present
-                    if let Ok(Some(caller_rc)) = obj_get_key_value(&env_ptr, &"__caller".into()) {
+                    if let Some(caller_rc) = object_get_key_value(&env_ptr, "__caller") {
                         if let Value::Object(caller_env) = &*caller_rc.borrow() {
                             env_opt = Some(*caller_env);
                             continue;
@@ -497,7 +497,7 @@ pub(crate) fn evaluate_new<'gc>(
                 //             Value::String(s) => Some(crate::unicode::utf16_to_utf8(&s)),
                 //             Value::Object(arr_obj) if is_array(mc, &arr_obj) => {
                 //                 // Try to read index 0 from the array
-                //                 if let Some(first_rc) = obj_get_key_value(&arr_obj, &"0".into())? {
+                //                 if let Some(first_rc) = object_get_key_value(&arr_obj, &"0".into()) {
                 //                     match &*first_rc.borrow() {
                 //                         Value::String(s) => Some(crate::unicode::utf16_to_utf8(s)),
                 //                         _ => None,
@@ -555,7 +555,7 @@ pub(crate) fn create_class_object<'gc>(
         let parent_val = evaluate_expr(mc, env, parent_expr)?;
         if let Value::Object(parent_class_obj) = parent_val {
             // Get the parent class's prototype
-            if let Some(parent_proto_val) = obj_get_key_value(&parent_class_obj, &"prototype".into())?
+            if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype")
                 && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
             {
                 // Set the child class prototype's internal prototype pointer and __proto__ property
@@ -901,7 +901,7 @@ pub(crate) fn call_static_method<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Look for static method directly on the class object
-    if let Some(method_val) = obj_get_key_value(class_obj, &method.into())? {
+    if let Some(method_val) = object_get_key_value(class_obj, method) {
         match &*method_val.borrow() {
             Value::Closure(data) | Value::AsyncClosure(data) => {
                 let params = &data.params;
@@ -941,7 +941,7 @@ pub(crate) fn call_class_method<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let proto_obj = get_class_proto_obj(object)?;
     // Look for method in prototype
-    if let Some(method_val) = obj_get_key_value(&proto_obj, &method.into())? {
+    if let Some(method_val) = object_get_key_value(&proto_obj, method) {
         log::trace!("Found method {method} in prototype");
         match &*method_val.borrow() {
             Value::Closure(data) | Value::AsyncClosure(data) => {
@@ -965,7 +965,7 @@ pub(crate) fn call_class_method<'gc>(
 
                 if let Some(home_ptr) = home_obj_opt {
                     // FIX: bind the home object into the method's call env so `super` resolves correctly
-                    crate::core::obj_set_key_value(mc, &func_env, &"__home_object__".into(), Value::Object(home_ptr))?;
+                    obj_set_key_value(mc, &func_env, &"__home_object__".into(), Value::Object(home_ptr))?;
                 }
 
                 log::trace!("Bound 'this' to instance");
@@ -1006,7 +1006,7 @@ pub(crate) fn call_class_method<'gc>(
 
 pub(crate) fn is_instance_of<'gc>(obj: &JSObjectDataPtr<'gc>, constructor: &JSObjectDataPtr<'gc>) -> Result<bool, JSError> {
     // Get the prototype of the constructor
-    if let Some(constructor_proto) = obj_get_key_value(constructor, &"prototype".into())? {
+    if let Some(constructor_proto) = object_get_key_value(constructor, "prototype") {
         log::trace!("is_instance_of: constructor.prototype raw = {:?}", constructor_proto);
         if let Value::Object(constructor_proto_obj) = &*constructor_proto.borrow() {
             // Walk the internal prototype chain directly
@@ -1034,13 +1034,13 @@ pub(crate) fn is_instance_of<'gc>(obj: &JSObjectDataPtr<'gc>, constructor: &JSOb
 pub(crate) fn evaluate_super<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, JSError> {
     // super refers to the parent class prototype
     // We need to find it from the current class context
-    if let Some(this_val) = obj_get_key_value(env, &"this".into())?
+    if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(instance, &"__proto__".into())?
+        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Get the parent prototype from the current prototype's __proto__
-        if let Some(parent_proto_val) = obj_get_key_value(proto_obj, &"__proto__".into())? {
+        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__") {
             return Ok(parent_proto_val.borrow().clone());
         }
     }
@@ -1053,17 +1053,17 @@ pub(crate) fn evaluate_super_call<'gc>(
     evaluated_args: &[Value<'gc>],
 ) -> Result<Value<'gc>, JSError> {
     // super() calls the parent constructor
-    if let Some(this_val) = obj_get_key_value(env, &"this".into())?
+    if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(instance, &"__proto__".into())?
+        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Get the parent prototype
-        if let Some(parent_proto_val) = obj_get_key_value(proto_obj, &"__proto__".into())?
+        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
             && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
         {
             // Find the parent class constructor
-            if let Some(parent_class_def_val) = obj_get_key_value(parent_proto_obj, &"__class_def__".into())?
+            if let Some(parent_class_def_val) = object_get_key_value(parent_proto_obj, "__class_def__")
                 && let Value::ClassDefinition(ref parent_class_def) = *parent_class_def_val.borrow()
             {
                 // Call parent constructor
@@ -1091,7 +1091,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                 // parent_proto_obj is the prototype of the parent class (e.g. Error.prototype).
                 // We need the constructor itself (e.g. Error).
 
-                let parent_ctor_val = if let Some(ctor) = obj_get_key_value(parent_proto_obj, &"constructor".into())? {
+                let parent_ctor_val = if let Some(ctor) = object_get_key_value(parent_proto_obj, "constructor") {
                     ctor.borrow().clone()
                 } else {
                     Value::Undefined
@@ -1104,7 +1104,7 @@ pub(crate) fn evaluate_super_call<'gc>(
                         // Fix up the prototype chain:
                         // The new instance has Parent.prototype.
                         // We want it to have the original instance's prototype (CurrentClass.prototype).
-                        if let Some(original_proto) = obj_get_key_value(instance, &"__proto__".into())? {
+                        if let Some(original_proto) = object_get_key_value(instance, "__proto__") {
                             obj_set_key_value(mc, &new_instance, &"__proto__".into(), original_proto.borrow().clone())?;
                             if let Value::Object(proto_obj) = &*original_proto.borrow() {
                                 new_instance.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -1133,16 +1133,16 @@ pub(crate) fn evaluate_super_property<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     // super.property accesses parent class properties
     // Use [[HomeObject]] if available
-    if let Some(home_obj_val) = obj_get_key_value(env, &"__home_object__".into())? {
+    if let Some(home_obj_val) = object_get_key_value(env, "__home_object__") {
         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
             // Super is the prototype of HomeObject
             if let Some(super_obj) = home_obj.borrow().prototype {
                 // Look up property on super object
-                if let Some(prop_val) = obj_get_key_value(&super_obj, &prop.into())? {
+                if let Some(prop_val) = object_get_key_value(&super_obj, prop) {
                     // If this is a property descriptor with a getter, call the getter with the current `this` as receiver
                     match &*prop_val.borrow() {
                         Value::Property { getter: Some(getter), .. } => {
-                            if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
+                            if let Some(this_val) = object_get_key_value(env, "this") {
                                 if let Value::Object(receiver) = &*this_val.borrow() {
                                     // Inline the call_accessor logic here so we can call it with `mc`
                                     match &**getter {
@@ -1151,7 +1151,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                             let call_env = crate::core::new_js_object_data(mc);
                                             call_env.borrow_mut(mc).prototype = Some(*captured_env);
                                             call_env.borrow_mut(mc).is_function_scope = true;
-                                            crate::core::obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver))?;
+                                            obj_set_key_value(mc, &call_env, &"this".into(), Value::Object(*receiver))?;
                                             let body_clone = body.clone();
                                             return crate::core::evaluate_statements(mc, &call_env, &body_clone).map_err(|e| match e {
                                                 crate::core::EvalError::Js(e) => e,
@@ -1171,7 +1171,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                             });
                                         }
                                         Value::Object(obj) => {
-                                            if let Some(cl_rc) = obj_get_key_value(obj, &"__closure__".into())? {
+                                            if let Some(cl_rc) = object_get_key_value(obj, "__closure__") {
                                                 if let Value::Closure(cl) = &*cl_rc.borrow() {
                                                     let cl_data = cl;
                                                     let call_env = crate::core::new_js_object_data(mc);
@@ -1202,7 +1202,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                             return Ok(Value::Undefined);
                         }
                         Value::Getter(..) => {
-                            if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
+                            if let Some(this_val) = object_get_key_value(env, "this") {
                                 if let Value::Object(receiver) = &*this_val.borrow() {
                                     // Inline call_accessor for the Getter variant
                                     let call_env = crate::core::new_js_object_data(mc);
@@ -1231,19 +1231,19 @@ pub(crate) fn evaluate_super_property<'gc>(
     }
 
     // Fallback for legacy class implementation (if any)
-    if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
+    if let Some(this_val) = object_get_key_value(env, "this") {
         if let Value::Object(instance) = &*this_val.borrow() {
-            if let Some(proto_val) = obj_get_key_value(instance, &"__proto__".into())? {
+            if let Some(proto_val) = object_get_key_value(instance, "__proto__") {
                 if let Value::Object(proto_obj) = &*proto_val.borrow() {
                     // Get the parent prototype
-                    if let Some(parent_proto_val) = obj_get_key_value(proto_obj, &"__proto__".into())? {
+                    if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__") {
                         if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
                             // Look for property in parent prototype
-                            if let Some(prop_val) = obj_get_key_value(parent_proto_obj, &prop.into())? {
+                            if let Some(prop_val) = object_get_key_value(parent_proto_obj, prop) {
                                 // If this is an accessor or getter, call it
                                 match &*prop_val.borrow() {
                                     Value::Property { getter: Some(getter), .. } => {
-                                        if let Some(this_rc) = obj_get_key_value(env, &"this".into())? {
+                                        if let Some(this_rc) = object_get_key_value(env, "this") {
                                             if let Value::Object(receiver) = &*this_rc.borrow() {
                                                 match &**getter {
                                                     Value::Getter(body, captured_env, _) => {
@@ -1290,7 +1290,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                         return Ok(Value::Undefined);
                                     }
                                     Value::Getter(..) => {
-                                        if let Some(this_rc) = obj_get_key_value(env, &"this".into())? {
+                                        if let Some(this_rc) = object_get_key_value(env, "this") {
                                             if let Value::Object(receiver) = &*this_rc.borrow() {
                                                 let (body, captured_env, _home) = match &*prop_val.borrow() {
                                                     Value::Getter(b, c_env, h) => (b.clone(), *c_env, h.clone()),
@@ -1333,12 +1333,12 @@ pub(crate) fn evaluate_super_method<'gc>(
     log::trace!(
         "DBG evaluate_super_method: method={}, this_present={}, home_object_present={}",
         method,
-        obj_get_key_value(env, &"this".into()).is_ok() && obj_get_key_value(env, &"this".into())?.is_some(),
-        obj_get_key_value(env, &"__home_object__".into()).is_ok() && obj_get_key_value(env, &"__home_object__".into())?.is_some()
+        object_get_key_value(env, "this").is_some() && object_get_key_value(env, "this").is_some(),
+        object_get_key_value(env, "__home_object__").is_some() && object_get_key_value(env, "__home_object__").is_some()
     );
 
     // Use [[HomeObject]] if available
-    if let Some(home_obj_val) = obj_get_key_value(env, &"__home_object__".into())? {
+    if let Some(home_obj_val) = object_get_key_value(env, "__home_object__") {
         if let Value::Object(home_obj) = &*home_obj_val.borrow() {
             // Super is the prototype of HomeObject
             if let Some(super_obj) = home_obj.borrow().prototype {
@@ -1356,7 +1356,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                     Gc::as_ptr(super_obj),
                     method
                 );
-                if let Some(method_val) = obj_get_key_value(&super_obj, &method.into())? {
+                if let Some(method_val) = object_get_key_value(&super_obj, method) {
                     // Reduce verbosity: only log a short method type rather than full Value debug
                     let method_type = match &*method_val.borrow() {
                         Value::Closure(..) => "Closure",
@@ -1367,7 +1367,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                     };
                     log::trace!("evaluate_super_method - found method on super: method={method} type={method_type}");
                     // We need to call this method with the current 'this'
-                    if let Some(this_val) = obj_get_key_value(env, &"this".into())? {
+                    if let Some(this_val) = object_get_key_value(env, "this") {
                         match &*method_val.borrow() {
                             Value::Closure(data) | Value::AsyncClosure(data) => {
                                 let params = &data.params;
@@ -1410,7 +1410,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                 return Err(raise_eval_error!(format!("Method '{}' not found in parent class", method)));
                             }
                             Value::Object(func_obj) => {
-                                if let Some(cl_rc) = obj_get_key_value(func_obj, &"__closure__".into())? {
+                                if let Some(cl_rc) = object_get_key_value(func_obj, "__closure__") {
                                     match &*cl_rc.borrow() {
                                         Value::Closure(data) | Value::AsyncClosure(data) => {
                                             let params = &data.params;
@@ -1451,17 +1451,17 @@ pub(crate) fn evaluate_super_method<'gc>(
     }
 
     // Fallback for legacy class implementation (if any)
-    if let Some(this_val) = obj_get_key_value(env, &"this".into())?
+    if let Some(this_val) = object_get_key_value(env, "this")
         && let Value::Object(instance) = &*this_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(instance, &"__proto__".into())?
+        && let Some(proto_val) = object_get_key_value(instance, "__proto__")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         // Get the parent prototype
-        if let Some(parent_proto_val) = obj_get_key_value(proto_obj, &"__proto__".into())?
+        if let Some(parent_proto_val) = object_get_key_value(proto_obj, "__proto__")
             && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
         {
             // Look for method in parent prototype
-            if let Some(method_val) = obj_get_key_value(parent_proto_obj, &method.into())? {
+            if let Some(method_val) = object_get_key_value(parent_proto_obj, method) {
                 match &*method_val.borrow() {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
                         let params = &data.params;
@@ -1565,9 +1565,9 @@ pub(crate) fn handle_object_constructor<'gc>(
             obj_set_key_value(mc, &obj, &"__value__".into(), Value::Symbol(sd))?;
 
             // Manually set internal prototype to Symbol.prototype
-            if let Some(sym) = crate::core::obj_get_key_value(env, &"Symbol".into())? {
+            if let Some(sym) = object_get_key_value(env, "Symbol") {
                 if let Value::Object(ctor_obj) = &*sym.borrow() {
-                    if let Some(proto) = crate::core::obj_get_key_value(ctor_obj, &"prototype".into())? {
+                    if let Some(proto) = object_get_key_value(ctor_obj, "prototype") {
                         if let Value::Object(proto_obj) = &*proto.borrow() {
                             obj.borrow_mut(mc).prototype = Some(*proto_obj);
                         }
@@ -1668,7 +1668,7 @@ pub(crate) fn boolean_prototype_to_string<'gc>(
     match this_val {
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Some(val) = object_get_key_value(&obj, "__value__") {
                 if let Value::Boolean(b) = *val.borrow() {
                     return Ok(Value::String(utf8_to_utf16(&b.to_string())));
                 }
@@ -1689,7 +1689,7 @@ pub(crate) fn boolean_prototype_value_of<'gc>(
     match this_val {
         Value::Boolean(b) => Ok(Value::Boolean(b)),
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Some(val) = object_get_key_value(&obj, "__value__") {
                 if let Value::Boolean(b) = *val.borrow() {
                     return Ok(Value::Boolean(b));
                 }

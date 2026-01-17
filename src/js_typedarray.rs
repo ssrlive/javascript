@@ -1,5 +1,5 @@
 use crate::core::{Gc, GcCell, MutationContext};
-use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value};
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_set_key_value, object_get_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
@@ -90,7 +90,7 @@ pub fn handle_atomics_method<'gc>(
     }
     let ta_val = args[0].clone();
     let ta_obj = if let Value::Object(object) = ta_val {
-        if let Some(ta_rc) = obj_get_key_value(&object, &"__typedarray".into())? {
+        if let Some(ta_rc) = object_get_key_value(&object, "__typedarray") {
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 *ta
             } else {
@@ -759,9 +759,9 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
 
     // Set prototype
     let mut proto_ptr = None;
-    if let Some(ctor_val) = obj_get_key_value(env, &"SharedArrayBuffer".into())?
+    if let Some(ctor_val) = object_get_key_value(env, "SharedArrayBuffer")
         && let Value::Object(ctor_obj) = &*ctor_val.borrow()
-        && let Some(p_val) = obj_get_key_value(ctor_obj, &"prototype".into())?
+        && let Some(p_val) = object_get_key_value(ctor_obj, "prototype")
         && let Value::Object(p_obj) = &*p_val.borrow()
     {
         proto_ptr = Some(*p_obj);
@@ -792,7 +792,7 @@ pub fn handle_dataview_constructor<'gc>(
     let buffer_val = args[0].clone();
     let buffer = match buffer_val {
         Value::Object(obj) => {
-            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     *ab
                 } else {
@@ -859,7 +859,7 @@ pub fn handle_typedarray_constructor<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get the kind from the constructor
-    let kind_val = obj_get_key_value(constructor_obj, &"__kind".into())?;
+    let kind_val = object_get_key_value(constructor_obj, "__kind");
     let kind = if let Some(kind_val) = kind_val {
         if let Value::Number(kind_num) = *kind_val.borrow() {
             match kind_num as i32 {
@@ -919,7 +919,7 @@ pub fn handle_typedarray_constructor<'gc>(
             }
             Value::Object(obj) => {
                 // Check if it's another TypedArray or ArrayBuffer
-                if let Some(ta_val) = obj_get_key_value(&obj, &"__typedarray".into())? {
+                if let Some(ta_val) = object_get_key_value(&obj, "__typedarray") {
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.length;
@@ -936,7 +936,7 @@ pub fn handle_typedarray_constructor<'gc>(
                     } else {
                         return Err(raise_eval_error!("Invalid TypedArray constructor argument"));
                     }
-                } else if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
+                } else if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
                     if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                         // new TypedArray(buffer)
                         (*ab, 0, (**ab).borrow().data.lock().unwrap().len() / element_size)
@@ -955,7 +955,7 @@ pub fn handle_typedarray_constructor<'gc>(
         let offset_val = args[1].clone();
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let Value::Number(offset_num) = offset_val {
                         let offset = offset_num as usize;
@@ -984,7 +984,7 @@ pub fn handle_typedarray_constructor<'gc>(
         let length_val = args[2].clone();
 
         if let Value::Object(obj) = buffer_val {
-            if let Some(ab_val) = obj_get_key_value(&obj, &"__arraybuffer".into())? {
+            if let Some(ab_val) = object_get_key_value(&obj, "__arraybuffer") {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     if let (Value::Number(offset_num), Value::Number(length_num)) = (offset_val, length_val) {
                         let offset = offset_num as usize;
@@ -1044,7 +1044,7 @@ pub fn handle_dataview_method<'gc>(
     _env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get the DataView from the object
-    let dv_val = obj_get_key_value(object, &"__dataview".into())?;
+    let dv_val = object_get_key_value(object, "__dataview");
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
             *dv
@@ -1750,7 +1750,7 @@ pub fn handle_arraybuffer_accessor<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     match property {
         "byteLength" => {
-            if let Some(ab_val) = obj_get_key_value(object, &"__arraybuffer".into())? {
+            if let Some(ab_val) = object_get_key_value(object, "__arraybuffer") {
                 if let Value::ArrayBuffer(ab) = &*ab_val.borrow() {
                     let len = (**ab).borrow().data.lock().unwrap().len();
                     Ok(Value::Number(len as f64))
@@ -1774,7 +1774,7 @@ pub fn handle_typedarray_accessor<'gc>(
     object: &JSObjectDataPtr<'gc>,
     property: &str,
 ) -> Result<Value<'gc>, JSError> {
-    if let Some(ta_val) = obj_get_key_value(object, &"__typedarray".into())? {
+    if let Some(ta_val) = object_get_key_value(object, "__typedarray") {
         if let Value::TypedArray(ta) = &*ta_val.borrow() {
             match property {
                 "buffer" => Ok(Value::ArrayBuffer(ta.buffer)),

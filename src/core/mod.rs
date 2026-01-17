@@ -201,7 +201,7 @@ where
                                         && prop_name == "push"
                                     {
                                         // Read the variable value directly from the global env
-                                        if let Ok(Some(val_rc)) = obj_get_key_value(&root.global_env, &var_name.into()) {
+                                        if let Some(val_rc) = object_get_key_value(&root.global_env, var_name) {
                                             result = val_rc.borrow().clone();
                                         }
                                     }
@@ -247,7 +247,7 @@ where
                                         && let crate::core::Expr::Var(var_name, ..) = &**boxed_prop
                                         && prop_name == "push"
                                     {
-                                        if let Ok(Some(val_rc)) = obj_get_key_value(&root.global_env, &var_name.into()) {
+                                        if let Some(val_rc) = object_get_key_value(&root.global_env, var_name) {
                                             result = val_rc.borrow().clone();
                                         }
                                     }
@@ -350,7 +350,7 @@ where
                                     }
                                     seen_keys.insert(key.clone());
                                     // Get value for key
-                                    if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(&cur_obj, key) {
+                                    if let Some(val_rc) = object_get_key_value(&cur_obj, key) {
                                         let val = val_rc.borrow().clone();
                                         let val_str = match val {
                                             Value::String(s) => format!("\"{}\"", crate::unicode::utf16_to_utf8(&s)),
@@ -420,9 +420,9 @@ pub fn get_constructor_prototype<'gc>(
     name: &str,
 ) -> Result<Option<JSObjectDataPtr<'gc>>, JSError> {
     // First try to find a constructor object already stored in the environment
-    if let Some(val_rc) = obj_get_key_value(env, &name.into())?
+    if let Some(val_rc) = object_get_key_value(env, name)
         && let Value::Object(ctor_obj) = &*val_rc.borrow()
-        && let Some(proto_val_rc) = obj_get_key_value(ctor_obj, &"prototype".into())?
+        && let Some(proto_val_rc) = object_get_key_value(ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val_rc.borrow()
     {
         return Ok(Some(*proto_obj));
@@ -431,7 +431,7 @@ pub fn get_constructor_prototype<'gc>(
     // If not found, attempt to evaluate the variable to force lazy creation
     match evaluate_expr(mc, env, &Expr::Var(name.to_string(), None, None)) {
         Ok(Value::Object(ctor_obj)) => {
-            if let Some(proto_val_rc) = obj_get_key_value(&ctor_obj, &"prototype".into())?
+            if let Some(proto_val_rc) = object_get_key_value(&ctor_obj, "prototype")
                 && let Value::Object(proto_obj) = &*proto_val_rc.borrow()
             {
                 return Ok(Some(*proto_obj));
@@ -485,15 +485,10 @@ where
     let iterable = args[0].clone();
     match iterable {
         Value::Object(obj) => {
-            let mut i = 0;
-            loop {
-                let key = format!("{i}");
-                if let Some(item_val) = obj_get_key_value(&obj, &key.into())? {
-                    let item = item_val.borrow().clone();
-                    process_item(item)?;
-                } else {
-                    break;
-                }
+            let mut i = 0_usize;
+            while let Some(item_val) = object_get_key_value(&obj, i) {
+                let item = item_val.borrow().clone();
+                process_item(item)?;
                 i += 1;
             }
             Ok(())

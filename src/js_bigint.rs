@@ -1,6 +1,6 @@
 use crate::PropertyKey;
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
+use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
@@ -59,7 +59,7 @@ pub fn handle_bigint_object_method<'gc>(this_val: Value<'gc>, method: &str, args
     let h = match this_val {
         Value::BigInt(b) => b,
         Value::Object(obj) => {
-            if let Some(value_val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Some(value_val) = object_get_key_value(&obj, "__value__") {
                 if let Value::BigInt(h) = &*value_val.borrow() {
                     h.clone()
                 } else {
@@ -224,9 +224,9 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     // Create prototype
     let bigint_proto = new_js_object_data(mc);
     // Set BigInt.prototype's prototype to Object.prototype if available
-    if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*proto_val.borrow()
     {
         bigint_proto.borrow_mut(mc).prototype = Some(*obj_proto);

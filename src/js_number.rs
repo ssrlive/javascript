@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, to_primitive};
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_set_key_value, object_get_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use crate::{PropertyKey, env_set};
@@ -49,9 +49,9 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     obj_set_key_value(mc, &number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -413,7 +413,7 @@ pub fn handle_number_prototype_method<'gc>(this_val: Option<Value<'gc>>, method:
     if let Some(Value::Number(n)) = this_val {
         handle_number_instance_method(&n, method, args)
     } else if let Some(Value::Object(obj)) = this_val {
-        if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+        if let Some(val) = object_get_key_value(&obj, "__value__") {
             if let Value::Number(n) = &*val.borrow() {
                 handle_number_instance_method(n, method, args)
             } else {

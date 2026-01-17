@@ -1,6 +1,6 @@
 use crate::core::MutationContext;
 use crate::core::{
-    JSObjectDataPtr, PropertyKey, Value, new_js_object_data, obj_get_key_value, obj_set_key_value, prepare_function_call_env,
+    JSObjectDataPtr, PropertyKey, Value, new_js_object_data, obj_set_key_value, object_get_key_value, prepare_function_call_env,
 };
 use crate::error::JSError;
 use crate::js_array::{get_array_length, set_array_length};
@@ -116,7 +116,7 @@ pub fn handle_reflect_method<'gc>(
                     if crate::js_array::is_array(mc, &arr_obj) {
                         if let Some(len) = get_array_length(mc, &arr_obj) {
                             for i in 0..len {
-                                if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
+                                if let Some(val_rc) = object_get_key_value(&arr_obj, i) {
                                     arg_values.push(val_rc.borrow().clone());
                                 } else {
                                     arg_values.push(Value::Undefined);
@@ -133,7 +133,7 @@ pub fn handle_reflect_method<'gc>(
 
             // If target is a native constructor object (e.g., String), call its native handler
             if let Value::Object(obj) = &target
-                && let Some(native_rc) = obj_get_key_value(obj, &"__native_ctor".into())?
+                && let Some(native_rc) = object_get_key_value(obj, "__native_ctor")
                 && let Value::String(name_utf16) = &*native_rc.borrow()
             {
                 let name = utf16_to_utf8(name_utf16);
@@ -145,7 +145,7 @@ pub fn handle_reflect_method<'gc>(
                 // Detect async closure (unused here; dispatcher handles it internally)
                 let _is_async = matches!(target, Value::AsyncClosure(_))
                     || (if let Value::Object(obj) = &target {
-                        if let Ok(Some(cl_ptr)) = obj_get_key_value(obj, &"__closure__".into()) {
+                        if let Some(cl_ptr) = object_get_key_value(obj, "__closure__") {
                             matches!(&*cl_ptr.borrow(), Value::AsyncClosure(_))
                         } else {
                             false
@@ -163,7 +163,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Function(func_name) => crate::js_function::handle_global_function(mc, &func_name, &arg_values, env),
                 Value::Object(object) => {
                     // If this object wraps an internal closure (function-object), invoke it
-                    if let Some(cl_rc) = obj_get_key_value(&object, &"__closure__".into())? {
+                    if let Some(cl_rc) = object_get_key_value(&object, "__closure__") {
                         let cl_val = cl_rc.borrow().clone();
                         if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&cl_val) {
                             let func_env = prepare_function_call_env(
@@ -198,7 +198,7 @@ pub fn handle_reflect_method<'gc>(
                     if crate::js_array::is_array(mc, &arr_obj) {
                         if let Some(len) = get_array_length(mc, &arr_obj) {
                             for i in 0..len {
-                                if let Some(val_rc) = obj_get_key_value(&arr_obj, &i.to_string().into())? {
+                                if let Some(val_rc) = object_get_key_value(&arr_obj, i) {
                                     arg_values.push(val_rc.borrow().clone());
                                 } else {
                                     arg_values.push(Value::Undefined);
@@ -228,7 +228,7 @@ pub fn handle_reflect_method<'gc>(
                     // For now, just set the property with the value from attributes
                     // This is a simplified implementation
                     if let Value::Object(attr_obj) = &attributes {
-                        if let Some(value_rc) = obj_get_key_value(attr_obj, &crate::core::PropertyKey::String("value".to_string()))? {
+                        if let Some(value_rc) = object_get_key_value(attr_obj, "value") {
                             let prop_key = match property_key {
                                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                                 Value::Number(n) => PropertyKey::String(n.to_string()),
@@ -282,7 +282,7 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    if let Some(value_rc) = obj_get_key_value(&obj, &prop_key)? {
+                    if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
                         Ok(value_rc.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
@@ -305,7 +305,7 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    if let Some(value_rc) = obj_get_key_value(&obj, &prop_key)? {
+                    if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
                         // Create a descriptor object
                         let descriptor = new_js_object_data(mc);
                         obj_set_key_value(
@@ -369,7 +369,7 @@ pub fn handle_reflect_method<'gc>(
                         Value::Number(n) => PropertyKey::String(n.to_string()),
                         _ => return Err(raise_type_error!("Invalid property key")),
                     };
-                    let has_prop = obj_get_key_value(&obj, &prop_key)?.is_some();
+                    let has_prop = object_get_key_value(&obj, &prop_key).is_some();
                     Ok(Value::Boolean(has_prop))
                 }
                 _ => Err(raise_type_error!("Reflect.has target must be an object")),

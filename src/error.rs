@@ -127,14 +127,14 @@ impl JSError {
                 let mut result = None;
                 if let crate::core::Value::Object(obj) = value {
                     // Try constructor.name
-                    if let Ok(Some(ctor_val_rc)) = crate::core::obj_get_key_value(obj, &"constructor".into())
+                    if let Some(ctor_val_rc) = object_get_key_value(obj, &"constructor".into())
                         && let crate::core::Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                        && let Ok(Some(name_val_rc)) = crate::core::obj_get_key_value(ctor_obj, &"name".into())
+                        && let Some(name_val_rc) = object_get_key_value(ctor_obj, &"name".into())
                         && let crate::core::Value::String(name_utf16) = &*name_val_rc.borrow()
                     {
                         let ctor_name = crate::unicode::utf16_to_utf8(name_utf16);
                         // prefer a message property if present
-                        if let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
+                        if let Some(msg_val_rc) = object_get_key_value(obj, &"message".into())
                             && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
                         {
                             let msg = crate::unicode::utf16_to_utf8(msg_utf16);
@@ -145,7 +145,7 @@ impl JSError {
                     }
                     // Fallback: if object has a message property, use it
                     if result.is_none()
-                        && let Ok(Some(msg_val_rc)) = crate::core::obj_get_key_value(obj, &"message".into())
+                        && let Some(msg_val_rc) = object_get_key_value(obj, &"message".into())
                         && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
                     {
                         let msg = crate::unicode::utf16_to_utf8(msg_utf16);

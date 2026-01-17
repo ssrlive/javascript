@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, has_own_property_value,
     new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{obj_get_key_value, obj_set_key_value};
+use crate::core::{obj_set_key_value, object_get_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -167,7 +167,7 @@ pub fn handle_global_function<'gc>(
                 let revoke_val = revoke_rc.borrow().clone();
                 if let Value::Object(wrapper_obj) = revoke_val {
                     // Get the stored __proxy__ property on the wrapper
-                    if let Ok(Some(proxy_prop)) = crate::core::obj_get_key_value(&wrapper_obj, &"__proxy__".into()) {
+                    if let Some(proxy_prop) = object_get_key_value(&wrapper_obj, "__proxy__") {
                         let proxy_val = proxy_prop.borrow().clone();
                         if let Value::Proxy(p) = proxy_val {
                             // Create a new proxy with revoked=true and same target/handler
@@ -341,7 +341,7 @@ pub fn handle_global_function<'gc>(
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
                     Value::Object(object) => {
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
+                        if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
@@ -463,7 +463,7 @@ pub fn handle_global_function<'gc>(
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
                     Value::Object(object) => {
-                        if let Some(cl_rc) = crate::core::obj_get_key_value(&object, &"__closure__".into())?
+                        if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
@@ -1082,7 +1082,7 @@ fn symbol_prototype_value_of<'gc>(
     match this_val {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())?
+            if let Some(val) = object_get_key_value(&obj, "__value__")
                 && let Value::Symbol(s) = &*val.borrow()
             {
                 return Ok(Value::Symbol(*s));
@@ -1102,7 +1102,7 @@ fn symbol_prototype_to_string<'gc>(
     let sym = match this_val {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Some(val) = object_get_key_value(&obj, "__value__") {
                 if let Value::Symbol(s) = &*val.borrow() {
                     *s
                 } else {
@@ -1421,26 +1421,26 @@ fn internal_promise_all_resolve<'gc>(
     let value = args[1].clone();
     if let Value::Object(state_obj) = args[2].clone() {
         // Store value in results[idx]
-        if let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
+        if let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             obj_set_key_value(mc, results_obj, &idx.to_string().into(), value)?;
         }
         // Increment completed
-        if let Some(completed_val_rc) = obj_get_key_value(&state_obj, &"completed".into())?
+        if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
             obj_set_key_value(mc, &state_obj, &"completed".into(), Value::Number(new_completed))?;
             // Check if all completed
-            if let Some(total_val_rc) = obj_get_key_value(&state_obj, &"total".into())?
+            if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
                 && let Value::Number(total) = &*total_val_rc.borrow()
                 && new_completed == *total
             {
                 // Resolve result_promise with results array
-                if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
+                if let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
                     && let Value::Promise(_result_promise) = &*promise_val_rc.borrow()
-                    && let Some(results_val_rc) = obj_get_key_value(&state_obj, &"results".into())?
+                    && let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
                     && let Value::Object(_results_obj) = &*results_val_rc.borrow()
                 {
                     // crate::js_promise::resolve_promise(mc, result_promise, Value::Object(results_obj.clone()));
@@ -1463,7 +1463,7 @@ fn internal_promise_all_reject<'gc>(
     let _reason = args[0].clone();
     if let Value::Object(state_obj) = args[1].clone() {
         // Reject result_promise
-        if let Some(promise_val_rc) = obj_get_key_value(&state_obj, &"result_promise".into())?
+        if let Some(promise_val_rc) = object_get_key_value(&state_obj, "result_promise")
             && let Value::Promise(_result_promise) = &*promise_val_rc.borrow()
         {
             // crate::js_promise::reject_promise(mc, result_promise, reason);

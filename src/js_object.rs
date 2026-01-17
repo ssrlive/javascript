@@ -1,5 +1,5 @@
 use crate::core::{
-    ClosureData, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    ClosureData, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, obj_set_key_value, object_get_key_value,
     prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext};
@@ -86,21 +86,21 @@ fn define_property_internal<'gc>(
     desc_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
     // Extract descriptor fields
-    let value_rc_opt = obj_get_key_value(desc_obj, &"value".into())?;
+    let value_rc_opt = object_get_key_value(desc_obj, "value");
 
     // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
-    if let Some(existing_rc) = obj_get_key_value(target_obj, &prop_key)?
+    if let Some(existing_rc) = object_get_key_value(target_obj, &prop_key)
         && !target_obj.borrow().is_configurable(&prop_key)
     {
         // If descriptor explicitly sets configurable true -> throw
-        if let Some(cfg_rc) = obj_get_key_value(desc_obj, &"configurable".into())?
+        if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
             && let Value::Boolean(true) = &*cfg_rc.borrow()
         {
             return Err(raise_type_error!("Cannot make non-configurable property configurable"));
         }
 
         // If descriptor explicitly sets enumerable and it's different -> throw
-        if let Some(enum_rc) = obj_get_key_value(desc_obj, &"enumerable".into())?
+        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
             && let Value::Boolean(new_enum) = &*enum_rc.borrow()
         {
             let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
@@ -119,12 +119,12 @@ fn define_property_internal<'gc>(
         // If existing is data property
         if !existing_is_accessor {
             // Disallow converting to accessor
-            if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+            if object_get_key_value(desc_obj, "get").is_some() || object_get_key_value(desc_obj, "set").is_some() {
                 return Err(raise_type_error!("Cannot convert non-configurable data property to an accessor"));
             }
 
             // If writable is being set from false -> true, disallow
-            if let Some(wrc) = obj_get_key_value(desc_obj, &"writable".into())?
+            if let Some(wrc) = object_get_key_value(desc_obj, "writable")
                 && let Value::Boolean(new_writable) = &*wrc.borrow()
                 && *new_writable
                 && !target_obj.borrow().is_writable(&prop_key)
@@ -148,12 +148,12 @@ fn define_property_internal<'gc>(
         } else {
             // existing is accessor
             // Disallow converting to data property
-            if value_rc_opt.is_some() || obj_get_key_value(desc_obj, &"writable".into())?.is_some() {
+            if value_rc_opt.is_some() || object_get_key_value(desc_obj, "writable").is_some() {
                 return Err(raise_type_error!("Cannot convert non-configurable accessor to a data property"));
             }
 
             // Disallow changing getter/setter functions on non-configurable accessor
-            if obj_get_key_value(desc_obj, &"get".into())?.is_some() || obj_get_key_value(desc_obj, &"set".into())?.is_some() {
+            if object_get_key_value(desc_obj, "get").is_some() || object_get_key_value(desc_obj, "set").is_some() {
                 return Err(raise_type_error!(
                     "Cannot change getter/setter of non-configurable accessor property"
                 ));
@@ -162,7 +162,7 @@ fn define_property_internal<'gc>(
     }
 
     let mut getter_opt: Option<Box<Value>> = None;
-    if let Some(get_rc) = obj_get_key_value(desc_obj, &"get".into())? {
+    if let Some(get_rc) = object_get_key_value(desc_obj, "get") {
         let get_val = get_rc.borrow();
         if !matches!(&*get_val, Value::Undefined) {
             getter_opt = Some(Box::new(get_val.clone()));
@@ -170,7 +170,7 @@ fn define_property_internal<'gc>(
     }
 
     let mut setter_opt: Option<Box<Value>> = None;
-    if let Some(set_rc) = obj_get_key_value(desc_obj, &"set".into())? {
+    if let Some(set_rc) = object_get_key_value(desc_obj, "set") {
         let set_val = set_rc.borrow();
         if !matches!(&*set_val, Value::Undefined) {
             setter_opt = Some(Box::new(set_val.clone()));
@@ -251,7 +251,7 @@ pub fn handle_object_method<'gc>(
                         }
                         if let PropertyKey::String(_s) = &key {
                             // Only include string keys (array indices and others); 'length' is non-enumerable so won't appear
-                            if let Ok(Some(v_rc)) = crate::core::obj_get_key_value(&obj, &key) {
+                            if let Some(v_rc) = object_get_key_value(&obj, &key) {
                                 values.push(v_rc.borrow().clone());
                             }
                         }
@@ -352,7 +352,7 @@ pub fn handle_object_method<'gc>(
             let len = get_array_length(mc, &items_obj).unwrap_or(0);
 
             for i in 0..len {
-                if let Some(val_rc) = obj_get_key_value(&items_obj, &i.to_string().into())? {
+                if let Some(val_rc) = object_get_key_value(&items_obj, i) {
                     let val = val_rc.borrow().clone();
 
                     let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
@@ -370,7 +370,7 @@ pub fn handle_object_method<'gc>(
                         _ => PropertyKey::String(value_to_string(&key_val)),
                     };
 
-                    let group_arr = if let Some(arr_rc) = obj_get_key_value(&result_obj, &key)? {
+                    let group_arr = if let Some(arr_rc) = object_get_key_value(&result_obj, &key) {
                         if let Value::Object(arr) = &*arr_rc.borrow() {
                             *arr
                         } else {
@@ -418,7 +418,7 @@ pub fn handle_object_method<'gc>(
                     for (key, desc_val) in props_obj.borrow().properties.iter() {
                         if let Value::Object(desc_obj) = &*desc_val.borrow() {
                             // Handle property descriptor
-                            let value = if let Some(val) = obj_get_key_value(desc_obj, &"value".into())? {
+                            let value = if let Some(val) = object_get_key_value(desc_obj, "value") {
                                 val.borrow().clone()
                             } else {
                                 Value::Undefined
@@ -488,7 +488,7 @@ pub fn handle_object_method<'gc>(
                     let ordered = crate::core::ordinary_own_property_keys(obj);
                     for key in &ordered {
                         // iterate own properties in spec order
-                        if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, key) {
+                        if let Some(val_rc) = object_get_key_value(obj, key) {
                             let desc_obj = new_js_object_data(mc);
 
                             match &*val_rc.borrow() {
@@ -704,7 +704,7 @@ pub fn handle_object_method<'gc>(
                         }
                         if let PropertyKey::String(_) = &key
                             && source_obj.borrow().is_enumerable(&key)
-                            && let Ok(Some(v_rc)) = crate::core::obj_get_key_value(&source_obj, &key)
+                            && let Some(v_rc) = object_get_key_value(&source_obj, &key)
                         {
                             obj_set_key_value(mc, &target_obj, &key, v_rc.borrow().clone())?;
                         }
@@ -827,7 +827,7 @@ pub(crate) fn handle_to_string_method<'gc>(
 
     if let Value::Object(object) = obj_val {
         // Check if this object defines its own toString method
-        if let Some(method_rc) = obj_get_key_value(object, &"toString".into())? {
+        if let Some(method_rc) = object_get_key_value(object, "toString") {
             let method_val = method_rc.borrow().clone();
             match method_val {
                 Value::Function(ref name) if name == "Object.prototype.toString" => {
@@ -859,7 +859,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             }
 
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get_key_value(object, &"__value__".into())? {
+            if let Some(wrapped_val) = object_get_key_value(object, "__value__") {
                 match &*wrapped_val.borrow() {
                     Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
                     Value::BigInt(h) => return Ok(Value::String(utf8_to_utf16(&h.to_string()))),
@@ -879,7 +879,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
                 let mut parts = Vec::new();
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val_rc) = object_get_key_value(object, i) {
                         match &*val_rc.borrow() {
                             Value::Undefined | Value::Null => parts.push("".to_string()), // push empty string for null and undefined
                             Value::String(s) => parts.push(utf16_to_utf8(s)),
@@ -898,13 +898,10 @@ pub(crate) fn handle_to_string_method<'gc>(
             // If this object contains a Symbol.toStringTag property, honor it
             if let Some(tag_sym_rc) = get_well_known_symbol(mc, env, "toStringTag")
                 && let Value::Symbol(sd) = &*tag_sym_rc.borrow()
+                && let Some(tag_val_rc) = object_get_key_value(object, sd)
+                && let Value::String(s) = &*tag_val_rc.borrow()
             {
-                let key = PropertyKey::Symbol(*sd);
-                if let Some(tag_val_rc) = obj_get_key_value(object, &key)?
-                    && let Value::String(s) = &*tag_val_rc.borrow()
-                {
-                    return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
-                }
+                return Ok(Value::String(utf8_to_utf16(&format!("[object {}]", utf16_to_utf8(s)))));
             }
 
             // Default object tag
@@ -947,7 +944,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
     // Expect an object receiver
     if let Value::Object(object) = obj_val {
         // name default to "Error"
-        let name = if let Some(n_rc) = obj_get_key_value(object, &"name".into())? {
+        let name = if let Some(n_rc) = object_get_key_value(object, "name") {
             if let Value::String(s) = &*n_rc.borrow() {
                 utf16_to_utf8(s)
             } else {
@@ -958,7 +955,7 @@ pub(crate) fn handle_error_to_string_method<'gc>(
         };
 
         // message default to empty
-        let message = if let Some(m_rc) = obj_get_key_value(object, &"message".into())? {
+        let message = if let Some(m_rc) = object_get_key_value(object, "message") {
             if let Value::String(s) = &*m_rc.borrow() {
                 utf16_to_utf8(s)
             } else {
@@ -1027,12 +1024,12 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::Null => Err(raise_type_error!("Cannot convert null to object")),
         Value::Object(obj) => {
             // Check if this is a wrapped primitive object
-            if let Some(wrapped_val) = obj_get_key_value(obj, &"__value__".into())? {
+            if let Some(wrapped_val) = object_get_key_value(obj, "__value__") {
                 return Ok(wrapped_val.borrow().clone());
             }
             // If object defines a user valueOf function, call it and use its
             // primitive result if it returns a primitive.
-            if let Some(method_rc) = obj_get_key_value(obj, &"valueOf".into())? {
+            if let Some(method_rc) = object_get_key_value(obj, "valueOf") {
                 let method_val = method_rc.borrow().clone();
                 match method_val {
                     Value::Closure(data) | Value::AsyncClosure(data) => {
@@ -1074,7 +1071,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 }
                 // Support method stored as a function-object (object wrapping a closure)
                 if let Value::Object(func_obj_map) = &*method_rc.borrow()
-                    && let Some(cl_rc) = obj_get_key_value(func_obj_map, &"__closure__".into())?
+                    && let Some(cl_rc) = object_get_key_value(func_obj_map, "__closure__")
                 {
                     match &*cl_rc.borrow() {
                         Value::Closure(data) | Value::AsyncClosure(data) => {
@@ -1207,7 +1204,7 @@ pub(crate) fn handle_object_prototype_builtin<'gc>(
 fn get_well_known_symbol<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Option<GcPtr<'gc, Value<'gc>>> {
     if let Some(sym_ctor_val) = crate::core::env_get(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_ctor_val.borrow()
-        && let Ok(Some(sym_val)) = obj_get_key_value(sym_ctor, &name.into())
+        && let Some(sym_val) = object_get_key_value(sym_ctor, name)
         && let Value::Symbol(_) = &*sym_val.borrow()
     {
         return Some(sym_val);

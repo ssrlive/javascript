@@ -1,8 +1,8 @@
 #![allow(warnings)]
 
 use crate::core::{
-    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Value, new_js_object_data, obj_get_key_value,
-    obj_set_key_value,
+    DestructuringElement, EvalError, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, Value, new_js_object_data, obj_set_key_value,
+    object_get_key_value,
 };
 use crate::core::{Gc, GcCell, GcPtr, MutationContext};
 use crate::error::JSError;
@@ -56,7 +56,7 @@ fn format_value_pretty<'gc>(
             }
 
             // If object looks like an Error (has non-empty "stack" string), print the stack directly
-            if let Ok(Some(stack_rc)) = obj_get_key_value(obj, &"stack".into()) {
+            if let Some(stack_rc) = object_get_key_value(obj, "stack") {
                 if let Value::String(s) = &*stack_rc.borrow() {
                     let s_utf8 = crate::unicode::utf16_to_utf8(s);
                     if !s_utf8.is_empty() {
@@ -97,7 +97,7 @@ fn format_value_pretty<'gc>(
                     if i > 0 {
                         s.push_str(", ");
                     }
-                    if let Some(val_rc) = obj_get_key_value(obj, &i.to_string().into())? {
+                    if let Some(val_rc) = object_get_key_value(obj, i) {
                         let val_str = format_value_pretty(mc, &val_rc.borrow(), _env, _depth + 1, seen, true)?;
                         s.push_str(&val_str);
                     } else if i == len - 1 {
@@ -109,7 +109,7 @@ fn format_value_pretty<'gc>(
                 Ok(s)
             } else {
                 // Check for boxed primitive
-                if let Some(val_rc) = obj_get_key_value(obj, &"__value__".into())? {
+                if let Some(val_rc) = object_get_key_value(obj, "__value__") {
                     let val = val_rc.borrow();
                     match *val {
                         Value::Boolean(b) => return Ok(format!("[Boolean: {}]", b)),
@@ -429,7 +429,7 @@ fn _print_additional_info_for_array<'gc>(mc: &MutationContext<'gc>, obj: &JSObje
 
     // Helper to print a single property if present
     let mut print_prop = |k: &str| -> Result<bool, crate::core::EvalError<'gc>> {
-        if let Some(vrc) = obj_get_key_value(obj, &k.into())? {
+        if let Some(vrc) = object_get_key_value(obj, k) {
             if need_sep {
                 print!(", ");
             }

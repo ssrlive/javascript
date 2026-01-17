@@ -11,7 +11,7 @@ use crate::{
     core::{
         BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, ImportSpecifier, JSObjectDataPtr, ObjectDestructuringElement,
         PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, is_error,
-        new_js_object_data, obj_get_key_value, obj_set_key_value, value_to_string,
+        new_js_object_data, obj_set_key_value, object_get_key_value, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -200,7 +200,7 @@ fn bind_object_inner_for_letconst<'gc>(
             DestructuringElement::Property(key, boxed) => match &**boxed {
                 DestructuringElement::Variable(name, default_expr) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined)
@@ -215,7 +215,7 @@ fn bind_object_inner_for_letconst<'gc>(
                 }
                 DestructuringElement::NestedObject(nested) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -243,7 +243,7 @@ fn bind_object_inner_for_letconst<'gc>(
                 }
                 DestructuringElement::NestedArray(nested_arr) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -297,7 +297,7 @@ fn bind_object_inner_for_var<'gc>(
             DestructuringElement::Property(key, boxed) => match &**boxed {
                 DestructuringElement::Variable(name, default_expr) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined)
@@ -309,7 +309,7 @@ fn bind_object_inner_for_var<'gc>(
                 }
                 DestructuringElement::NestedObject(nested) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -337,7 +337,7 @@ fn bind_object_inner_for_var<'gc>(
                 }
                 DestructuringElement::NestedArray(nested_arr) => {
                     let mut prop_val = Value::Undefined;
-                    if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                    if let Some(cell) = object_get_key_value(obj, key) {
                         prop_val = cell.borrow().clone();
                     }
                     if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -382,7 +382,7 @@ fn bind_array_inner_for_letconst<'gc>(
         match inner_elem {
             DestructuringElement::Variable(name, default_expr) => {
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined)
@@ -398,7 +398,7 @@ fn bind_array_inner_for_letconst<'gc>(
             DestructuringElement::NestedObject(inner_pattern) => {
                 // get element at index j
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
@@ -426,7 +426,7 @@ fn bind_array_inner_for_letconst<'gc>(
                                 match &**boxed {
                                     DestructuringElement::Variable(name, default_expr) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined)
@@ -441,7 +441,7 @@ fn bind_array_inner_for_letconst<'gc>(
                                     }
                                     DestructuringElement::NestedObject(nested) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -470,7 +470,7 @@ fn bind_array_inner_for_letconst<'gc>(
                                     }
                                     DestructuringElement::NestedArray(nested_arr) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -506,7 +506,7 @@ fn bind_array_inner_for_letconst<'gc>(
             }
             DestructuringElement::NestedArray(inner_array) => {
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
@@ -522,7 +522,7 @@ fn bind_array_inner_for_letconst<'gc>(
                 // Collect remaining elements into an array
                 let arr_obj2 = crate::js_array::create_array(mc, env)?;
                 // get length
-                let len = if let Ok(Some(len_cell)) = obj_get_key_value(arr_obj, &"length".into()) {
+                let len = if let Some(len_cell) = object_get_key_value(arr_obj, "length") {
                     if let Value::Number(n) = len_cell.borrow().clone() {
                         n as usize
                     } else {
@@ -533,7 +533,7 @@ fn bind_array_inner_for_letconst<'gc>(
                 };
                 let mut idx2 = 0;
                 for jj in j..len {
-                    if let Ok(Some(cell2)) = obj_get_key_value(arr_obj, &jj.to_string().into()) {
+                    if let Some(cell2) = object_get_key_value(arr_obj, jj.to_string()) {
                         obj_set_key_value(mc, &arr_obj2, &PropertyKey::from(idx2.to_string()), cell2.borrow().clone())?;
                         idx2 += 1;
                     }
@@ -578,7 +578,7 @@ fn bind_array_inner_for_var<'gc>(
         match inner_elem {
             DestructuringElement::Variable(name, default_expr) => {
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined)
@@ -591,7 +591,7 @@ fn bind_array_inner_for_var<'gc>(
             DestructuringElement::NestedObject(inner_pattern) => {
                 // get element at index j
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
@@ -619,7 +619,7 @@ fn bind_array_inner_for_var<'gc>(
                                 match &**boxed {
                                     DestructuringElement::Variable(name, default_expr) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined)
@@ -631,7 +631,7 @@ fn bind_array_inner_for_var<'gc>(
                                     }
                                     DestructuringElement::NestedObject(nested) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -660,7 +660,7 @@ fn bind_array_inner_for_var<'gc>(
                                     }
                                     DestructuringElement::NestedArray(nested_arr) => {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(obj2, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(obj2, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined) || matches!(prop_val, Value::Null) {
@@ -696,7 +696,7 @@ fn bind_array_inner_for_var<'gc>(
             }
             DestructuringElement::NestedArray(inner_array) => {
                 let mut elem_val = Value::Undefined;
-                if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &j.to_string().into()) {
+                if let Some(cell) = object_get_key_value(arr_obj, j.to_string()) {
                     elem_val = cell.borrow().clone();
                 }
                 if matches!(elem_val, Value::Undefined) || matches!(elem_val, Value::Null) {
@@ -712,7 +712,7 @@ fn bind_array_inner_for_var<'gc>(
                 // Collect remaining elements into an array
                 let arr_obj2 = crate::js_array::create_array(mc, env)?;
                 // get length
-                let len = if let Ok(Some(len_cell)) = obj_get_key_value(arr_obj, &"length".into()) {
+                let len = if let Some(len_cell) = object_get_key_value(arr_obj, "length") {
                     if let Value::Number(n) = len_cell.borrow().clone() {
                         n as usize
                     } else {
@@ -723,7 +723,7 @@ fn bind_array_inner_for_var<'gc>(
                 };
                 let mut idx2 = 0;
                 for jj in j..len {
-                    if let Ok(Some(cell)) = obj_get_key_value(arr_obj, &jj.to_string().into()) {
+                    if let Some(cell) = object_get_key_value(arr_obj, jj.to_string()) {
                         obj_set_key_value(mc, &arr_obj2, &PropertyKey::from(idx2.to_string()), cell.borrow().clone())?;
                         idx2 += 1;
                     }
@@ -842,7 +842,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 // Set __proto__ to Function.prototype
                 if let Some(func_ctor_val) = env_get(env, "Function")
                     && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                    && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                    && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
                 {
                     func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -865,7 +865,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 let proto_obj = crate::core::new_js_object_data(mc);
                 if let Some(obj_val) = env_get(env, "Object")
                     && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                    && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                    && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
                     && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
                 {
                     proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -878,7 +878,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
                 if let Some(func_ctor_val) = env_get(env, "Function")
                     && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                    && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                    && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                     && let Value::Object(proto) = &*proto_val.borrow()
                 {
                     func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -998,11 +998,11 @@ pub(crate) fn handle_object_prototype_to_string<'gc>(
                 "Date".to_string()
             } else {
                 let mut t = "Object".to_string();
-                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into())
+                if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                     && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                    && let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into())
+                    && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
                     && let Value::Symbol(s) = &*tag_sym.borrow()
-                    && let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(*s))
+                    && let Some(val) = object_get_key_value(obj, s)
                     && let Value::String(s_val) = &*val.borrow()
                 {
                     t = crate::unicode::utf16_to_utf8(s_val);
@@ -1151,8 +1151,8 @@ fn eval_res<'gc>(
                         ImportSpecifier::Named(name, alias) => {
                             let binding_name = alias.as_ref().unwrap_or(name);
 
-                            let val_ptr_res = obj_get_key_value(&exports_obj, &name.into());
-                            let val = if let Ok(Some(cell)) = val_ptr_res {
+                            let val_ptr_res = object_get_key_value(&exports_obj, name);
+                            let val = if let Some(cell) = val_ptr_res {
                                 cell.borrow().clone()
                             } else {
                                 Value::Undefined
@@ -1160,8 +1160,8 @@ fn eval_res<'gc>(
                             env_set(mc, env, binding_name, val)?;
                         }
                         ImportSpecifier::Default(name) => {
-                            let val_ptr_res = obj_get_key_value(&exports_obj, &"default".into());
-                            let val = if let Ok(Some(cell)) = val_ptr_res {
+                            let val_ptr_res = object_get_key_value(&exports_obj, "default");
+                            let val = if let Some(cell) = val_ptr_res {
                                 cell.borrow().clone()
                             } else {
                                 Value::Undefined
@@ -1301,7 +1301,7 @@ fn eval_res<'gc>(
                     let mut elem_val = Value::Undefined;
                     if let Value::Object(obj) = &val
                         && is_array(mc, obj)
-                        && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                        && let Some(cell) = object_get_key_value(obj, i)
                     {
                         elem_val = cell.borrow().clone();
                     }
@@ -1349,7 +1349,7 @@ fn eval_res<'gc>(
                         let mut elem_val = Value::Undefined;
                         if let Value::Object(obj) = &val
                             && is_array(mc, obj)
-                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                            && let Some(cell) = object_get_key_value(obj, i)
                         {
                             elem_val = cell.borrow().clone();
                         }
@@ -1375,7 +1375,7 @@ fn eval_res<'gc>(
                         let mut elem_val = Value::Undefined;
                         if let Value::Object(obj) = &val
                             && is_array(mc, obj)
-                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                            && let Some(cell) = object_get_key_value(obj, i)
                         {
                             elem_val = cell.borrow().clone();
                         }
@@ -1405,7 +1405,7 @@ fn eval_res<'gc>(
                                         match &**boxed {
                                             DestructuringElement::Variable(name, default_expr) => {
                                                 let mut prop_val = Value::Undefined;
-                                                if let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into()) {
+                                                if let Some(cell) = object_get_key_value(obj, key) {
                                                     prop_val = cell.borrow().clone();
                                                 }
                                                 if matches!(prop_val, Value::Undefined)
@@ -1447,7 +1447,7 @@ fn eval_res<'gc>(
                         if let Value::Object(obj) = &val
                             && is_array(mc, obj)
                         {
-                            let len = if let Ok(Some(len_cell)) = obj_get_key_value(obj, &"length".into()) {
+                            let len = if let Some(len_cell) = object_get_key_value(obj, "length") {
                                 if let Value::Number(n) = len_cell.borrow().clone() {
                                     n as usize
                                 } else {
@@ -1458,7 +1458,7 @@ fn eval_res<'gc>(
                             };
                             let mut idx2 = 0;
                             for j in i..len {
-                                if let Ok(Some(cell)) = obj_get_key_value(obj, &j.to_string().into()) {
+                                if let Some(cell) = object_get_key_value(obj, j) {
                                     crate::core::obj_set_key_value(
                                         mc,
                                         &arr_obj,
@@ -1486,7 +1486,7 @@ fn eval_res<'gc>(
                         let mut elem_val = Value::Undefined;
                         if let Value::Object(obj) = &val
                             && is_array(mc, obj)
-                            && let Ok(Some(cell)) = obj_get_key_value(obj, &i.to_string().into())
+                            && let Some(cell) = object_get_key_value(obj, i)
                         {
                             elem_val = cell.borrow().clone();
                         }
@@ -1539,7 +1539,7 @@ fn eval_res<'gc>(
                                 // lookup property on object
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1557,7 +1557,7 @@ fn eval_res<'gc>(
                                 // fetch property
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1589,7 +1589,7 @@ fn eval_res<'gc>(
                                 // fetch property
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1632,7 +1632,7 @@ fn eval_res<'gc>(
                                             break;
                                         }
                                     }
-                                    if !skip && let Ok(Some(cell)) = crate::core::obj_get_key_value(orig, &k) {
+                                    if !skip && let Some(cell) = object_get_key_value(orig, &k) {
                                         obj.borrow_mut(mc).insert(k.clone(), cell);
                                     }
                                 }
@@ -1678,7 +1678,7 @@ fn eval_res<'gc>(
                             DestructuringElement::Variable(name, default_expr) => {
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1701,7 +1701,7 @@ fn eval_res<'gc>(
                             DestructuringElement::NestedObject(inner_pattern) => {
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1731,7 +1731,7 @@ fn eval_res<'gc>(
                             DestructuringElement::NestedArray(inner_array) => {
                                 let mut prop_val = Value::Undefined;
                                 if let Value::Object(obj) = &val
-                                    && let Ok(Some(cell)) = obj_get_key_value(obj, &key.clone().into())
+                                    && let Some(cell) = object_get_key_value(obj, key)
                                 {
                                     prop_val = cell.borrow().clone();
                                 }
@@ -1798,13 +1798,13 @@ fn eval_res<'gc>(
                 && is_error(&val)
             {
                 let mut filename = String::new();
-                if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into())
+                if let Some(val_ptr) = object_get_key_value(env, "__filepath")
                     && let Value::String(s) = &*val_ptr.borrow()
                 {
                     filename = utf16_to_utf8(s);
                 }
                 let mut frame_name = "<anonymous>".to_string();
-                if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into())
+                if let Some(frame_val) = object_get_key_value(env, "__frame")
                     && let Value::String(s) = &*frame_val.borrow()
                 {
                     frame_name = utf16_to_utf8(s);
@@ -2120,13 +2120,13 @@ fn eval_res<'gc>(
             let mut iterator = None;
 
             // Try to use Symbol.iterator
-            if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(*iter_sym_data))? {
+                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
                         c.borrow().clone()
                     } else {
                         Value::Undefined
@@ -2144,18 +2144,18 @@ fn eval_res<'gc>(
                 } else {
                     // Debug why method is missing
                     if matches!(iter_val, Value::String(_)) {
-                        let sym_ctor = obj_get_key_value(env, &"Symbol".into())?.unwrap();
+                        let sym_ctor = object_get_key_value(env, "Symbol").unwrap();
                         let sym_obj = if let Value::Object(o) = &*sym_ctor.borrow() { *o } else { panic!() };
-                        let iter_sym = obj_get_key_value(&sym_obj, &"iterator".into())?.unwrap();
+                        let iter_sym = object_get_key_value(&sym_obj, "iterator").unwrap();
                         println!("DEBUG: ForOf String iterator missing. Symbol.iterator: {:?}", iter_sym.borrow());
                         // check if String.prototype has it
-                        let str_ctor = obj_get_key_value(env, &"String".into())?.unwrap();
+                        let str_ctor = object_get_key_value(env, "String").unwrap();
                         if let Value::Object(s_obj) = &*str_ctor.borrow()
-                            && let Some(proto) = obj_get_key_value(s_obj, &"prototype".into())?
+                            && let Some(proto) = object_get_key_value(s_obj, "prototype")
                             && let Value::Object(p_obj) = &*proto.borrow()
                             && let Value::Symbol(s) = &*iter_sym.borrow()
                         {
-                            let has = obj_get_key_value(p_obj, &PropertyKey::Symbol(*s))?;
+                            let has = object_get_key_value(p_obj, s);
                             println!("DEBUG: String.prototype[@@iterator] found: {:?}", has.is_some());
                         }
                     }
@@ -2167,7 +2167,7 @@ fn eval_res<'gc>(
                 loop_env.borrow_mut(mc).prototype = Some(*env);
 
                 loop {
-                    let next_method = obj_get_key_value(&iter_obj, &"next".into())?
+                    let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
                         .borrow()
                         .clone();
@@ -2175,7 +2175,7 @@ fn eval_res<'gc>(
                     let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
 
                     if let Value::Object(next_res) = next_res_val {
-                        let done = if let Some(done_val) = obj_get_key_value(&next_res, &"done".into())? {
+                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
                             match &*done_val.borrow() {
                                 Value::Boolean(b) => *b,
                                 _ => false,
@@ -2188,7 +2188,7 @@ fn eval_res<'gc>(
                             break;
                         }
 
-                        let value = if let Some(val) = obj_get_key_value(&next_res, &"value".into())? {
+                        let value = if let Some(val) = object_get_key_value(&next_res, "value") {
                             val.borrow().clone()
                         } else {
                             Value::Undefined
@@ -2224,7 +2224,7 @@ fn eval_res<'gc>(
             if let Value::Object(obj) = iter_val
                 && is_array(mc, &obj)
             {
-                let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap().borrow().clone();
+                let len_val = object_get_key_value(&obj, "length").unwrap().borrow().clone();
                 let len = match len_val {
                     Value::Number(n) => n as usize,
                     _ => 0,
@@ -2232,7 +2232,7 @@ fn eval_res<'gc>(
                 let loop_env = new_js_object_data(mc);
                 loop_env.borrow_mut(mc).prototype = Some(*env);
                 for i in 0..len {
-                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
                     env_set(mc, &loop_env, var_name, val)?;
                     let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                     match res {
@@ -2287,12 +2287,12 @@ fn eval_res<'gc>(
                 let loop_env = new_js_object_data(mc);
                 loop_env.borrow_mut(mc).prototype = Some(*env);
                 log::trace!("for-in keys: {keys:?}");
-                for k in keys {
+                for k in &keys {
                     // Debug: inspect the property value before executing the body
-                    if let Ok(Some(val_rc)) = obj_get_key_value(&obj, &PropertyKey::from(k.clone())) {
+                    if let Some(val_rc) = object_get_key_value(&obj, k) {
                         log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
                     }
-                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(&k)))?;
+                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(k)))?;
                     let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
                     match res {
                         ControlFlow::Normal(v) => *last_value = v,
@@ -2334,13 +2334,13 @@ fn eval_res<'gc>(
                 let loop_env = new_js_object_data(mc);
                 loop_env.borrow_mut(mc).prototype = Some(*env);
                 for i in 0..len {
-                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
                     // Perform object destructuring
                     for elem in pattern {
                         match elem {
                             ObjectDestructuringElement::Property { key, value } => {
                                 let prop_val = if let Value::Object(o) = &val {
-                                    if let Some(cell) = obj_get_key_value(o, &PropertyKey::String(key.clone()))? {
+                                    if let Some(cell) = object_get_key_value(o, key) {
                                         cell.borrow().clone()
                                     } else {
                                         Value::Undefined
@@ -2396,13 +2396,13 @@ fn eval_res<'gc>(
             let mut iterator = None;
 
             // Try to use Symbol.iterator
-            if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                 && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
                 && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
             {
                 let method = if let Value::Object(obj) = &iter_val {
-                    if let Some(c) = obj_get_key_value(obj, &PropertyKey::Symbol(*iter_sym_data))? {
+                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
                         c.borrow().clone()
                     } else {
                         Value::Undefined
@@ -2425,7 +2425,7 @@ fn eval_res<'gc>(
                 loop_env.borrow_mut(mc).prototype = Some(*env);
 
                 loop {
-                    let next_method = obj_get_key_value(&iter_obj, &"next".into())?
+                    let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
                         .borrow()
                         .clone();
@@ -2433,7 +2433,7 @@ fn eval_res<'gc>(
                     let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
 
                     if let Value::Object(next_res) = next_res_val {
-                        let done = if let Some(done_val) = obj_get_key_value(&next_res, &"done".into())? {
+                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
                             match &*done_val.borrow() {
                                 Value::Boolean(b) => *b,
                                 _ => false,
@@ -2446,7 +2446,7 @@ fn eval_res<'gc>(
                             break;
                         }
 
-                        let value = if let Some(val) = obj_get_key_value(&next_res, &"value".into())? {
+                        let value = if let Some(val) = object_get_key_value(&next_res, "value") {
                             val.borrow().clone()
                         } else {
                             Value::Undefined
@@ -2457,7 +2457,7 @@ fn eval_res<'gc>(
                             if let DestructuringElement::Variable(name, _) = elem {
                                 let elem_val = if let Value::Object(o) = &value {
                                     if is_array(mc, o) {
-                                        if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
+                                        if let Some(cell) = object_get_key_value(o, j) {
                                             cell.borrow().clone()
                                         } else {
                                             Value::Undefined
@@ -2506,13 +2506,13 @@ fn eval_res<'gc>(
                 let loop_env = new_js_object_data(mc);
                 loop_env.borrow_mut(mc).prototype = Some(*env);
                 for i in 0..len {
-                    let val = obj_get_key_value(&obj, &i.to_string().into())?.unwrap().borrow().clone();
+                    let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
                     // Perform array destructuring
                     for (j, elem) in pattern.iter().enumerate() {
                         if let DestructuringElement::Variable(name, _) = elem {
                             let elem_val = if let Value::Object(o) = &val {
                                 if is_array(mc, o) {
-                                    if let Some(cell) = obj_get_key_value(o, &j.to_string().into())? {
+                                    if let Some(cell) = object_get_key_value(o, j) {
                                         cell.borrow().clone()
                                     } else {
                                         Value::Undefined
@@ -2646,7 +2646,7 @@ pub fn export_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, 
     if let Some(module_cell) = env_get(env, "module") {
         let module = module_cell.borrow().clone();
         if let Value::Object(module_obj) = module
-            && let Ok(Some(exports_val)) = obj_get_key_value(&module_obj, &"exports".into())
+            && let Some(exports_val) = object_get_key_value(&module_obj, "exports")
             && let Value::Object(exports_obj) = &*exports_val.borrow()
         {
             obj_set_key_value(mc, exports_obj, &name.into(), val).map_err(EvalError::Js)?;
@@ -2663,14 +2663,14 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     mut e: EvalError<'gc>,
 ) -> EvalError<'gc> {
     let mut filename = String::new();
-    if let Ok(Some(val_ptr)) = obj_get_key_value(env, &"__filepath".into())
+    if let Some(val_ptr) = object_get_key_value(env, "__filepath")
         && let Value::String(s) = &*val_ptr.borrow()
     {
         filename = utf16_to_utf8(s);
     }
     // Prefer an explicit frame name if the call environment has one (set in call_closure)
     let mut frame_name = "<anonymous>".to_string();
-    if let Ok(Some(frame_val)) = obj_get_key_value(env, &"__frame".into())
+    if let Some(frame_val) = object_get_key_value(env, "__frame")
         && let Value::String(s) = &*frame_val.borrow()
     {
         frame_name = utf16_to_utf8(s);
@@ -2708,7 +2708,7 @@ fn get_primitive_prototype_property<'gc>(
 
     if let Ok(ctor) = evaluate_var(mc, env, proto_name)
         && let Value::Object(ctor_obj) = ctor
-        && let Some(proto_ref) = obj_get_key_value(&ctor_obj, &"prototype".into())?
+        && let Some(proto_ref) = object_get_key_value(&ctor_obj, "prototype")
         && let Value::Object(proto) = &*proto_ref.borrow()
     {
         // Special-case Symbol.prototype.description: return primitive description without invoking getter
@@ -2723,7 +2723,7 @@ fn get_primitive_prototype_property<'gc>(
             return Ok(Value::Undefined);
         }
 
-        if let Some(val) = obj_get_key_value(proto, key)? {
+        if let Some(val) = object_get_key_value(proto, key) {
             return Ok(val.borrow().clone());
         }
     }
@@ -3801,7 +3801,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     let s_vec = match this_v {
                         Value::String(s) => s.clone(),
                         Value::Object(ref obj) => {
-                            if let Ok(Some(val_rc)) = obj_get_key_value(obj, &"__value__".into()) {
+                            if let Some(val_rc) = object_get_key_value(obj, "__value__") {
                                 if let Value::String(s2) = &*val_rc.borrow() {
                                     s2.clone()
                                 } else {
@@ -3873,7 +3873,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("Generator.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(gen_rc) = obj_get_key_value(&obj, &"__generator__".into())? {
+                        if let Some(gen_rc) = object_get_key_value(&obj, "__generator__") {
                             let gen_val = gen_rc.borrow().clone();
                             if let Value::Generator(gen_ptr) = gen_val {
                                 return crate::js_generator::handle_generator_instance_method(mc, &gen_ptr, method, &eval_args, env)
@@ -3895,7 +3895,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("Map.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(map_val) = obj_get_key_value(&obj, &"__map__".into())? {
+                        if let Some(map_val) = object_get_key_value(&obj, "__map__") {
                             if let Value::Map(map_ptr) = &*map_val.borrow() {
                                 Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, &eval_args, env)?)
                             } else {
@@ -3922,7 +3922,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("Map.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(map_val) = obj_get_key_value(&obj, &"__map__".into())? {
+                        if let Some(map_val) = object_get_key_value(&obj, "__map__") {
                             if let Value::Map(map_ptr) = &*map_val.borrow() {
                                 Ok(crate::js_map::handle_map_instance_method(mc, map_ptr, method, &eval_args, env)?)
                             } else {
@@ -3949,7 +3949,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("WeakMap.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(wm_val) = obj_get_key_value(&obj, &"__weakmap__".into())? {
+                        if let Some(wm_val) = object_get_key_value(&obj, "__weakmap__") {
                             if let Value::WeakMap(wm_ptr) = &*wm_val.borrow() {
                                 Ok(crate::js_weakmap::handle_weakmap_instance_method(
                                     mc, wm_ptr, method, &eval_args, env,
@@ -3980,7 +3980,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("WeakSet.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(ws_val) = obj_get_key_value(&obj, &"__weakset__".into())? {
+                        if let Some(ws_val) = object_get_key_value(&obj, "__weakset__") {
                             if let Value::WeakSet(ws_ptr) = &*ws_val.borrow() {
                                 Ok(crate::js_weakset::handle_weakset_instance_method(mc, ws_ptr, method, &eval_args)?)
                             } else {
@@ -4007,7 +4007,7 @@ pub fn evaluate_call_dispatch<'gc>(
                 if let Some(method) = name.strip_prefix("Set.prototype.") {
                     let this_v = this_val.clone().unwrap_or(Value::Undefined);
                     if let Value::Object(obj) = this_v {
-                        if let Some(set_val) = obj_get_key_value(&obj, &"__set__".into())? {
+                        if let Some(set_val) = object_get_key_value(&obj, "__set__") {
                             if let Value::Set(set_ptr) = &*set_val.borrow() {
                                 Ok(crate::js_set::handle_set_instance_method(
                                     mc,
@@ -4071,7 +4071,7 @@ pub fn evaluate_call_dispatch<'gc>(
                                 }
                             }
                             Value::Object(obj) => {
-                                if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
+                                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                                     if let Value::Closure(cl) = &*cl_ptr.borrow() {
                                         call_closure(mc, cl, Some(this_arg), call_args, env, None)
                                     } else {
@@ -4096,7 +4096,7 @@ pub fn evaluate_call_dispatch<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
+            if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
                         let res = call_closure(mc, cl, this_val.clone(), &eval_args, env, Some(obj));
@@ -4127,11 +4127,11 @@ pub fn evaluate_call_dispatch<'gc>(
                     },
                     _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                 }
-            } else if (obj_get_key_value(&obj, &"__class_def__".into())?).is_some() {
+            } else if (object_get_key_value(&obj, "__class_def__")).is_some() {
                 Err(EvalError::Js(crate::raise_type_error!(
                     "Class constructor cannot be invoked without 'new'"
                 )))
-            } else if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())? {
+            } else if let Some(native_name) = object_get_key_value(&obj, "__native_ctor") {
                 match &*native_name.borrow() {
                     Value::String(name) => {
                         if name == &crate::unicode::utf8_to_utf16("Object") {
@@ -4178,9 +4178,9 @@ fn evaluate_expr_call<'gc>(
                 return Ok(Value::Undefined);
             }
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if key.as_str() == "call" && obj_get_key_value(obj, &"__closure__".into())?.is_some() {
+                } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
                     Value::Function("call".to_string())
                 } else {
                     Value::Undefined
@@ -4216,7 +4216,7 @@ fn evaluate_expr_call<'gc>(
             };
 
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = obj_get_key_value(obj, &key)? {
+                if let Some(val) = object_get_key_value(obj, &key) {
                     val.borrow().clone()
                 } else {
                     Value::Undefined
@@ -4229,9 +4229,9 @@ fn evaluate_expr_call<'gc>(
         Expr::Property(obj_expr, key) => {
             let obj_val = evaluate_expr(mc, env, obj_expr)?;
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if key.as_str() == "call" && obj_get_key_value(obj, &"__closure__".into())?.is_some() {
+                } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
                     Value::Function("call".to_string())
                 } else {
                     Value::Undefined
@@ -4265,7 +4265,7 @@ fn evaluate_expr_call<'gc>(
             };
 
             let f_val = if let Value::Object(obj) = &obj_val {
-                if let Some(val) = obj_get_key_value(obj, &key)? {
+                if let Some(val) = object_get_key_value(obj, &key) {
                     val.borrow().clone()
                 } else {
                     Value::Undefined
@@ -4286,20 +4286,19 @@ fn evaluate_expr_call<'gc>(
             let val = evaluate_expr(mc, env, target)?;
             if let Value::Object(obj) = val {
                 if is_array(mc, &obj) {
-                    let len_val = obj_get_key_value(&obj, &"length".into())?.unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                    let len_val = object_get_key_value(&obj, "length").unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
                     let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
                     for k in 0..len {
-                        let k_key = PropertyKey::from(k.to_string());
-                        let item = obj_get_key_value(&obj, &k_key)?.unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                        let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
                         eval_args.push(item.borrow().clone());
                     }
                 } else {
                     // Support generic iterables via Symbol.iterator
-                    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                        && let Ok(Some(iter_sym_val)) = obj_get_key_value(sym_obj, &"iterator".into())
+                        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                        && let Ok(Some(iter_fn_val)) = obj_get_key_value(&obj, &PropertyKey::Symbol(*iter_sym))
+                        && let Some(iter_fn_val) = object_get_key_value(&obj, iter_sym)
                     {
                         // Call iterator method on the object to get an iterator
                         let iterator = match &*iter_fn_val.borrow() {
@@ -4322,7 +4321,7 @@ fn evaluate_expr_call<'gc>(
                         // Consume iterator by repeatedly calling its next() method
                         if let Value::Object(iter_obj) = iterator {
                             loop {
-                                if let Ok(Some(next_val)) = obj_get_key_value(&iter_obj, &"next".into()) {
+                                if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
                                     let next_fn = next_val.borrow().clone();
 
                                     let res = match &next_fn {
@@ -4351,7 +4350,7 @@ fn evaluate_expr_call<'gc>(
                                     };
 
                                     if let Value::Object(res_obj) = res {
-                                        let done = if let Ok(Some(done_rc)) = obj_get_key_value(&res_obj, &"done".into()) {
+                                        let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
                                             if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
                                         } else {
                                             false
@@ -4361,7 +4360,7 @@ fn evaluate_expr_call<'gc>(
                                             break;
                                         }
 
-                                        let value = if let Ok(Some(val_rc)) = obj_get_key_value(&res_obj, &"value".into()) {
+                                        let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
                                             val_rc.borrow().clone()
                                         } else {
                                             Value::Undefined
@@ -4583,7 +4582,7 @@ fn evaluate_expr_binary<'gc>(
                     let present = crate::js_proxy::_proxy_has_property(mc, p, &PropertyKey::from(key.clone())).map_err(EvalError::Js)?;
                     return Ok(Value::Boolean(present));
                 }
-                let present = obj_get_key_value(&obj, &key.into())?.is_some();
+                let present = object_get_key_value(&obj, key).is_some();
                 Ok(Value::Boolean(present))
             } else {
                 Err(EvalError::Js(crate::raise_type_error!("Right-hand side of 'in' must be an object")))
@@ -4956,7 +4955,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Set __proto__ to Function.prototype
             if let Some(func_ctor_val) = env_get(env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
             {
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -4982,7 +4981,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Set prototype of prototype object to Object.prototype
             if let Some(obj_val) = env_get(env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
                 && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
                 proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -5003,7 +5002,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Set __proto__ to Function.prototype
             if let Some(func_ctor_val) = env_get(env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
             {
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -5032,7 +5031,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Set __proto__ to Function.prototype
             if let Some(func_ctor_val) = env_get(env, "Function")
                 && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-                && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
                 && let Value::Object(proto) = &*proto_val.borrow()
             {
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -5061,7 +5060,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             // Set prototype of prototype object to Object.prototype
             if let Some(obj_val) = env_get(env, "Object")
                 && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
                 && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
             {
                 proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -5164,7 +5163,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 // We call toString() explicitly if it exists, otherwise use value_to_string.
                                 let mut s = "[object Object]".to_string();
                                 if let Value::Object(obj) = &val {
-                                    if let Ok(Some(method_rc)) = crate::core::obj_get_key_value(obj, &"toString".into()) {
+                                    if let Some(method_rc) = object_get_key_value(obj, "toString") {
                                         let method_val = method_rc.borrow().clone();
                                         if matches!(
                                             method_val,
@@ -5265,9 +5264,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 | Value::Getter(..)
                 | Value::Setter(..) => "function",
                 Value::Object(obj) => {
-                    if obj_get_key_value(&obj, &"__closure__".into()).unwrap_or(None).is_some() {
+                    if object_get_key_value(&obj, "__closure__").is_some() {
                         "function"
-                    } else if let Some(is_ctor) = obj_get_key_value(&obj, &"__is_constructor".into()).unwrap_or(None) {
+                    } else if let Some(is_ctor) = object_get_key_value(&obj, "__is_constructor") {
                         if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
                             "function"
                         } else {
@@ -5341,7 +5340,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             if left_val.is_null_or_undefined() {
                 Ok(Value::Undefined)
             } else if let Value::Object(obj) = &left_val {
-                if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop.into()).map_err(EvalError::Js)? {
+                if let Some(val_rc) = object_get_key_value(obj, prop) {
                     Ok(val_rc.borrow().clone())
                 } else {
                     Ok(Value::Undefined)
@@ -5371,7 +5370,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
                 };
                 if let Value::Object(obj) = &left_val {
-                    if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop_key).map_err(EvalError::Js)? {
+                    if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
                         Ok(val_rc.borrow().clone())
                     } else {
                         Ok(Value::Undefined)
@@ -5396,9 +5395,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
 
                     let f_val = if let Value::Object(obj) = &obj_val {
-                        if let Some(val) = obj_get_key_value(obj, &key.as_str().into())? {
+                        if let Some(val) = object_get_key_value(obj, key) {
                             val.borrow().clone()
-                        } else if key.as_str() == "call" && obj_get_key_value(obj, &"__closure__".into())?.is_some() {
+                        } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
                             Value::Function("call".to_string())
                         } else {
                             Value::Undefined
@@ -5453,7 +5452,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     }
 
                     let f_val = if let Value::Object(obj) = &obj_val {
-                        if let Some(val_rc) = crate::core::obj_get_key_value(obj, &prop_key).map_err(EvalError::Js)? {
+                        if let Some(val_rc) = object_get_key_value(obj, &prop_key) {
                             val_rc.borrow().clone()
                         } else {
                             Value::Undefined
@@ -5572,7 +5571,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let val = evaluate_expr(mc, env, func_expr)?;
             let closure = match &val {
                 Value::Object(obj) => {
-                    let c_val = obj_get_key_value(obj, &"__closure__".into())?;
+                    let c_val = object_get_key_value(obj, "__closure__");
                     if let Some(c_ptr) = c_val {
                         let c_ref = c_ptr.borrow();
                         if let Value::Closure(c) = &*c_ref {
@@ -5593,7 +5592,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let val = evaluate_expr(mc, env, func_expr)?;
             let closure = match &val {
                 Value::Object(obj) => {
-                    let c_val = obj_get_key_value(obj, &"__closure__".into())?;
+                    let c_val = object_get_key_value(obj, "__closure__");
                     if let Some(c_ptr) = c_val {
                         let c_ref = c_ptr.borrow();
                         if let Value::Closure(c) = &*c_ref {
@@ -5650,12 +5649,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             // Obtain Promise.resolve from the current environment
             let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
-                if let Ok(Some(resolve_method)) = crate::core::obj_get_key_value(
+                if let Some(resolve_method) = object_get_key_value(
                     &match ctor.borrow().clone() {
                         Value::Object(o) => o,
                         _ => return Err(EvalError::Js(crate::raise_eval_error!("Promise not object"))),
                     },
-                    &"resolve".into(),
+                    "resolve",
                 ) {
                     resolve_method.borrow().clone()
                 } else {
@@ -5736,7 +5735,7 @@ fn evaluate_function_expression<'gc>(
     // Set __proto__ to Function.prototype
     if let Some(func_ctor_val) = env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = obj_get_key_value(func_ctor, &"prototype".into())
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         func_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -5766,7 +5765,7 @@ fn evaluate_function_expression<'gc>(
     // Set prototype of prototype object to Object.prototype
     if let Some(obj_val) = env_get(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+        && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
     {
         proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -5798,7 +5797,7 @@ fn get_property_with_accessors<'gc>(
         }
     }
 
-    if let Some(val_ptr) = crate::core::obj_get_key_value(obj, key).map_err(EvalError::Js)? {
+    if let Some(val_ptr) = object_get_key_value(obj, key) {
         let val = val_ptr.borrow().clone();
         match val {
             Value::Property { getter, value, .. } => {
@@ -5882,7 +5881,7 @@ fn set_property_with_accessors<'gc>(
         return Ok(());
     }
 
-    if let Some(prop_ptr) = crate::core::obj_get_key_value(obj, key).map_err(EvalError::Js)? {
+    if let Some(prop_ptr) = object_get_key_value(obj, key) {
         let prop = prop_ptr.borrow().clone();
         match prop {
             Value::Property { setter, getter, .. } => {
@@ -5941,7 +5940,7 @@ pub fn call_native_function<'gc>(
                 }
             }
             Value::Object(obj) => {
-                if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
+                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, None)?)),
 
@@ -5967,11 +5966,11 @@ pub fn call_native_function<'gc>(
             Value::Null => "Null".to_string(),
             Value::Object(obj) => {
                 let mut t = "Object".to_string();
-                if let Ok(Some(sym_ctor)) = obj_get_key_value(env, &"Symbol".into())
+                if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                     && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                    && let Ok(Some(tag_sym)) = obj_get_key_value(sym_obj, &"toStringTag".into())
+                    && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
                     && let Value::Symbol(s) = &*tag_sym.borrow()
-                    && let Ok(Some(val)) = obj_get_key_value(obj, &PropertyKey::Symbol(*s))
+                    && let Some(val) = object_get_key_value(obj, s)
                     && let Value::String(s_val) = &*val.borrow()
                 {
                     t = crate::unicode::utf16_to_utf8(s_val);
@@ -6058,7 +6057,7 @@ pub fn call_native_function<'gc>(
     {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         if let Value::Object(obj) = this_v {
-            if let Some(map_val) = crate::core::obj_get_key_value(&obj, &"__map__".into()).map_err(EvalError::Js)? {
+            if let Some(map_val) = object_get_key_value(&obj, "__map__") {
                 if let Value::Map(map_ptr) = &*map_val.borrow() {
                     return Ok(Some(
                         crate::js_map::handle_map_instance_method(mc, map_ptr, method, args, env).map_err(EvalError::Js)?,
@@ -6089,7 +6088,7 @@ pub fn call_native_function<'gc>(
     {
         let this_v = this_val.clone().unwrap_or(Value::Undefined);
         if let Value::Object(obj) = this_v {
-            if let Some(set_val) = crate::core::obj_get_key_value(&obj, &"__set__".into()).map_err(EvalError::Js)? {
+            if let Some(set_val) = object_get_key_value(&obj, "__set__") {
                 if let Value::Set(set_ptr) = &*set_val.borrow() {
                     return Ok(Some(
                         crate::js_set::handle_set_instance_method(mc, set_ptr, this_v.clone(), method, args, env).map_err(EvalError::Js)?,
@@ -6224,12 +6223,12 @@ fn call_accessor<'gc>(
         }
         Value::Object(obj) => {
             // Check for __closure__
-            let cl_val_opt = crate::core::obj_get_key_value(obj, &"__closure__".into()).map_err(EvalError::Js)?;
+            let cl_val_opt = object_get_key_value(obj, "__closure__");
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
                 // If the function object has a stored __home_object__, propagate that into the call env
-                if let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(obj, &"__home_object__".into())
+                if let Some(home_val_rc) = object_get_key_value(obj, "__home_object__")
                     && let Value::Object(home_obj) = &*home_val_rc.borrow()
                 {
                     let cl_data = cl;
@@ -6275,7 +6274,7 @@ fn call_setter<'gc>(
         }
         Value::Object(obj) => {
             // Check for __closure__
-            let cl_val_opt = crate::core::obj_get_key_value(obj, &"__closure__".into()).map_err(EvalError::Js)?;
+            let cl_val_opt = object_get_key_value(obj, "__closure__");
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
@@ -6326,15 +6325,15 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         _ => ("Error", full_msg.clone()),
     };
 
-    let error_proto = if let Ok(Some(err_ctor_val)) = obj_get_key_value(env, &name.into())
+    let error_proto = if let Some(err_ctor_val) = object_get_key_value(env, name)
         && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = obj_get_key_value(err_ctor, &"prototype".into())
+        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
-    } else if let Ok(Some(err_ctor_val)) = obj_get_key_value(env, &"Error".into())
+    } else if let Some(err_ctor_val) = object_get_key_value(env, "Error")
         && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = obj_get_key_value(err_ctor, &"prototype".into())
+        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -6443,7 +6442,7 @@ pub fn call_closure<'gc>(
     // If the function was stored as an object with a `__home_object__` property, propagate
     // that into the call environment (this covers methods defined in object-literals).
     if let Some(fn_obj_ptr) = fn_obj
-        && let Ok(Some(home_val_rc)) = crate::core::obj_get_key_value(&fn_obj_ptr, &"__home_object__".into())
+        && let Some(home_val_rc) = object_get_key_value(&fn_obj_ptr, "__home_object__")
         && let Value::Object(home_obj) = &*home_val_rc.borrow()
     {
         crate::core::obj_set_key_value(mc, &call_env, &"__home_object__".into(), Value::Object(*home_obj)).map_err(EvalError::Js)?;
@@ -6461,7 +6460,7 @@ pub fn call_closure<'gc>(
         let args_obj = crate::core::new_js_object_data(mc);
         if let Some(obj_val) = crate::core::env_get(env, "Object")
             && let Value::Object(obj_ctor) = &*obj_val.borrow()
-            && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into())
+            && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
             args_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -6469,7 +6468,7 @@ pub fn call_closure<'gc>(
 
         if let Some(obj_val) = crate::core::env_get(env, "Object")
             && let Value::Object(obj_ctor) = &*obj_val.borrow()
-            && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(obj_ctor, &"prototype".into())
+            && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
             && let Value::Object(proto) = &*proto_val.borrow()
         {
             args_obj.borrow_mut(mc).prototype = Some(*proto);
@@ -6482,14 +6481,14 @@ pub fn call_closure<'gc>(
         // This is needed for `...arguments` to work.
         if let Some(sym_val) = crate::core::env_get(env, "Symbol")
             && let Value::Object(sym_ctor) = &*sym_val.borrow()
-            && let Ok(Some(iter_sym_val)) = crate::core::obj_get_key_value(sym_ctor, &"iterator".into())
+            && let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
         {
             // Get Array.prototype.values
             if let Some(arr_val) = crate::core::env_get(env, "Array")
                 && let Value::Object(arr_ctor) = &*arr_val.borrow()
-                && let Ok(Some(arr_proto_val)) = crate::core::obj_get_key_value(arr_ctor, &"prototype".into())
+                && let Some(arr_proto_val) = object_get_key_value(arr_ctor, "prototype")
                 && let Value::Object(arr_proto) = &*arr_proto_val.borrow()
-                && let Ok(Some(_values_fn)) = crate::core::obj_get_key_value(arr_proto, &"values".into())
+                && let Some(_values_fn) = object_get_key_value(arr_proto, "values")
             {
                 let key_val = iter_sym_val.borrow().clone();
                 let _key_str = match key_val {
@@ -6646,7 +6645,7 @@ pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<Destruct
             Some((data.params.clone(), data.body.clone(), data.env))
         }
         Value::Object(obj) => {
-            if let Ok(Some(closure_prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+            if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
                 let closure_val = closure_prop.borrow();
                 match &*closure_val {
                     Value::Closure(cl) => {
@@ -6709,7 +6708,7 @@ pub fn prepare_function_call_env<'gc>(
                         let arg_val = args.get(i).cloned().unwrap_or(Value::Undefined);
                         let mut prop_val = Value::Undefined;
                         if let Value::Object(o) = arg_val
-                            && let Ok(Some(cell)) = obj_get_key_value(&o, &key.clone().into())
+                            && let Some(cell) = object_get_key_value(&o, key)
                         {
                             prop_val = cell.borrow().clone();
                         }
@@ -6730,7 +6729,7 @@ pub fn prepare_function_call_env<'gc>(
                                 DestructuringElement::Property(key, boxed) => {
                                     if let DestructuringElement::Variable(name, default_expr) = &**boxed {
                                         let mut prop_val = Value::Undefined;
-                                        if let Ok(Some(cell)) = obj_get_key_value(&o, &key.clone().into()) {
+                                        if let Some(cell) = object_get_key_value(&o, key) {
                                             prop_val = cell.borrow().clone();
                                         }
                                         if matches!(prop_val, Value::Undefined)
@@ -6796,17 +6795,16 @@ fn evaluate_expr_new<'gc>(
                 if is_array(mc, &obj) {
                     let len = object_get_length(&obj).unwrap_or(0);
                     for k in 0..len {
-                        let k_key = PropertyKey::from(k.to_string());
-                        let item = obj_get_key_value(&obj, &k_key)?.unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                        let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
                         eval_args.push(item.borrow().clone());
                     }
                 } else {
                     // Support iterable spread for constructors: if object has Symbol.iterator, iterate and push
-                    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                        && let Ok(Some(iter_sym_val)) = obj_get_key_value(sym_obj, &"iterator".into())
+                        && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                         && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                        && let Ok(Some(iter_fn_val)) = obj_get_key_value(&obj, &PropertyKey::Symbol(*iter_sym))
+                        && let Some(iter_fn_val) = object_get_key_value(&obj, iter_sym)
                     {
                         // Call iterator method on the object to get an iterator
                         let iterator = match &*iter_fn_val.borrow() {
@@ -6834,7 +6832,7 @@ fn evaluate_expr_new<'gc>(
 
                         if let Value::Object(iter_obj) = iterator {
                             loop {
-                                if let Ok(Some(next_val)) = obj_get_key_value(&iter_obj, &"next".into()) {
+                                if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
                                     let next_fn = next_val.borrow().clone();
                                     let res = match &next_fn {
                                         Value::Function(name) => {
@@ -6862,7 +6860,7 @@ fn evaluate_expr_new<'gc>(
                                     };
 
                                     if let Value::Object(res_obj) = res {
-                                        let done = if let Ok(Some(done_rc)) = obj_get_key_value(&res_obj, &"done".into()) {
+                                        let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
                                             if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
                                         } else {
                                             false
@@ -6872,7 +6870,7 @@ fn evaluate_expr_new<'gc>(
                                             break;
                                         }
 
-                                        let value = if let Ok(Some(val_rc)) = obj_get_key_value(&res_obj, &"value".into()) {
+                                        let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
                                             val_rc.borrow().clone()
                                         } else {
                                             Value::Undefined
@@ -6903,14 +6901,14 @@ fn evaluate_expr_new<'gc>(
 
     match func_val {
         Value::Object(obj) => {
-            if let Some(cl_ptr) = obj_get_key_value(&obj, &"__closure__".into())? {
+            if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
                         // 1. Create instance
                         let instance = crate::core::new_js_object_data(mc);
 
                         // 2. Set prototype
-                        if let Ok(Some(proto_val)) = obj_get_key_value(&obj, &"prototype".into()) {
+                        if let Some(proto_val) = object_get_key_value(&obj, "prototype") {
                             if let Value::Object(proto_obj) = &*proto_val.borrow() {
                                 instance.borrow_mut(mc).prototype = Some(*proto_obj);
                                 obj_set_key_value(mc, &instance, &"__proto__".into(), Value::Object(*proto_obj))?;
@@ -6918,7 +6916,7 @@ fn evaluate_expr_new<'gc>(
                                 // Fallback to Object.prototype
                                 if let Some(obj_val) = env_get(env, "Object")
                                     && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                                    && let Ok(Some(obj_proto_val)) = obj_get_key_value(obj_ctor, &"prototype".into())
+                                    && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
                                     && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
                                 {
                                     instance.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -6958,12 +6956,12 @@ fn evaluate_expr_new<'gc>(
                     }
                     _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
                 }
-            } else if (obj_get_key_value(&obj, &"__class_def__".into())?).is_some() {
+            } else if object_get_key_value(&obj, "__class_def__").is_some() {
                 // Delegate to js_class::evaluate_new
                 let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args).map_err(EvalError::Js)?;
                 Ok(val)
             } else {
-                if let Some(native_name) = obj_get_key_value(&obj, &"__native_ctor".into())?
+                if let Some(native_name) = object_get_key_value(&obj, "__native_ctor")
                     && let Value::String(name) = &*native_name.borrow()
                 {
                     let name_str = crate::unicode::utf16_to_utf8(name);
@@ -6972,7 +6970,7 @@ fn evaluate_expr_new<'gc>(
                         "Error" | "ReferenceError" | "TypeError" | "RangeError" | "SyntaxError"
                     ) {
                         let msg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                        let prototype = if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                        let prototype = if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
                         {
                             Some(*proto_obj)
@@ -6996,7 +6994,7 @@ fn evaluate_expr_new<'gc>(
 
                         obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::String(val.clone()))?;
 
-                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                        if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
                         {
                             new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -7014,7 +7012,7 @@ fn evaluate_expr_new<'gc>(
                         let new_obj = crate::core::new_js_object_data(mc);
                         obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Boolean(val))?;
 
-                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                        if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
                         {
                             new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -7029,7 +7027,7 @@ fn evaluate_expr_new<'gc>(
                         let new_obj = crate::core::new_js_object_data(mc);
                         obj_set_key_value(mc, &new_obj, &"__value__".into(), Value::Number(val))?;
 
-                        if let Some(proto_val) = obj_get_key_value(&obj, &"prototype".into())?
+                        if let Some(proto_val) = object_get_key_value(&obj, "prototype")
                             && let Value::Object(proto_obj) = &*proto_val.borrow()
                         {
                             new_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -7082,7 +7080,7 @@ fn evaluate_expr_object<'gc>(
     let obj = crate::core::new_js_object_data(mc);
     if let Some(obj_val) = env_get(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         obj.borrow_mut(mc).prototype = Some(*proto);
@@ -7097,7 +7095,7 @@ fn evaluate_expr_object<'gc>(
                     // Copy only enumerable string-keyed properties
                     if let PropertyKey::String(_) = &k
                         && source_obj.borrow().is_enumerable(&k)
-                        && let Some(val_ptr) = crate::core::obj_get_key_value(&source_obj, &k).map_err(EvalError::Js)?
+                        && let Some(val_ptr) = object_get_key_value(&source_obj, &k)
                     {
                         let v = val_ptr.borrow().clone();
                         obj_set_key_value(mc, &obj, &k, v)?;
@@ -7151,13 +7149,13 @@ fn evaluate_expr_object<'gc>(
         // If the value is a function object (holds a __closure__), attach a __home_object__
         // own property on the function object so it can propagate [[HomeObject]] during calls
         if let Value::Object(func_obj) = &val
-            && let Ok(Some(_)) = obj_get_key_value(func_obj, &"__closure__".into())
+            && let Some(_) = object_get_key_value(func_obj, "__closure__")
         {
             let _ = obj_set_key_value(mc, func_obj, &"__home_object__".into(), Value::Object(obj));
         }
 
         // Merge accessors if existing property is a getter or setter; otherwise set normally
-        if let Some(existing_ptr) = obj_get_key_value(&obj, &key_v)? {
+        if let Some(existing_ptr) = object_get_key_value(&obj, &key_v) {
             let existing = existing_ptr.borrow().clone();
             let new_val = val.clone();
             match (existing, new_val) {
@@ -7194,11 +7192,11 @@ fn evaluate_expr_object<'gc>(
                 | (Value::Setter(_, _, _, _), Value::Setter(_, _, _, _)) => {
                     // Extract existing components
                     let (mut getter_opt, mut setter_opt) = (None::<Box<Value<'gc>>>, None::<Box<Value<'gc>>>);
-                    if let Value::Getter(_, _, _) = obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone() {
-                        getter_opt = Some(Box::new(obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone()));
+                    if let Value::Getter(_, _, _) = object_get_key_value(&obj, &key_v).unwrap().borrow().clone() {
+                        getter_opt = Some(Box::new(object_get_key_value(&obj, &key_v).unwrap().borrow().clone()));
                     }
-                    if let Value::Setter(_, _, _, _) = obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone() {
-                        setter_opt = Some(Box::new(obj_get_key_value(&obj, &key_v)?.unwrap().borrow().clone()));
+                    if let Value::Setter(_, _, _, _) = object_get_key_value(&obj, &key_v).unwrap().borrow().clone() {
+                        setter_opt = Some(Box::new(object_get_key_value(&obj, &key_v).unwrap().borrow().clone()));
                     }
                     // Incorporate new value
                     match val {
@@ -7241,18 +7239,17 @@ fn evaluate_expr_array<'gc>(
                     if is_array(mc, &obj) {
                         let len = object_get_length(&obj).unwrap_or(0);
                         for k in 0..len {
-                            let k_key = PropertyKey::from(k.to_string());
-                            let item = obj_get_key_value(&obj, &k_key)?.unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                            let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
                             obj_set_key_value(mc, &arr_obj, &index.to_string().into(), item.borrow().clone())?;
                             index += 1;
                         }
                     } else {
                         // Support generic iterables via Symbol.iterator
-                        if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+                        if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
                             && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-                            && let Ok(Some(iter_sym_val)) = obj_get_key_value(sym_obj, &"iterator".into())
+                            && let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator")
                             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
-                            && let Ok(Some(iter_fn_val)) = obj_get_key_value(&obj, &PropertyKey::Symbol(*iter_sym))
+                            && let Some(iter_fn_val) = object_get_key_value(&obj, iter_sym)
                         {
                             // Call iterator method on the object to get an iterator
                             let iterator = match &*iter_fn_val.borrow() {
@@ -7281,7 +7278,7 @@ fn evaluate_expr_array<'gc>(
                             // Consume iterator by repeatedly calling its next() method
                             if let Value::Object(iter_obj) = iterator {
                                 loop {
-                                    if let Ok(Some(next_val)) = obj_get_key_value(&iter_obj, &"next".into()) {
+                                    if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
                                         let next_fn = next_val.borrow().clone();
 
                                         let res = match &next_fn {
@@ -7310,7 +7307,7 @@ fn evaluate_expr_array<'gc>(
                                         };
 
                                         if let Value::Object(res_obj) = res {
-                                            let done = if let Ok(Some(done_rc)) = obj_get_key_value(&res_obj, &"done".into()) {
+                                            let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
                                                 if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
                                             } else {
                                                 false
@@ -7320,7 +7317,7 @@ fn evaluate_expr_array<'gc>(
                                                 break;
                                             }
 
-                                            let value = if let Ok(Some(val_rc)) = obj_get_key_value(&res_obj, &"value".into()) {
+                                            let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
                                                 val_rc.borrow().clone()
                                             } else {
                                                 Value::Undefined

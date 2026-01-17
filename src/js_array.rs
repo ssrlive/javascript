@@ -9,7 +9,7 @@ use crate::{
 };
 
 use crate::core::{
-    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_get_key_value, obj_set_key_value, obj_set_rc,
+    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_set_key_value, obj_set_rc, object_get_key_value,
     value_to_sort_string, values_equal,
 };
 
@@ -19,9 +19,9 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     obj_set_key_value(mc, &array_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Array")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -92,9 +92,9 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     }
 
     // Register Symbol.iterator on Array.prototype (alias to Array.prototype.values)
-    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())? {
+    if let Some(sym_val) = object_get_key_value(env, "Symbol") {
         if let Value::Object(sym_ctor) = &*sym_val.borrow() {
-            if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())? {
+            if let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator") {
                 if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
                     let val = Value::Function("Array.prototype.values".to_string());
                     obj_set_key_value(mc, &array_proto, &PropertyKey::Symbol(iter_sym.clone()), val)?;
@@ -103,7 +103,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             }
 
             // Symbol.toStringTag default for Array.prototype
-            if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())? {
+            if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag") {
                 if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
                     obj_set_key_value(
                         mc,
@@ -237,11 +237,11 @@ pub(crate) fn handle_array_static_method<'gc>(
                     // } else if let Some(len) = get_array_length(mc, &object) {
 
                     // Support generic iterables via Symbol.iterator: call the iterator method and consume next() until done
-                    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())? {
+                    if let Some(sym_ctor) = object_get_key_value(env, "Symbol") {
                         if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                            if let Ok(Some(iter_sym_val)) = obj_get_key_value(sym_obj, &"iterator".into()) {
+                            if let Some(iter_sym_val) = object_get_key_value(sym_obj, "iterator") {
                                 if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
-                                    if let Ok(Some(iter_fn_val)) = obj_get_key_value(&object, &PropertyKey::Symbol(iter_sym.clone())) {
+                                    if let Some(iter_fn_val) = object_get_key_value(&object, iter_sym) {
                                         // Call iterator method on the object to get an iterator
                                         let iterator = match &*iter_fn_val.borrow() {
                                             Value::Function(name) => {
@@ -273,7 +273,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                             Value::Object(iter_obj) => {
                                                 let mut idx = 0usize;
                                                 loop {
-                                                    if let Ok(Some(next_val)) = obj_get_key_value(&iter_obj, &"next".into()) {
+                                                    if let Some(next_val) = object_get_key_value(&iter_obj, "next") {
                                                         let next_fn = next_val.borrow().clone();
 
                                                         let res = match &next_fn {
@@ -311,28 +311,26 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                         };
 
                                                         if let Value::Object(res_obj) = res {
-                                                            let done =
-                                                                if let Ok(Some(done_rc)) = obj_get_key_value(&res_obj, &"done".into()) {
-                                                                    if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
-                                                                } else {
-                                                                    false
-                                                                };
+                                                            let done = if let Some(done_rc) = object_get_key_value(&res_obj, "done") {
+                                                                if let Value::Boolean(b) = &*done_rc.borrow() { *b } else { false }
+                                                            } else {
+                                                                false
+                                                            };
 
                                                             if done {
                                                                 break;
                                                             }
 
-                                                            let value =
-                                                                if let Ok(Some(val_rc)) = obj_get_key_value(&res_obj, &"value".into()) {
-                                                                    val_rc.borrow().clone()
-                                                                } else {
-                                                                    Value::Undefined
-                                                                };
+                                                            let value = if let Some(val_rc) = object_get_key_value(&res_obj, "value") {
+                                                                val_rc.borrow().clone()
+                                                            } else {
+                                                                Value::Undefined
+                                                            };
 
                                                             if let Some(ref fn_val) = map_fn {
                                                                 // Support closures or function names for map function
                                                                 let actual_fn = if let Value::Object(obj) = fn_val {
-                                                                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                                                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                                                         prop.borrow().clone()
                                                                     } else {
                                                                         fn_val.clone()
@@ -390,7 +388,7 @@ pub(crate) fn handle_array_static_method<'gc>(
 
                     if let Some(len) = get_array_length(mc, &object) {
                         for i in 0..len {
-                            let val_opt = obj_get_key_value(&object, &i.to_string().into())?;
+                            let val_opt = object_get_key_value(&object, i);
                             let element = if let Some(val) = val_opt {
                                 val.borrow().clone()
                             } else {
@@ -400,7 +398,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             if let Some(ref fn_val) = map_fn {
                                 // Support closures or function names for map function
                                 let actual_fn = if let Value::Object(obj) = fn_val {
-                                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                         prop.borrow().clone()
                                     } else {
                                         fn_val.clone()
@@ -534,7 +532,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if k < 0 || k >= len {
                 Ok(Value::Undefined)
             } else {
-                let val_opt = obj_get_key_value(object, &k.to_string().into())?;
+                let val_opt = object_get_key_value(object, k.to_string());
                 Ok(val_opt.map(|v| v.borrow().clone()).unwrap_or(Value::Undefined))
             }
         }
@@ -604,7 +602,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if i > 0 {
                     result.push_str(&separator);
                 }
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&utf16_to_utf8(s)),
@@ -650,7 +648,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             let mut idx = 0;
             for i in start..end {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     obj_set_key_value(mc, &new_array, &idx.to_string().into(), val.borrow().clone())?;
                     idx += 1;
                 }
@@ -666,12 +664,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val_rc) = object_get_key_value(object, i) {
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
 
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -706,12 +704,12 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 set_array_length(mc, &new_array, current_len)?;
 
                 for i in 0..current_len {
-                    if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val_rc) = object_get_key_value(object, i) {
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
                         // Support inline closures wrapped as objects with __closure__ like forEach does.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -744,10 +742,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let new_array = create_array(mc, env)?;
                 let mut idx = 0;
                 for i in 0..current_len {
-                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val) = object_get_key_value(object, i) {
                         // Support inline closures wrapped as objects with __closure__ like forEach does.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -810,7 +808,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 let mut accumulator: Value = if let Some(ref val) = initial_value {
                     val.clone()
-                } else if let Some(val) = obj_get_key_value(object, &"0".into())? {
+                } else if let Some(val) = object_get_key_value(object, "0") {
                     val.borrow().clone()
                 } else {
                     Value::Undefined
@@ -818,10 +816,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
-                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val) = object_get_key_value(object, i) {
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -884,7 +882,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     let mut found = false;
                     accumulator = Value::Undefined; // Placeholder
                     for i in (0..current_len).rev() {
-                        if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                        if let Some(val) = object_get_key_value(object, i) {
                             accumulator = val.borrow().clone();
                             start_idx_rev = current_len - i;
                             found = true;
@@ -910,10 +908,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let start_loop = current_len.saturating_sub(start_idx_rev);
 
                 for i in (0..start_loop).rev() {
-                    if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(val) = object_get_key_value(object, i) {
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -951,10 +949,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -998,7 +996,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -1021,7 +1019,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     }
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1065,7 +1063,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -1088,7 +1086,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     }
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1132,7 +1130,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 for i in 0..current_len {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         // if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                         //     let element = value.borrow().clone();
                         //     let index_val = Value::Number(i as f64);
@@ -1155,7 +1153,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     }
                         // Support inline closures wrapped as objects with __closure__.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1201,7 +1199,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut new_index = 0;
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     obj_set_key_value(mc, &result, &new_index.to_string().into(), val.borrow().clone())?;
                     new_index += 1;
                 }
@@ -1215,7 +1213,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         // If argument is an array-like object, copy its elements
                         let arg_len = get_array_length(mc, &arg_obj).unwrap_or(0);
                         for i in 0..arg_len {
-                            if let Some(val) = obj_get_key_value(&arg_obj, &i.to_string().into())? {
+                            if let Some(val) = object_get_key_value(&arg_obj, i) {
                                 obj_set_rc(mc, &result, &new_index.to_string().into(), val.clone())?;
                                 new_index += 1;
                             }
@@ -1256,7 +1254,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
+                if let Some(val) = object_get_key_value(object, i)
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Number(i as f64));
@@ -1289,7 +1287,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
+                if let Some(val) = object_get_key_value(object, i)
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Boolean(true));
@@ -1308,7 +1306,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // object storage model.
             let mut elements: Vec<(String, Value<'gc>)> = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     elements.push((i.to_string(), val.borrow().clone()));
                 }
             }
@@ -1326,7 +1324,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let compare_fn = args[0].clone();
                 // Support closures wrapped in objects or bare closures/functions
                 let actual_fn = if let Value::Object(obj) = &compare_fn {
-                    if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
                         prop.borrow().clone()
                     } else {
                         compare_fn.clone()
@@ -1385,8 +1383,8 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let left_key = left.to_string();
                 let right_key = right.to_string();
 
-                let left_val = obj_get_key_value(object, &left_key.clone().into())?.map(|v| v.borrow().clone());
-                let right_val = obj_get_key_value(object, &right_key.clone().into())?.map(|v| v.borrow().clone());
+                let left_val = object_get_key_value(object, &left_key).map(|v| v.borrow().clone());
+                let right_val = object_get_key_value(object, &right_key).map(|v| v.borrow().clone());
 
                 if let Some(val) = right_val {
                     obj_set_key_value(mc, object, &left_key.clone().into(), val)?;
@@ -1437,7 +1435,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Collect elements to be deleted
             let mut deleted_elements = Vec::new();
             for i in start..(start + delete_count).min(current_len) {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     deleted_elements.push(val.borrow().clone());
                 }
             }
@@ -1454,7 +1452,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut tail_elements = Vec::new();
             let shift_start = start + delete_count;
             for i in shift_start..current_len {
-                let val_opt = obj_get_key_value(object, &i.to_string().into())?;
+                let val_opt = object_get_key_value(object, i);
                 tail_elements.push(val_opt.map(|v| v.borrow().clone()));
             }
 
@@ -1496,9 +1494,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if current_len > 0 {
                 // Get the first element
                 // Fallback: mutate the local object copy
-                let first_element = obj_get_key_value(object, &"0".into())?.map(|v| v.borrow().clone());
+                let first_element = object_get_key_value(object, "0").map(|v| v.borrow().clone());
                 for i in 1..current_len {
-                    let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
+                    let val_rc_opt = object_get_key_value(object, i);
                     if let Some(val_rc) = val_rc_opt {
                         obj_set_rc(mc, object, &(i - 1).to_string().into(), val_rc);
                     } else {
@@ -1527,7 +1525,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Fallback: mutate local copy (shift right by number of new elements)
             for i in (0..current_len).rev() {
                 let dest = (i + args.len()).to_string();
-                let val_rc_opt = obj_get_key_value(object, &i.to_string().into())?;
+                let val_rc_opt = object_get_key_value(object, i);
                 if let Some(val_rc) = val_rc_opt {
                     obj_set_rc(mc, object, &dest.into(), val_rc);
                 } else {
@@ -1613,7 +1611,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             // Search from from_index backwards
             for i in (0..=from_index).rev() {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())?
+                if let Some(val) = object_get_key_value(object, i)
                     && values_equal(mc, &val.borrow(), &search_element)
                 {
                     return Ok(Value::Number(i as f64));
@@ -1631,7 +1629,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 if i > 0 {
                     result.push(',');
                 }
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     match &*val.borrow() {
                         Value::Undefined | Value::Null => {} // push nothing for null and undefined
                         Value::String(s) => result.push_str(&utf16_to_utf8(s)),
@@ -1674,10 +1672,10 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut result = Vec::new();
             for i in 0..current_len {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     // Support inline closures wrapped as objects with __closure__.
                     let actual_func = if let Value::Object(obj) = &callback_val {
-                        if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                        if let Some(prop) = object_get_key_value(obj, "__closure__") {
                             prop.borrow().clone()
                         } else {
                             callback_val.clone()
@@ -1759,7 +1757,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             let mut temp_values = Vec::new();
             for i in start..end.min(current_len) {
-                if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+                if let Some(val) = object_get_key_value(object, i) {
                     temp_values.push(val.borrow().clone());
                 }
             }
@@ -1798,9 +1796,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 // Search from the end
                 for i in (0..current_len).rev() {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1845,9 +1843,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 // Search from the end
                 for i in (0..current_len).rev() {
-                    if let Some(value) = obj_get_key_value(object, &i.to_string().into())? {
+                    if let Some(value) = object_get_key_value(object, i) {
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Ok(Some(prop)) = obj_get_key_value(obj, &"__closure__".into()) {
+                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1901,7 +1899,7 @@ fn flatten_array<'gc>(
     let current_len = get_array_length(mc, object).unwrap_or(0);
 
     for i in 0..current_len {
-        if let Some(val) = obj_get_key_value(object, &i.to_string().into())? {
+        if let Some(val) = object_get_key_value(object, i) {
             let value = val.borrow().clone();
             flatten_single_value(mc, value, result, depth)?;
         }
@@ -2010,11 +2008,11 @@ pub(crate) fn create_array_iterator<'gc>(
     )?;
 
     // Register Symbols
-    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
     {
         // Symbol.iterator
-        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("IteratorSelf".to_string());
@@ -2022,7 +2020,7 @@ pub(crate) fn create_array_iterator<'gc>(
         }
 
         // Symbol.toStringTag
-        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
             let val = Value::String(utf8_to_utf16("Array Iterator"));
@@ -2039,7 +2037,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get array
-    let arr_val = obj_get_key_value(iterator, &"__iterator_array__".into())?.ok_or(raise_eval_error!("Iterator has no array"))?;
+    let arr_val = object_get_key_value(iterator, "__iterator_array__").ok_or(raise_eval_error!("Iterator has no array"))?;
     let arr_ptr = if let Value::Object(o) = &*arr_val.borrow() {
         o.clone()
     } else {
@@ -2047,7 +2045,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?.ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -2055,7 +2053,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = obj_get_key_value(iterator, &"__iterator_kind__".into())?.ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(raise_eval_error!("Iterator has no kind"))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {
@@ -2071,7 +2069,7 @@ pub(crate) fn handle_array_iterator_next<'gc>(
         return Ok(Value::Object(result_obj));
     }
 
-    let element_val = if let Some(v) = obj_get_key_value(&arr_ptr, &index.to_string().into())? {
+    let element_val = if let Some(v) = object_get_key_value(&arr_ptr, index) {
         v.borrow().clone()
     } else {
         Value::Undefined
@@ -2106,7 +2104,7 @@ pub fn serialize_array_for_eval<'gc>(mc: &MutationContext<'gc>, object: &JSObjec
     let current_len = get_array_length(mc, object).unwrap_or(0);
     let mut parts = Vec::new();
     for i in 0..current_len {
-        if let Some(val_rc) = obj_get_key_value(object, &i.to_string().into())? {
+        if let Some(val_rc) = object_get_key_value(object, i) {
             match &*val_rc.borrow() {
                 Value::Undefined | Value::Null => parts.push(String::new()),
                 Value::String(s) => parts.push(format!("\"{}\"", utf16_to_utf8(s))),
@@ -2133,7 +2131,7 @@ pub fn serialize_array_for_eval<'gc>(mc: &MutationContext<'gc>, object: &JSObjec
                                     continue;
                                 }
                                 seen_keys.insert(key.clone());
-                                if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(&cur_obj, key) {
+                                if let Some(val_rc) = object_get_key_value(&cur_obj, key) {
                                     let val = val_rc.borrow().clone();
                                     let val_str = match val {
                                         Value::String(s) => format!("\"{}\"", crate::unicode::utf16_to_utf8(&s)),

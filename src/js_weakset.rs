@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::core::{JSWeakSet, PropertyKey};
 use crate::{
-    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_get_key_value, obj_set_key_value},
+    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -34,9 +34,9 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     weakset_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakset__"));
 
     // Set prototype to WeakSet.prototype if available
-    if let Some(weakset_ctor) = obj_get_key_value(env, &"WeakSet".into())?
+    if let Some(weakset_ctor) = object_get_key_value(env, "WeakSet")
         && let Value::Object(ctor) = &*weakset_ctor.borrow()
-        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
         weakset_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -53,8 +53,8 @@ fn initialize_weakset_from_iterable<'gc>(
 ) -> Result<(), JSError> {
     match iterable {
         Value::Object(obj) => {
-            let mut i = 0;
-            while let Some(value_val) = obj_get_key_value(obj, &i.to_string().into())? {
+            let mut i = 0_usize;
+            while let Some(value_val) = object_get_key_value(obj, i) {
                 let value = value_val.borrow().clone();
 
                 // Check if value is an object
@@ -81,9 +81,9 @@ pub fn initialize_weakset<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     obj_set_key_value(mc, &weakset_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("WeakSet")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -229,7 +229,7 @@ pub(crate) fn handle_weakset_instance_method<'gc>(
 
 /// Check if a JS object wraps an internal WeakSet
 pub fn is_weakset_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
-    if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, &"__weakset__".into()) {
+    if let Some(val_rc) = object_get_key_value(obj, "__weakset__") {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakSet(_))
     } else {
         false

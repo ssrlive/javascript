@@ -8,6 +8,33 @@ pub enum PropertyKey<'gc> {
     Symbol(Gc<'gc, SymbolData>),
 }
 
+impl<'gc> From<&Gc<'gc, SymbolData>> for PropertyKey<'gc> {
+    fn from(s: &Gc<'gc, SymbolData>) -> Self {
+        Self::from(*s)
+    }
+}
+
+impl<'gc> From<Gc<'gc, SymbolData>> for PropertyKey<'gc> {
+    fn from(s: Gc<'gc, SymbolData>) -> Self {
+        PropertyKey::Symbol(s)
+    }
+}
+
+impl<'gc> From<usize> for PropertyKey<'gc> {
+    fn from(n: usize) -> Self {
+        PropertyKey::String(n.to_string())
+    }
+}
+
+impl<'gc> From<&PropertyKey<'gc>> for PropertyKey<'gc> {
+    fn from(pk: &PropertyKey<'gc>) -> Self {
+        match pk {
+            PropertyKey::String(s) => PropertyKey::String(s.clone()),
+            PropertyKey::Symbol(sym) => PropertyKey::Symbol(*sym),
+        }
+    }
+}
+
 impl<'gc> From<&str> for PropertyKey<'gc> {
     fn from(s: &str) -> Self {
         PropertyKey::String(s.to_string())

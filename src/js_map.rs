@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, GcPtr};
 use crate::core::{
     JSMap, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
-    obj_get_key_value, obj_set_key_value, values_equal,
+    obj_set_key_value, object_get_key_value, values_equal,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -14,9 +14,9 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     obj_set_key_value(mc, &map_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Map")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -52,11 +52,11 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     obj_set_key_value(mc, &map_proto, &"size".into(), size_prop)?;
 
     // Register Symbols
-    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
     {
         // Symbol.iterator
-        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("Map.prototype.entries".to_string());
@@ -64,7 +64,7 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         }
 
         // Symbol.toStringTag
-        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
             obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Map")))?;
@@ -85,10 +85,7 @@ pub(crate) fn handle_map_constructor<'gc>(
 
     initialize_collection_from_iterable(args, "Map", |entry| {
         if let Value::Object(entry_obj) = entry
-            && let (Some(key_val), Some(value_val)) = (
-                obj_get_key_value(&entry_obj, &"0".into())?,
-                obj_get_key_value(&entry_obj, &"1".into())?,
-            )
+            && let (Some(key_val), Some(value_val)) = (object_get_key_value(&entry_obj, "0"), object_get_key_value(&entry_obj, "1"))
         {
             map.borrow_mut(mc)
                 .entries
@@ -106,9 +103,9 @@ pub(crate) fn handle_map_constructor<'gc>(
     );
 
     // Set prototype to Map.prototype
-    if let Some(map_ctor) = obj_get_key_value(env, &"Map".into())?
+    if let Some(map_ctor) = object_get_key_value(env, "Map")
         && let Value::Object(ctor) = &*map_ctor.borrow()
-        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
         map_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -234,11 +231,11 @@ pub(crate) fn create_map_iterator<'gc>(
     )?;
 
     // Register Symbols
-    if let Some(sym_ctor) = obj_get_key_value(_env, &"Symbol".into())?
+    if let Some(sym_ctor) = object_get_key_value(_env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
     {
         // Symbol.iterator
-        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("IteratorSelf".to_string());
@@ -246,7 +243,7 @@ pub(crate) fn create_map_iterator<'gc>(
         }
 
         // Symbol.toStringTag
-        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
             let val = Value::String(utf8_to_utf16("Map Iterator"));
@@ -263,7 +260,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get map
-    let map_val = obj_get_key_value(iterator, &"__iterator_map__".into())?.ok_or(raise_eval_error!("Iterator has no map"))?;
+    let map_val = object_get_key_value(iterator, "__iterator_map__").ok_or(raise_eval_error!("Iterator has no map"))?;
     let map_ptr = if let Value::Map(m) = &*map_val.borrow() {
         *m
     } else {
@@ -271,7 +268,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?.ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -279,7 +276,7 @@ pub(crate) fn handle_map_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = obj_get_key_value(iterator, &"__iterator_kind__".into())?.ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(raise_eval_error!("Iterator has no kind"))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {

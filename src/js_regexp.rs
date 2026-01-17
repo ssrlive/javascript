@@ -1,6 +1,7 @@
 use crate::PropertyKey;
 use crate::core::{
-    EvalError, JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value, obj_set_key_value,
+    EvalError, JSObjectDataPtr, MutationContext, Value, env_set, get_own_property, new_js_object_data, obj_set_key_value,
+    object_get_key_value,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -13,9 +14,9 @@ pub fn initialize_regexp<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &regexp_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("RegExp")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)

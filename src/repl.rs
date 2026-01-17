@@ -99,7 +99,7 @@ impl Repl {
             Ok(v) => {
                 // If the result is a Promise object (wrapped in Object with __promise property), wait for it to resolve
                 if let Value::Object(obj) = &v
-                    && let Some(promise_val_rc) = obj_get_key_value(obj, &"__promise".into())?
+                    && let Some(promise_val_rc) = object_get_key_value(obj, &"__promise".into())
                     && let Value::Promise(promise) = &*promise_val_rc.borrow()
                 {
                     // Run the event loop until the promise is resolved

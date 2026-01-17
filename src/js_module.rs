@@ -1,6 +1,6 @@
 use crate::{
     JSError, Value,
-    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, obj_get_key_value, obj_set_key_value},
+    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, obj_set_key_value, object_get_key_value},
     core::{Gc, GcCell, MutationContext},
     new_js_object_data,
 };
@@ -176,7 +176,7 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     }
 
     // Check if module.exports was reassigned (CommonJS style)
-    if let Some(module_exports_val) = obj_get_key_value(&module_obj, &"exports".into())? {
+    if let Some(module_exports_val) = object_get_key_value(&module_obj, "exports") {
         match &*module_exports_val.borrow() {
             Value::Object(obj) if Gc::ptr_eq(*obj, module_exports) => {
                 // exports was not reassigned, return the exports object
@@ -195,7 +195,7 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
 
 pub fn import_from_module<'gc>(module_value: &Value<'gc>, specifier: &str) -> Result<Value<'gc>, JSError> {
     match module_value {
-        Value::Object(obj) => match obj_get_key_value(obj, &specifier.into())? {
+        Value::Object(obj) => match object_get_key_value(obj, specifier) {
             Some(val) => Ok(val.borrow().clone()),
             None => Err(crate::raise_eval_error!(format!("Export '{}' not found in module", specifier))),
         },

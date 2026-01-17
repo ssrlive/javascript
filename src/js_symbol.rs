@@ -1,6 +1,5 @@
-use crate::core::obj_get_key_value;
 use crate::core::{Gc, MutationContext, SymbolData};
-use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value};
+use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value};
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 
@@ -19,9 +18,9 @@ pub fn initialize_symbol<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     let symbol_proto = new_js_object_data(mc);
 
     // Get Object.prototype
-    if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(obj_proto) = &*proto_val.borrow()
     {
         symbol_proto.borrow_mut(mc).prototype = Some(*obj_proto);
@@ -113,7 +112,7 @@ pub(crate) fn handle_symbol_tostring<'gc>(_mc: &MutationContext<'gc>, this_value
     let sym = match this_value {
         Value::Symbol(s) => s,
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())? {
+            if let Some(val) = object_get_key_value(&obj, "__value__") {
                 if let Value::Symbol(s) = &*val.borrow() {
                     *s
                 } else {
@@ -147,7 +146,7 @@ pub(crate) fn handle_symbol_valueof<'gc>(_mc: &MutationContext<'gc>, this_value:
     match this_value {
         Value::Symbol(s) => Ok(Value::Symbol(s)),
         Value::Object(obj) => {
-            if let Some(val) = obj_get_key_value(&obj, &"__value__".into())?
+            if let Some(val) = object_get_key_value(&obj, "__value__")
                 && let Value::Symbol(s) = &*val.borrow()
             {
                 return Ok(Value::Symbol(*s));
@@ -170,7 +169,7 @@ pub(crate) fn handle_symbol_for<'gc>(
     let key = crate::core::value_to_string(&args[0]);
 
     // Retrieve or create registry object on the environment
-    let registry_obj = match obj_get_key_value(env, &"__symbol_registry".into())? {
+    let registry_obj = match object_get_key_value(env, "__symbol_registry") {
         Some(val) => {
             if let Value::Object(obj) = &*val.borrow() {
                 *obj
@@ -188,7 +187,7 @@ pub(crate) fn handle_symbol_for<'gc>(
     };
 
     // If an existing symbol is found for this key, return it
-    if let Ok(Some(val)) = obj_get_key_value(&registry_obj, &key.clone().into())
+    if let Some(val) = object_get_key_value(&registry_obj, &key)
         && let Value::Symbol(s) = &*val.borrow()
     {
         return Ok(Value::Symbol(*s));
@@ -217,7 +216,7 @@ pub(crate) fn handle_symbol_keyfor<'gc>(
     match &args[0] {
         Value::Symbol(s) => {
             // Lookup registry object and iterate properties to find matching symbol
-            if let Some(val) = obj_get_key_value(env, &"__symbol_registry".into())?
+            if let Some(val) = object_get_key_value(env, "__symbol_registry")
                 && let Value::Object(obj) = &*val.borrow()
             {
                 for (k, v) in &obj.borrow().properties {

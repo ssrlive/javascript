@@ -42,7 +42,7 @@ pub use core::{
     JSArrayBuffer, JSDataView, JSObjectData, JSTypedArray, JsArena, TypedArrayKind, initialize_global_constructors, new_js_object_data,
     parse_object_destructuring_pattern, parse_simple_expression, parse_statement, parse_statements, read_script_file,
 };
-pub use core::{PropertyKey, Value, env_set, evaluate_script, obj_get_key_value, obj_set_key_value, tokenize};
+pub use core::{PropertyKey, Value, env_set, evaluate_script, obj_set_key_value, object_get_key_value, tokenize};
 pub use error::{JSError, JSErrorKind};
 pub use repl::Repl;
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

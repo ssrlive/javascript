@@ -1,6 +1,6 @@
 use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
-use crate::core::{new_js_object_data, obj_get_key_value, obj_set_key_value};
+use crate::core::{new_js_object_data, object_get_key_value, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -287,7 +287,7 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
     let result = new_js_object_data(mc);
 
     // Get the stored locale, or default to "en-US"
-    let locale = if let Some(locale_val) = obj_get_key_value(instance, &"__locale".into())? {
+    let locale = if let Some(locale_val) = object_get_key_value(instance, &"__locale".into()) {
         match &*locale_val.borrow() {
             Value::String(s) => utf16_to_utf8(&s),
             _ => "en-US".to_string(),
@@ -366,7 +366,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                 if let Some(len) = get_array_length(mc, &arr_obj) {
                     for i in 0..len {
                         let key = i.to_string();
-                        if let Some(elem_rc) = obj_get_key_value(&arr_obj, &key.into())?
+                        if let Some(elem_rc) = object_get_key_value(&arr_obj, &key.into())
                             && let Value::String(s_utf16) = &*elem_rc.borrow()
                         {
                             let candidate = utf16_to_utf8(s_utf16);

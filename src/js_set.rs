@@ -2,8 +2,8 @@ use crate::core::JSSet;
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::{
     core::{
-        JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data, obj_get_key_value,
-        obj_set_key_value, values_equal,
+        JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data, obj_set_key_value,
+        object_get_key_value, values_equal,
     },
     error::JSError,
     js_array::{create_array, set_array_length},
@@ -17,9 +17,9 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     obj_set_key_value(mc, &set_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Set")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -46,9 +46,9 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Get Symbol.iterator
-    let iterator_sym = if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+    let iterator_sym = if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+        && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
     {
         Some(iter_sym.borrow().clone())
     } else {
@@ -61,9 +61,9 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     }
 
     // Symbol.toStringTag
-    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
-        && let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(s) = &*tag_sym.borrow()
     {
         obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Set")))?;
@@ -108,9 +108,9 @@ pub(crate) fn handle_set_constructor<'gc>(
     );
 
     // Set prototype to Set.prototype
-    if let Some(set_ctor) = obj_get_key_value(env, &"Set".into())?
+    if let Some(set_ctor) = object_get_key_value(env, "Set")
         && let Value::Object(ctor) = &*set_ctor.borrow()
-        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
         set_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -223,12 +223,12 @@ pub(crate) fn handle_set_instance_method<'gc>(
 
             match callback {
                 Value::Object(obj) => {
-                    if let Some(cl_val) = obj_get_key_value(&obj, &"__closure__".into())? {
+                    if let Some(cl_val) = object_get_key_value(&obj, "__closure__") {
                         match &*cl_val.borrow() {
                             Value::Closure(cl) => execute(cl)?,
                             _ => return Err(crate::raise_type_error!("Set.prototype.forEach callback is not a closure")),
                         }
-                    } else if let Some(_native_ctor) = obj_get_key_value(&obj, &"__native_ctor".into())? {
+                    } else if let Some(_native_ctor) = object_get_key_value(&obj, "__native_ctor") {
                         // Native function object
                         return Err(raise_eval_error!("Native functions in forEach not supported yet"));
                     } else {
@@ -272,18 +272,18 @@ fn create_set_iterator<'gc>(
     )?;
 
     // Register Symbols
-    if let Some(sym_ctor) = obj_get_key_value(env, &"Symbol".into())?
+    if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_obj) = &*sym_ctor.borrow()
     {
         // Symbol.iterator
-        if let Some(iter_sym) = obj_get_key_value(sym_obj, &"iterator".into())?
+        if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), Value::Function("IteratorSelf".to_string()))?;
         }
 
         // Symbol.toStringTag
-        if let Some(tag_sym) = obj_get_key_value(sym_obj, &"toStringTag".into())?
+        if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
             obj_set_key_value(
@@ -304,7 +304,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Get set
-    let set_val = obj_get_key_value(iterator, &"__iterator_set__".into())?.ok_or(raise_eval_error!("Iterator has no set"))?;
+    let set_val = object_get_key_value(iterator, "__iterator_set__").ok_or(raise_eval_error!("Iterator has no set"))?;
     let set_ptr = if let Value::Set(s) = &*set_val.borrow() {
         *s
     } else {
@@ -312,7 +312,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?.ok_or(raise_eval_error!("Iterator has no index"))?;
+    let index_val = object_get_key_value(iterator, "__iterator_index__").ok_or(raise_eval_error!("Iterator has no index"))?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {
         *n as usize
     } else {
@@ -320,7 +320,7 @@ pub(crate) fn handle_set_iterator_next<'gc>(
     };
 
     // Get kind
-    let kind_val = obj_get_key_value(iterator, &"__iterator_kind__".into())?.ok_or(raise_eval_error!("Iterator has no kind"))?;
+    let kind_val = object_get_key_value(iterator, "__iterator_kind__").ok_or(raise_eval_error!("Iterator has no kind"))?;
     let kind = if let Value::String(s) = &*kind_val.borrow() {
         crate::unicode::utf16_to_utf8(s)
     } else {

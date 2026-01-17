@@ -1,6 +1,9 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
-    core::{Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, obj_set_key_value, prepare_function_call_env},
+    core::{
+        Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, obj_set_key_value, object_get_key_value,
+        prepare_function_call_env,
+    },
     error::JSError,
 };
 
@@ -43,7 +46,7 @@ pub fn handle_generator_function_call<'gc>(
     // Set prototype to Generator.prototype if available
     if let Some(gen_ctor_val) = crate::core::env_get(&closure.env, "Generator")
         && let Value::Object(gen_ctor_obj) = &*gen_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(gen_ctor_obj, &"prototype".into())
+        && let Some(proto_val) = object_get_key_value(gen_ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         gen_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -768,7 +771,7 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
     // Set __proto__ to Function.prototype if present
     if let Some(func_ctor_val) = crate::core::env_get(env, "Function")
         && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
-        && let Ok(Some(proto_val)) = crate::core::obj_get_key_value(func_ctor, &"prototype".into())
+        && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()
     {
         gen_ctor.borrow_mut(mc).prototype = Some(*proto_obj);

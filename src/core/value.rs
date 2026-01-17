@@ -188,7 +188,7 @@ impl<'gc> JSObjectData<'gc> {
             return None;
         }
         if let Some(proto) = &self.prototype {
-            if let Ok(Some(val_ptr)) = obj_get_key_value(proto, &key) {
+            if let Some(val_ptr) = object_get_key_value(proto, key) {
                 if let Value::String(s) = &*val_ptr.borrow() {
                     return Some(utf16_to_utf8(s));
                 }
@@ -524,9 +524,9 @@ pub fn to_primitive<'gc>(
             // If object has Symbol.toPrimitive, call it first
             if let Some(sym_ctor) = crate::core::env_get(env, "Symbol") {
                 if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                    if let Ok(Some(tp_sym_val)) = crate::core::obj_get_key_value(sym_obj, &"toPrimitive".into()) {
+                    if let Some(tp_sym_val) = object_get_key_value(sym_obj, "toPrimitive") {
                         if let Value::Symbol(tp_sym) = &*tp_sym_val.borrow() {
-                            if let Ok(Some(func_val_rc)) = crate::core::obj_get_key_value(obj, &crate::core::PropertyKey::Symbol(*tp_sym)) {
+                            if let Some(func_val_rc) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym)) {
                                 let func_val = func_val_rc.borrow().clone();
                                 if !matches!(func_val, Value::Undefined | Value::Null) {
                                     // Call it with hint
@@ -538,7 +538,7 @@ pub fn to_primitive<'gc>(
                                             crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None)
                                         }
                                         Value::Object(func_obj) => {
-                                            if let Ok(Some(cl_ptr)) = crate::core::obj_get_key_value(&func_obj, &"__closure__".into()) {
+                                            if let Some(cl_ptr) = object_get_key_value(&func_obj, "__closure__") {
                                                 if let Value::Closure(cl) = &*cl_ptr.borrow() {
                                                     crate::core::call_closure(
                                                         mc,
@@ -728,15 +728,16 @@ pub fn values_equal<'gc>(_mc: &MutationContext<'gc>, v1: &Value<'gc>, v2: &Value
     }
 }
 
-pub fn obj_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>) -> Result<Option<GcPtr<'gc, Value<'gc>>>, JSError> {
+pub fn object_get_key_value<'gc>(obj: &JSObjectDataPtr<'gc>, key: impl Into<PropertyKey<'gc>>) -> Option<GcPtr<'gc, Value<'gc>>> {
+    let key = key.into();
     let mut current = Some(*obj);
     while let Some(cur) = current {
-        if let Some(val) = cur.borrow().properties.get(key) {
-            return Ok(Some(*val));
+        if let Some(val) = cur.borrow().properties.get(&key) {
+            return Some(*val);
         }
         current = cur.borrow().prototype;
     }
-    Ok(None)
+    None
 }
 
 // Return property keys in 'ordinary own property keys' order per ECMAScript:
@@ -874,7 +875,7 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
-    if let Some(len_ptr) = obj_get_key_value(obj, &"length".into()).ok().flatten() {
+    if let Some(len_ptr) = object_get_key_value(obj, "length") {
         if let Value::Number(n) = &*len_ptr.borrow() {
             return Some(*n as usize);
         }

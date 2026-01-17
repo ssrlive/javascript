@@ -1,4 +1,4 @@
-use crate::core::{ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, obj_get_key_value, obj_set_key_value};
+use crate::core::{ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, obj_set_key_value, object_get_key_value};
 use crate::core::{Gc, GcPtr, MutationContext};
 use crate::error::JSError;
 use crate::js_generator::handle_generator_function_call;
@@ -24,7 +24,7 @@ pub fn handle_async_closure_call<'gc>(
 
     // We need to keep the generator alive
     let generator_root = if let Value::Object(obj) = generator_val {
-        if let Ok(Some(gen_ptr)) = obj_get_key_value(&obj, &"__generator__".into()) {
+        if let Some(gen_ptr) = object_get_key_value(&obj, "__generator__") {
             gen_ptr.borrow().clone()
         } else {
             return Err(crate::raise_eval_error!("Async function failed to create generator"));
@@ -67,7 +67,7 @@ fn step<'gc>(
         Ok(res_obj) => {
             // Check if done
             let done = if let Value::Object(obj) = &res_obj {
-                if let Ok(Some(d)) = crate::core::obj_get_key_value(obj, &"done".into()) {
+                if let Some(d) = object_get_key_value(obj, "done") {
                     crate::js_boolean::to_boolean(&d.borrow())
                 } else {
                     false
@@ -77,7 +77,7 @@ fn step<'gc>(
             };
 
             let value = if let Value::Object(obj) = &res_obj {
-                if let Ok(Some(v)) = crate::core::obj_get_key_value(obj, &"value".into()) {
+                if let Some(v) = object_get_key_value(obj, "value") {
                     v.borrow().clone()
                 } else {
                     Value::Undefined
@@ -94,12 +94,12 @@ fn step<'gc>(
                 // Promise.resolve(value).then(res => step(next(res)), err => step(throw(err)))
 
                 let promise_resolve = if let Some(ctor) = crate::core::env_get(env, "Promise") {
-                    if let Ok(Some(resolve_method)) = crate::core::obj_get_key_value(
+                    if let Some(resolve_method) = object_get_key_value(
                         &match ctor.borrow().clone() {
                             Value::Object(o) => o,
                             _ => return Err(crate::raise_eval_error!("Promise not object")),
                         },
-                        &"resolve".into(),
+                        "resolve",
                     ) {
                         resolve_method.borrow().clone()
                     } else {
@@ -117,7 +117,7 @@ fn step<'gc>(
                 log::trace!("DEBUG: p_val type: {:?}", p_val);
 
                 if let Value::Object(p_obj) = p_val
-                    && let Ok(Some(then_method)) = crate::core::obj_get_key_value(&p_obj, &"then".into())
+                    && let Some(then_method) = object_get_key_value(&p_obj, "then")
                 {
                     // eprintln!("DEBUG: Calling then method with this");
                     call_function_with_this(mc, &then_method.borrow(), Some(p_val), &[on_fulfilled, on_rejected], env)?;
@@ -194,9 +194,9 @@ fn continue_async_step<'gc>(
     env: &JSObjectDataPtr<'gc>,
     result: Result<Value<'gc>, Value<'gc>>,
 ) -> Result<Value<'gc>, JSError> {
-    let generator_val = obj_get_key_value(env, &"__async_generator".into())?.unwrap().borrow().clone();
-    let resolve_val = obj_get_key_value(env, &"__async_resolve".into())?.unwrap().borrow().clone();
-    let reject_val = obj_get_key_value(env, &"__async_reject".into())?.unwrap().borrow().clone();
+    let generator_val = object_get_key_value(env, "__async_generator").unwrap().borrow().clone();
+    let resolve_val = object_get_key_value(env, "__async_resolve").unwrap().borrow().clone();
+    let reject_val = object_get_key_value(env, "__async_reject").unwrap().borrow().clone();
 
     if let Value::Generator(gen_ref) = generator_val {
         let global_env = env.borrow().prototype.unwrap();

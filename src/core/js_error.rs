@@ -1,7 +1,7 @@
 use crate::{
     JSError,
     core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value, value_to_string},
-    obj_get_key_value, utf8_to_utf16, utf16_to_utf8,
+    object_get_key_value, utf8_to_utf16, utf16_to_utf8,
 };
 
 #[derive(Debug)]
@@ -55,9 +55,9 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     // However, in the current core.rs, Object is initialized right before Error.
     // We can try to retrieve Object from env.
 
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)

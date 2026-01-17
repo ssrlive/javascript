@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::core::{JSWeakMap, PropertyKey};
 use crate::{
-    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_get_key_value, obj_set_key_value},
+    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -34,9 +34,9 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     weakmap_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakmap__"));
 
     // Set prototype to WeakMap.prototype if available
-    if let Some(weakmap_ctor) = obj_get_key_value(env, &"WeakMap".into())?
+    if let Some(weakmap_ctor) = object_get_key_value(env, "WeakMap")
         && let Value::Object(ctor) = &*weakmap_ctor.borrow()
-        && let Some(proto) = obj_get_key_value(ctor, &"prototype".into())?
+        && let Some(proto) = object_get_key_value(ctor, "prototype")
         && let Value::Object(proto_obj) = &*proto.borrow()
     {
         weakmap_obj.borrow_mut(mc).prototype = Some(*proto_obj);
@@ -53,14 +53,11 @@ fn initialize_weakmap_from_iterable<'gc>(
 ) -> Result<(), JSError> {
     match iterable {
         Value::Object(obj) => {
-            let mut i = 0;
-            while let Some(entry_val) = obj_get_key_value(obj, &i.to_string().into())? {
+            let mut i = 0_usize;
+            while let Some(entry_val) = object_get_key_value(obj, i) {
                 let entry = entry_val.borrow().clone();
                 if let Value::Object(entry_obj) = entry
-                    && let (Some(key_val), Some(value_val)) = (
-                        obj_get_key_value(&entry_obj, &"0".into())?,
-                        obj_get_key_value(&entry_obj, &"1".into())?,
-                    )
+                    && let (Some(key_val), Some(value_val)) = (object_get_key_value(&entry_obj, "0"), object_get_key_value(&entry_obj, "1"))
                 {
                     let key_obj = key_val.borrow().clone();
                     let value_obj = value_val.borrow().clone();
@@ -92,9 +89,9 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
     obj_set_key_value(mc, &weakmap_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("WeakMap")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -241,7 +238,7 @@ pub(crate) fn handle_weakmap_instance_method<'gc>(
 
 /// Check if a JS object wraps an internal WeakMap
 pub fn is_weakmap_object<'gc>(_mc: &MutationContext<'gc>, obj: &crate::core::JSObjectDataPtr<'gc>) -> bool {
-    if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, &"__weakmap__".into()) {
+    if let Some(val_rc) = object_get_key_value(obj, "__weakmap__") {
         matches!(&*val_rc.borrow(), crate::core::Value::WeakMap(_))
     } else {
         false

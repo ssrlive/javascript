@@ -3,8 +3,8 @@ use crate::core::{Gc, GcCell, MutationContext};
 use crate::env_set;
 use crate::{
     core::{
-        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data, obj_get_key_value,
-        obj_set_key_value,
+        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data, obj_set_key_value,
+        object_get_key_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
@@ -128,7 +128,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
 
     // Check if handler has the trap
     if let Value::Object(handler_obj) = &*proxy.handler
-        && let Some(trap_val) = obj_get_key_value(handler_obj, &trap_name.into())?
+        && let Some(trap_val) = object_get_key_value(handler_obj, trap_name)
     {
         let trap = trap_val.borrow().clone();
         // Accept either a direct `Value::Closure` or a function-object that
@@ -161,7 +161,7 @@ pub(crate) fn proxy_get_property<'gc>(
         // Default behavior: get property from target
         match &*proxy.target {
             Value::Object(obj) => {
-                let val_opt = obj_get_key_value(obj, key)?;
+                let val_opt = object_get_key_value(obj, key);
                 match val_opt {
                     Some(val_rc) => Ok(val_rc.borrow().clone()),
                     None => Ok(Value::Undefined),
@@ -216,7 +216,7 @@ pub(crate) fn _proxy_has_property<'gc>(
     let result = apply_proxy_trap(mc, proxy, "has", vec![(*proxy.target).clone(), property_key_to_value(key)], || {
         // Default behavior: check if property exists on target
         match &*proxy.target {
-            Value::Object(obj) => Ok(Value::Boolean(obj_get_key_value(obj, key)?.is_some())),
+            Value::Object(obj) => Ok(Value::Boolean(object_get_key_value(obj, key).is_some())),
             _ => Ok(Value::Boolean(false)), // Non-objects don't have properties
         }
     })?;
@@ -273,9 +273,9 @@ pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
     obj_set_key_value(mc, &proxy_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Proxy")))?;
 
     // Set up prototype linked to Object.prototype if available
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)

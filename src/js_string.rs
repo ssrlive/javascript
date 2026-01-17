@@ -1,7 +1,7 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_get_key_value,
-    obj_set_key_value, to_primitive, value_to_string,
+    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_set_key_value,
+    object_get_key_value, to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -19,9 +19,9 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &string_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("String")))?;
 
     // Get Object.prototype
-    let object_proto = if let Some(obj_val) = obj_get_key_value(env, &"Object".into())?
+    let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()
-        && let Some(proto_val) = obj_get_key_value(obj_ctor, &"prototype".into())?
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
     {
         Some(*proto)
@@ -38,10 +38,10 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     obj_set_key_value(mc, &string_proto, &"constructor".into(), Value::Object(string_ctor))?;
 
     // Register Symbol.iterator
-    if let Some(sym_val) = obj_get_key_value(env, &"Symbol".into())?
+    if let Some(sym_val) = object_get_key_value(env, "Symbol")
         && let Value::Object(sym_ctor) = &*sym_val.borrow()
     {
-        if let Some(iter_sym_val) = obj_get_key_value(sym_ctor, &"iterator".into())?
+        if let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator")
             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
         {
             let val = Value::Function("String.prototype.[Symbol.iterator]".to_string());
@@ -49,7 +49,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         }
 
         // Symbol.toStringTag default for String.prototype
-        if let Some(tag_sym_val) = obj_get_key_value(sym_ctor, &"toStringTag".into())?
+        if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag")
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
             let val = Value::String(utf8_to_utf16("String"));
@@ -828,7 +828,7 @@ fn string_match_method<'gc>(
         loop {
             match handle_regexp_method(mc, &regexp_obj, "exec", &exec_args, env)? {
                 Value::Object(arr) => {
-                    if let Some(val_rc) = obj_get_key_value(&arr, &"0".into())? {
+                    if let Some(val_rc) = object_get_key_value(&arr, "0") {
                         match &*val_rc.borrow() {
                             Value::String(u16s) => matches.push(utf16_to_utf8(u16s)),
                             _ => matches.push("".to_string()),
@@ -1240,7 +1240,7 @@ fn string_search_method<'gc>(
 
     match res {
         Value::Object(match_obj) => {
-            if let Some(idx_val) = obj_get_key_value(&match_obj, &"index".into())? {
+            if let Some(idx_val) = object_get_key_value(&match_obj, "index") {
                 Ok(idx_val.borrow().clone())
             } else {
                 Ok(Value::Number(-1.0))
@@ -1330,10 +1330,10 @@ fn string_match_all_method<'gc>(
             Value::Object(match_obj) => {
                 matches.push(Value::Object(match_obj));
 
-                if let Some(m0) = obj_get_key_value(&match_obj, &"0".into())?
+                if let Some(m0) = object_get_key_value(&match_obj, "0")
                     && let Value::String(s) = &*m0.borrow()
                     && s.is_empty()
-                    && let Some(li) = obj_get_key_value(&matcher_obj, &"lastIndex".into())?
+                    && let Some(li) = object_get_key_value(&matcher_obj, "lastIndex")
                     && let Value::Number(n) = *li.borrow()
                 {
                     obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
@@ -1628,7 +1628,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     iterator: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get string
-    let str_val = obj_get_key_value(iterator, &"__iterator_string__".into())?
+    let str_val = object_get_key_value(iterator, "__iterator_string__")
         .ok_or(raise_eval_error!("Iterator has no string"))
         .map_err(EvalError::Js)?;
     let s = if let Value::String(utf16) = &*str_val.borrow() {
@@ -1638,7 +1638,7 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     };
 
     // Get index
-    let index_val = obj_get_key_value(iterator, &"__iterator_index__".into())?
+    let index_val = object_get_key_value(iterator, "__iterator_index__")
         .ok_or(raise_eval_error!("Iterator has no index"))
         .map_err(EvalError::Js)?;
     let mut index = if let Value::Number(n) = &*index_val.borrow() {

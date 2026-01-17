@@ -2,6 +2,7 @@ use crate::core::MutationContext;
 use crate::core::{JSObjectDataPtr, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_set_key_value};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
+use crate::object_get_key_value;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 
 pub fn initialize_json<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -141,7 +142,7 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
                 for key in ordered {
                     if let PropertyKey::String(s) = &key
                         && s != "length"
-                        && let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, &key)
+                        && let Some(val_rc) = object_get_key_value(obj, &key)
                         && let Some(json_val) = js_value_to_json_value(mc, &val_rc.borrow())
                     {
                         map.insert(s.clone(), json_val);
@@ -212,7 +213,7 @@ fn js_value_to_json_string<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>) -> Op
                         if s == "length" {
                             continue;
                         }
-                        if let Ok(Some(val_rc)) = crate::core::obj_get_key_value(obj, &key) {
+                        if let Some(val_rc) = object_get_key_value(obj, &key) {
                             if let Some(val_str) = js_value_to_json_string(mc, &val_rc.borrow()) {
                                 parts.push(format!("\"{}\":{}", escape_json_str(s), val_str));
                             } else {

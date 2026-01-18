@@ -9,14 +9,14 @@ use crate::{
 };
 
 use crate::core::{
-    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_set_key_value, obj_set_rc, object_get_key_value,
+    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_set_rc, object_get_key_value, object_set_key_value,
     value_to_sort_string, values_equal,
 };
 
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let array_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &array_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &array_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Array")))?;
+    object_set_key_value(mc, &array_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &array_ctor, "__native_ctor", Value::String(utf8_to_utf16("Array")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -34,15 +34,15 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         array_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &array_ctor, &"prototype".into(), Value::Object(array_proto))?;
-    obj_set_key_value(mc, &array_proto, &"constructor".into(), Value::Object(array_ctor))?;
+    object_set_key_value(mc, &array_ctor, "prototype", Value::Object(array_proto))?;
+    object_set_key_value(mc, &array_proto, "constructor", Value::Object(array_ctor))?;
     // Make constructor non-enumerable
     array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Register static methods
-    obj_set_key_value(mc, &array_ctor, &"isArray".into(), Value::Function("Array.isArray".to_string()))?;
-    obj_set_key_value(mc, &array_ctor, &"from".into(), Value::Function("Array.from".to_string()))?;
-    obj_set_key_value(mc, &array_ctor, &"of".into(), Value::Function("Array.of".to_string()))?;
+    object_set_key_value(mc, &array_ctor, "isArray", Value::Function("Array.isArray".to_string()))?;
+    object_set_key_value(mc, &array_ctor, "from", Value::Function("Array.from".to_string()))?;
+    object_set_key_value(mc, &array_ctor, "of", Value::Function("Array.of".to_string()))?;
 
     // Register instance methods
     let methods = vec![
@@ -85,7 +85,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
 
     for method in methods {
         let val = Value::Function(format!("Array.prototype.{method}"));
-        obj_set_key_value(mc, &array_proto, &method.into(), val)?;
+        object_set_key_value(mc, &array_proto, method, val)?;
 
         // Methods on prototypes should be non-enumerable so for..in doesn't list them
         array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
@@ -97,7 +97,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             if let Some(iter_sym_val) = object_get_key_value(sym_ctor, "iterator") {
                 if let Value::Symbol(iter_sym) = &*iter_sym_val.borrow() {
                     let val = Value::Function("Array.prototype.values".to_string());
-                    obj_set_key_value(mc, &array_proto, &PropertyKey::Symbol(iter_sym.clone()), val)?;
+                    object_set_key_value(mc, &array_proto, iter_sym, val)?;
                     array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(iter_sym.clone()));
                 }
             }
@@ -105,12 +105,7 @@ pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
             // Symbol.toStringTag default for Array.prototype
             if let Some(tag_sym_val) = object_get_key_value(sym_ctor, "toStringTag") {
                 if let Value::Symbol(tag_sym) = &*tag_sym_val.borrow() {
-                    obj_set_key_value(
-                        mc,
-                        &array_proto,
-                        &PropertyKey::Symbol(tag_sym.clone()),
-                        Value::String(utf8_to_utf16("Array")),
-                    )?;
+                    object_set_key_value(mc, &array_proto, tag_sym, Value::String(utf8_to_utf16("Array")))?;
                     array_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(tag_sym.clone()));
                 }
             }
@@ -215,8 +210,8 @@ pub(crate) fn handle_array_static_method<'gc>(
                     //         for (i, (key, val)) in map.borrow().entries.iter().enumerate() {
                     //             let entry_obj = create_array(mc, env)?;
                     //             set_array_length(mc, &entry_obj, 2)?;
-                    //             obj_set_key_value(mc, &entry_obj, &"0".into(), key.clone())?;
-                    //             obj_set_key_value(mc, &entry_obj, &"1".into(), val.clone())?;
+                    //             object_set_key_value(mc, &entry_obj, &"0".into(), key.clone())?;
+                    //             object_set_key_value(mc, &entry_obj, &"1".into(), val.clone())?;
                     //             let entry_val = Value::Object(entry_obj);
 
                     //             if let Some(ref fn_val) = map_fn {
@@ -377,7 +372,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                         let new_array = create_array(mc, env)?;
                                         set_array_length(mc, &new_array, result.len())?;
                                         for (i, val) in result.into_iter().enumerate() {
-                                            obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                                            object_set_key_value(mc, &new_array, i, val)?;
                                         }
                                         return Ok(Value::Object(new_array));
                                     }
@@ -432,7 +427,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -442,7 +437,7 @@ pub(crate) fn handle_array_static_method<'gc>(
             for (i, arg) in args.iter().enumerate() {
                 // let val = evaluate_expr(mc, env, arg)?;
                 let val = arg.clone();
-                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             set_array_length(mc, &new_array, args.len())?;
             Ok(Value::Object(new_array))
@@ -488,7 +483,7 @@ pub(crate) fn handle_array_constructor<'gc>(
             _ => {
                 // Array(element) - create array with single element
                 let array_obj = create_array(mc, env)?;
-                obj_set_key_value(mc, &array_obj, &"0".into(), arg_val)?;
+                object_set_key_value(mc, &array_obj, "0", arg_val)?;
                 set_array_length(mc, &array_obj, 1)?;
                 Ok(Value::Object(array_obj))
             }
@@ -499,7 +494,7 @@ pub(crate) fn handle_array_constructor<'gc>(
         for (i, arg) in args.iter().enumerate() {
             // let arg_val = evaluate_expr(mc, env, arg)?;
             let arg_val = arg.clone();
-            obj_set_key_value(mc, &array_obj, &i.to_string().into(), arg_val)?;
+            object_set_key_value(mc, &array_obj, i, arg_val)?;
         }
         set_array_length(mc, &array_obj, args.len())?;
         Ok(Value::Object(array_obj))
@@ -551,7 +546,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     val: Value<'gc>,
                     current_len: &mut usize,
                 ) -> Result<(), JSError> {
-                    obj_set_key_value(mc, map, &current_len.to_string().into(), val)?;
+                    object_set_key_value(mc, map, *current_len, val)?;
                     *current_len += 1;
                     Ok(())
                 }
@@ -649,7 +644,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut idx = 0;
             for i in start..end {
                 if let Some(val) = object_get_key_value(object, i) {
-                    obj_set_key_value(mc, &new_array, &idx.to_string().into(), val.borrow().clone())?;
+                    object_set_key_value(mc, &new_array, idx, val.borrow().clone())?;
                     idx += 1;
                 }
             }
@@ -725,7 +720,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             }
                             _ => return Err(EvalError::Js(raise_eval_error!("Array.map callback must be a function"))),
                         };
-                        obj_set_key_value(mc, &new_array, &i.to_string().into(), res)?;
+                        object_set_key_value(mc, &new_array, i, res)?;
                     }
                 }
                 Ok(Value::Object(new_array))
@@ -775,7 +770,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                             _ => false,
                         };
                         if include {
-                            obj_set_key_value(mc, &new_array, &idx.to_string().into(), element_val)?;
+                            object_set_key_value(mc, &new_array, idx, element_val)?;
                             idx += 1;
                         }
                     }
@@ -1200,7 +1195,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut new_index = 0;
             for i in 0..current_len {
                 if let Some(val) = object_get_key_value(object, i) {
-                    obj_set_key_value(mc, &result, &new_index.to_string().into(), val.borrow().clone())?;
+                    object_set_key_value(mc, &result, new_index, val.borrow().clone())?;
                     new_index += 1;
                 }
             }
@@ -1221,7 +1216,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     }
                     _ => {
                         // If argument is not an array, append it directly
-                        obj_set_key_value(mc, &result, &new_index.to_string().into(), arg_val)?;
+                        object_set_key_value(mc, &result, new_index, arg_val)?;
                         new_index += 1;
                     }
                 }
@@ -1367,7 +1362,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
             // Update the array with sorted elements
             for (new_index, (_old_key, value)) in elements.into_iter().enumerate() {
-                obj_set_key_value(mc, object, &new_index.to_string().into(), value)?;
+                object_set_key_value(mc, object, new_index, value)?;
             }
 
             Ok(Value::Object(object.clone()))
@@ -1387,15 +1382,15 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let right_val = object_get_key_value(object, &right_key).map(|v| v.borrow().clone());
 
                 if let Some(val) = right_val {
-                    obj_set_key_value(mc, object, &left_key.clone().into(), val)?;
+                    object_set_key_value(mc, object, left_key, val)?;
                 } else {
-                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(left_key.clone()));
+                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(left_key));
                 }
 
                 if let Some(val) = left_val {
-                    obj_set_key_value(mc, object, &right_key.clone().into(), val)?;
+                    object_set_key_value(mc, object, right_key, val)?;
                 } else {
-                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(right_key.clone()));
+                    object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(right_key));
                 }
 
                 left += 1;
@@ -1443,7 +1438,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             // Create new array for deleted elements
             let deleted_array = create_array(mc, env)?;
             for (i, val) in deleted_elements.iter().enumerate() {
-                obj_set_key_value(mc, &deleted_array, &i.to_string().into(), val.clone())?;
+                object_set_key_value(mc, &deleted_array, i, val.clone())?;
             }
             set_array_length(mc, &deleted_array, deleted_elements.len())?;
 
@@ -1460,14 +1455,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut write_idx = start;
             for item in args.iter().skip(2) {
                 let item_val = item.clone();
-                obj_set_key_value(mc, object, &write_idx.to_string().into(), item_val)?;
+                object_set_key_value(mc, object, write_idx, item_val)?;
                 write_idx += 1;
             }
 
             // Write tail elements back
             for val_opt in tail_elements {
                 if let Some(val) = val_opt {
-                    obj_set_key_value(mc, object, &write_idx.to_string().into(), val)?;
+                    object_set_key_value(mc, object, write_idx, val)?;
                 } else {
                     // If the element was a hole (or missing), ensure the destination is also a hole
                     object
@@ -1533,8 +1528,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 }
             }
             for (i, arg) in args.iter().enumerate() {
-                let val = arg.clone();
-                obj_set_key_value(mc, object, &i.to_string().into(), val)?;
+                object_set_key_value(mc, object, i, arg.clone())?;
             }
             let new_len = current_len + args.len();
             set_array_length(mc, object, new_len)?;
@@ -1580,7 +1574,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             };
 
             for i in start..end.min(current_len) {
-                obj_set_key_value(mc, object, &i.to_string().into(), fill_value.clone())?;
+                object_set_key_value(mc, object, i, fill_value.clone())?;
             }
 
             Ok(Value::Object(object.clone()))
@@ -1658,7 +1652,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -1699,7 +1693,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let new_array = create_array(mc, env)?;
             set_array_length(mc, &new_array, result.len())?;
             for (i, val) in result.into_iter().enumerate() {
-                obj_set_key_value(mc, &new_array, &i.to_string().into(), val)?;
+                object_set_key_value(mc, &new_array, i, val)?;
             }
             Ok(Value::Object(new_array))
         }
@@ -1765,7 +1759,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             for (i, val) in temp_values.into_iter().enumerate() {
                 let dest_idx = target + i;
                 if dest_idx < current_len {
-                    obj_set_key_value(mc, object, &dest_idx.to_string().into(), val)?;
+                    object_set_key_value(mc, object, dest_idx, val)?;
                 }
             }
 
@@ -1957,7 +1951,7 @@ pub(crate) fn create_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     let arr = new_js_object_data(mc);
     set_array_length(mc, &arr, 0)?;
 
-    obj_set_key_value(mc, &arr, &"__is_array".into(), Value::Boolean(true))?;
+    object_set_key_value(mc, &arr, "__is_array", Value::Boolean(true))?;
     arr.borrow_mut(mc).non_enumerable.insert("__is_array".into());
     // Mark 'length' as non-enumerable on arrays per spec
     arr.borrow_mut(mc).set_non_enumerable(PropertyKey::from("length"));
@@ -1993,19 +1987,13 @@ pub(crate) fn create_array_iterator<'gc>(
     let iterator = new_js_object_data(mc);
 
     // Store array
-    obj_set_key_value(mc, &iterator, &"__iterator_array__".into(), Value::Object(object.clone()))?;
+    object_set_key_value(mc, &iterator, "__iterator_array__", Value::Object(object.clone()))?;
     // Store index
-    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &iterator, "__iterator_index__", Value::Number(0.0))?;
     // Store kind
-    obj_set_key_value(mc, &iterator, &"__iterator_kind__".into(), Value::String(utf8_to_utf16(kind)))?;
-
+    object_set_key_value(mc, &iterator, "__iterator_kind__", Value::String(utf8_to_utf16(kind)))?;
     // next method
-    obj_set_key_value(
-        mc,
-        &iterator,
-        &"next".into(),
-        Value::Function("ArrayIterator.prototype.next".to_string()),
-    )?;
+    object_set_key_value(mc, &iterator, "next", Value::Function("ArrayIterator.prototype.next".to_string()))?;
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -2015,16 +2003,14 @@ pub(crate) fn create_array_iterator<'gc>(
         if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
-            let val = Value::Function("IteratorSelf".to_string());
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+            object_set_key_value(mc, &iterator, s, Value::Function("IteratorSelf".to_string()))?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            let val = Value::String(utf8_to_utf16("Array Iterator"));
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(s.clone()), val)?;
+            object_set_key_value(mc, &iterator, s, Value::String(utf8_to_utf16("Array Iterator")))?;
         }
     }
 
@@ -2064,8 +2050,8 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     if index >= length {
         let result_obj = new_js_object_data(mc);
-        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
-        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        object_set_key_value(mc, &result_obj, "value", Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -2080,8 +2066,8 @@ pub(crate) fn handle_array_iterator_next<'gc>(
         "values" => element_val,
         "entries" => {
             let entry = create_array(mc, env)?;
-            obj_set_key_value(mc, &entry, &"0".into(), Value::Number(index as f64))?;
-            obj_set_key_value(mc, &entry, &"1".into(), element_val)?;
+            object_set_key_value(mc, &entry, "0", Value::Number(index as f64))?;
+            object_set_key_value(mc, &entry, "1", element_val)?;
             set_array_length(mc, &entry, 2)?;
             Value::Object(entry)
         }
@@ -2090,12 +2076,11 @@ pub(crate) fn handle_array_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+    object_set_key_value(mc, iterator, "__iterator_index__", Value::Number(index as f64))?;
 
     let result_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &result_obj, &"value".into(), result_value)?;
-    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
-
+    object_set_key_value(mc, &result_obj, "value", result_value)?;
+    object_set_key_value(mc, &result_obj, "done", Value::Boolean(false))?;
     Ok(Value::Object(result_obj))
 }
 

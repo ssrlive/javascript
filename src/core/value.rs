@@ -779,14 +779,15 @@ pub fn get_own_property<'gc>(obj: &JSObjectDataPtr<'gc>, key: &PropertyKey<'gc>)
     obj.borrow().properties.get(key).cloned()
 }
 
-pub fn obj_set_key_value<'gc>(
+pub fn object_set_key_value<'gc>(
     mc: &MutationContext<'gc>,
     obj: &JSObjectDataPtr<'gc>,
-    key: &PropertyKey<'gc>,
+    key: impl Into<PropertyKey<'gc>>,
     val: Value<'gc>,
 ) -> Result<(), JSError> {
+    let key = key.into();
     // If obj is an array and we're setting a numeric index, update length accordingly
-    if let PropertyKey::String(s) = key {
+    if let PropertyKey::String(s) = &key {
         if let Ok(idx) = s.parse::<usize>() {
             if crate::js_array::is_array(mc, obj) {
                 let current_len = object_get_length(obj).unwrap_or(0);
@@ -799,7 +800,7 @@ pub fn obj_set_key_value<'gc>(
     }
 
     let val_ptr = Gc::new(mc, GcCell::new(val));
-    obj.borrow_mut(mc).insert(key.clone(), val_ptr);
+    obj.borrow_mut(mc).insert(key, val_ptr);
     Ok(())
 }
 
@@ -894,6 +895,6 @@ pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'
             }
         }
     }
-    obj_set_key_value(mc, obj, &"length".into(), Value::Number(length as f64))?;
+    object_set_key_value(mc, obj, "length", Value::Number(length as f64))?;
     Ok(())
 }

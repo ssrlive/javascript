@@ -2,8 +2,8 @@ use crate::core::JSSet;
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::{
     core::{
-        JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data, obj_set_key_value,
-        object_get_key_value, values_equal,
+        JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
+        object_set_key_value, values_equal,
     },
     error::JSError,
     js_array::{create_array, set_array_length},
@@ -13,8 +13,8 @@ use crate::{
 /// Initialize Set constructor and prototype
 pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let set_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &set_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &set_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Set")))?;
+    object_set_key_value(mc, &set_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &set_ctor, "__native_ctor", Value::String(utf8_to_utf16("Set")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -32,14 +32,14 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         set_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &set_ctor, &"prototype".into(), Value::Object(set_proto))?;
-    obj_set_key_value(mc, &set_proto, &"constructor".into(), Value::Object(set_ctor))?;
+    object_set_key_value(mc, &set_ctor, "prototype", Value::Object(set_proto))?;
+    object_set_key_value(mc, &set_proto, "constructor", Value::Object(set_ctor))?;
 
     // Register instance methods
     let methods = vec!["add", "has", "delete", "clear", "keys", "values", "entries", "forEach"];
 
     for method in methods {
-        obj_set_key_value(mc, &set_proto, &method.into(), Value::Function(format!("Set.prototype.{}", method)))?;
+        object_set_key_value(mc, &set_proto, method, Value::Function(format!("Set.prototype.{}", method)))?;
         set_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
     // Mark constructor non-enumerable
@@ -57,7 +57,7 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
     if let Some(Value::Symbol(iterator_sym_data)) = iterator_sym {
         let val = Value::Function("Set.prototype.values".to_string());
-        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(iterator_sym_data), val)?;
+        object_set_key_value(mc, &set_proto, iterator_sym_data, val)?;
     }
 
     // Symbol.toStringTag
@@ -66,7 +66,7 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         && let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
         && let Value::Symbol(s) = &*tag_sym.borrow()
     {
-        obj_set_key_value(mc, &set_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Set")))?;
+        object_set_key_value(mc, &set_proto, s, Value::String(utf8_to_utf16("Set")))?;
     }
 
     // Register size getter
@@ -76,7 +76,7 @@ pub fn initialize_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         getter: Some(Box::new(size_getter)),
         setter: None,
     };
-    obj_set_key_value(mc, &set_proto, &"size".into(), size_prop)?;
+    object_set_key_value(mc, &set_proto, "size", size_prop)?;
 
     env_set(mc, env, "Set", Value::Object(set_ctor))?;
     Ok(())
@@ -256,20 +256,15 @@ fn create_set_iterator<'gc>(
     // However, cycle collection might be tricky if we use strong ref here and set has ref to iterator?
     // Usually iterators are created from set, set doesn't hold iterators. So strong ref matches spec.
     // Use Value::Set to store it.
-    obj_set_key_value(mc, &iterator, &"__iterator_set__".into(), Value::Set(set))?;
+    object_set_key_value(mc, &iterator, "__iterator_set__", Value::Set(set))?;
 
     // Store index
-    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &iterator, "__iterator_index__", Value::Number(0.0))?;
     // Store kind
-    obj_set_key_value(mc, &iterator, &"__iterator_kind__".into(), Value::String(utf8_to_utf16(kind)))?;
+    object_set_key_value(mc, &iterator, "__iterator_kind__", Value::String(utf8_to_utf16(kind)))?;
 
     // next method - shared native function name, handled in eval.rs
-    obj_set_key_value(
-        mc,
-        &iterator,
-        &"next".into(),
-        Value::Function("SetIterator.prototype.next".to_string()),
-    )?;
+    object_set_key_value(mc, &iterator, "next", Value::Function("SetIterator.prototype.next".to_string()))?;
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -279,19 +274,14 @@ fn create_set_iterator<'gc>(
         if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), Value::Function("IteratorSelf".to_string()))?;
+            object_set_key_value(mc, &iterator, s, Value::Function("IteratorSelf".to_string()))?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            obj_set_key_value(
-                mc,
-                &iterator,
-                &PropertyKey::Symbol(*s),
-                Value::String(utf8_to_utf16("Set Iterator")),
-            )?;
+            object_set_key_value(mc, &iterator, s, Value::String(utf8_to_utf16("Set Iterator")))?;
         }
     }
 
@@ -331,8 +321,8 @@ pub(crate) fn handle_set_iterator_next<'gc>(
 
     if index >= values.len() {
         let result_obj = new_js_object_data(mc);
-        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
-        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        object_set_key_value(mc, &result_obj, "value", Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -341,8 +331,8 @@ pub(crate) fn handle_set_iterator_next<'gc>(
         "values" => value.clone(),
         "entries" => {
             let entry_array = create_array(mc, env)?;
-            obj_set_key_value(mc, &entry_array, &"0".into(), value.clone())?;
-            obj_set_key_value(mc, &entry_array, &"1".into(), value.clone())?;
+            object_set_key_value(mc, &entry_array, "0", value.clone())?;
+            object_set_key_value(mc, &entry_array, "1", value.clone())?;
             set_array_length(mc, &entry_array, 2)?;
             Value::Object(entry_array)
         }
@@ -351,11 +341,11 @@ pub(crate) fn handle_set_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+    object_set_key_value(mc, iterator, "__iterator_index__", Value::Number(index as f64))?;
 
     let result_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &result_obj, &"value".into(), result_value)?;
-    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
+    object_set_key_value(mc, &result_obj, "value", result_value)?;
+    object_set_key_value(mc, &result_obj, "done", Value::Boolean(false))?;
 
     Ok(Value::Object(result_obj))
 }

@@ -1,4 +1,4 @@
-use crate::core::{JSObjectDataPtr, MutationContext, Value, new_js_object_data, obj_set_key_value, object_get_key_value};
+use crate::core::{JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -6,8 +6,8 @@ use num_bigint::BigInt;
 
 pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let boolean_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &boolean_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &boolean_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Boolean")))?;
+    object_set_key_value(mc, &boolean_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &boolean_ctor, "__native_ctor", Value::String(utf8_to_utf16("Boolean")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -25,21 +25,14 @@ pub fn initialize_boolean<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         boolean_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &boolean_ctor, &"prototype".into(), Value::Object(boolean_proto))?;
-    obj_set_key_value(mc, &boolean_proto, &"constructor".into(), Value::Object(boolean_ctor))?;
+    object_set_key_value(mc, &boolean_ctor, "prototype", Value::Object(boolean_proto))?;
+    object_set_key_value(mc, &boolean_proto, "constructor", Value::Object(boolean_ctor))?;
 
-    obj_set_key_value(
-        mc,
-        &boolean_proto,
-        &"toString".into(),
-        Value::Function("Boolean.prototype.toString".to_string()),
-    )?;
-    obj_set_key_value(
-        mc,
-        &boolean_proto,
-        &"valueOf".into(),
-        Value::Function("Boolean.prototype.valueOf".to_string()),
-    )?;
+    let val = Value::Function("Boolean.prototype.toString".to_string());
+    object_set_key_value(mc, &boolean_proto, "toString", val)?;
+
+    let val = Value::Function("Boolean.prototype.valueOf".to_string());
+    object_set_key_value(mc, &boolean_proto, "valueOf", val)?;
 
     env_set(mc, env, "Boolean", Value::Object(boolean_ctor))?;
     Ok(())

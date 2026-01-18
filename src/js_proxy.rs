@@ -3,8 +3,8 @@ use crate::core::{Gc, GcCell, MutationContext};
 use crate::env_set;
 use crate::{
     core::{
-        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data, obj_set_key_value,
-        object_get_key_value,
+        JSObjectDataPtr, PropertyKey, Value, evaluate_statements, extract_closure_from_value, new_js_object_data, object_get_key_value,
+        object_set_key_value,
     },
     error::JSError,
     unicode::utf8_to_utf16,
@@ -108,8 +108,8 @@ pub(crate) fn handle_proxy_revocable<'gc>(
 
     // Create the revocable result object
     let result_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &result_obj, &"proxy".into(), Value::Object(proxy_wrapper))?;
-    obj_set_key_value(mc, &result_obj, &"revoke".into(), revoke_func)?;
+    object_set_key_value(mc, &result_obj, "proxy", Value::Object(proxy_wrapper))?;
+    object_set_key_value(mc, &result_obj, "revoke", revoke_func)?;
 
     Ok(Value::Object(result_obj))
 }
@@ -193,7 +193,7 @@ pub(crate) fn proxy_set_property<'gc>(
             // Default behavior: set property on target
             match &*proxy.target {
                 Value::Object(obj) => {
-                    obj_set_key_value(mc, obj, key, value)?;
+                    object_set_key_value(mc, obj, key, value)?;
                     Ok(Value::Boolean(true))
                 }
                 _ => Ok(Value::Boolean(false)), // Non-objects can't have properties set
@@ -269,8 +269,8 @@ fn property_key_to_value<'gc>(key: &PropertyKey<'gc>) -> Value<'gc> {
 /// Initialize Proxy constructor and prototype
 pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let proxy_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &proxy_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &proxy_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Proxy")))?;
+    object_set_key_value(mc, &proxy_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &proxy_ctor, "__native_ctor", Value::String(utf8_to_utf16("Proxy")))?;
 
     // Set up prototype linked to Object.prototype if available
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -288,11 +288,11 @@ pub fn initialize_proxy<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'g
         proxy_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &proxy_ctor, &"prototype".into(), Value::Object(proxy_proto))?;
-    obj_set_key_value(mc, &proxy_proto, &"constructor".into(), Value::Object(proxy_ctor))?;
+    object_set_key_value(mc, &proxy_ctor, "prototype", Value::Object(proxy_proto))?;
+    object_set_key_value(mc, &proxy_proto, "constructor", Value::Object(proxy_ctor))?;
 
     // Register revocable static method
-    obj_set_key_value(mc, &proxy_ctor, &"revocable".into(), Value::Function("Proxy.revocable".to_string()))?;
+    object_set_key_value(mc, &proxy_ctor, "revocable", Value::Function("Proxy.revocable".to_string()))?;
 
     env_set(mc, env, "Proxy", Value::Object(proxy_ctor))?;
     Ok(())

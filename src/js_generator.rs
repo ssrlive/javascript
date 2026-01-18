@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
     core::{
-        Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, obj_set_key_value, object_get_key_value,
+        Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, object_get_key_value, object_set_key_value,
         prepare_function_call_env,
     },
     error::JSError,
@@ -41,7 +41,7 @@ pub fn handle_generator_function_call<'gc>(
     let gen_obj = crate::core::new_js_object_data(mc);
 
     // Store the actual generator data
-    crate::core::obj_set_key_value(mc, &gen_obj, &"__generator__".into(), Value::Generator(generator))?;
+    object_set_key_value(mc, &gen_obj, "__generator__", Value::Generator(generator))?;
 
     // Set prototype to Generator.prototype if available
     if let Some(gen_ctor_val) = crate::core::env_get(&closure.env, "Generator")
@@ -615,7 +615,7 @@ pub fn generator_next<'gc>(
                     // in the function activation environment.
                     let parent_env = pre_env_opt.as_ref().unwrap_or(&gen_obj.env);
                     let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-                    crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), Value::Undefined)?;
+                    object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
                         Ok(val) => return Ok(create_iterator_result(mc, val, false)),
                         Err(_) => return Ok(create_iterator_result(mc, Value::Undefined, false)),
@@ -663,7 +663,7 @@ pub fn generator_next<'gc>(
             // by pre-statements remain visible when we resume execution.
             let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_obj.env };
             let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-            obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), _send_value.clone())?;
+            object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
             // Execute the (possibly modified) tail
             let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             log::trace!("DEBUG: evaluate_statements result: {:?}", result);
@@ -724,7 +724,7 @@ pub fn generator_throw<'gc>(
             }
 
             let func_env = prepare_function_call_env(mc, Some(&gen_obj.env), None, None, &[], None, None)?;
-            crate::core::obj_set_key_value(mc, &func_env, &"__gen_throw_val".into(), throw_value.clone())?;
+            object_set_key_value(mc, &func_env, "__gen_throw_val", throw_value.clone())?;
 
             // Execute the modified tail. If the throw is uncaught, evaluate_statements
             // will return Err and we should propagate that to the caller.
@@ -781,16 +781,16 @@ pub fn initialize_generator<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPt
 
     // Attach prototype methods as named functions that dispatch to the generator handler
     let val = Value::Function("Generator.prototype.next".to_string());
-    obj_set_key_value(mc, &gen_proto, &"next".into(), val)?;
+    object_set_key_value(mc, &gen_proto, "next", val)?;
 
     let val = Value::Function("Generator.prototype.return".to_string());
-    obj_set_key_value(mc, &gen_proto, &"return".into(), val)?;
+    object_set_key_value(mc, &gen_proto, "return", val)?;
 
     let val = Value::Function("Generator.prototype.throw".to_string());
-    obj_set_key_value(mc, &gen_proto, &"throw".into(), val)?;
+    object_set_key_value(mc, &gen_proto, "throw", val)?;
 
     // link prototype to constructor and expose on global env
-    obj_set_key_value(mc, &gen_ctor, &"prototype".into(), Value::Object(gen_proto))?;
+    object_set_key_value(mc, &gen_ctor, "prototype", Value::Object(gen_proto))?;
     crate::core::env_set(mc, env, "Generator", Value::Object(gen_ctor))?;
     Ok(())
 }

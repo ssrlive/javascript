@@ -1,7 +1,7 @@
 use crate::core::js_error::EvalError;
 use crate::core::{
-    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, obj_set_key_value,
-    object_get_key_value, to_primitive, value_to_string,
+    JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, get_own_property, new_js_object_data, object_get_key_value,
+    object_set_key_value, to_primitive, value_to_string,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -15,8 +15,8 @@ use crate::unicode::{
 
 pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let string_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &string_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &string_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("String")))?;
+    object_set_key_value(mc, &string_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &string_ctor, "__native_ctor", Value::String(utf8_to_utf16("String")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -34,8 +34,8 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
         string_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &string_ctor, &"prototype".into(), Value::Object(string_proto))?;
-    obj_set_key_value(mc, &string_proto, &"constructor".into(), Value::Object(string_ctor))?;
+    object_set_key_value(mc, &string_ctor, "prototype", Value::Object(string_proto))?;
+    object_set_key_value(mc, &string_proto, "constructor", Value::Object(string_ctor))?;
 
     // Register Symbol.iterator
     if let Some(sym_val) = object_get_key_value(env, "Symbol")
@@ -45,7 +45,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             && let Value::Symbol(iter_sym) = &*iter_sym_val.borrow()
         {
             let val = Value::Function("String.prototype.[Symbol.iterator]".to_string());
-            obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(*iter_sym), val)?;
+            object_set_key_value(mc, &string_proto, iter_sym, val)?;
         }
 
         // Symbol.toStringTag default for String.prototype
@@ -53,24 +53,19 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             && let Value::Symbol(tag_sym) = &*tag_sym_val.borrow()
         {
             let val = Value::String(utf8_to_utf16("String"));
-            obj_set_key_value(mc, &string_proto, &PropertyKey::Symbol(*tag_sym), val)?;
+            object_set_key_value(mc, &string_proto, tag_sym, val)?;
             string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::Symbol(*tag_sym));
         }
     }
 
-    obj_set_key_value(
+    object_set_key_value(mc, &string_ctor, "fromCharCode", Value::Function("String.fromCharCode".to_string()))?;
+    object_set_key_value(
         mc,
         &string_ctor,
-        &"fromCharCode".into(),
-        Value::Function("String.fromCharCode".to_string()),
-    )?;
-    obj_set_key_value(
-        mc,
-        &string_ctor,
-        &"fromCodePoint".into(),
+        "fromCodePoint",
         Value::Function("String.fromCodePoint".to_string()),
     )?;
-    obj_set_key_value(mc, &string_ctor, &"raw".into(), Value::Function("String.raw".to_string()))?;
+    object_set_key_value(mc, &string_ctor, "raw", Value::Function("String.raw".to_string()))?;
 
     // Register instance methods
     let methods = vec![
@@ -110,12 +105,7 @@ pub fn initialize_string<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     ];
 
     for method in methods {
-        obj_set_key_value(
-            mc,
-            &string_proto,
-            &method.into(),
-            Value::Function(format!("String.prototype.{}", method)),
-        )?;
+        object_set_key_value(mc, &string_proto, method, Value::Function(format!("String.prototype.{method}")))?;
         // Methods on String.prototype should be non-enumerable
         string_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
@@ -631,7 +621,7 @@ fn string_split_method<'gc>(
         if let Value::Undefined = sep_val {
             // No separator: return array with the whole string
             let arr = create_array(mc, env)?;
-            obj_set_key_value(mc, &arr, &"0".into(), Value::String(s.to_vec()))?;
+            object_set_key_value(mc, &arr, "0", Value::String(s.to_vec()))?;
             set_array_length(mc, &arr, 1)?;
             Ok(Value::Object(arr))
         } else if let Value::String(sep) = sep_val {
@@ -659,7 +649,7 @@ fn string_split_method<'gc>(
             }
             let arr = create_array(mc, env)?;
             for (i, part) in parts.iter().enumerate() {
-                obj_set_key_value(mc, &arr, &i.to_string().into(), Value::String(part.clone()))?;
+                object_set_key_value(mc, &arr, i, Value::String(part.clone()))?;
             }
             set_array_length(mc, &arr, parts.len())?;
             Ok(Value::Object(arr))
@@ -732,7 +722,7 @@ fn string_split_method<'gc>(
 
             let arr = create_array(mc, env)?;
             for (i, part) in parts.iter().enumerate() {
-                obj_set_key_value(mc, &arr, &i.to_string().into(), part.clone())?;
+                object_set_key_value(mc, &arr, i, part.clone())?;
             }
             set_array_length(mc, &arr, parts.len())?;
             Ok(Value::Object(arr))
@@ -822,7 +812,7 @@ fn string_match_method<'gc>(
         // Save lastIndex (prefer user-visible `lastIndex`)
         let prev_last_index = get_own_property(&regexp_obj, &"lastIndex".into());
         // Reset lastIndex to 0 for global matching
-        obj_set_key_value(mc, &regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
+        object_set_key_value(mc, &regexp_obj, "lastIndex", Value::Number(0.0))?;
 
         let mut matches: Vec<String> = Vec::new();
         loop {
@@ -849,9 +839,9 @@ fn string_match_method<'gc>(
 
         // Restore lastIndex
         if let Some(val) = prev_last_index {
-            obj_set_key_value(mc, &regexp_obj, &"lastIndex".into(), val.borrow().clone())?;
+            object_set_key_value(mc, &regexp_obj, "lastIndex", val.borrow().clone())?;
         } else {
-            obj_set_key_value(mc, &regexp_obj, &"lastIndex".into(), Value::Number(0.0))?;
+            object_set_key_value(mc, &regexp_obj, "lastIndex", Value::Number(0.0))?;
         }
 
         if matches.is_empty() {
@@ -861,7 +851,7 @@ fn string_match_method<'gc>(
         // Convert matches to JS array-like
         let arr = create_array(mc, env)?;
         for (i, m) in matches.iter().enumerate() {
-            obj_set_key_value(mc, &arr, &i.to_string().into(), Value::String(utf8_to_utf16(m)))?;
+            object_set_key_value(mc, &arr, i, Value::String(utf8_to_utf16(m)))?;
         }
         set_array_length(mc, &arr, matches.len())?;
         Ok(Value::Object(arr))
@@ -1233,7 +1223,7 @@ fn string_search_method<'gc>(
         return Err(EvalError::Js(raise_eval_error!("Failed to clone RegExp")));
     };
 
-    obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &matcher_obj, "lastIndex", Value::Number(0.0))?;
 
     let exec_args = vec![Value::String(s.to_vec())];
     let res = handle_regexp_method(mc, &matcher_obj, "exec", &exec_args, env)?;
@@ -1318,7 +1308,7 @@ fn string_match_all_method<'gc>(
         return Err(EvalError::Js(raise_eval_error!("Failed to clone RegExp")));
     };
 
-    obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &matcher_obj, "lastIndex", Value::Number(0.0))?;
 
     let mut matches = Vec::new();
     let exec_args = vec![Value::String(s.to_vec())];
@@ -1336,7 +1326,7 @@ fn string_match_all_method<'gc>(
                     && let Some(li) = object_get_key_value(&matcher_obj, "lastIndex")
                     && let Value::Number(n) = *li.borrow()
                 {
-                    obj_set_key_value(mc, &matcher_obj, &"lastIndex".into(), Value::Number(n + 1.0))?;
+                    object_set_key_value(mc, &matcher_obj, "lastIndex", Value::Number(n + 1.0))?;
                 }
             }
             _ => break,
@@ -1399,7 +1389,7 @@ fn make_array_from_values<'gc>(
     let len = values.len();
     let arr = create_array(mc, env)?;
     for (i, v) in values.into_iter().enumerate() {
-        obj_set_key_value(mc, &arr, &i.to_string().into(), v)?;
+        object_set_key_value(mc, &arr, i, v)?;
     }
     set_array_length(mc, &arr, len)?;
     Ok(Value::Object(arr))
@@ -1609,16 +1599,11 @@ pub(crate) fn create_string_iterator<'gc>(mc: &MutationContext<'gc>, s: &[u16]) 
     let iterator = new_js_object_data(mc);
 
     // Store string data
-    obj_set_key_value(mc, &iterator, &"__iterator_string__".into(), Value::String(s.to_vec()))?;
-    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &iterator, "__iterator_string__", Value::String(s.to_vec()))?;
+    object_set_key_value(mc, &iterator, "__iterator_index__", Value::Number(0.0))?;
 
     // next method
-    obj_set_key_value(
-        mc,
-        &iterator,
-        &"next".into(),
-        Value::Function("StringIterator.prototype.next".to_string()),
-    )?;
+    object_set_key_value(mc, &iterator, "next", Value::Function("StringIterator.prototype.next".to_string()))?;
 
     Ok(Value::Object(iterator))
 }
@@ -1650,8 +1635,8 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     let len = s.len();
     if index >= len {
         let result_obj = new_js_object_data(mc);
-        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
-        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        object_set_key_value(mc, &result_obj, "value", Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -1669,11 +1654,10 @@ pub(crate) fn handle_string_iterator_next<'gc>(
     }
 
     index += code_unit_count;
-    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+    object_set_key_value(mc, iterator, "__iterator_index__", Value::Number(index as f64))?;
 
     let result_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &result_obj, &"value".into(), Value::String(ch_vec))?;
-    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
-
+    object_set_key_value(mc, &result_obj, "value", Value::String(ch_vec))?;
+    object_set_key_value(mc, &result_obj, "done", Value::Boolean(false))?;
     Ok(Value::Object(result_obj))
 }

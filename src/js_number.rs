@@ -1,7 +1,7 @@
 #![allow(clippy::collapsible_if, clippy::collapsible_match)]
 
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, new_js_object_data, obj_set_key_value, object_get_key_value, to_primitive};
+use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use crate::{PropertyKey, env_set};
@@ -15,38 +15,28 @@ pub fn initialize_number_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
 /// Create the Number object with all number constants and functions
 fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let number_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &number_obj, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &number_obj, &"__native_ctor".into(), Value::String(utf8_to_utf16("Number")))?;
+    object_set_key_value(mc, &number_obj, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &number_obj, "__native_ctor", Value::String(utf8_to_utf16("Number")))?;
 
-    obj_set_key_value(mc, &number_obj, &"MAX_VALUE".into(), Value::Number(f64::MAX))?;
-    obj_set_key_value(mc, &number_obj, &"MIN_VALUE".into(), Value::Number(f64::from_bits(1)))?;
-    obj_set_key_value(mc, &number_obj, &"NaN".into(), Value::Number(f64::NAN))?;
-    obj_set_key_value(mc, &number_obj, &"POSITIVE_INFINITY".into(), Value::Number(f64::INFINITY))?;
-    obj_set_key_value(mc, &number_obj, &"NEGATIVE_INFINITY".into(), Value::Number(f64::NEG_INFINITY))?;
-    obj_set_key_value(mc, &number_obj, &"EPSILON".into(), Value::Number(f64::EPSILON))?;
-    obj_set_key_value(mc, &number_obj, &"MAX_SAFE_INTEGER".into(), Value::Number(9007199254740991.0))?;
-    obj_set_key_value(mc, &number_obj, &"MIN_SAFE_INTEGER".into(), Value::Number(-9007199254740991.0))?;
-    obj_set_key_value(mc, &number_obj, &"isNaN".into(), Value::Function("Number.isNaN".to_string()))?;
-    obj_set_key_value(mc, &number_obj, &"isFinite".into(), Value::Function("Number.isFinite".to_string()))?;
-    obj_set_key_value(
+    object_set_key_value(mc, &number_obj, "MAX_VALUE", Value::Number(f64::MAX))?;
+    object_set_key_value(mc, &number_obj, "MIN_VALUE", Value::Number(f64::from_bits(1)))?;
+    object_set_key_value(mc, &number_obj, "NaN", Value::Number(f64::NAN))?;
+    object_set_key_value(mc, &number_obj, "POSITIVE_INFINITY", Value::Number(f64::INFINITY))?;
+    object_set_key_value(mc, &number_obj, "NEGATIVE_INFINITY", Value::Number(f64::NEG_INFINITY))?;
+    object_set_key_value(mc, &number_obj, "EPSILON", Value::Number(f64::EPSILON))?;
+    object_set_key_value(mc, &number_obj, "MAX_SAFE_INTEGER", Value::Number(9007199254740991.0))?;
+    object_set_key_value(mc, &number_obj, "MIN_SAFE_INTEGER", Value::Number(-9007199254740991.0))?;
+    object_set_key_value(mc, &number_obj, "isNaN", Value::Function("Number.isNaN".to_string()))?;
+    object_set_key_value(mc, &number_obj, "isFinite", Value::Function("Number.isFinite".to_string()))?;
+    object_set_key_value(mc, &number_obj, "isInteger", Value::Function("Number.isInteger".to_string()))?;
+    object_set_key_value(
         mc,
         &number_obj,
-        &"isInteger".into(),
-        Value::Function("Number.isInteger".to_string()),
-    )?;
-    obj_set_key_value(
-        mc,
-        &number_obj,
-        &"isSafeInteger".into(),
+        "isSafeInteger",
         Value::Function("Number.isSafeInteger".to_string()),
     )?;
-    obj_set_key_value(
-        mc,
-        &number_obj,
-        &"parseFloat".into(),
-        Value::Function("Number.parseFloat".to_string()),
-    )?;
-    obj_set_key_value(mc, &number_obj, &"parseInt".into(), Value::Function("Number.parseInt".to_string()))?;
+    object_set_key_value(mc, &number_obj, "parseFloat", Value::Function("Number.parseFloat".to_string()))?;
+    object_set_key_value(mc, &number_obj, "parseInt", Value::Function("Number.parseInt".to_string()))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -65,40 +55,40 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         number_prototype.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"toString".into(),
+        "toString",
         Value::Function("Number.prototype.toString".to_string()),
     )?;
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"valueOf".into(),
+        "valueOf",
         Value::Function("Number.prototype.valueOf".to_string()),
     )?;
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"toLocaleString".into(),
+        "toLocaleString",
         Value::Function("Number.prototype.toLocaleString".to_string()),
     )?;
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"toExponential".into(),
+        "toExponential",
         Value::Function("Number.prototype.toExponential".to_string()),
     )?;
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"toFixed".into(),
+        "toFixed",
         Value::Function("Number.prototype.toFixed".to_string()),
     )?;
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &number_prototype,
-        &"toPrecision".into(),
+        "toPrecision",
         Value::Function("Number.prototype.toPrecision".to_string()),
     )?;
 
@@ -116,7 +106,7 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     number_prototype.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Set prototype on Number constructor
-    obj_set_key_value(mc, &number_obj, &"prototype".into(), Value::Object(number_prototype))?;
+    object_set_key_value(mc, &number_obj, "prototype", Value::Object(number_prototype))?;
 
     Ok(number_obj)
 }

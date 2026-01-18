@@ -1,6 +1,6 @@
 use crate::{
     JSError,
-    core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, obj_set_key_value, value_to_string},
+    core::{JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, new_js_object_data, object_set_key_value, value_to_string},
     object_get_key_value, utf8_to_utf16, utf16_to_utf8,
 };
 
@@ -47,8 +47,8 @@ impl<'gc> EvalError<'gc> {
 /// Initialize the Error constructor and its prototype.
 pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let error_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &error_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &error_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Error")))?;
+    object_set_key_value(mc, &error_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &error_ctor, "__native_ctor", Value::String(utf8_to_utf16("Error")))?;
 
     // We need Object.prototype to set as the prototype of Error.prototype
     // If Object is not yet initialized, we might have an issue, but usually Object is init first.
@@ -70,10 +70,10 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
         error_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &error_ctor, &"prototype".into(), Value::Object(error_proto))?;
-    obj_set_key_value(mc, &error_proto, &"constructor".into(), Value::Object(error_ctor))?;
-    obj_set_key_value(mc, &error_proto, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
-    obj_set_key_value(mc, &error_proto, &"message".into(), Value::String(utf8_to_utf16("")))?;
+    object_set_key_value(mc, &error_ctor, "prototype", Value::Object(error_proto))?;
+    object_set_key_value(mc, &error_proto, "constructor", Value::Object(error_ctor))?;
+    object_set_key_value(mc, &error_proto, "name", Value::String(utf8_to_utf16("Error")))?;
+    object_set_key_value(mc, &error_proto, "message", Value::String(utf8_to_utf16("")))?;
 
     env_set(mc, env, "Error", Value::Object(error_ctor))?;
 
@@ -96,8 +96,8 @@ fn initialize_native_error<'gc>(
     parent_proto: Value<'gc>,
 ) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16(name)))?;
+    object_set_key_value(mc, &ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &ctor, "__native_ctor", Value::String(utf8_to_utf16(name)))?;
 
     // Set prototype of constructor to parent constructor (Error) so strict inheritance works if checked
     // However, usually Foo.__proto__ === Function.prototype.
@@ -112,10 +112,10 @@ fn initialize_native_error<'gc>(
         proto.borrow_mut(mc).prototype = Some(parent_p_obj);
     }
 
-    obj_set_key_value(mc, &ctor, &"prototype".into(), Value::Object(proto))?;
-    obj_set_key_value(mc, &proto, &"constructor".into(), Value::Object(ctor))?;
-    obj_set_key_value(mc, &proto, &"name".into(), Value::String(utf8_to_utf16(name)))?;
-    obj_set_key_value(mc, &proto, &"message".into(), Value::String(utf8_to_utf16("")))?;
+    object_set_key_value(mc, &ctor, "prototype", Value::Object(proto))?;
+    object_set_key_value(mc, &proto, "constructor", Value::Object(ctor))?;
+    object_set_key_value(mc, &proto, "name", Value::String(utf8_to_utf16(name)))?;
+    object_set_key_value(mc, &proto, "message", Value::String(utf8_to_utf16("")))?;
 
     env_set(mc, env, name, Value::Object(ctor))?;
     Ok(())
@@ -130,8 +130,8 @@ pub fn create_error<'gc>(
     let error_obj = new_js_object_data(mc);
     error_obj.borrow_mut(mc).prototype = prototype;
 
-    obj_set_key_value(mc, &error_obj, &"name".into(), Value::String(utf8_to_utf16("Error")))?;
-    obj_set_key_value(mc, &error_obj, &"message".into(), message.clone())?;
+    object_set_key_value(mc, &error_obj, "name", Value::String(utf8_to_utf16("Error")))?;
+    object_set_key_value(mc, &error_obj, "message", message.clone())?;
 
     let msg_str = if let Value::String(s) = &message {
         utf16_to_utf8(s)
@@ -139,10 +139,10 @@ pub fn create_error<'gc>(
         "Unknown error".to_string()
     };
     let stack_str = format!("Error: {msg_str}");
-    obj_set_key_value(mc, &error_obj, &"stack".into(), Value::String(utf8_to_utf16(&stack_str)))?;
+    object_set_key_value(mc, &error_obj, "stack", Value::String(utf8_to_utf16(&stack_str)))?;
 
     // Internal marker to identify Error objects
-    obj_set_key_value(mc, &error_obj, &"__is_error".into(), Value::Boolean(true))?;
+    object_set_key_value(mc, &error_obj, "__is_error", Value::Boolean(true))?;
 
     Ok(Value::Object(error_obj))
 }

@@ -1,6 +1,6 @@
 use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value};
-use crate::core::{evaluate_expr, evaluate_statements, new_js_object_data, obj_set_key_value, prepare_function_call_env};
+use crate::core::{evaluate_expr, evaluate_statements, new_js_object_data, object_set_key_value, prepare_function_call_env};
 use crate::error::JSError;
 use crate::unicode::utf16_to_utf8;
 
@@ -73,7 +73,7 @@ pub fn handle_assert_method<'gc>(
             // If values are the same, this assertion fails — throw a plain error object
             if equal {
                 let err_obj = new_js_object_data(mc);
-                obj_set_key_value(
+                object_set_key_value(
                     mc,
                     &err_obj,
                     &"message".into(),

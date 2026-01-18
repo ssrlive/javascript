@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, GcPtr};
 use crate::core::{
     JSMap, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
-    obj_set_key_value, object_get_key_value, values_equal,
+    object_get_key_value, object_set_key_value, values_equal,
 };
 use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
@@ -10,8 +10,8 @@ use crate::unicode::utf8_to_utf16;
 /// Initialize Map constructor and prototype
 pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let map_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &map_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &map_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Map")))?;
+    object_set_key_value(mc, &map_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &map_ctor, "__native_ctor", Value::String(utf8_to_utf16("Map")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -29,14 +29,14 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         map_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &map_ctor, &"prototype".into(), Value::Object(map_proto))?;
-    obj_set_key_value(mc, &map_proto, &"constructor".into(), Value::Object(map_ctor))?;
+    object_set_key_value(mc, &map_ctor, "prototype", Value::Object(map_proto))?;
+    object_set_key_value(mc, &map_proto, "constructor", Value::Object(map_ctor))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "clear", "keys", "values", "entries"];
 
     for method in methods {
-        obj_set_key_value(mc, &map_proto, &method.into(), Value::Function(format!("Map.prototype.{}", method)))?;
+        object_set_key_value(mc, &map_proto, method, Value::Function(format!("Map.prototype.{}", method)))?;
         map_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
     // Mark constructor non-enumerable
@@ -49,7 +49,7 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
         getter: Some(Box::new(size_getter)),
         setter: None,
     };
-    obj_set_key_value(mc, &map_proto, &"size".into(), size_prop)?;
+    object_set_key_value(mc, &map_proto, "size", size_prop)?;
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
@@ -60,14 +60,14 @@ pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
             let val = Value::Function("Map.prototype.entries".to_string());
-            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(*s), val)?;
+            object_set_key_value(mc, &map_proto, s, val)?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            obj_set_key_value(mc, &map_proto, &PropertyKey::Symbol(*s), Value::String(utf8_to_utf16("Map")))?;
+            object_set_key_value(mc, &map_proto, s, Value::String(utf8_to_utf16("Map")))?;
         }
     }
 
@@ -216,19 +216,14 @@ pub(crate) fn create_map_iterator<'gc>(
     let iterator = new_js_object_data(mc);
 
     // Store map
-    obj_set_key_value(mc, &iterator, &"__iterator_map__".into(), Value::Map(map))?;
+    object_set_key_value(mc, &iterator, "__iterator_map__", Value::Map(map))?;
     // Store index
-    obj_set_key_value(mc, &iterator, &"__iterator_index__".into(), Value::Number(0.0))?;
+    object_set_key_value(mc, &iterator, "__iterator_index__", Value::Number(0.0))?;
     // Store kind
-    obj_set_key_value(mc, &iterator, &"__iterator_kind__".into(), Value::String(utf8_to_utf16(kind)))?;
+    object_set_key_value(mc, &iterator, "__iterator_kind__", Value::String(utf8_to_utf16(kind)))?;
 
     // next method
-    obj_set_key_value(
-        mc,
-        &iterator,
-        &"next".into(),
-        Value::Function("MapIterator.prototype.next".to_string()),
-    )?;
+    object_set_key_value(mc, &iterator, "next", Value::Function("MapIterator.prototype.next".to_string()))?;
 
     // Register Symbols
     if let Some(sym_ctor) = object_get_key_value(_env, "Symbol")
@@ -238,16 +233,14 @@ pub(crate) fn create_map_iterator<'gc>(
         if let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
             && let Value::Symbol(s) = &*iter_sym.borrow()
         {
-            let val = Value::Function("IteratorSelf".to_string());
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), val)?;
+            object_set_key_value(mc, &iterator, s, Value::Function("IteratorSelf".to_string()))?;
         }
 
         // Symbol.toStringTag
         if let Some(tag_sym) = object_get_key_value(sym_obj, "toStringTag")
             && let Value::Symbol(s) = &*tag_sym.borrow()
         {
-            let val = Value::String(utf8_to_utf16("Map Iterator"));
-            obj_set_key_value(mc, &iterator, &PropertyKey::Symbol(*s), val)?;
+            object_set_key_value(mc, &iterator, s, Value::String(utf8_to_utf16("Map Iterator")))?;
         }
     }
 
@@ -287,8 +280,8 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     if index >= entries.len() {
         let result_obj = new_js_object_data(mc);
-        obj_set_key_value(mc, &result_obj, &"value".into(), Value::Undefined)?;
-        obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(true))?;
+        object_set_key_value(mc, &result_obj, "value", Value::Undefined)?;
+        object_set_key_value(mc, &result_obj, "done", Value::Boolean(true))?;
         return Ok(Value::Object(result_obj));
     }
 
@@ -298,8 +291,8 @@ pub(crate) fn handle_map_iterator_next<'gc>(
         "values" => value.clone(),
         "entries" => {
             let entry_array = create_array(mc, env)?;
-            obj_set_key_value(mc, &entry_array, &"0".into(), key.clone())?;
-            obj_set_key_value(mc, &entry_array, &"1".into(), value.clone())?;
+            object_set_key_value(mc, &entry_array, "0", key.clone())?;
+            object_set_key_value(mc, &entry_array, "1", value.clone())?;
             set_array_length(mc, &entry_array, 2)?;
             Value::Object(entry_array)
         }
@@ -308,11 +301,11 @@ pub(crate) fn handle_map_iterator_next<'gc>(
 
     // Update index
     index += 1;
-    obj_set_key_value(mc, iterator, &"__iterator_index__".into(), Value::Number(index as f64))?;
+    object_set_key_value(mc, iterator, "__iterator_index__", Value::Number(index as f64))?;
 
     let result_obj = new_js_object_data(mc);
-    obj_set_key_value(mc, &result_obj, &"value".into(), result_value)?;
-    obj_set_key_value(mc, &result_obj, &"done".into(), Value::Boolean(false))?;
+    object_set_key_value(mc, &result_obj, "value", result_value)?;
+    object_set_key_value(mc, &result_obj, "done", Value::Boolean(false))?;
 
     Ok(Value::Object(result_obj))
 }

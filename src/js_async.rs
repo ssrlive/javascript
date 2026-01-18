@@ -1,4 +1,6 @@
-use crate::core::{ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, obj_set_key_value, object_get_key_value};
+use crate::core::{
+    ClosureData, DestructuringElement, Expr, JSGenerator, JSObjectDataPtr, Value, object_get_key_value, object_set_key_value,
+};
 use crate::core::{Gc, GcPtr, MutationContext};
 use crate::error::JSError;
 use crate::js_generator::handle_generator_function_call;
@@ -145,9 +147,9 @@ fn create_async_step_callback<'gc>(
     let env = crate::new_js_object_data(mc);
     env.borrow_mut(mc).prototype = Some(global_env);
 
-    obj_set_key_value(mc, &env, &"__async_generator".into(), Value::Generator(generator)).unwrap();
-    obj_set_key_value(mc, &env, &"__async_resolve".into(), resolve).unwrap();
-    obj_set_key_value(mc, &env, &"__async_reject".into(), reject).unwrap();
+    object_set_key_value(mc, &env, "__async_generator", Value::Generator(generator)).unwrap();
+    object_set_key_value(mc, &env, "__async_resolve", resolve).unwrap();
+    object_set_key_value(mc, &env, "__async_reject", reject).unwrap();
 
     let func_name = if is_reject {
         "__internal_async_step_reject"

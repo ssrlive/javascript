@@ -1,7 +1,7 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::core::{JSWeakMap, PropertyKey};
 use crate::{
-    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value},
+    core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
     error::JSError,
     unicode::utf8_to_utf16,
 };
@@ -85,8 +85,8 @@ fn initialize_weakmap_from_iterable<'gc>(
 /// Initialize WeakMap constructor and prototype
 pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let weakmap_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &weakmap_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &weakmap_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("WeakMap")))?;
+    object_set_key_value(mc, &weakmap_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &weakmap_ctor, "__native_ctor", Value::String(utf8_to_utf16("WeakMap")))?;
 
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
@@ -104,15 +104,15 @@ pub fn initialize_weakmap<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
         weakmap_proto.borrow_mut(mc).prototype = Some(proto);
     }
 
-    obj_set_key_value(mc, &weakmap_ctor, &"prototype".into(), Value::Object(weakmap_proto))?;
-    obj_set_key_value(mc, &weakmap_proto, &"constructor".into(), Value::Object(weakmap_ctor))?;
+    object_set_key_value(mc, &weakmap_ctor, "prototype", Value::Object(weakmap_proto))?;
+    object_set_key_value(mc, &weakmap_proto, "constructor", Value::Object(weakmap_ctor))?;
 
     // Register instance methods
     let methods = vec!["set", "get", "has", "delete", "toString"];
 
     for method in methods {
         let val = Value::Function(format!("WeakMap.prototype.{method}"));
-        obj_set_key_value(mc, &weakmap_proto, &method.into(), val)?;
+        object_set_key_value(mc, &weakmap_proto, method, val)?;
         weakmap_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
     }
     // Mark constructor non-enumerable

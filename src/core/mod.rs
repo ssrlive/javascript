@@ -166,7 +166,7 @@ where
         if let Some(p) = script_path.as_ref() {
             let p_str = p.as_ref().to_string_lossy().to_string();
             // Store __filepath
-            obj_set_key_value(mc, &root.global_env, &"__filepath".into(), Value::String(utf8_to_utf16(&p_str)))?;
+            object_set_key_value(mc, &root.global_env, "__filepath", Value::String(utf8_to_utf16(&p_str)))?;
         }
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {
@@ -457,7 +457,7 @@ pub fn set_internal_prototype_from_constructor<'gc>(
         log::trace!("setting prototype for ctor='{}' proto_obj={:p}", ctor_name, Gc::as_ptr(proto_obj));
         obj.borrow_mut(mc).prototype = Some(proto_obj);
         // Also set the `__proto__` own property so `obj.__proto__` accesses match expectations
-        match obj_set_key_value(mc, obj, &"__proto__".into(), Value::Object(proto_obj)) {
+        match object_set_key_value(mc, obj, "__proto__", Value::Object(proto_obj)) {
             Ok(_) => {
                 // __proto__ should be non-enumerable
                 obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));

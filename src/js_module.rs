@@ -1,6 +1,6 @@
 use crate::{
     JSError, Value,
-    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, obj_set_key_value, object_get_key_value},
+    core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, object_get_key_value, object_set_key_value},
     core::{Gc, GcCell, MutationContext},
     new_js_object_data,
 };
@@ -16,8 +16,8 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
         let pi = Value::Number(std::f64::consts::PI);
         let e = Value::Number(std::f64::consts::E);
 
-        obj_set_key_value(mc, &module_exports, &"PI".into(), pi)?;
-        obj_set_key_value(mc, &module_exports, &"E".into(), e)?;
+        object_set_key_value(mc, &module_exports, "PI", pi)?;
+        object_set_key_value(mc, &module_exports, "E", e)?;
 
         // Add a simple function (just return the input for now)
         let identity_func = Value::Closure(Gc::new(
@@ -33,13 +33,13 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
                 None,
             ),
         ));
-        obj_set_key_value(mc, &module_exports, &"identity".into(), identity_func.clone())?;
-        obj_set_key_value(mc, &module_exports, &"default".into(), identity_func)?;
+        object_set_key_value(mc, &module_exports, "identity", identity_func.clone())?;
+        object_set_key_value(mc, &module_exports, "default", identity_func)?;
     } else if module_name == "console" {
         // Create console module with log function
         // Create a function that directly handles console.log calls
         let log_func = Value::Function("console.log".to_string());
-        obj_set_key_value(mc, &module_exports, &"log".into(), log_func)?;
+        object_set_key_value(mc, &module_exports, "log", log_func)?;
     } else if module_name == "std" {
         #[cfg(feature = "std")]
         {
@@ -136,7 +136,7 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     // Record a module path on the module environment so stack frames / errors can include it
     // Store as `__filepath` similarly to `evaluate_script`.
     let val = Value::String(crate::unicode::utf8_to_utf16(module_path));
-    obj_set_key_value(mc, &env, &"__filepath".into(), val)?;
+    object_set_key_value(mc, &env, "__filepath", val)?;
 
     // Add exports object to the environment
     env.borrow_mut(mc).insert(
@@ -159,7 +159,7 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     crate::core::initialize_global_constructors(mc, &env)?;
 
     // Expose `globalThis` binding in module environment as well
-    crate::core::obj_set_key_value(mc, &env, &"globalThis".into(), crate::core::Value::Object(env))?;
+    object_set_key_value(mc, &env, "globalThis", crate::core::Value::Object(env))?;
 
     // Parse and execute the module content
     let tokens = crate::core::tokenize(content)?;

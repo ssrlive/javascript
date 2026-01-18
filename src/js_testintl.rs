@@ -1,6 +1,6 @@
 use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, Trace};
 use crate::core::{Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, extract_closure_from_value};
-use crate::core::{new_js_object_data, object_get_key_value, obj_set_key_value};
+use crate::core::{new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::js_array::get_array_length;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -8,7 +8,7 @@ use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 /// Create the testIntl object with testing functions
 pub fn make_testintl_object<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let testintl_obj = new_js_object_data(mc);
-    obj_set_key_value(
+    object_set_key_value(
         mc,
         &testintl_obj,
         &"testWithIntlConstructors".into(),
@@ -145,7 +145,7 @@ pub fn create_mock_intl_instance<'gc>(
 
     // Add resolvedOptions method
     let resolved_options = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &[], &new_js_object_data(mc), None)));
-    obj_set_key_value(mc, &instance, &"resolvedOptions".into(), resolved_options)?;
+    object_set_key_value(mc, &instance, &"resolvedOptions".into(), resolved_options)?;
 
     // Store the locale that was passed to the constructor
     if let Some(locale) = locale_arg {
@@ -178,7 +178,7 @@ pub fn create_mock_intl_instance<'gc>(
                 match crate::core::evaluate_expr(mc, &global_env, &canon_call) {
                     Ok(CoreValue::String(canon_utf16)) => {
                         let canonical = utf16_to_utf8(canon_utf16);
-                        obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&canonical)))?;
+                        object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&canonical)))?;
                     }
                     _ => {
                         // Fall back to canonicalizedTags if canonicalize returned
@@ -206,16 +206,16 @@ pub fn create_mock_intl_instance<'gc>(
                                 match crate::core::evaluate_expr(mc, &global_env, &first) {
                                     Ok(CoreValue::String(first_utf16)) => {
                                         let first_str = utf16_to_utf8(first_utf16);
-                                        obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
+                                        object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
                                     }
                                     _ => {
-                                        obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+                                        object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
                                     }
                                 }
                             }
                             _ => {
                                 // Nothing helpful found; store the original locale
-                                obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+                                object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
                             }
                         }
                     }
@@ -262,16 +262,16 @@ pub fn create_mock_intl_instance<'gc>(
                         match crate::core::evaluate_expr(mc, &global_env, &first) {
                             Ok(CoreValue::String(first_utf16)) => {
                                 let first_str = utf16_to_utf8(first_utf16);
-                                obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
+                                object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&first_str)))?;
                             }
                             _ => {
-                                obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+                                object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
                             }
                         }
                     }
                     _ => {
                         // Nothing helpful found; store the original locale
-                        obj_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+                        object_set_key_value(mc, &instance, &"__locale".into(), Value::String(utf8_to_utf16(&locale)))?;
                     }
                 }
             }
@@ -296,7 +296,7 @@ pub fn handle_resolved_options(instance: &JSObjectDataPtr) -> Result<Value, JSEr
         "en-US".to_string()
     };
 
-    obj_set_key_value(mc, &result, &"locale".into(), Value::String(utf8_to_utf16(&locale)))?;
+    object_set_key_value(mc, &result, &"locale".into(), Value::String(utf8_to_utf16(&locale)))?;
     Ok(Value::Object(result))
 }
 
@@ -404,7 +404,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                                 vec![Expr::StringLit(utf8_to_utf16(&canonical))],
                                             );
                                             if let Ok(Value::Boolean(true)) = crate::core::evaluate_expr(mc, env, &check_call) {
-                                                obj_set_key_value(
+                                                object_set_key_value(
                                                     mc,
                                                     &result,
                                                     &idx.to_string().into(),
@@ -464,7 +464,7 @@ pub fn handle_mock_intl_static_method<'gc>(
                                             crate::core::evaluate_expr(mc, &global_env, &first)
                                         {
                                             let canonical = utf16_to_utf8(first_utf16);
-                                            obj_set_key_value(
+                                            object_set_key_value(
                                                 mc,
                                                 &result,
                                                 &idx.to_string().into(),

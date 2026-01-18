@@ -1,6 +1,6 @@
 use crate::PropertyKey;
 use crate::core::MutationContext;
-use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, obj_set_key_value, object_get_key_value, to_primitive};
+use crate::core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value, to_primitive};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
 use num_bigint::BigInt;
@@ -215,12 +215,11 @@ pub fn parse_bigint_string(raw: &str) -> Result<BigInt, JSError> {
 
 pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let bigint_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &bigint_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("BigInt")))?;
+    object_set_key_value(mc, &bigint_ctor, "__native_ctor", Value::String(utf8_to_utf16("BigInt")))?;
 
     // Add static methods
-    obj_set_key_value(mc, &bigint_ctor, &"asIntN".into(), Value::Function("BigInt.asIntN".to_string()))?;
-    obj_set_key_value(mc, &bigint_ctor, &"asUintN".into(), Value::Function("BigInt.asUintN".to_string()))?;
-
+    object_set_key_value(mc, &bigint_ctor, "asIntN", Value::Function("BigInt.asIntN".to_string()))?;
+    object_set_key_value(mc, &bigint_ctor, "asUintN", Value::Function("BigInt.asUintN".to_string()))?;
     // Create prototype
     let bigint_proto = new_js_object_data(mc);
     // Set BigInt.prototype's prototype to Object.prototype if available
@@ -233,13 +232,13 @@ pub fn initialize_bigint<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
     }
 
     let to_string = Value::Function("BigInt.prototype.toString".to_string());
-    obj_set_key_value(mc, &bigint_proto, &"toString".into(), to_string)?;
+    object_set_key_value(mc, &bigint_proto, "toString", to_string)?;
     let value_of = Value::Function("BigInt.prototype.valueOf".to_string());
-    obj_set_key_value(mc, &bigint_proto, &"valueOf".into(), value_of)?;
+    object_set_key_value(mc, &bigint_proto, "valueOf", value_of)?;
 
     // Wire up
-    obj_set_key_value(mc, &bigint_ctor, &"prototype".into(), Value::Object(bigint_proto))?;
-    obj_set_key_value(mc, &bigint_proto, &"constructor".into(), Value::Object(bigint_ctor))?;
+    object_set_key_value(mc, &bigint_ctor, "prototype", Value::Object(bigint_proto))?;
+    object_set_key_value(mc, &bigint_proto, "constructor", Value::Object(bigint_ctor))?;
 
     // Mark prototype methods and constructor non-enumerable
     bigint_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));

@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr, has_own_property_value,
     new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{obj_set_key_value, object_get_key_value};
+use crate::core::{object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -334,9 +334,9 @@ pub fn handle_global_function<'gc>(
                         let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                         crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                         for (i, arg) in evaluated_args.iter().enumerate() {
-                            crate::core::obj_set_key_value(mc, &arguments_obj, &i.to_string().into(), arg.clone())?;
+                            object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
                         }
-                        crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+                        object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
 
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
@@ -366,9 +366,9 @@ pub fn handle_global_function<'gc>(
                             let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                             crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
-                                crate::core::obj_set_key_value(mc, &arguments_obj, &i.to_string().into(), arg.clone())?;
+                                object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
                             }
-                            crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+                            object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
 
                             return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                         }
@@ -456,9 +456,9 @@ pub fn handle_global_function<'gc>(
                         let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                         crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                         for (i, arg) in evaluated_args.iter().enumerate() {
-                            crate::core::obj_set_key_value(mc, &arguments_obj, &i.to_string().into(), arg.clone())?;
+                            object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
                         }
-                        crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+                        object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
 
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
@@ -504,9 +504,9 @@ pub fn handle_global_function<'gc>(
                             let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
                             crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
                             for (i, arg) in evaluated_args.iter().enumerate() {
-                                crate::core::obj_set_key_value(mc, &arguments_obj, &i.to_string().into(), arg.clone())?;
+                                object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
                             }
-                            crate::core::obj_set_key_value(mc, &func_env, &"arguments".into(), Value::Object(arguments_obj))?;
+                            object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
 
                             return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                         }
@@ -547,22 +547,12 @@ pub fn handle_global_function<'gc>(
                     }
                     Value::String(s) => {
                         let str_obj = crate::core::new_js_object_data(mc);
-                        crate::core::obj_set_key_value(mc, &str_obj, &"__value__".into(), Value::String(s.clone()))?;
-                        crate::core::obj_set_key_value(
-                            mc,
-                            &str_obj,
-                            &"length".into(),
-                            Value::Number(crate::unicode::utf16_len(&s) as f64),
-                        )?;
+                        object_set_key_value(mc, &str_obj, "__value__", Value::String(s.clone()))?;
+                        object_set_key_value(mc, &str_obj, "length", Value::Number(crate::unicode::utf16_len(&s) as f64))?;
                         let mut i = 0;
                         while let Some(c) = crate::unicode::utf16_char_at(&s, i) {
                             let char_str = crate::unicode::utf16_to_utf8(&[c]);
-                            crate::core::obj_set_key_value(
-                                mc,
-                                &str_obj,
-                                &i.to_string().into(),
-                                Value::String(crate::unicode::utf8_to_utf16(&char_str)),
-                            )?;
+                            object_set_key_value(mc, &str_obj, i, Value::String(crate::unicode::utf8_to_utf16(&char_str)))?;
                             i += 1;
                         }
                         return crate::js_array::handle_array_instance_method(mc, &str_obj, method, args, env).map_err(JSError::from);
@@ -661,7 +651,7 @@ fn dynamic_import_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>]) 
 
     // let promise_obj = Value::Object(new_js_object_data(mc));
     // if let Value::Object(obj) = &promise_obj {
-    //     obj_set_key_value(mc, obj, &"__promise".into(), Value::Promise(promise))?;
+    //     object_set_key_value(mc, obj, &"__promise".into(), Value::Promise(promise))?;
     // }
     // Ok(promise_obj)
     todo!()
@@ -1424,14 +1414,14 @@ fn internal_promise_all_resolve<'gc>(
         if let Some(results_val_rc) = object_get_key_value(&state_obj, "results")
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
-            obj_set_key_value(mc, results_obj, &idx.to_string().into(), value)?;
+            object_set_key_value(mc, results_obj, idx, value)?;
         }
         // Increment completed
         if let Some(completed_val_rc) = object_get_key_value(&state_obj, "completed")
             && let Value::Number(completed) = &*completed_val_rc.borrow()
         {
             let new_completed = completed + 1.0;
-            obj_set_key_value(mc, &state_obj, &"completed".into(), Value::Number(new_completed))?;
+            object_set_key_value(mc, &state_obj, "completed", Value::Number(new_completed))?;
             // Check if all completed
             if let Some(total_val_rc) = object_get_key_value(&state_obj, "total")
                 && let Value::Number(total) = &*total_val_rc.borrow()
@@ -1549,22 +1539,17 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
 #[allow(dead_code)]
 pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let func_ctor = new_js_object_data(mc);
-    obj_set_key_value(mc, &func_ctor, &"name".into(), Value::String(utf8_to_utf16("Function")))?;
-    obj_set_key_value(mc, &func_ctor, &"__is_constructor".into(), Value::Boolean(true))?;
-    obj_set_key_value(mc, &func_ctor, &"__native_ctor".into(), Value::String(utf8_to_utf16("Function")))?;
+    object_set_key_value(mc, &func_ctor, "name", Value::String(utf8_to_utf16("Function")))?;
+    object_set_key_value(mc, &func_ctor, "__is_constructor", Value::Boolean(true))?;
+    object_set_key_value(mc, &func_ctor, "__native_ctor", Value::String(utf8_to_utf16("Function")))?;
 
     let func_proto = new_js_object_data(mc);
 
-    obj_set_key_value(mc, &func_ctor, &"prototype".into(), Value::Object(func_proto))?;
-    obj_set_key_value(mc, &func_proto, &"constructor".into(), Value::Object(func_ctor))?;
+    object_set_key_value(mc, &func_ctor, "prototype", Value::Object(func_proto))?;
+    object_set_key_value(mc, &func_proto, "constructor", Value::Object(func_ctor))?;
 
     // Function.prototype.bind
-    obj_set_key_value(
-        mc,
-        &func_proto,
-        &"bind".into(),
-        Value::Function("Function.prototype.bind".to_string()),
-    )?;
+    object_set_key_value(mc, &func_proto, "bind", Value::Function("Function.prototype.bind".to_string()))?;
     func_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("bind"));
     func_proto
         .borrow_mut(mc)

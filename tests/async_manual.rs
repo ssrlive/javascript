@@ -7,7 +7,6 @@ fn __init_test_logger() {
 }
 
 #[test]
-#[ignore]
 fn async_function_returns_value() {
     let res = evaluate_script("async function f(){ return 7; } f()", None::<&std::path::Path>);
     match res {
@@ -17,7 +16,6 @@ fn async_function_returns_value() {
 }
 
 #[test]
-#[ignore]
 fn async_function_awaits_promise_resolve() {
     let res = evaluate_script(
         "async function f(){ return await Promise.resolve(8); } f()",
@@ -30,7 +28,6 @@ fn async_function_awaits_promise_resolve() {
 }
 
 #[test]
-#[ignore]
 fn async_arrow_awaits_and_computes() {
     let script = "let f = async () => { const x = await Promise.resolve(9); return x + 1; }; f()";
     let res = evaluate_script(script, None::<&std::path::Path>);

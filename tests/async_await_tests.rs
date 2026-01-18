@@ -8,7 +8,6 @@ fn __init_test_logger() {
 }
 
 #[test]
-#[ignore]
 fn test_async_function_syntax() {
     // Test that async function syntax is accepted (even if execution is synchronous)
     let script = "async function foo() { return 42; }; await foo()";
@@ -19,7 +18,6 @@ fn test_async_function_syntax() {
 }
 
 #[test]
-#[ignore]
 fn test_await_syntax() {
     // Test that await syntax is accepted
     let script = "let p = Promise.resolve(42); await p";
@@ -30,7 +28,6 @@ fn test_await_syntax() {
 }
 
 #[test]
-#[ignore]
 fn test_async_arrow_function_syntax() {
     // Test that async arrow function syntax is accepted
     let script = "let foo = async () => { return 42; }; await foo()";
@@ -41,7 +38,6 @@ fn test_async_arrow_function_syntax() {
 }
 
 #[test]
-#[ignore]
 fn test_async_promise_resolution() {
     // Test that promises resolve asynchronously
     let script = r#"
@@ -52,7 +48,7 @@ fn test_async_promise_resolution() {
         result
     "#;
     match evaluate_script(script, None::<&std::path::Path>) {
-        Ok(value) => assert_eq!(value, "sync,async"),
+        Ok(value) => assert_eq!(value, "[\"sync\",\"async\"]"),
         Err(e) => panic!("Script evaluation failed: {e:?}"),
     }
 }

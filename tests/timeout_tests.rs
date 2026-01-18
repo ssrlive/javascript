@@ -101,4 +101,54 @@ mod timeout_tests {
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "2");
     }
+
+    #[test]
+    #[ignore = "Known issue: setTimeout closure not implemented yet"]
+    fn timeout_closure_handles_error_constructor() {
+        let script = r#"
+    // Ensure an async callback that rejects with `new Error(...)` can resolve Error
+    function doSomethingCritical(){ return new Promise((r)=>{ setTimeout(()=>r('crit'), 5); }); }
+    function doSomethingOptional(){ return new Promise((resolve,reject)=>{ setTimeout(()=>reject(new Error('optional failed')), 5); }); }
+    function doSomethingExtraNice(x){ return new Promise((r)=>{ setTimeout(()=>r('extra-'+x), 5); }); }
+    function moreCriticalStuff(){ return new Promise((r)=>{ setTimeout(()=>r('done'), 5); }); }
+
+    // Chain where optional rejects but is caught; ensure no ReferenceError occurs
+    doSomethingCritical()
+        .then((result) =>
+            doSomethingOptional()
+                .then((optionalResult) => doSomethingExtraNice(optionalResult))
+                .catch((e) => { /* swallow optional error */ }),
+        )
+        .then(() => moreCriticalStuff())
+        .catch((e) => { throw new Error('serious error: ' + e.message); });
+    "#;
+
+        let res = evaluate_script(script, None::<&std::path::Path>);
+        assert!(res.is_ok(), "evaluate_script failed: {:?}", res.err());
+    }
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn test_set_interval() {
+        let script = r#"
+            let count = 0;
+            let id = setInterval(() => {
+                count++;
+            }, 10);
+            
+            new Promise((resolve) => {
+                setTimeout(() => {
+                    clearInterval(id);
+                    resolve(count);
+                }, 50);
+            })
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert!(result.parse::<f64>().unwrap() >= 1.0);
+    }
 }

@@ -28,7 +28,6 @@ fn test_reflect_construct_with_new_target_parameter() {
 }
 
 #[test]
-#[ignore = "Reflect.apply with async closure not yet implemented"]
 fn test_reflect_apply_with_async_closure_returns_promise_resolved() {
     let script = r#"
         let fnc = async function(a){ return a + 1; };

@@ -5703,6 +5703,38 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(p_val)
         }
         Expr::Yield(_) | Expr::YieldStar(_) => Err(EvalError::Js(raise_eval_error!("`yield` is only valid inside generator functions"))),
+        Expr::AsyncArrowFunction(params, body) => {
+            // Create an async arrow function object which captures the current `this` lexically
+            let func_obj = crate::core::new_js_object_data(mc);
+            // Set __proto__ to Function.prototype
+            if let Some(func_ctor_val) = env_get(env, "Function")
+                && let Value::Object(func_ctor) = &*func_ctor_val.borrow()
+                && let Some(proto_val) = object_get_key_value(func_ctor, "prototype")
+                && let Value::Object(proto) = &*proto_val.borrow()
+            {
+                func_obj.borrow_mut(mc).prototype = Some(*proto);
+            }
+
+            // Capture current `this` value for lexical this
+            let captured_this = match crate::js_class::evaluate_this(mc, env) {
+                Ok(v) => v,
+                Err(e) => return Err(EvalError::Js(e)),
+            };
+
+            let closure_data = ClosureData {
+                params: params.to_vec(),
+                body: body.clone(),
+                env: *env,
+                home_object: GcCell::new(None),
+                captured_envs: Vec::new(),
+                bound_this: Some(captured_this),
+                is_arrow: true,
+            };
+            let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
+            object_set_key_value(mc, &func_obj, "__closure__", closure_val).map_err(EvalError::Js)?;
+
+            Ok(Value::Object(func_obj))
+        }
         _ => todo!("{expr:?}"),
     }
 }

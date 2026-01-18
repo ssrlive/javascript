@@ -183,7 +183,6 @@ fn test_error_rejection_silenced_by_sync_catch() {
 }
 
 #[test]
-#[ignore = "flaky: immediate Error-like unhandled reporting race; runtime fix needed"]
 fn test_allsettled_with_error_like_does_not_report_unhandled() {
     // Promise.allSettled should register handlers for each input promise and
     // therefore should not cause an Error-like rejection to be treated as
@@ -195,8 +194,15 @@ fn test_allsettled_with_error_like_does_not_report_unhandled() {
         // Defer the rejection to the microtask queue so that allSettled can attach handlers
         // synchronously before the rejection occurs.
         Promise.allSettled([
-            new Promise(function(resolve, reject) { Promise.resolve().then(function() { let e = {message: 'boom', __is_error: true}; reject(e); }); })
-        ]).then(function(arr) { result = arr[0].status + ':' + arr[0].reason.message; });
+            new Promise(function(resolve, reject) {
+                Promise.resolve().then(function() {
+                    let e = {message: 'boom', __is_error: true};
+                    reject(e);
+                });
+            })
+        ]).then(function(arr) {
+            result = arr[0].status + ':' + arr[0].reason.message;
+        });
         result
     "#;
     let result = evaluate_script(script, None::<&std::path::Path>);

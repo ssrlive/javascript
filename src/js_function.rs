@@ -236,6 +236,29 @@ pub fn handle_global_function<'gc>(
         "__internal_async_step_resolve" => return crate::js_async::__internal_async_step_resolve(mc, args, env),
         "__internal_async_step_reject" => return crate::js_async::__internal_async_step_reject(mc, args, env),
 
+        "__internal_allsettled_state_record_fulfilled_env" => {
+            if args.len() < 3 {
+                return Err(raise_eval_error!("internal function called with insufficient args"));
+            }
+            let idx = match args[1] {
+                Value::Number(n) => n,
+                _ => return Err(raise_eval_error!("internal function expected number")),
+            };
+            return crate::js_promise::__internal_allsettled_state_record_fulfilled_env(mc, args[0].clone(), idx, args[2].clone(), env)
+                .map(|_| Value::Undefined);
+        }
+        "__internal_allsettled_state_record_rejected_env" => {
+            if args.len() < 3 {
+                return Err(raise_eval_error!("internal function called with insufficient args"));
+            }
+            let idx = match args[1] {
+                Value::Number(n) => n,
+                _ => return Err(raise_eval_error!("internal function expected number")),
+            };
+            return crate::js_promise::__internal_allsettled_state_record_rejected_env(mc, args[0].clone(), idx, args[2].clone(), env)
+                .map(|_| Value::Undefined);
+        }
+
         "__internal_resolve_promise" => return internal_resolve_promise(mc, args, env),
         "__internal_reject_promise" => return internal_reject_promise(mc, args, env),
 

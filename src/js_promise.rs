@@ -2368,17 +2368,10 @@ pub fn handle_promise_static_method<'gc>(
                                 }
                                 PromiseState::Pending => {
                                     // Promise still pending, attach callbacks that update the state env
-                                    let then_callback = create_allsettled_resolve_callback(mc, state_env.clone(), idx);
-                                    let catch_callback = create_allsettled_reject_callback(mc, state_env.clone(), idx);
+                                    let then_callback = create_allsettled_resolve_callback(mc, state_env.clone(), idx, *env);
+                                    let catch_callback = create_allsettled_reject_callback(mc, state_env.clone(), idx, *env);
                                     // Attach both callbacks in a single mutation to avoid double-borrowing the promise
-                                    perform_promise_then(
-                                        mc,
-                                        promise_ref.clone(),
-                                        Some(then_callback),
-                                        Some(catch_callback),
-                                        Some(result_promise.clone()),
-                                        env,
-                                    )?;
+                                    perform_promise_then(mc, promise_ref.clone(), Some(then_callback), Some(catch_callback), None, env)?;
                                 }
                             }
                         } else {
@@ -3098,7 +3091,12 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
 ///
 /// # Returns
 /// A Value::Closure that can be used as a then callback
-fn create_allsettled_resolve_callback<'gc>(mc: &MutationContext<'gc>, state_env: JSObjectDataPtr<'gc>, index: usize) -> Value<'gc> {
+fn create_allsettled_resolve_callback<'gc>(
+    mc: &MutationContext<'gc>,
+    state_env: JSObjectDataPtr<'gc>,
+    index: usize,
+    parent_env: JSObjectDataPtr<'gc>,
+) -> Value<'gc> {
     Value::Closure(Gc::new(
         mc,
         ClosureData::new(
@@ -3117,6 +3115,7 @@ fn create_allsettled_resolve_callback<'gc>(mc: &MutationContext<'gc>, state_env:
             ))],
             &{
                 let env = new_js_object_data(mc);
+                env.borrow_mut(mc).prototype = Some(parent_env);
                 env_set(mc, &env, "__state_env", Value::Object(state_env.clone())).unwrap();
                 env
             },
@@ -3129,7 +3128,12 @@ fn create_allsettled_resolve_callback<'gc>(mc: &MutationContext<'gc>, state_env:
 ///
 /// Creates a closure that calls the internal function to record rejection
 /// in the state env stored on the closure's environment.
-fn create_allsettled_reject_callback<'gc>(mc: &MutationContext<'gc>, state_env: JSObjectDataPtr<'gc>, index: usize) -> Value<'gc> {
+fn create_allsettled_reject_callback<'gc>(
+    mc: &MutationContext<'gc>,
+    state_env: JSObjectDataPtr<'gc>,
+    index: usize,
+    parent_env: JSObjectDataPtr<'gc>,
+) -> Value<'gc> {
     Value::Closure(Gc::new(
         mc,
         ClosureData::new(
@@ -3144,6 +3148,7 @@ fn create_allsettled_reject_callback<'gc>(mc: &MutationContext<'gc>, state_env: 
             ))],
             &{
                 let env = new_js_object_data(mc);
+                env.borrow_mut(mc).prototype = Some(parent_env);
                 env_set(mc, &env, "__state_env", Value::Object(state_env.clone())).unwrap();
                 env
             },
@@ -3555,22 +3560,14 @@ pub fn handle_promise_static_method_val<'gc>(
                                     }
                                 }
                                 PromiseState::Pending => {
-                                    let then_callback = create_allsettled_resolve_callback(mc, state_env.clone(), idx);
-                                    let catch_callback = create_allsettled_reject_callback(mc, state_env.clone(), idx);
+                                    let then_callback = create_allsettled_resolve_callback(mc, state_env.clone(), idx, *env);
+                                    let catch_callback = create_allsettled_reject_callback(mc, state_env.clone(), idx, *env);
                                     perform_promise_then(
                                         mc,
                                         promise_ref.clone(),
                                         Some(then_callback),
-                                        None,
-                                        Some(result_promise.clone()),
-                                        env,
-                                    )?;
-                                    perform_promise_then(
-                                        mc,
-                                        promise_ref.clone(),
-                                        None,
                                         Some(catch_callback),
-                                        Some(result_promise.clone()),
+                                        None, // Do not tie result to result_promise
                                         env,
                                     )?;
                                 }

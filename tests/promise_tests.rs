@@ -242,4 +242,25 @@ mod promise_tests {
         let result = evaluate_script(code, None::<&std::path::Path>).unwrap();
         assert_eq!(result, "84");
     }
+
+    #[test]
+    fn then_calls_native_callback_and_prints() {
+        let script = r#"
+        let printed = "";
+        console.log = function(x) { printed = x; };
+
+        async function example() {
+            return new Promise((resolve) => {
+                setTimeout(() => resolve("Done!"), 0);
+            });
+        }
+
+        example().then(console.log);
+        // Wait briefly to let timers / microtasks run and observe side-effects
+        new Promise((resolve) => setTimeout(() => resolve(printed), 10));
+    "#;
+
+        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(res, "\"Done!\"");
+    }
 }

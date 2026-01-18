@@ -44,6 +44,9 @@ pub struct JSGenerator<'gc> {
     // created when the generator starts executing.
     pub args: Vec<Value<'gc>>,
     pub state: GeneratorState<'gc>,
+    // Optionally cache the initially yielded value so that resume/re-entry
+    // paths can avoid re-evaluating the inner expression.
+    pub cached_initial_yield: Option<Value<'gc>>,
 }
 
 #[derive(Clone, Collect)]

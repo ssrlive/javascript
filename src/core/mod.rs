@@ -127,6 +127,12 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env_set(mc, env, "encodeURIComponent", Value::Function("encodeURIComponent".to_string()))?;
     env_set(mc, env, "decodeURIComponent", Value::Function("decodeURIComponent".to_string()))?;
 
+    // Timer functions
+    env_set(mc, env, "setTimeout", Value::Function("setTimeout".to_string()))?;
+    env_set(mc, env, "clearTimeout", Value::Function("clearTimeout".to_string()))?;
+    env_set(mc, env, "setInterval", Value::Function("setInterval".to_string()))?;
+    env_set(mc, env, "clearInterval", Value::Function("clearInterval".to_string()))?;
+
     #[cfg(feature = "os")]
     crate::js_os::initialize_os_module(mc, env)?;
 
@@ -177,9 +183,58 @@ where
         match evaluate_statements(mc, &root.global_env, &statements) {
             Ok(mut result) => {
                 let mut count = 0;
-                while let crate::js_promise::PollResult::Executed = crate::js_promise::run_event_loop(mc)? {
-                    count += 1;
-                    log::trace!("DEBUG: event loop iteration {count}");
+                loop {
+                    match crate::js_promise::run_event_loop(mc)? {
+                        crate::js_promise::PollResult::Executed => {
+                            count += 1;
+                            log::trace!("DEBUG: event loop iteration {count}");
+                            continue;
+                        }
+                        // If the next task is a short timer, wait briefly and continue so
+                        // small delays (1ms) used in tests can fire before evaluate_script returns.
+                        crate::js_promise::PollResult::Wait(dur) => {
+                            if dur <= std::time::Duration::from_millis(crate::js_promise::short_timer_threshold_ms()) {
+                                log::trace!("DEBUG: waiting (condvar) for {:?} to allow timers to fire", dur);
+                                // Wait on a condvar so we can be woken early when new tasks arrive.
+                                let (lock, cv) = crate::js_promise::get_event_loop_wake();
+                                let mut guard = lock.lock().unwrap();
+                                // Reset the flag before waiting
+                                *guard = false;
+                                let (_g, _result) = cv.wait_timeout(guard, dur).unwrap();
+                                count += 1;
+                                continue;
+                            } else if crate::js_promise::wait_for_active_handles() {
+                                // If the CLI/example wants to keep the loop alive while active
+                                // timers exist, wait and continue instead of exiting immediately.
+                                log::trace!("DEBUG: longer timer pending ({:?}), but wait_for_active_handles=true, waiting", dur);
+                                let (lock, cv) = crate::js_promise::get_event_loop_wake();
+                                let mut guard = lock.lock().unwrap();
+                                *guard = false;
+                                let (_g, _result) = cv.wait_timeout(guard, dur).unwrap();
+                                count += 1;
+                                continue;
+                            } else {
+                                log::warn!("DEBUG: longer timer pending ({:?}), exiting event loop", dur);
+                                break;
+                            }
+                        }
+                        crate::js_promise::PollResult::Empty => {
+                            // If configured to wait for active handles (Node-like), and we have
+                            // timers/intervals registered, keep the event loop alive until
+                            // they are gone. We poll periodically and wait on the condvar
+                            // so the loop can be woken when timers expire or handles are cleared.
+                            if crate::js_promise::wait_for_active_handles() && crate::js_promise::has_active_timers() {
+                                log::trace!("DEBUG: event loop empty but active timers exist, waiting for handles to clear");
+                                let (lock, cv) = crate::js_promise::get_event_loop_wake();
+                                let guard = lock.lock().unwrap();
+                                // Wait in short increments to allow responsive wakeups
+                                let (_g, _res) = cv.wait_timeout(guard, std::time::Duration::from_millis(100)).unwrap();
+                                count += 1;
+                                continue;
+                            }
+                            break;
+                        }
+                    }
                 }
 
                 // Re-evaluate final expression/return after draining microtasks so that

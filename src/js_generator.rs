@@ -34,6 +34,7 @@ pub fn handle_generator_function_call<'gc>(
             // when the generator actually starts executing on the first `next()`.
             args: args.to_vec(),
             state: crate::core::GeneratorState::NotStarted,
+            cached_initial_yield: None,
         }),
     );
 
@@ -281,6 +282,31 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
                 }
             }
         }
+        StatementKind::TryCatch(tc_stmt) => {
+            let tc_stmt = tc_stmt.as_mut();
+            for s in tc_stmt.try_body.iter_mut() {
+                replace_first_yield_in_statement(s, send_value, replaced);
+                if *replaced {
+                    return;
+                }
+            }
+            if let Some(catch_body) = tc_stmt.catch_body.as_mut() {
+                for s in catch_body.iter_mut() {
+                    replace_first_yield_in_statement(s, send_value, replaced);
+                    if *replaced {
+                        return;
+                    }
+                }
+            }
+            if let Some(finally_body) = tc_stmt.finally_body.as_mut() {
+                for s in finally_body.iter_mut() {
+                    replace_first_yield_in_statement(s, send_value, replaced);
+                    if *replaced {
+                        return;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -463,19 +489,20 @@ fn find_yield_in_expr(e: &Expr) -> Option<Option<Box<Expr>>> {
 }
 
 // Helper to find a yield expression within statements. Returns the
-// index of the containing top-level statement and the inner yield
-// expression if found.
-fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<Box<Expr>>)> {
+// index of the containing top-level statement, an optional inner index if
+// the yield is found inside a nested block/body, and the inner yield
+// expression (the Expr inside the yield/await).
+fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<usize>, Option<Box<Expr>>)> {
     for (i, s) in stmts.iter().enumerate() {
         match &*s.kind {
             StatementKind::Expr(e) => {
                 if let Some(inner) = find_yield_in_expr(e) {
-                    return Some((i, inner));
+                    return Some((i, None, inner));
                 }
             }
             StatementKind::Return(Some(e)) => {
                 if let Some(inner) = find_yield_in_expr(e) {
-                    return Some((i, inner));
+                    return Some((i, None, inner));
                 }
             }
             StatementKind::Let(decls) | StatementKind::Var(decls) => {
@@ -483,64 +510,64 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
                     if let Some(expr) = expr_opt
                         && let Some(inner) = find_yield_in_expr(expr)
                     {
-                        return Some((i, inner));
+                        return Some((i, None, inner));
                     }
                 }
             }
             StatementKind::Const(decls) => {
                 for (_, expr) in decls {
                     if let Some(inner) = find_yield_in_expr(expr) {
-                        return Some((i, inner));
+                        return Some((i, None, inner));
                     }
                 }
             }
             StatementKind::Block(inner_stmts) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(inner_stmts) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(inner_stmts) {
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::If(if_stmt) => {
                 let if_stmt = if_stmt.as_ref();
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&if_stmt.then_body) {
+                    return Some((i, Some(inner_idx), found));
                 }
                 if let Some(else_body) = &if_stmt.else_body
-                    && let Some((_inner_idx, found)) = find_first_yield_in_statements(else_body)
+                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(else_body)
                 {
-                    return Some((i, found));
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::For(for_stmt) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(&for_stmt.body) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&for_stmt.body) {
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::TryCatch(tc_stmt) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(&tc_stmt.try_body) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(&tc_stmt.try_body) {
+                    return Some((i, Some(inner_idx), found));
                 }
                 if let Some(catch_body) = &tc_stmt.as_ref().catch_body
-                    && let Some((_inner_idx, found)) = find_first_yield_in_statements(catch_body)
+                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(catch_body)
                 {
-                    return Some((i, found));
+                    return Some((i, Some(inner_idx), found));
                 }
                 if let Some(finally_body) = &tc_stmt.as_ref().finally_body
-                    && let Some((_inner_idx, found)) = find_first_yield_in_statements(finally_body)
+                    && let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(finally_body)
                 {
-                    return Some((i, found));
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::While(_, body) | StatementKind::DoWhile(body, _) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(body) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(body) {
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::ForOf(_, _, body)
             | StatementKind::ForIn(_, _, body)
             | StatementKind::ForOfDestructuringObject(_, _, body)
             | StatementKind::ForOfDestructuringArray(_, _, body) => {
-                if let Some((_inner_idx, found)) = find_first_yield_in_statements(body) {
-                    return Some((i, found));
+                if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(body) {
+                    return Some((i, Some(inner_idx), found));
                 }
             }
             StatementKind::FunctionDeclaration(..) => {
@@ -573,7 +600,14 @@ pub fn generator_next<'gc>(
                 pre_env: None,
             };
 
-            if let Some((idx, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
+            if let Some((idx, inner_idx_opt, yield_inner)) = find_first_yield_in_statements(&gen_obj.body) {
+                log::debug!(
+                    "generator_next: found first yield at idx={} inner_idx={:?} body_len={} func_env_pre={} ",
+                    idx,
+                    inner_idx_opt,
+                    gen_obj.body.len(),
+                    gen_obj.args.len()
+                );
                 // Suspend at the containing top-level statement index so
                 // that resumed execution re-evaluates the statement with
                 // the sent-in value substituted for the `yield`.
@@ -586,11 +620,26 @@ pub fn generator_next<'gc>(
                 let func_env =
                     prepare_function_call_env(mc, Some(&gen_obj.env), None, Some(&gen_obj.params[..]), &gen_obj.args, None, None)?;
 
+                // If the yield is inside a nested block/branch we may need to
+                // execute pre-statements that are inside that block before
+                // evaluating the inner expression. For example, when the
+                // function body is a single Block, and the yield is in the
+                // block's second statement, we must run the block's first
+                // statement so that side-effects happen in order.
                 let pre_env_opt: Option<JSObjectDataPtr> = if idx > 0 {
                     let pre_stmts = gen_obj.body[0..idx].to_vec();
                     // Execute pre-yield statements in the function env so that
                     // bindings and side-effects are recorded on that environment.
                     let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                    Some(func_env)
+                } else if let Some(inner_idx) = inner_idx_opt {
+                    if inner_idx > 0 {
+                        // Execute the inner block's pre-statements (those before the yield)
+                        if let StatementKind::Block(inner_stmts) = &*gen_obj.body[idx].kind {
+                            let pre_stmts = inner_stmts[0..inner_idx].to_vec();
+                            let _ = crate::core::evaluate_statements(mc, &func_env, &pre_stmts)?;
+                        }
+                    }
                     Some(func_env)
                 } else {
                     // Even when there are no pre-statements, we need the function
@@ -617,8 +666,15 @@ pub fn generator_next<'gc>(
                     let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
                     object_set_key_value(mc, &func_env, "__gen_throw_val", Value::Undefined)?;
                     match crate::core::evaluate_expr(mc, &func_env, &inner_expr_box) {
-                        Ok(val) => return Ok(create_iterator_result(mc, val, false)),
-                        Err(_) => return Ok(create_iterator_result(mc, Value::Undefined, false)),
+                        Ok(val) => {
+                            // Cache the value so re-entry/resume paths can use it
+                            gen_obj.cached_initial_yield = Some(val.clone());
+                            return Ok(create_iterator_result(mc, val, false));
+                        }
+                        Err(_) => {
+                            gen_obj.cached_initial_yield = Some(Value::Undefined);
+                            return Ok(create_iterator_result(mc, Value::Undefined, false));
+                        }
                     }
                 }
 
@@ -663,7 +719,21 @@ pub fn generator_next<'gc>(
             // by pre-statements remain visible when we resume execution.
             let parent_env = if let Some(env) = pre_env.as_ref() { env } else { &gen_obj.env };
             let func_env = prepare_function_call_env(mc, Some(parent_env), None, None, &[], None, None)?;
-            object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+            // Prefer the cached initial yield value (if present) to avoid
+            // re-evaluating the awaited expression in re-entry scenarios.
+            // If the caller provided a concrete send value (e.g., the resolved
+            // value from Promise resolution), prefer it. Otherwise fall back to
+            // the cached initially-yielded value captured during generator
+            // startup to avoid re-evaluation.
+            if let Value::Undefined = _send_value {
+                if let Some(cached) = gen_obj.cached_initial_yield.as_ref() {
+                    object_set_key_value(mc, &func_env, "__gen_throw_val", cached.clone())?;
+                } else {
+                    object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+                }
+            } else {
+                object_set_key_value(mc, &func_env, "__gen_throw_val", _send_value.clone())?;
+            }
             // Execute the (possibly modified) tail
             let result = crate::core::evaluate_statements(mc, &func_env, &tail);
             log::trace!("DEBUG: evaluate_statements result: {:?}", result);

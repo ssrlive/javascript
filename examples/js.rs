@@ -9,6 +9,10 @@ struct Cli {
 
     /// JavaScript file to execute
     file: Option<std::path::PathBuf>,
+
+    /// Milliseconds threshold for short timers which `evaluate_script` will wait for
+    #[arg(long, default_value_t = 20)]
+    timer_wait_ms: u64,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
@@ -30,6 +34,15 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
 
 fn run_main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     let cli = <Cli as clap::Parser>::parse();
+
+    // Apply configured short-timer threshold so evaluate_script can decide which
+    // timers to wait for before returning (default 20 ms).
+    set_short_timer_threshold_ms(cli.timer_wait_ms);
+
+    // If executing a file, mirror Node semantics by keeping the event loop alive
+    // while there are active handles (timers, intervals). This allows scripts
+    // that set intervals or long timeouts to keep the process running like Node.
+    set_wait_for_active_handles(cli.file.is_some());
 
     let script_content = if let Some(script) = cli.eval {
         script

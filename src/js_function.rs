@@ -311,10 +311,10 @@ pub fn handle_global_function<'gc>(
             return Err(raise_eval_error!("Promise.prototype.finally called without a promise receiver"));
         }
         // */
-        // "setTimeout" => return crate::js_promise::handle_set_timeout(mc, args, env),
-        // "clearTimeout" => return crate::js_promise::handle_clear_timeout(mc, args, env),
-        // "setInterval" => return crate::js_promise::handle_set_interval(mc, args, env),
-        // "clearInterval" => return crate::js_promise::handle_clear_interval(mc, args, env),
+        "setTimeout" => return crate::js_promise::handle_set_timeout_val(mc, args, env),
+        "clearTimeout" => return crate::js_promise::handle_clear_timeout_val(mc, args, env),
+        "setInterval" => return crate::js_promise::handle_set_interval_val(mc, args, env),
+        "clearInterval" => return crate::js_promise::handle_clear_interval_val(mc, args, env),
         "Function.prototype.call" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();

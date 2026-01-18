@@ -321,6 +321,23 @@ pub fn pending_unhandled_count<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDat
     }
 }
 
+/// Configure whether `evaluate_script` should keep the event loop alive while
+/// active timers/intervals exist. Default: false. Exposed via a public setter
+/// so examples or tests can enable the Node-like behavior when appropriate.
+pub fn set_wait_for_active_handles(enabled: bool) {
+    WAIT_FOR_ACTIVE_HANDLES.store(enabled, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn wait_for_active_handles() -> bool {
+    WAIT_FOR_ACTIVE_HANDLES.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Returns true if there are any active timers or intervals registered on this
+/// thread's timer registry.
+pub fn has_active_timers() -> bool {
+    TIMER_REGISTRY.with(|reg| !reg.borrow().is_empty())
+}
+
 /// Peek the reason information for the first pending UnhandledCheck task, if any.
 /// Returns (message, Option<(line, column)>) to avoid GC lifetime issues when reporting
 /// an unhandled rejection back to the caller.
@@ -436,6 +453,27 @@ thread_local! {
     /// Counter for generating unique timeout IDs
     static NEXT_TIMEOUT_ID: std::cell::RefCell<usize> = std::cell::RefCell::new(1);
 
+    /// Registry of active timers for the current thread/arena.
+    /// Stores (callback, args, optional interval) as 'static coerced values.
+    static TIMER_REGISTRY: std::cell::RefCell<std::collections::HashMap<usize, (Value<'static>, Vec<Value<'static>>, Option<std::time::Duration>)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+use crate::timer_thread::{TimerCommand, spawn_timer_thread};
+use crossbeam_channel::{Receiver, Sender};
+use std::sync::OnceLock;
+
+struct TimerThreadHandle {
+    cmd_tx: Sender<TimerCommand>,
+    expired_rx: Receiver<usize>,
+}
+
+static TIMER_THREAD_HANDLE: OnceLock<TimerThreadHandle> = OnceLock::new();
+
+fn ensure_timer_thread() -> &'static TimerThreadHandle {
+    TIMER_THREAD_HANDLE.get_or_init(|| {
+        let (cmd_tx, expired_rx) = spawn_timer_thread();
+        TimerThreadHandle { cmd_tx, expired_rx }
+    })
 }
 
 /// Reset global promise runtime state between arena runs (for test isolation).
@@ -452,6 +490,11 @@ pub fn reset_global_state() {
 /// processing to the outermost loop to avoid premature unhandled reports.
 static RUN_LOOP_NESTING: AtomicUsize = AtomicUsize::new(0);
 
+// If true, `evaluate_script` (CLI / examples) will keep the event loop alive
+// while there are active timers/intervals registered. Defaults to false so
+// tests don't block waiting for long-running handles.
+static WAIT_FOR_ACTIVE_HANDLES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Monotonic tick counter advanced once per outermost idle event-loop tick.
 /// Pending unhandled checks record the insertion tick and are considered
 /// unhandled only when `CURRENT_TICK >= insertion_tick + UNHANDLED_GRACE`.
@@ -462,6 +505,33 @@ static CURRENT_TICK: AtomicUsize = AtomicUsize::new(0);
 /// Increased to give harnesses additional time to attach handlers in
 /// high-latency or deeply-nested synchronous scenarios.
 const UNHANDLED_GRACE: usize = 6;
+
+use std::sync::atomic::AtomicU64;
+use std::sync::{Condvar, Mutex};
+
+/// Threshold (ms) under which timers are considered "short" and are
+/// handled synchronously by `evaluate_script` to allow small test timers
+/// to fire before returning. Default is 20 ms.
+static SHORT_TIMER_WAIT_MS: AtomicU64 = AtomicU64::new(20);
+
+/// Set the short-timer threshold (milliseconds). Public so examples can
+/// configure runtime behavior via CLI flags.
+pub fn set_short_timer_threshold_ms(ms: u64) {
+    SHORT_TIMER_WAIT_MS.store(ms, Ordering::SeqCst);
+}
+
+/// Read the current short-timer threshold in milliseconds.
+pub fn short_timer_threshold_ms() -> u64 {
+    SHORT_TIMER_WAIT_MS.load(Ordering::SeqCst)
+}
+
+/// Event-loop wake primitive used by `evaluate_script` to wait for short timers
+/// and to be notified when new tasks are queued. Lazily initialized on first use.
+static EVENT_LOOP_WAKE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+
+pub(crate) fn get_event_loop_wake() -> &'static (Mutex<bool>, Condvar) {
+    EVENT_LOOP_WAKE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
 
 /// Add a task to the global task queue for later execution.
 ///
@@ -477,6 +547,12 @@ fn queue_task<'gc>(_mc: &MutationContext<'gc>, task: Task<'gc>) {
             t => unsafe { std::mem::transmute::<Task<'gc>, Task<'static>>(t) },
         });
     });
+
+    // Wake anyone waiting for short timers / new tasks so they can process immediately.
+    let (lock, cv) = get_event_loop_wake();
+    let mut guard = lock.lock().unwrap();
+    *guard = true;
+    cv.notify_all();
 }
 
 /// Remove any pending UnhandledCheck tasks for the given promise from the global queue.
@@ -572,16 +648,52 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                         }
                     }
                 } else {
-                    // If callback is not a function, forward the fulfillment value
-                    log::trace!("Callback is not a function, forwarding fulfillment");
-                    if let Some(env) = caller_env_opt.as_ref() {
-                        let original_val = promise.borrow().value.clone().unwrap_or(Value::Undefined);
-                        log::trace!(
-                            "forwarding original_val={:?} into new_promise ptr={:p}",
-                            original_val,
-                            Gc::as_ptr(new_promise.clone())
-                        );
-                        resolve_promise(mc, &new_promise, original_val, env);
+                    // If callback is a native function (Value::Function) or an object with
+                    // a callable closure, attempt to call it. Otherwise forward the value.
+                    let original_val = promise.borrow().value.clone().unwrap_or(Value::Undefined);
+
+                    // Determine whether we should forward (i.e. callback is not callable)
+                    let should_forward = match &callback {
+                        Value::Undefined => true,
+                        Value::Function(_) => false,
+                        Value::Object(obj) => object_get_key_value(obj, "__closure__").is_none(),
+                        _ => true,
+                    };
+
+                    if should_forward {
+                        // Forward the original value to the chained promise
+                        if let Some(env) = caller_env_opt.as_ref() {
+                            resolve_promise(mc, &new_promise, original_val, env);
+                        } else {
+                            // Fallback env in the unlikely case none was provided
+                            let tmp_env = new_js_object_data(mc);
+                            resolve_promise(mc, &new_promise, original_val, &tmp_env);
+                        }
+                    } else {
+                        // Callback looks callable — attempt to call it using the provided env
+                        if let Some(env) = caller_env_opt.as_ref() {
+                            match crate::js_promise::call_function(mc, &callback, std::slice::from_ref(&original_val), env) {
+                                Ok(res) => {
+                                    resolve_promise(mc, &new_promise, res, env);
+                                }
+                                Err(e) => {
+                                    log::trace!("Callback execution failed: {:?}", e);
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), env);
+                                }
+                            }
+                        } else {
+                            // No caller env — create a temporary env and try
+                            let tmp_env = new_js_object_data(mc);
+                            match crate::js_promise::call_function(mc, &callback, std::slice::from_ref(&original_val), &tmp_env) {
+                                Ok(res) => {
+                                    resolve_promise(mc, &new_promise, res, &tmp_env);
+                                }
+                                Err(e) => {
+                                    log::trace!("Callback execution failed: {:?}", e);
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), &tmp_env);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -620,39 +732,94 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                         }
                     }
                 } else {
-                    // If callback is not a function, forward the rejection (bubble up)
-                    log::trace!("Callback is not a function, forwarding rejection");
-                    if let Some(env) = caller_env_opt.as_ref() {
-                        let original_reason = promise.borrow().value.clone().unwrap_or(Value::Undefined);
-                        reject_promise(mc, &new_promise, original_reason, env);
+                    // If callback is a native function or Function object, call it; otherwise forward the rejection
+                    let original_reason = promise.borrow().value.clone().unwrap_or(Value::Undefined);
+
+                    // Determine whether we should forward the rejection (callback not callable)
+                    let should_forward = match &callback {
+                        Value::Undefined => true,
+                        Value::Function(_) => false,
+                        Value::Object(obj) => object_get_key_value(obj, "__closure__").is_none(),
+                        _ => true,
+                    };
+
+                    if should_forward {
+                        if let Some(env) = caller_env_opt.as_ref() {
+                            reject_promise(mc, &new_promise, original_reason, env);
+                        } else {
+                            let tmp_env = new_js_object_data(mc);
+                            reject_promise(mc, &new_promise, original_reason, &tmp_env);
+                        }
+                    } else {
+                        if let Some(env) = caller_env_opt.as_ref() {
+                            match crate::js_promise::call_function(mc, &callback, std::slice::from_ref(&original_reason), env) {
+                                Ok(res) => {
+                                    resolve_promise(mc, &new_promise, res, env);
+                                }
+                                Err(e) => {
+                                    log::trace!("Callback execution failed: {:?}", e);
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), env);
+                                }
+                            }
+                        } else {
+                            let tmp_env = new_js_object_data(mc);
+                            match crate::js_promise::call_function(mc, &callback, std::slice::from_ref(&original_reason), &tmp_env) {
+                                Ok(res) => {
+                                    resolve_promise(mc, &new_promise, res, &tmp_env);
+                                }
+                                Err(e) => {
+                                    log::trace!("Callback execution failed: {:?}", e);
+                                    reject_promise(mc, &new_promise, Value::String(utf8_to_utf16(&e.message())), &tmp_env);
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
-        Task::Timeout { id: _, callback, args, .. } => {
+        Task::Timeout { id, callback, args, .. } => {
             log::trace!("Processing Timeout task");
             // Call the callback with the provided args
             if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
-                // If callback is a standard function (Value::Object), bind `this` to global.
-                // Arrow functions (Value::Closure) should inherit `this` from captured_env.
-                let this_val_opt = if let Value::Object(_) = callback {
-                    let mut global_env = captured_env.clone();
-                    loop {
-                        let next = global_env.borrow().prototype.clone();
-                        if let Some(parent) = next {
-                            global_env = parent;
-                        } else {
-                            break;
+                // Distinguish arrow vs normal functions so `this` semantics match Node:
+                // - Arrow functions inherit lexical `this` from creation time (use closure semantics)
+                // - Non-arrow functions should be called with the global object as `this` when
+                //   invoked by timers (i.e., plain function call semantics)
+                let mut is_arrow = false;
+                match &callback {
+                    Value::Closure(cl) => is_arrow = cl.is_arrow,
+                    Value::AsyncClosure(cl) => is_arrow = cl.is_arrow,
+                    Value::Object(obj) => {
+                        if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
+                            match &*closure_prop.borrow() {
+                                Value::Closure(c) => is_arrow = c.is_arrow,
+                                Value::AsyncClosure(c) => is_arrow = c.is_arrow,
+                                _ => {}
+                            }
                         }
                     }
-                    Some(Value::Object(global_env))
-                } else {
-                    None
-                };
+                    _ => {}
+                }
 
-                let func_env = prepare_function_call_env(mc, Some(&captured_env), this_val_opt, Some(&params[..]), &args, None, None)?;
-                let _ = evaluate_statements(mc, &func_env, &body)?;
+                if is_arrow {
+                    // Arrow functions: use closure semantics so bound_this is respected
+                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, None)?;
+                    let _ = evaluate_statements(mc, &func_env, &body)?;
+                } else {
+                    // Non-arrow function: follow strict-mode semantics when applicable.
+                    // Our runtime is strict-only, so the `this` value for a plain function
+                    // call should be `undefined` (not the global object).
+                    let this_val = Some(Value::Undefined);
+                    let func_env = prepare_function_call_env(mc, Some(&captured_env), this_val, Some(&params[..]), &args, None, None)?;
+                    let _ = evaluate_statements(mc, &func_env, &body)?;
+                }
             }
+
+            // One-shot timeouts should be removed from the registry so that any
+            // late expired notifications from the timer thread are ignored.
+            TIMER_REGISTRY.with(|reg| {
+                reg.borrow_mut().remove(&id);
+            });
         }
         Task::Interval {
             id,
@@ -663,7 +830,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
         } => {
             log::trace!("Processing Interval task");
             // Call the callback with the provided args
-            if let Some((params, _body, captured_env)) = extract_closure_from_value(&callback) {
+            if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                 let this_val_opt = if let Value::Object(_) = callback {
                     let mut global_env = captured_env.clone();
                     loop {
@@ -679,7 +846,34 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     None
                 };
 
-                let _func_env = prepare_function_call_env(mc, Some(&captured_env), this_val_opt, Some(&params[..]), &args, None, None)?;
+                // Distinguish arrow vs normal functions like above
+                let mut is_arrow = false;
+                match &callback {
+                    Value::Closure(cl) => is_arrow = cl.is_arrow,
+                    Value::AsyncClosure(cl) => is_arrow = cl.is_arrow,
+                    Value::Object(obj) => {
+                        if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
+                            match &*closure_prop.borrow() {
+                                Value::Closure(c) => is_arrow = c.is_arrow,
+                                Value::AsyncClosure(c) => is_arrow = c.is_arrow,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+
+                if is_arrow {
+                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, None)?;
+                    let _ = evaluate_statements(mc, &func_env, &body)?;
+                } else {
+                    // Strict-mode: use undefined as `this` for plain function calls
+                    let this_val = Some(Value::Undefined);
+                    let func_env = prepare_function_call_env(mc, Some(&captured_env), this_val, Some(&params[..]), &args, None, None)?;
+                    let _ = evaluate_statements(mc, &func_env, &body)?;
+                }
+
+                // Re-schedule the next interval tick
                 queue_task(
                     mc,
                     Task::Interval {
@@ -813,6 +1007,63 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
 /// If the queue is empty, it returns `PollResult::Empty`.
 pub fn poll_event_loop<'gc>(mc: &MutationContext<'gc>) -> Result<PollResult, JSError> {
     let now = Instant::now();
+
+    // Drain any expired timer notifications from the timer thread and enqueue
+    // corresponding tasks on the main event loop. This converts cross-thread
+    // timer expirations (ids) back into `Task::Timeout` or `Task::Interval`
+    // so that callbacks run on the main thread where GC-managed Values are
+    // valid.
+    if let Some(handle) = TIMER_THREAD_HANDLE.get() {
+        // Try to receive expired ids without blocking; process all available.
+        while let Ok(id) = handle.expired_rx.try_recv() {
+            TIMER_REGISTRY.with(|reg| {
+                let mut reg_borrow = reg.borrow_mut();
+                if let Some((cb_static, args_static, interval_opt)) = reg_borrow.get(&id).cloned() {
+                    // Convert stored 'static values back into the current arena lifetime
+                    let cb_gc: Value<'gc> = unsafe { std::mem::transmute::<Value<'static>, Value<'gc>>(cb_static) };
+                    let args_gc: Vec<Value<'gc>> = args_static
+                        .into_iter()
+                        .map(|a| unsafe { std::mem::transmute::<Value<'static>, Value<'gc>>(a) })
+                        .collect();
+
+                    // Remove any placeholder task for this id so we don't double-enqueue
+                    GLOBAL_TASK_QUEUE.with(|queue| {
+                        let mut queue_borrow = queue.borrow_mut();
+                        queue_borrow.retain(|task| !matches!(task, Task::Timeout { id: task_id, .. } if *task_id == id));
+                        queue_borrow.retain(|task| !matches!(task, Task::Interval { id: task_id, .. } if *task_id == id));
+                    });
+
+                    if let Some(interval) = interval_opt {
+                        queue_task(
+                            mc,
+                            Task::Interval {
+                                id,
+                                callback: cb_gc,
+                                args: args_gc,
+                                target_time: now,
+                                interval,
+                            },
+                        );
+                        // Reschedule the interval occurrence with the timer thread
+                        let _ = handle.cmd_tx.send(TimerCommand::Schedule {
+                            id,
+                            when: Instant::now() + interval,
+                        });
+                    } else {
+                        queue_task(
+                            mc,
+                            Task::Timeout {
+                                id,
+                                callback: cb_gc,
+                                args: args_gc,
+                                target_time: now,
+                            },
+                        );
+                    }
+                }
+            });
+        }
+    }
 
     // Debug: print queue summary to help diagnose hanging loops
     GLOBAL_TASK_QUEUE.with(|queue| {
@@ -3309,6 +3560,231 @@ pub fn handle_clear_interval<'gc>(mc: &MutationContext<'gc>, args: &[Expr], env:
     };
 
     // Remove the interval task with the matching ID
+    GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        queue_borrow.retain(|task| !matches!(task, Task::Interval { id: task_id, .. } if *task_id == id));
+    });
+
+    Ok(Value::Undefined)
+}
+
+// Value-based wrappers for timer functions (used by global function dispatch)
+
+pub fn handle_set_timeout_val<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Err(raise_eval_error!("setTimeout requires at least one argument"));
+    }
+
+    let callback = args[0].clone();
+    let delay = if args.len() > 1 {
+        match &args[1] {
+            Value::Number(n) => n.max(0.0) as u64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    let mut timeout_args = Vec::new();
+    for arg in args.iter().skip(2) {
+        timeout_args.push(arg.clone());
+    }
+
+    let id = NEXT_TIMEOUT_ID.with(|counter| {
+        let mut id = counter.borrow_mut();
+        let current_id = *id;
+        *id += 1;
+        current_id
+    });
+
+    // For small delays, schedule directly on the main thread to avoid
+    // cross-thread latency for short timers used by tests.
+    let when = Instant::now() + Duration::from_millis(delay);
+    if delay <= short_timer_threshold_ms() {
+        queue_task(
+            mc,
+            Task::Timeout {
+                id,
+                callback: callback.clone(),
+                args: timeout_args,
+                target_time: when,
+            },
+        );
+        return Ok(Value::Number(id as f64));
+    }
+
+    // Store callback + args + optional interval in the thread-local timer registry for long timers.
+    let cb_static = unsafe { std::mem::transmute::<Value<'gc>, Value<'static>>(callback.clone()) };
+    let args_static: Vec<Value<'static>> = timeout_args
+        .iter()
+        .cloned()
+        .map(|a| unsafe { std::mem::transmute::<Value<'gc>, Value<'static>>(a) })
+        .collect();
+
+    TIMER_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, (cb_static, args_static, None));
+    });
+
+    // Schedule with timer thread
+    let handle = ensure_timer_thread();
+    let _ = handle.cmd_tx.send(TimerCommand::Schedule { id, when });
+
+    // Also enqueue a placeholder task so the main event loop knows a timer is pending
+    queue_task(
+        mc,
+        Task::Timeout {
+            id,
+            callback: callback.clone(),
+            args: timeout_args,
+            target_time: when,
+        },
+    );
+
+    Ok(Value::Number(id as f64))
+}
+
+pub fn handle_clear_timeout_val<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
+
+    let id = match &args[0] {
+        Value::Number(n) => *n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+
+    // Remove from local registry if present
+    TIMER_REGISTRY.with(|reg| {
+        reg.borrow_mut().remove(&id);
+    });
+
+    // Tell timer thread to cancel
+    if let Some(handle) = TIMER_THREAD_HANDLE.get() {
+        let _ = handle.cmd_tx.send(TimerCommand::Cancel(id));
+    }
+
+    // Also remove from any queued tasks if present
+    GLOBAL_TASK_QUEUE.with(|queue| {
+        let mut queue_borrow = queue.borrow_mut();
+        queue_borrow.retain(|task| !matches!(task, Task::Timeout { id: task_id, .. } if *task_id == id));
+    });
+
+    Ok(Value::Undefined)
+}
+
+pub fn handle_set_interval_val<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Err(raise_eval_error!("setInterval requires at least one argument"));
+    }
+
+    let callback = args[0].clone();
+    let delay = if args.len() > 1 {
+        match &args[1] {
+            Value::Number(n) => n.max(0.0) as u64,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    let mut interval_args = Vec::new();
+    for arg in args.iter().skip(2) {
+        interval_args.push(arg.clone());
+    }
+
+    let id = NEXT_TIMEOUT_ID.with(|counter| {
+        let mut id = counter.borrow_mut();
+        let current_id = *id;
+        *id += 1;
+        current_id
+    });
+
+    let interval = Duration::from_millis(delay);
+
+    let when = Instant::now() + interval;
+    if delay <= short_timer_threshold_ms() {
+        // Small intervals: schedule locally and rely on local rescheduling for subsequent ticks.
+        queue_task(
+            mc,
+            Task::Interval {
+                id,
+                callback: callback.clone(),
+                args: interval_args.clone(),
+                target_time: when,
+                interval,
+            },
+        );
+        return Ok(Value::Number(id as f64));
+    }
+
+    // Store in registry so the timer thread can manage long sleeps and expiry
+    let cb_static = unsafe { std::mem::transmute::<Value<'gc>, Value<'static>>(callback.clone()) };
+    let args_static: Vec<Value<'static>> = interval_args
+        .iter()
+        .cloned()
+        .map(|a| unsafe { std::mem::transmute::<Value<'gc>, Value<'static>>(a) })
+        .collect();
+
+    TIMER_REGISTRY.with(|reg| {
+        reg.borrow_mut().insert(id, (cb_static, args_static, Some(interval)));
+    });
+
+    // Schedule with timer thread
+    let handle = ensure_timer_thread();
+    let _ = handle.cmd_tx.send(TimerCommand::Schedule { id, when });
+
+    // Enqueue placeholder interval task so the main event loop observes the pending timer
+    queue_task(
+        mc,
+        Task::Interval {
+            id,
+            callback: callback.clone(),
+            args: interval_args.clone(),
+            target_time: when,
+            interval,
+        },
+    );
+
+    Ok(Value::Number(id as f64))
+}
+
+pub fn handle_clear_interval_val<'gc>(
+    mc: &MutationContext<'gc>,
+    args: &[Value<'gc>],
+    _env: &JSObjectDataPtr<'gc>,
+) -> Result<Value<'gc>, JSError> {
+    if args.is_empty() {
+        return Ok(Value::Undefined);
+    }
+
+    let id = match &args[0] {
+        Value::Number(n) => *n as usize,
+        _ => return Ok(Value::Undefined),
+    };
+
+    // Remove from local registry if present
+    TIMER_REGISTRY.with(|reg| {
+        reg.borrow_mut().remove(&id);
+    });
+
+    // Tell timer thread to cancel
+    if let Some(handle) = TIMER_THREAD_HANDLE.get() {
+        let _ = handle.cmd_tx.send(TimerCommand::Cancel(id));
+    }
+
+    // Also remove from any queued tasks if present
     GLOBAL_TASK_QUEUE.with(|queue| {
         let mut queue_borrow = queue.borrow_mut();
         queue_borrow.retain(|task| !matches!(task, Task::Interval { id: task_id, .. } if *task_id == id));

@@ -76,7 +76,7 @@ jobs:
         cargo run --all-features --example js -- js-scripts/object_tests_02.js
         cargo run --all-features --example js -- js-scripts/object_tests_03.js
         cargo run --all-features --example js -- js-scripts/parameter_rest.js
-        # cargo run --all-features --example js -- js-scripts/promise_tests.js
+        cargo run --all-features --example js -- js-scripts/promise_tests.js
         cargo run --all-features --example js -- js-scripts/proper_dataview_test.js
         cargo run --all-features --example js -- js-scripts/regex_test_2.js
         cargo run --all-features --example js -- js-scripts/regex_test_3.js
@@ -85,7 +85,7 @@ jobs:
         cargo run --all-features --example js -- js-scripts/set_tests_01.js
         cargo run --all-features --example js -- js-scripts/set_tests_02.js
         cargo run --all-features --example js -- js-scripts/set_tests_03.js
-        # cargo run --all-features --example js -- js-scripts/set_time_out_tests.js
+        cargo run --all-features --example js -- js-scripts/set_time_out_tests.js
         cargo run --all-features --example js -- js-scripts/sharedarraybuffer_final.js
         cargo run --all-features --example js -- js-scripts/sharedarraybuffer_test.js
         cargo run --all-features --example js -- js-scripts/simple_dataview_test.js

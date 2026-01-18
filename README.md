@@ -47,7 +47,7 @@ with support for modern language features including ES6+ modules, async/await, B
 - **TypedArray**: All typed arrays (Int8Array, Uint8Array, Float32Array, etc.)
 - **ArrayBuffer**: Binary data buffers
 - **DataView**: Binary data views with endianness support
-- **setTimeout/clearTimeout**: Asynchronous timer functions with cancellation support
+- **setTimeout/clearTimeout/setInterval/clearInterval**: Asynchronous timer functions with cancellation support (IDs are numeric). Long-running timers are scheduled on a background timer thread; short timers may be handled inline for tests. The short-timer wait threshold is configurable via `set_short_timer_threshold_ms` and the `--timer-wait-ms` CLI flag.
 - **Error**: Error types and stack traces
 - **OS**: File system operations and path manipulation
 
@@ -60,11 +60,11 @@ with support for modern language features including ES6+ modules, async/await, B
 
 ## Installation
 
-Add this to your `Cargo.toml`:
+Add this to your `Cargo.toml` (latest published version shown here):
 
 ```toml
 [dependencies]
-javascript = "0.1.8"
+javascript = "0.1.14"
 ```
 
 ## Usage
@@ -103,7 +103,7 @@ assert_eq!(result, "94");
 
 ### Working with Promises
 
-```rust,no_run
+```rust
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"
@@ -113,25 +113,32 @@ let result = evaluate_script(r#"
         });
         return await promise;
     }
-    example()
+    await example()
 "#, None::<&std::path::Path>).unwrap();
 // The engine automatically runs the event loop to resolve promises
 ```
 
-### Using setTimeout
+### Using setTimeout / setInterval
 
-```rust,no_run
+```rust
 use javascript::evaluate_script;
 
 let result = evaluate_script(r#"
     let timeoutId = setTimeout(() => {
         console.log("Timeout executed!");
     }, 1000);
-    
+
     // Cancel the timeout
     clearTimeout(timeoutId);
-    
-    "Timeout scheduled and cancelled"
+
+    // setInterval returns an id as well
+    let intervalId = setInterval(() => { console.log('tick'); }, 1000);
+    clearInterval(intervalId);
+
+    // The script's final expression is returned by evaluate_script; if the
+    // last statement returns a timer id you will see that numeric value. Use
+    // `void` or an explicit `undefined` expression to avoid returning the id.
+    undefined
 "#, None::<&std::path::Path>).unwrap();
 ```
 

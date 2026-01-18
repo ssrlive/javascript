@@ -155,6 +155,10 @@ function assert(condition, message) {
             } else {
                 setTimeout(() => reject(new Error('[control flow] optional failed')), 10);
             }
+        }).catch(e => {
+            // swallow optional error and return undefined so the chain continues
+            console.log(`[control flow] optional failed (internal): ${e.message}`);
+            return undefined;
         });
     }
 

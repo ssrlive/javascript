@@ -27,6 +27,7 @@ num-traits = "0.2.19"
 regress = { version = "0.10", features = ["utf16"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
+crossbeam-channel = "0.5"
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2.178", optional = true }

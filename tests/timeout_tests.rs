@@ -12,7 +12,6 @@ mod timeout_tests {
     use super::*;
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_set_timeout_basic() {
         let script = r#"
             new Promise((resolve) => {
@@ -28,7 +27,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_set_timeout_with_args() {
         let script = r#"
             new Promise((resolve) => {
@@ -42,7 +40,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_set_timeout_returns_id() {
         let script = r#"
             let id = setTimeout(() => {}, 0);
@@ -53,7 +50,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_clear_timeout() {
         let script = r#"
             new Promise((resolve) => {
@@ -69,7 +65,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_multiple_set_timeout() {
         let script = r#"
             new Promise((resolve) => {
@@ -87,7 +82,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Promises are not yet supported in the test environment"]
     fn test_set_timeout_with_function_reference() {
         let script = r#"
             new Promise((resolve) => {
@@ -103,7 +97,6 @@ mod timeout_tests {
     }
 
     #[test]
-    #[ignore = "Known issue: setTimeout closure not implemented yet"]
     fn timeout_closure_handles_error_constructor() {
         let script = r#"
     // Ensure an async callback that rejects with `new Error(...)` can resolve Error
@@ -123,8 +116,25 @@ mod timeout_tests {
         .catch((e) => { throw new Error('serious error: ' + e.message); });
     "#;
 
+        let res = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(res, "\"done\"");
+    }
+
+    #[test]
+    fn awaited_function_called_once() {
+        let script = r#"
+        let cnt = 0;
+        function doSomething(){ cnt += 1; return new Promise((r)=>setTimeout(()=>r(1), 0)); }
+        async function f(){ const x = await doSomething(); return x; }
+        f();
+        // Wait briefly to let microtasks / timers run
+        new Promise((resolve)=>setTimeout(()=>resolve(cnt), 10));
+    "#;
         let res = evaluate_script(script, None::<&std::path::Path>);
-        assert!(res.is_ok(), "evaluate_script failed: {:?}", res.err());
+        match res {
+            Ok(value) => assert_eq!(value, "1"),
+            Err(e) => panic!("Script evaluation failed: {e:?}"),
+        }
     }
 }
 
@@ -133,7 +143,6 @@ mod interval_tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn test_set_interval() {
         let script = r#"
             let count = 0;
@@ -149,6 +158,6 @@ mod interval_tests {
             })
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        assert!(result.parse::<f64>().unwrap() >= 1.0);
+        assert!(result.parse::<i32>().unwrap() > 0);
     }
 }

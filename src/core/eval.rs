@@ -5666,18 +5666,16 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             if let Value::Object(p_obj) = &p_val
                 && let Some(promise_ref) = crate::js_promise::get_promise_from_js_object(p_obj)
             {
-                use crate::js_promise::{PollResult, run_event_loop};
-
                 loop {
                     // Check current state
                     let state = promise_ref.borrow().state.clone();
                     match state {
                         PromiseState::Pending => {
-                            match run_event_loop(mc)? {
-                                PollResult::Executed => continue,
+                            match crate::js_promise::run_event_loop(mc)? {
+                                crate::js_promise::PollResult::Executed => continue,
                                 // If event loop reports a timed wait, sleep briefly and then
                                 // continue polling so we wait for the promise to settle.
-                                PollResult::Wait(d) => {
+                                crate::js_promise::PollResult::Wait(d) => {
                                     std::thread::sleep(d);
                                     continue;
                                 }
@@ -5687,7 +5685,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                                 // settles (matching Node.js behavior) rather than
                                 // observing a still-pending promise when the loop is
                                 // momentarily idle.
-                                PollResult::Empty => {
+                                crate::js_promise::PollResult::Empty => {
                                     std::thread::yield_now();
                                     continue;
                                 }

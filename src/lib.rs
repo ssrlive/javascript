@@ -30,6 +30,7 @@ pub(crate) mod js_set;
 pub(crate) mod js_std;
 pub(crate) mod js_string;
 pub(crate) mod js_symbol;
+pub(crate) mod timer_thread;
 // pub(crate) mod js_testintl;
 pub(crate) mod js_typedarray;
 pub(crate) mod js_weakmap;
@@ -44,5 +45,7 @@ pub use core::{
 };
 pub use core::{PropertyKey, Value, env_set, evaluate_script, object_get_key_value, object_set_key_value, tokenize};
 pub use error::{JSError, JSErrorKind};
+pub use js_promise::set_short_timer_threshold_ms;
+pub use js_promise::set_wait_for_active_handles;
 pub use repl::Repl;
 pub use unicode::{utf8_to_utf16, utf16_to_utf8};

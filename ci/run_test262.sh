@@ -1,0 +1,290 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LIMIT=100
+FAIL_ON_FAILURE=false
+# Comma-separated list of features to skip (default: Intl)
+SKIP_FEATURES="${SKIP_FEATURES:-Intl}"
+# Cap multiplier (LIMIT * CAP_MULTIPLIER) can be set via env or CLI; default 5
+CAP_MULTIPLIER="${CAP_MULTIPLIER:-5}"
+# Focus (comma-separated) e.g., language,built-ins,intl - can be set via env or CLI
+FOCUS="${FOCUS:-}"
+
+usage() {
+  cat <<EOF
+Usage: $0 [--limit N] [--fail-on-failure] [--cap-multiplier N] [--focus name]
+
+--limit N            Run at most N tests (default: 100)
+--fail-on-failure    Exit non-zero if any test fails (default: false)
+--cap-multiplier N   Cap multiplier used when collecting candidates (search cap = LIMIT * CAP_MULTIPLIER). Can also set env CAP_MULTIPLIER (default: 5)
+--focus name         Comma-separated focus areas (language,built-ins,intl) or subdirs under test/; can also set env FOCUS
+EOF
+} 
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --limit)
+      LIMIT="$2"; shift 2;;
+    --fail-on-failure)
+      FAIL_ON_FAILURE=true; shift;;
+    --cap-multiplier)
+      CAP_MULTIPLIER="$2"; shift 2;;
+    --focus)
+      FOCUS="$2"; shift 2;;
+    --help)
+      usage; exit 0;;
+    *)
+      echo "Unknown argument: $1"; usage; exit 1;;
+  esac
+done
+
+REPO_DIR=test262
+RESULTS_FILE=test262-results.log
+: > "$RESULTS_FILE"
+
+if [[ ! -d "$REPO_DIR" ]]; then
+  echo "Cloning test262..."
+  git clone --depth 1 https://github.com/tc39/test262.git "$REPO_DIR"
+fi
+
+n=0; pass=0; fail=0; skip=0
+
+echo "Building engine example..."
+cargo build --example js --all-features
+
+# Locate example binary
+if [[ -x "target/debug/examples/js" ]]; then
+  BIN="target/debug/examples/js"
+elif [[ -x "target/debug/js" ]]; then
+  BIN="target/debug/js"
+else
+  BIN=""
+fi
+
+if [[ -n "$BIN" ]]; then
+  RUN_CMD="$BIN"
+else
+  echo "Warning: example binary not found, will use 'cargo run --example js --' (slower)"
+  RUN_CMD="cargo run --example js --"
+fi
+
+# Build harness index to speed up include/harness lookups (fast and local to harness)
+declare -A HARNESS_INDEX
+while IFS= read -r -d '' p; do
+  base=$(basename "$p")
+  HARNESS_INDEX["$base"]="$p"
+done < <(find "$REPO_DIR/harness" -type f -print0)
+
+# Build the collection cap and support focused searches
+CAP=$((LIMIT * CAP_MULTIPLIER))
+
+# Prepare search directories based on FOCUS (env or CLI)
+SEARCH_DIRS=()
+if [[ -n "$FOCUS" ]]; then
+  IFS=',' read -ra TOKS <<< "$FOCUS"
+  for tok in "${TOKS[@]}"; do
+    tok="${tok// /}"
+    case "$tok" in
+      language) SEARCH_DIRS+=("$REPO_DIR/test/language") ;;
+      built-ins|builtins) SEARCH_DIRS+=("$REPO_DIR/test/built-ins") ;;
+      intl) SEARCH_DIRS+=("$REPO_DIR/test/intl402") ;;
+      all) SEARCH_DIRS+=("$REPO_DIR/test") ;;
+      *)
+        if [[ -d "$REPO_DIR/test/$tok" ]]; then
+          SEARCH_DIRS+=("$REPO_DIR/test/$tok")
+        elif [[ -d "$tok" ]]; then
+          SEARCH_DIRS+=("$tok")
+        fi
+        ;;
+    esac
+  done
+else
+  SEARCH_DIRS+=("$REPO_DIR/test")
+fi
+
+echo "Collecting up to $CAP candidate tests (LIMIT=$LIMIT, CAP_MULTIPLIER=$CAP_MULTIPLIER). Search dirs: ${SEARCH_DIRS[*]}"
+
+basic=()
+other=()
+intl_tests=()
+for dir in "${SEARCH_DIRS[@]}"; do
+  if [[ ! -d "$dir" ]]; then
+    continue
+  fi
+  while IFS= read -r -d '' f; do
+    meta=$(awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$f" || true)
+    if (echo "$meta" | grep -q 'features:' && echo "$meta" | grep -q 'Intl') || grep -q '\<Intl\>' "$f"; then
+      intl_tests+=("$f")
+    elif echo "$meta" | grep -q 'includes:' || echo "$meta" | grep -Eq 'flags:\s*\[.*module.*\]' || echo "$meta" | grep -q 'negative:' || echo "$meta" | grep -q 'features:'; then
+      other+=("$f")
+    else
+      basic+=("$f")
+    fi
+
+    if [[ $(( ${#basic[@]} + ${#other[@]} + ${#intl_tests[@]} )) -ge $CAP ]]; then
+      break 2
+    fi
+  done < <(find "$dir" -name '*.js' -print0)
+done
+
+echo "Collected: basic=${#basic[@]} other=${#other[@]} intl=${#intl_tests[@]} (total=$((${#basic[@]}+${#other[@]}+${#intl_tests[@]})))"
+
+ordered=("${basic[@]}" "${other[@]}" "${intl_tests[@]}")
+
+# run tests from ordered list
+for f in "${ordered[@]}"; do
+  # extract metadata inside /*--- ... ---*/
+  meta=$(awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$f" || true)
+
+  # skip tests that reference Intl (fast path) when SKIP_FEATURES contains Intl
+  if echo "$meta" | grep -q 'features:' && echo "$meta" | grep -q 'Intl'; then
+    skip=$((skip+1))
+    echo "SKIP (feature: Intl) $f" >> "$RESULTS_FILE"
+    continue
+  fi
+  # also skip if the test source mentions the Intl symbol and SKIP_FEATURES includes Intl
+  if echo "$SKIP_FEATURES" | tr ',' '\n' | grep -qx "Intl" && grep -q '\<Intl\>' "$f"; then
+    skip=$((skip+1))
+    echo "SKIP (contains Intl) $f" >> "$RESULTS_FILE"
+    continue
+  fi
+
+  # handle includes: try to resolve harness files and prepend them to a temporary test file
+  tmp=""
+  includes_list=$(echo "$meta" | sed -n "s/^includes:[[:space:]]*\[\(.*\)\].*/\1/p" || true)
+  if [[ -n "$includes_list" ]]; then
+    resolved_includes=()
+    IFS=',' read -ra INCS <<< "$(echo "$includes_list" | tr -d '[:space:]')"
+    missing=false
+    for inc in "${INCS[@]}"; do
+      inc=${inc//\"/}
+      inc=${inc//\'/}
+      # try harness first using index
+      inc_path="${HARNESS_INDEX[$inc]:-}"
+      if [[ -z "$inc_path" ]]; then
+        inc_path=$(find "$REPO_DIR" -type f -name "$inc" -print -quit 2>/dev/null || true)
+      fi
+      if [[ -z "$inc_path" ]]; then
+        echo "MISSING INCLUDE $inc for $f" >> "$RESULTS_FILE"
+        missing=true
+        break
+      fi
+      resolved_includes+=("$inc_path")
+    done
+
+    # if the test references `assert` but none of the includes supply it, prepend harness/assert.js if available
+    if grep -q '\<assert\>' "$f"; then
+      have_assert=false
+      for p in "${resolved_includes[@]}"; do
+        if grep -qE 'function[[:space:]]+assert|var[[:space:]]+assert|assert\.sameValue|assert\.throws' "$p"; then
+          have_assert=true; break
+        fi
+      done
+      if ! $have_assert; then
+        inc_path="${HARNESS_INDEX['assert.js']:-}"
+        if [[ -n "$inc_path" ]]; then
+          # also prepend Test262Error/sta.js if present (assert uses Test262Error)
+          sta_path="${HARNESS_INDEX['sta.js']:-}"
+          if [[ -n "$sta_path" ]]; then
+            resolved_includes=("$sta_path" "$inc_path" "${resolved_includes[@]}")
+          else
+            resolved_includes=("$inc_path" "${resolved_includes[@]}")
+          fi
+        fi
+      fi
+    fi
+
+    if $missing; then
+      skip=$((skip+1))
+      echo "SKIP (missing-include) $f" >> "$RESULTS_FILE"
+      continue
+    fi
+
+    tmp=$(mktemp /tmp/test262.XXXXXX.js)
+    for p in "${resolved_includes[@]}"; do
+      cat "$p" >> "$tmp"
+      echo -e "\n" >> "$tmp"
+    done
+    cat "$f" >> "$tmp"
+    cleanup_tmp=true
+  else
+    cleanup_tmp=false
+  fi
+
+  # If the test uses `assert` but had no includes, automatically prepend harness/assert.js if available
+  if [[ "$cleanup_tmp" != "true" ]]; then
+    if grep -q '\<assert\>' "$f"; then
+      inc_path="${HARNESS_INDEX['assert.js']:-}"
+      if [[ -n "$inc_path" ]]; then
+        sta_path="${HARNESS_INDEX['sta.js']:-}"
+        tmp=$(mktemp /tmp/test262.XXXXXX.js)
+        if [[ -n "$sta_path" ]]; then
+          cat "$sta_path" >> "$tmp"
+          echo -e "\n" >> "$tmp"
+        fi
+        cat "$inc_path" >> "$tmp"
+        echo -e "\n" >> "$tmp"
+        cat "$f" >> "$tmp"
+        cleanup_tmp=true
+      fi
+    fi
+  fi
+
+  if echo "$meta" | grep -Eq 'flags:\s*\[.*module.*\]'; then
+    skip=$((skip+1))
+    echo "SKIP (module) $f" >> "$RESULTS_FILE"
+    continue
+  fi
+
+  # skip tests that require non-strict mode (noStrict)
+  if echo "$meta" | grep -Eq 'flags:\s*\[.*noStrict.*\]'; then
+    skip=$((skip+1))
+    echo "SKIP (noStrict) $f" >> "$RESULTS_FILE"
+    continue
+  fi
+
+  if echo "$meta" | grep -q 'negative:'; then
+    skip=$((skip+1))
+    echo "SKIP (negative) $f" >> "$RESULTS_FILE"
+    continue
+  fi
+
+  if [[ $n -ge $LIMIT ]]; then
+    break
+  fi
+  n=$((n+1))
+
+  test_to_run="$f"
+  if [[ "$cleanup_tmp" == "true" && -n "$tmp" ]]; then
+    test_to_run="$tmp"
+  fi
+
+  echo "RUN $f"
+  # run with timeout to avoid hangs
+  if timeout 10s $RUN_CMD "$test_to_run" > /tmp/test262_run_out 2>&1; then
+    echo "PASS $f" | tee -a "$RESULTS_FILE"
+    pass=$((pass+1))
+  else
+    echo "FAIL $f" | tee -a "$RESULTS_FILE"
+    echo "---- OUTPUT ----" >> "$RESULTS_FILE"
+    cat /tmp/test262_run_out >> "$RESULTS_FILE"
+    echo "----------------" >> "$RESULTS_FILE"
+    fail=$((fail+1))
+  fi
+
+  # cleanup temporary test file if created
+  if [[ "$cleanup_tmp" == "true" && -n "$tmp" ]]; then
+    # rm -f "$tmp"
+    echo "$tmp"
+  fi
+
+done
+
+# summary
+echo "Ran $n tests: pass=$pass fail=$fail skip=$skip"
+echo "Details in $RESULTS_FILE"
+
+if [[ "$FAIL_ON_FAILURE" == "true" && $fail -gt 0 ]]; then
+  echo "One or more tests failed. Exiting with failure as requested."
+  exit 1
+fi

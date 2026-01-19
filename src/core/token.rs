@@ -217,11 +217,13 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
     while i < chars.len() {
         let start_col = column;
         match chars[i] {
-            ' ' | '\t' | '\r' => {
+            // Treat common whitespace characters (including VT, FF, NBSP) as whitespace
+            ' ' | '\t' | '\r' | '\u{000B}' | '\u{000C}' | '\u{00A0}' => {
                 i += 1;
                 column += 1;
             }
-            '\n' => {
+            // Line terminators: LF, LS (U+2028), PS (U+2029)
+            '\n' | '\u{2028}' | '\u{2029}' => {
                 tokens.push(TokenData {
                     token: Token::LineTerminator,
                     line,

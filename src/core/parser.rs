@@ -2248,7 +2248,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             Expr::Decrement(Box::new(inner))
         }
         Token::Spread => {
-            let inner = parse_primary(tokens, index, true)?;
+            // Parse the inner expression as an AssignmentExpression so that
+            // constructs like `...target = source` are parsed as `Spread(Assign(...))`
+            // rather than `Assign(Spread(...))` which would make `Spread` the
+            // assignment target (invalid for assignment).
+            let inner = parse_assignment(tokens, index)?;
             Expr::Spread(Box::new(inner))
         }
         Token::TemplateString(parts) => {

@@ -2765,7 +2765,34 @@ fn evaluate_expr_assign<'gc>(
                 Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
             }
         }
-        _ => todo!("Assignment target not supported"),
+        _ => {
+            // Diagnostic: report the specific Expr variant of the unsupported assignment target
+            let variant = match target {
+                Expr::Var(_, _, _) => "Var",
+                Expr::Property(_, _) => "Property",
+                Expr::Index(_, _) => "Index",
+                Expr::Array(_) => "Array",
+                Expr::Object(_) => "Object",
+                Expr::Spread(_) => "Spread",
+                Expr::Call(_, _) => "Call",
+                Expr::New(_, _) => "New",
+                Expr::Function(_, _, _) => "Function",
+                Expr::ArrowFunction(_, _) => "ArrowFunction",
+                Expr::Assign(_, _) => "Assign",
+                Expr::Comma(_, _) => "Comma",
+                Expr::OptionalProperty(_, _) => "OptionalProperty",
+                Expr::OptionalIndex(_, _) => "OptionalIndex",
+                Expr::OptionalCall(_, _) => "OptionalCall",
+                Expr::TaggedTemplate(_, _, _) => "TaggedTemplate",
+                Expr::TemplateString(_) => "TemplateString",
+                Expr::GeneratorFunction(_, _, _) => "GeneratorFunction",
+                Expr::AsyncFunction(_, _, _) => "AsyncFunction",
+                Expr::AsyncArrowFunction(_, _) => "AsyncArrowFunction",
+                _ => "Other",
+            };
+            log::error!("Unsupported assignment target reached in evaluate_expr_assign: {}", variant);
+            Err(EvalError::Js(raise_eval_error!("Assignment target not supported")))
+        }
     }
 }
 
@@ -4897,7 +4924,32 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             evaluate_expr(mc, env, left)?;
             evaluate_expr(mc, env, right)
         }
-        Expr::Assign(target, value_expr) => evaluate_expr_assign(mc, env, target, value_expr),
+        Expr::Assign(target, value_expr) => {
+            // Diagnostic: log the assignment target variant to help identify unsupported targets
+            let target_variant = match &**target {
+                Expr::Var(_, _, _) => "Var",
+                Expr::Property(_, _) => "Property",
+                Expr::Index(_, _) => "Index",
+                Expr::Spread(inner) => {
+                    // log inner variant for better diagnostics
+                    let inner_variant = match &**inner {
+                        Expr::Array(_) => "Array",
+                        Expr::Index(_, _) => "Index",
+                        Expr::Property(_, _) => "Property",
+                        Expr::Var(_, _, _) => "Var",
+                        Expr::Call(_, _) => "Call",
+                        _ => "Other",
+                    };
+                    log::debug!("evaluate_expr: Assign target is Spread with inner variant = {}", inner_variant);
+                    "Spread"
+                }
+                Expr::Array(_) => "Array",
+                Expr::Object(_) => "Object",
+                _ => "Other",
+            };
+            log::debug!("evaluate_expr: Assign target variant = {}", target_variant);
+            evaluate_expr_assign(mc, env, target, value_expr)
+        }
         Expr::AddAssign(target, value_expr) => evaluate_expr_add_assign(mc, env, target, value_expr),
         Expr::SubAssign(target, value_expr) => evaluate_expr_sub_assign(mc, env, target, value_expr),
         Expr::MulAssign(target, value_expr) => evaluate_expr_mul_assign(mc, env, target, value_expr),
@@ -6993,6 +7045,9 @@ fn evaluate_expr_new<'gc>(
         CtorRef::Other(v) => v,
     };
 
+    // Diagnostic: log resolved constructor value
+    log::debug!("evaluate_expr_new - resolved constructor value = {:?}", func_val);
+
     match func_val {
         Value::Object(obj) => {
             if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
@@ -7041,6 +7096,9 @@ fn evaluate_expr_new<'gc>(
                                 _ => {}
                             }
                         }
+
+                        crate::js_class::create_arguments_object(mc, &call_env, &eval_args)?;
+
                         let body_clone = cl.body.clone();
                         match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {
                             ControlFlow::Return(Value::Object(obj)) => Ok(Value::Object(obj)),
@@ -7077,9 +7135,11 @@ fn evaluate_expr_new<'gc>(
                             object_set_key_value(mc, err_obj, "name", Value::String(name.clone()))?;
                         }
                         return Ok(err_val);
+                    } else if name_str == "Object" {
+                        return Ok(crate::js_class::handle_object_constructor(mc, &eval_args, env)?);
                     } else if name_str == "Promise" {
                         return crate::js_promise::handle_promise_constructor_val(mc, &eval_args, env).map_err(EvalError::Js);
-                    } else if name == &crate::unicode::utf8_to_utf16("String") {
+                    } else if name_str == "String" {
                         let val = match crate::js_string::string_constructor(mc, &eval_args, env)? {
                             Value::String(s) => s,
                             _ => Vec::new(),
@@ -7097,7 +7157,7 @@ fn evaluate_expr_new<'gc>(
                         let val = Value::Number(crate::unicode::utf16_len(&val) as f64);
                         object_set_key_value(mc, &new_obj, "length", val)?;
                         return Ok(Value::Object(new_obj));
-                    } else if name == &crate::unicode::utf8_to_utf16("Boolean") {
+                    } else if name_str == "Boolean" {
                         let val = match crate::js_boolean::boolean_constructor(&eval_args)? {
                             Value::Boolean(b) => b,
                             _ => false,
@@ -7112,7 +7172,7 @@ fn evaluate_expr_new<'gc>(
                         }
 
                         return Ok(Value::Object(new_obj));
-                    } else if name == &crate::unicode::utf8_to_utf16("Number") {
+                    } else if name_str == "Number" {
                         let val = match number_constructor(mc, &eval_args, env).map_err(EvalError::Js)? {
                             Value::Number(n) => n,
                             _ => f64::NAN,
@@ -7127,33 +7187,33 @@ fn evaluate_expr_new<'gc>(
                         }
 
                         return Ok(Value::Object(new_obj));
-                    } else if name == &crate::unicode::utf8_to_utf16("Date") {
+                    } else if name_str == "Date" {
                         return Ok(crate::js_date::handle_date_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("Array") {
+                    } else if name_str == "Array" {
                         return crate::js_array::handle_array_constructor(mc, &eval_args, env);
-                    } else if name == &crate::unicode::utf8_to_utf16("RegExp") {
+                    } else if name_str == "RegExp" {
                         return crate::js_regexp::handle_regexp_constructor(mc, &eval_args);
-                    } else if name == &crate::unicode::utf8_to_utf16("Map") {
+                    } else if name_str == "Map" {
                         return Ok(crate::js_map::handle_map_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("Proxy") {
+                    } else if name_str == "Proxy" {
                         return Ok(crate::js_proxy::handle_proxy_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("WeakMap") {
+                    } else if name_str == "WeakMap" {
                         return Ok(crate::js_weakmap::handle_weakmap_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("WeakSet") {
+                    } else if name_str == "WeakSet" {
                         return Ok(crate::js_weakset::handle_weakset_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("Set") {
+                    } else if name_str == "Set" {
                         return Ok(crate::js_set::handle_set_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("ArrayBuffer") {
+                    } else if name_str == "ArrayBuffer" {
                         return Ok(crate::js_typedarray::handle_arraybuffer_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("SharedArrayBuffer") {
+                    } else if name_str == "SharedArrayBuffer" {
                         return Ok(crate::js_typedarray::handle_sharedarraybuffer_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("DataView") {
+                    } else if name_str == "DataView" {
                         return Ok(crate::js_typedarray::handle_dataview_constructor(mc, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("TypedArray") {
+                    } else if name_str == "TypedArray" {
                         return Ok(crate::js_typedarray::handle_typedarray_constructor(mc, &obj, &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("Function") {
+                    } else if name_str == "Function" {
                         return Ok(crate::js_function::handle_global_function(mc, "Function", &eval_args, env)?);
-                    } else if name == &crate::unicode::utf8_to_utf16("Symbol") {
+                    } else if name_str == "Symbol" {
                         return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
                     }
                 }
@@ -7163,7 +7223,7 @@ fn evaluate_expr_new<'gc>(
                 Err(EvalError::Js(raise_type_error!("Not a constructor")))
             }
         }
-        _ => todo!("New expression with non-object constructor not implemented yet"),
+        _ => Err(EvalError::Js(raise_type_error!("Not a constructor"))),
     }
 }
 

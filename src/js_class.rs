@@ -90,6 +90,20 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     Ok(Value::Object(last_seen))
 }
 
+pub fn create_arguments_object<'gc>(
+    mc: &MutationContext<'gc>,
+    func_env: &JSObjectDataPtr<'gc>,
+    evaluated_args: &[Value<'gc>],
+) -> Result<(), JSError> {
+    let arguments_obj = crate::js_array::create_array(mc, func_env)?;
+    crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
+    for (i, arg) in evaluated_args.iter().enumerate() {
+        object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
+    }
+    object_set_key_value(mc, func_env, "arguments", Value::Object(arguments_obj))?;
+    Ok(())
+}
+
 pub(crate) fn evaluate_new<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -166,6 +180,9 @@ pub(crate) fn evaluate_new<'gc>(
                         None,
                         Some(env),
                     )?;
+
+                    // Create the arguments object
+                    create_arguments_object(mc, &func_env, evaluated_args)?;
 
                     // Execute constructor body
                     evaluate_statements(mc, &func_env, body)?;
@@ -451,6 +468,8 @@ pub(crate) fn evaluate_new<'gc>(
                 None,
                 Some(env),
             )?;
+
+            create_arguments_object(mc, &func_env, evaluated_args)?;
 
             // Execute function body
             evaluate_statements(mc, &func_env, body)?;

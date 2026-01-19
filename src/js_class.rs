@@ -94,11 +94,19 @@ pub fn create_arguments_object<'gc>(
     mc: &MutationContext<'gc>,
     func_env: &JSObjectDataPtr<'gc>,
     evaluated_args: &[Value<'gc>],
+    callee: Option<Value<'gc>>,
 ) -> Result<(), JSError> {
+    // log::debug!("create_arguments_object called with callee={:?}", callee.is_some());
     let arguments_obj = crate::js_array::create_array(mc, func_env)?;
     crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
     for (i, arg) in evaluated_args.iter().enumerate() {
         object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
+    }
+    if let Some(c) = callee {
+        // log::debug!("Setting arguments.callee");
+        object_set_key_value(mc, &arguments_obj, "callee", c)?;
+    } else {
+        // log::debug!("create_arguments_object: callee is None");
     }
     object_set_key_value(mc, func_env, "arguments", Value::Object(arguments_obj))?;
     Ok(())
@@ -182,7 +190,7 @@ pub(crate) fn evaluate_new<'gc>(
                     )?;
 
                     // Create the arguments object
-                    create_arguments_object(mc, &func_env, evaluated_args)?;
+                    create_arguments_object(mc, &func_env, evaluated_args, None)?;
 
                     // Execute constructor body
                     evaluate_statements(mc, &func_env, body)?;
@@ -469,7 +477,7 @@ pub(crate) fn evaluate_new<'gc>(
                 Some(env),
             )?;
 
-            create_arguments_object(mc, &func_env, evaluated_args)?;
+            create_arguments_object(mc, &func_env, evaluated_args, None)?;
 
             // Execute function body
             evaluate_statements(mc, &func_env, body)?;

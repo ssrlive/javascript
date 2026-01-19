@@ -318,6 +318,7 @@ pub fn handle_global_function<'gc>(
         "Function.prototype.call" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
+                let callee_for_arguments = this_val.clone(); // The function object being called
                 match this_val {
                     Value::Function(func_name) => {
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
@@ -354,22 +355,25 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
-                        let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
-                        crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
-                        for (i, arg) in evaluated_args.iter().enumerate() {
-                            object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
-                        }
-                        object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
+                        // For raw closures (without wrapper object), we don't have a stable object identity for 'callee'.
+                        // But we can check if there's a reference to the function object in the `this` binding? No.
+                        // However, Function.prototype.call is usually called as `func.call(...)`.
+                        // The `this_val` here IS the function object (or closure).
+                        // So `callee_for_arguments` holds the correct Value::Closure or Value::Object.
+
+                        crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(callee_for_arguments))?;
 
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
                     Value::Object(object) => {
+                        log::debug!("Function.prototype.call on Value::Object");
                         if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
                                 return Err(raise_eval_error!("call requires a receiver"));
                             }
+                            log::debug!("Function.prototype.call calling closure with callee={:?}", callee_for_arguments);
                             let receiver_val = args[0].clone();
                             let forwarded = args[1..].to_vec();
                             let evaluated_args = forwarded.to_vec();
@@ -386,12 +390,7 @@ pub fn handle_global_function<'gc>(
                                 Some(env),
                             )?;
 
-                            let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
-                            crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
-                            for (i, arg) in evaluated_args.iter().enumerate() {
-                                object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
-                            }
-                            object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
+                            crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(callee_for_arguments))?;
 
                             return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                         }
@@ -407,6 +406,7 @@ pub fn handle_global_function<'gc>(
         "Function.prototype.apply" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
+                let callee_for_arguments = this_val.clone(); // The function object being called
                 match this_val {
                     Value::Function(func_name) => {
                         if func_name.starts_with("Object.prototype.") || func_name.starts_with("Array.prototype.") {
@@ -476,12 +476,7 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
-                        let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
-                        crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
-                        for (i, arg) in evaluated_args.iter().enumerate() {
-                            object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
-                        }
-                        object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
+                        crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(callee_for_arguments))?;
 
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
@@ -524,12 +519,7 @@ pub fn handle_global_function<'gc>(
                                 Some(env),
                             )?;
 
-                            let arguments_obj = crate::js_array::create_array(mc, &func_env)?;
-                            crate::js_array::set_array_length(mc, &arguments_obj, evaluated_args.len())?;
-                            for (i, arg) in evaluated_args.iter().enumerate() {
-                                object_set_key_value(mc, &arguments_obj, i, arg.clone())?;
-                            }
-                            object_set_key_value(mc, &func_env, "arguments", Value::Object(arguments_obj))?;
+                            crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(Value::Object(object)))?;
 
                             return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                         }
@@ -1574,6 +1564,17 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     // Function.prototype.bind
     object_set_key_value(mc, &func_proto, "bind", Value::Function("Function.prototype.bind".to_string()))?;
     func_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("bind"));
+
+    // Function.prototype.call
+    object_set_key_value(mc, &func_proto, "call", Value::Function("Function.prototype.call".to_string()))?;
+    func_proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("call"));
+
+    // Function.prototype.apply
+    object_set_key_value(mc, &func_proto, "apply", Value::Function("Function.prototype.apply".to_string()))?;
+    func_proto
+        .borrow_mut(mc)
+        .set_non_enumerable(crate::core::PropertyKey::from("apply"));
+
     func_proto
         .borrow_mut(mc)
         .set_non_enumerable(crate::core::PropertyKey::from("constructor"));

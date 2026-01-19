@@ -4202,8 +4202,8 @@ fn evaluate_expr_call<'gc>(
             let f_val = if let Value::Object(obj) = &obj_val {
                 if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
-                    Value::Function("call".to_string())
+                } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some() {
+                    Value::Function(key.to_string())
                 } else {
                     Value::Undefined
                 }
@@ -4214,9 +4214,9 @@ fn evaluate_expr_call<'gc>(
             } else if matches!(
                 obj_val,
                 Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-            ) && key == "call"
+            ) && (key == "call" || key == "apply")
             {
-                Value::Function("call".to_string())
+                Value::Function(key.to_string())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
             };
@@ -4253,8 +4253,8 @@ fn evaluate_expr_call<'gc>(
             let f_val = if let Value::Object(obj) = &obj_val {
                 if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if key.as_str() == "call" && object_get_key_value(obj, "__closure__").is_some() {
-                    Value::Function("call".to_string())
+                } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some() {
+                    Value::Function(key.to_string())
                 } else {
                     Value::Undefined
                 }
@@ -4267,9 +4267,9 @@ fn evaluate_expr_call<'gc>(
             } else if matches!(
                 obj_val,
                 Value::Closure(_) | Value::Function(_) | Value::AsyncClosure(_) | Value::GeneratorFunction(..)
-            ) && key == "call"
+            ) && (key == "call" || key == "apply")
             {
-                Value::Function("call".to_string())
+                Value::Function(key.to_string())
             } else {
                 get_primitive_prototype_property(mc, env, &obj_val, &key.as_str().into())?
             };
@@ -5995,10 +5995,10 @@ pub fn call_native_function<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Option<Value<'gc>>, EvalError<'gc>> {
-    if name == "call" {
+    if name == "call" || name == "Function.prototype.call" {
         let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call call without this")))?;
         let new_this = args.first().cloned().unwrap_or(Value::Undefined);
-        let rest_args = &args[1..];
+        let rest_args = if args.is_empty() { &[] } else { &args[1..] };
         return match this {
             Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), rest_args, env, None)?)),
 
@@ -6019,8 +6019,56 @@ pub fn call_native_function<'gc>(
             Value::Object(obj) => {
                 if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                     match &*cl_ptr.borrow() {
-                        Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, None)?)),
+                        Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
 
+                        _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
+                    }
+                } else {
+                    Err(EvalError::Js(raise_eval_error!("Not a function")))
+                }
+            }
+            _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
+        };
+    }
+
+    if name == "apply" || name == "Function.prototype.apply" {
+        let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call apply without this")))?;
+        log::debug!("call_native_function: apply called on this={:?}", this);
+        let new_this = args.first().cloned().unwrap_or(Value::Undefined);
+        let arg_array = args.get(1).cloned().unwrap_or(Value::Undefined);
+
+        let mut rest_args = Vec::new();
+        if let Value::Object(obj) = arg_array
+            && is_array(mc, &obj)
+        {
+            let len_val = object_get_key_value(&obj, "length").unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+            let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
+            for k in 0..len {
+                let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                rest_args.push(item.borrow().clone());
+            }
+        }
+
+        return match this {
+            Value::Closure(cl) => Ok(Some(call_closure(mc, &cl, Some(new_this), &rest_args, env, None)?)),
+            Value::Function(func_name) => {
+                if let Some(res) = call_native_function(mc, &func_name, Some(new_this.clone()), &rest_args, env)? {
+                    Ok(Some(res))
+                } else {
+                    let call_env = crate::core::new_js_object_data(mc);
+                    call_env.borrow_mut(mc).prototype = Some(*env);
+                    call_env.borrow_mut(mc).is_function_scope = true;
+                    object_set_key_value(mc, &call_env, "this", new_this.clone()).map_err(EvalError::Js)?;
+                    match crate::js_function::handle_global_function(mc, &func_name, &rest_args, &call_env) {
+                        Ok(res) => Ok(Some(res)),
+                        Err(e) => Err(EvalError::Js(e)),
+                    }
+                }
+            }
+            Value::Object(obj) => {
+                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+                    match &*cl_ptr.borrow() {
+                        Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
                         _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                     }
                 } else {
@@ -6584,6 +6632,11 @@ pub fn call_closure<'gc>(
 
         // Minimal arguments object: expose numeric properties and length
         object_set_length(mc, &args_obj, args.len())?;
+
+        if let Some(fn_ptr) = fn_obj {
+            object_set_key_value(mc, &args_obj, "callee", Value::Object(fn_ptr)).map_err(EvalError::Js)?;
+        }
+
         env_set(mc, &call_env, "arguments", Value::Object(args_obj)).map_err(EvalError::Js)?;
     }
 
@@ -7097,7 +7150,7 @@ fn evaluate_expr_new<'gc>(
                             }
                         }
 
-                        crate::js_class::create_arguments_object(mc, &call_env, &eval_args)?;
+                        crate::js_class::create_arguments_object(mc, &call_env, &eval_args, None)?;
 
                         let body_clone = cl.body.clone();
                         match evaluate_statements_with_labels(mc, &call_env, &body_clone, &[], &[])? {

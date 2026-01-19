@@ -626,6 +626,13 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
                 let msg = obj.borrow().get_message().unwrap_or("Unknown error".into());
                 return format!("Error: {msg}");
             }
+            // Prefer an explicit `message` property on user-defined error-like objects
+            // so thrown harness-liked errors show useful messages
+            if let Ok(borrowed) = obj.try_borrow() {
+                if let Some(msg) = borrowed.get_message() {
+                    return msg;
+                }
+            }
             "[object Object]".to_string()
         }
         Value::Function(name) => format!("function {}", name),

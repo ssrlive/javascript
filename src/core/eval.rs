@@ -6802,14 +6802,64 @@ pub fn prepare_closure_call_env<'gc>(
     prepare_function_call_env(mc, Some(captured_env), None, params_opt, args, None, _caller_env)
 }
 
+#[allow(dead_code)]
+enum CtorRef<'a, 'gc> {
+    Var(&'a str),
+    Property(Value<'gc>, crate::core::PropertyKey<'gc>), // base value and key
+    Index(Value<'gc>, Value<'gc>),                       // base and computed key value
+    Other(Value<'gc>),
+}
+
 fn evaluate_expr_new<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
     ctor: &Expr,
     args: &[Expr],
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    let func_val = evaluate_expr(mc, env, ctor)?;
-    let mut eval_args = Vec::new();
+    // Per ECMAScript semantics for 'new', the constructExpr evaluation yields a Reference
+    // (ref) and the actual GetValue(ref) must happen *after* argument evaluation so
+    // side-effects in arguments can affect the constructor value. Implement this by
+    // capturing a small reference-like descriptor for common cases (Var, Property, Index)
+    // and resolving the actual constructor value after evaluating args.
+    let mut ctor_ref: Option<CtorRef<'_, 'gc>> = match ctor {
+        Expr::Var(name, _, _) => {
+            // GetValue(ref) now (before arguments evaluation)
+            let val = evaluate_var(mc, env, name)?;
+            Some(CtorRef::Other(val))
+        }
+        Expr::Property(obj_expr, key) => {
+            // evaluate base and perform GetValue(ref) now (before args)
+            let base = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = crate::core::PropertyKey::from(key.to_string());
+            let val = match &base {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, &key_val)?,
+                other => get_primitive_prototype_property(mc, env, other, &key_val)?,
+            };
+            Some(CtorRef::Other(val))
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            // evaluate base and key now, then GetValue(ref) now
+            let base = evaluate_expr(mc, env, obj_expr)?;
+            let key_val = evaluate_expr(mc, env, key_expr)?;
+            let key = match &key_val {
+                Value::Symbol(s) => crate::core::PropertyKey::Symbol(*s),
+                Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(s)),
+                Value::Number(n) => crate::core::PropertyKey::from(n.to_string()),
+                _ => crate::core::PropertyKey::from(crate::core::value_to_string(&key_val)),
+            };
+            let val = match &base {
+                Value::Object(obj) => get_property_with_accessors(mc, env, obj, &key)?,
+                other => get_primitive_prototype_property(mc, env, other, &key)?,
+            };
+            Some(CtorRef::Other(val))
+        }
+        _ => {
+            let val = evaluate_expr(mc, env, ctor)?;
+            Some(CtorRef::Other(val))
+        }
+    };
+
+    let mut eval_args: Vec<Value<'gc>> = Vec::new();
     for arg in args {
         if let Expr::Spread(target) = arg {
             let val = evaluate_expr(mc, env, target)?;
@@ -6920,6 +6970,28 @@ fn evaluate_expr_new<'gc>(
             eval_args.push(evaluate_expr(mc, env, arg)?);
         }
     }
+
+    // Resolve constructor value now (GetValue(ref)) after arguments are evaluated
+    let func_val = match ctor_ref.take().expect("ctor_ref must be set") {
+        CtorRef::Var(name) => evaluate_var(mc, env, name)?,
+        CtorRef::Property(base, key) => match base {
+            Value::Object(obj) => get_property_with_accessors(mc, env, &obj, &key)?,
+            other => get_primitive_prototype_property(mc, env, &other, &key)?,
+        },
+        CtorRef::Index(base, key_v) => {
+            let key = match &key_v {
+                Value::Symbol(s) => crate::core::PropertyKey::Symbol(*s),
+                Value::String(s) => crate::core::PropertyKey::String(crate::unicode::utf16_to_utf8(s)),
+                Value::Number(n) => crate::core::PropertyKey::from(n.to_string()),
+                _ => crate::core::PropertyKey::from(crate::core::value_to_string(&key_v)),
+            };
+            match base {
+                Value::Object(obj) => get_property_with_accessors(mc, env, &obj, &key)?,
+                other => get_primitive_prototype_property(mc, env, &other, &key)?,
+            }
+        }
+        CtorRef::Other(v) => v,
+    };
 
     match func_val {
         Value::Object(obj) => {
@@ -7085,8 +7157,10 @@ fn evaluate_expr_new<'gc>(
                         return Err(EvalError::Js(raise_type_error!("Symbol is not a constructor")));
                     }
                 }
-                let new_obj = crate::core::new_js_object_data(mc);
-                Ok(Value::Object(new_obj))
+                // If we've reached here, the target object is not a recognized constructor
+                // (no __closure__, no __class_def__, and no native constructor handled above).
+                // Per ECMAScript, attempting `new` with a non-constructor should throw a TypeError.
+                Err(EvalError::Js(raise_type_error!("Not a constructor")))
             }
         }
         _ => todo!("New expression with non-object constructor not implemented yet"),

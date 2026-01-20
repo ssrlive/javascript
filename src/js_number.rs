@@ -129,6 +129,15 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     // Set prototype on Number constructor
     object_set_key_value(mc, &number_obj, "prototype", Value::Object(number_prototype))?;
 
+    // Ensure Number.prototype.constructor points back to Number
+    if let Some(proto_val) = object_get_key_value(&number_obj, "prototype")
+        && let Value::Object(proto_obj) = &*proto_val.borrow()
+    {
+        object_set_key_value(mc, proto_obj, "constructor", Value::Object(number_obj))?;
+        // Non-enumerable already set above, but ensure it's non-enumerable
+        proto_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+    }
+
     Ok(number_obj)
 }
 

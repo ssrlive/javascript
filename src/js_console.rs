@@ -108,6 +108,28 @@ fn format_value_pretty<'gc>(
                 seen.remove(&Gc::as_ptr(*obj));
                 Ok(s)
             } else {
+                // If object is a constructor-like function object, print concise "[Function: Name]" like Node
+                if let Some(is_ctor_rc) = object_get_key_value(obj, "__is_constructor") {
+                    if let Value::Boolean(true) = &*is_ctor_rc.borrow() {
+                        // Prefer __native_ctor name
+                        if let Some(native_rc) = object_get_key_value(obj, "__native_ctor") {
+                            if let Value::String(name_u16) = &*native_rc.borrow() {
+                                return Ok(format!("[Function: {}]", utf16_to_utf8(name_u16)));
+                            }
+                        }
+                        // Fallback to 'name' own property
+                        if let Some(name_rc) = object_get_key_value(obj, "name") {
+                            if let Value::String(name_u16) = &*name_rc.borrow() {
+                                let name = utf16_to_utf8(name_u16);
+                                if !name.is_empty() {
+                                    return Ok(format!("[Function: {}]", name));
+                                }
+                            }
+                        }
+                        return Ok("[Function]".to_string());
+                    }
+                }
+
                 // Check for boxed primitive
                 if let Some(val_rc) = object_get_key_value(obj, "__value__") {
                     let val = val_rc.borrow();

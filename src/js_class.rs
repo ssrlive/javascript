@@ -1570,6 +1570,8 @@ pub(crate) fn handle_object_constructor<'gc>(
     if evaluated_args.is_empty() {
         // Object() - create empty object
         let obj = new_js_object_data(mc);
+        // Set prototype to Object.prototype
+        crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object")?;
         return Ok(Value::Object(obj));
     }
     // Object(value) - convert value to object
@@ -1578,6 +1580,8 @@ pub(crate) fn handle_object_constructor<'gc>(
         Value::Undefined => {
             // Object(undefined) creates empty object
             let obj = new_js_object_data(mc);
+            // Set prototype to Object.prototype
+            crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object")?;
             Ok(Value::Object(obj))
         }
         Value::Object(obj) => {
@@ -1646,6 +1650,8 @@ pub(crate) fn handle_object_constructor<'gc>(
         _ => {
             // For other types, return empty object
             let obj = new_js_object_data(mc);
+            // Set prototype to Object.prototype
+            crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Object")?;
             Ok(Value::Object(obj))
         }
     }

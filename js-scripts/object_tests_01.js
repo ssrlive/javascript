@@ -71,4 +71,32 @@ function assert(mustBeTrue, message) {
     }
 }
 
+{
+    console.log("==== Test changing __proto__ of non-extensible object ====");
+    let x = Object.preventExtensions({});
+    let y = {};
+    try {
+        x.__proto__ = y;
+        assert(false, 'Changing __proto__ of a non-extensible object should throw a TypeError');
+    } catch (err) {
+        // As far as this test is concerned, we allow the above assignment
+        // to fail. This failure does violate the spec and should probably
+        // be tested separately.
+        console.log("Caught error while changing __proto__: " + err);
+        assert(err instanceof TypeError);
+    }
+    assert(Object.getPrototypeOf(x) === Object.prototype, "Prototype of non-extensible object should not be mutated");
+}
+
+{
+    console.log("==== Test Object constructor ====");
+    var objInstance = new Object;
+    console.log(objInstance.constructor);
+    assert(objInstance.constructor === Object, 'objInstance.constructor should be Object');
+
+    var numInstance = new Number;
+    console.log(numInstance.constructor);
+    assert(numInstance.constructor === Number, 'numInstance.constructor should be Number');
+}
+
 return true;

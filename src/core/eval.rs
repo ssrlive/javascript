@@ -6027,11 +6027,24 @@ fn set_property_with_accessors<'gc>(
     {
         match &val {
             Value::Object(proto_obj) => {
+                // If object is non-extensible and the new prototype differs, throw TypeError
+                if !obj.borrow().is_extensible() {
+                    let differs = match obj.borrow().prototype {
+                        Some(cur) => !Gc::ptr_eq(cur, *proto_obj),
+                        None => true,
+                    };
+                    if differs {
+                        return Err(EvalError::Js(raise_type_error!("Cannot change prototype of non-extensible object")));
+                    }
+                }
                 // Update internal prototype pointer; do NOT create an own enumerable '__proto__' property
                 obj.borrow_mut(mc).prototype = Some(*proto_obj);
                 return Ok(());
             }
             Value::Null => {
+                if !obj.borrow().is_extensible() && obj.borrow().prototype.is_some() {
+                    return Err(EvalError::Js(raise_type_error!("Cannot change prototype of non-extensible object")));
+                }
                 obj.borrow_mut(mc).prototype = None;
                 return Ok(());
             }

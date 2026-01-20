@@ -6889,7 +6889,13 @@ fn evaluate_update_expression<'gc>(
         _ => return Err(EvalError::Js(raise_eval_error!("Invalid L-value in update expression"))),
     };
 
-    if is_post { Ok(old_val) } else { Ok(new_val) }
+    if is_post {
+        // For post-increment/decrement, return ToNumber(oldValue)
+        let num = to_number(&old_val)?;
+        Ok(Value::Number(num))
+    } else {
+        Ok(new_val)
+    }
 }
 
 // Helpers for js_object and other modules

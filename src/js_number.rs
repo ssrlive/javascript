@@ -38,6 +38,27 @@ fn make_number_object<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     object_set_key_value(mc, &number_obj, "parseFloat", Value::Function("Number.parseFloat".to_string()))?;
     object_set_key_value(mc, &number_obj, "parseInt", Value::Function("Number.parseInt".to_string()))?;
 
+    // Make static Number properties non-enumerable
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MAX_VALUE"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MIN_VALUE"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("NaN"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("POSITIVE_INFINITY"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("NEGATIVE_INFINITY"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("EPSILON"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MAX_SAFE_INTEGER"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("MIN_SAFE_INTEGER"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isNaN"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isFinite"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isInteger"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("isSafeInteger"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseFloat"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("parseInt"));
+
+    // Internal markers and prototype should not be enumerable
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__is_constructor"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__native_ctor"));
+    number_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("prototype"));
+
     // Get Object.prototype
     let object_proto = if let Some(obj_val) = object_get_key_value(env, "Object")
         && let Value::Object(obj_ctor) = &*obj_val.borrow()

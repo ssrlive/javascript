@@ -1,3 +1,11 @@
+"use strict";
+
+function assert(mustBeTrue, message) {
+    if (!mustBeTrue) {
+        throw new Error(message || "Assertion failed");
+    }
+}
+
 // Test Number constants
 console.log("=== Testing Number constants... ===");
 console.log("MAX_VALUE:", Number.MAX_VALUE);
@@ -66,4 +74,22 @@ try {
     }
 } catch (e) {
     console.log("Caught expected error: " + e.name + ": " + e.message);
+}
+
+{
+    console.log("==== Test enumerability of Number properties ====");
+    let count = 0;
+    for (p in Number) { count++;  }
+    if (count > 0) {
+        throw new Error('#1: count=0; for (p in Number) count++; count > 0. Actual: ' + (count));
+    }
+}
+
+{
+    console.log("==== Test post-increment on undeclared property ====");
+    var __map = {};
+    let result = __map.foo++;
+    console.log("Result of __map.foo++:", result); // Should be NaN
+    assert(Number.isNaN(result), '#1: __map.foo++ should be NaN');
+    assert("foo" in __map, '#2: var __map={}; "foo" in __map');
 }

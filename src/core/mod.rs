@@ -98,6 +98,10 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
     env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
 
+    // This engine operates in strict mode only; mark the global environment accordingly so
+    // eval() and nested function parsing can enforce strict-mode rules unconditionally.
+    object_set_key_value(mc, env, "__is_strict", Value::Boolean(true))?;
+
     let val = Value::Function("__internal_async_step_resolve".to_string());
     env_set(mc, env, "__internal_async_step_resolve", val)?;
 

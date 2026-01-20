@@ -413,6 +413,10 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
 
     let params = parse_parameters(t, index)?;
 
+    // Skip any semicolons or line terminators before the function body opening brace
+    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        *index += 1;
+    }
     if !matches!(t[*index].token, Token::LBrace) {
         return Err(raise_parse_error_at(t.get(*index)));
     }

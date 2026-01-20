@@ -13,6 +13,9 @@ with support for modern language features including ES6+ modules, async/await, B
 
 ## Features
 
+> Note: This engine runs in strict mode only — all scripts and eval'd code are executed using ECMAScript strict semantics.
+
+
 ### Core JavaScript Features (ES5-ES2020)
 - **Variables and Scoping**: `let`, `const`, `var` declarations with proper scope rules
 - **Data Types**: Numbers, strings, booleans, BigInt, symbols, objects, arrays, functions, classes

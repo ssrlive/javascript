@@ -17,7 +17,7 @@ use crate::{
     raise_eval_error, raise_reference_error,
     unicode::{utf8_to_utf16, utf16_to_utf8},
 };
-use crate::{Token, parse_statements, raise_type_error, tokenize};
+use crate::{Token, parse_statements, raise_syntax_error, raise_type_error, tokenize};
 use num_bigint::BigInt;
 use num_traits::{FromPrimitive, ToPrimitive, Zero};
 
@@ -1024,6 +1024,86 @@ pub fn evaluate_statements_with_context<'gc>(
     evaluate_statements_with_labels(mc, env, statements, labels, &[])
 }
 
+fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
+    match e {
+        Expr::Assign(lhs, _rhs) => {
+            if let Expr::Var(name, ..) = &**lhs {
+                return name == "arguments";
+            }
+            false
+        }
+        Expr::Property(obj, _)
+        | Expr::Call(obj, _)
+        | Expr::New(obj, _)
+        | Expr::Index(obj, _)
+        | Expr::OptionalProperty(obj, _)
+        | Expr::OptionalCall(obj, _)
+        | Expr::OptionalIndex(obj, _) => check_expr_for_arguments_assignment(obj),
+        Expr::Binary(l, _, r) | Expr::Comma(l, r) | Expr::Conditional(l, r, _) => {
+            check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r)
+        }
+        Expr::LogicalAnd(l, r) | Expr::LogicalOr(l, r) | Expr::NullishCoalescing(l, r) => {
+            check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r)
+        }
+        Expr::AddAssign(l, r)
+        | Expr::SubAssign(l, r)
+        | Expr::MulAssign(l, r)
+        | Expr::DivAssign(l, r)
+        | Expr::ModAssign(l, r)
+        | Expr::BitAndAssign(l, r)
+        | Expr::BitOrAssign(l, r)
+        | Expr::BitXorAssign(l, r)
+        | Expr::LeftShiftAssign(l, r)
+        | Expr::RightShiftAssign(l, r)
+        | Expr::UnsignedRightShiftAssign(l, r)
+        | Expr::LogicalAndAssign(l, r)
+        | Expr::LogicalOrAssign(l, r)
+        | Expr::NullishAssign(l, r) => check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r),
+        Expr::UnaryNeg(inner)
+        | Expr::UnaryPlus(inner)
+        | Expr::LogicalNot(inner)
+        | Expr::TypeOf(inner)
+        | Expr::Delete(inner)
+        | Expr::Void(inner)
+        | Expr::Await(inner)
+        | Expr::Yield(Some(inner))
+        | Expr::YieldStar(inner)
+        | Expr::PostIncrement(inner)
+        | Expr::PostDecrement(inner)
+        | Expr::Increment(inner)
+        | Expr::Decrement(inner) => check_expr_for_arguments_assignment(inner),
+        _ => false,
+    }
+}
+
+fn check_stmt_for_arguments_assignment(stmt: &Statement) -> bool {
+    match &*stmt.kind {
+        StatementKind::Expr(e) => check_expr_for_arguments_assignment(e),
+        StatementKind::If(if_stmt) => {
+            check_expr_for_arguments_assignment(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(check_stmt_for_arguments_assignment)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+        }
+        StatementKind::Block(stmts) => stmts.iter().any(check_stmt_for_arguments_assignment),
+        StatementKind::TryCatch(try_stmt) => {
+            try_stmt.try_body.iter().any(check_stmt_for_arguments_assignment)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+        }
+        StatementKind::FunctionDeclaration(_, _, body, _, _) => body.iter().any(check_stmt_for_arguments_assignment),
+        _ => false,
+    }
+}
+
 pub fn evaluate_statements_with_labels<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -1031,7 +1111,47 @@ pub fn evaluate_statements_with_labels<'gc>(
     labels: &[String],
     own_labels: &[String],
 ) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
+    // If this statement sequence begins with a "use strict" directive, mark the
+    // environment so eval'd code and nested parsing can behave as strict code.
+    if let Some(stmt0) = statements.first()
+        && let StatementKind::Expr(expr) = &*stmt0.kind
+        && let Expr::StringLit(s) = expr
+        && utf16_to_utf8(s).as_str() == "use strict"
+    {
+        log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
+        object_set_key_value(mc, env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+    }
+
     hoist_declarations(mc, env, statements)?;
+
+    // If the environment is marked strict, scan for certain forbidden patterns
+    // such as assignment to the Identifier 'arguments' in function bodies which
+    // should be a SyntaxError under strict mode (matching Test262 expectations
+    // for eval'd code in strict contexts).
+    if let Some(is_strict_cell) = object_get_key_value(env, "__is_strict")
+        && let Value::Boolean(true) = *is_strict_cell.borrow()
+    {
+        for stmt in statements {
+            if check_stmt_for_arguments_assignment(stmt) {
+                log::debug!("evaluate_statements: detected assignment to 'arguments' in function body under strict mode");
+                // Construct a SyntaxError object and throw it so it behaves like a JS exception
+                if let Some(syn_ctor_val) = object_get_key_value(env, "SyntaxError")
+                    && let Value::Object(syn_ctor) = &*syn_ctor_val.borrow()
+                    && let Some(proto_val_rc) = object_get_key_value(syn_ctor, "prototype")
+                    && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
+                {
+                    let msg = Value::String(utf8_to_utf16("Strict mode violation: assignment to 'arguments'"));
+                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg).map_err(EvalError::Js)?;
+                    return Err(EvalError::Throw(err_obj, None, None));
+                }
+                // If we couldn't construct a SyntaxError instance for some reason, fall back
+                return Err(EvalError::Js(raise_syntax_error!(
+                    "Strict mode violation: assignment to 'arguments'"
+                )));
+            }
+        }
+    }
+
     let mut last_value = Value::Undefined;
     for stmt in statements {
         if let Some(cf) = eval_res(mc, stmt, &mut last_value, env, labels, own_labels)? {
@@ -6033,7 +6153,7 @@ pub fn call_native_function<'gc>(
 
     if name == "apply" || name == "Function.prototype.apply" {
         let this = this_val.ok_or_else(|| EvalError::Js(raise_eval_error!("Cannot call apply without this")))?;
-        log::debug!("call_native_function: apply called on this={:?}", this);
+        log::trace!("call_native_function: apply called on this={:?}", this);
         let new_this = args.first().cloned().unwrap_or(Value::Undefined);
         let arg_array = args.get(1).cloned().unwrap_or(Value::Undefined);
 

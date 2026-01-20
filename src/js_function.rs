@@ -366,14 +366,14 @@ pub fn handle_global_function<'gc>(
                         return Ok(crate::core::evaluate_statements(mc, &func_env, body)?);
                     }
                     Value::Object(object) => {
-                        log::debug!("Function.prototype.call on Value::Object");
+                        log::trace!("Function.prototype.call on Value::Object");
                         if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
                                 return Err(raise_eval_error!("call requires a receiver"));
                             }
-                            log::debug!("Function.prototype.call calling closure with callee={:?}", callee_for_arguments);
+                            log::trace!("Function.prototype.call calling closure with callee={:?}", callee_for_arguments);
                             let receiver_val = args[0].clone();
                             let forwarded = args[1..].to_vec();
                             let evaluated_args = forwarded.to_vec();

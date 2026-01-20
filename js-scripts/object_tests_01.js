@@ -56,4 +56,19 @@ function assert(mustBeTrue, message) {
     }
 }
 
+{
+    console.log("==== Test non-writable property ====");
+
+    var _8_7_2_3 = {};
+    Object.defineProperty(_8_7_2_3, "b", {
+        writable: false
+    });
+    try {
+        _8_7_2_3.b = 11;
+        assert(false, 'Assigning to a non-writable property should throw a TypeError');
+    } catch (e) {
+        assert(e instanceof TypeError);
+    }
+}
+
 return true;

@@ -180,6 +180,14 @@ fn define_property_internal<'gc>(
         setter: setter_opt,
     };
 
+    // If writable flag explicitly set to false, mark property as non-writable
+    if let Some(wrc) = object_get_key_value(desc_obj, "writable")
+        && let Value::Boolean(is_writable) = &*wrc.borrow()
+        && !*is_writable
+    {
+        target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+    }
+
     // Install property on target object
     object_set_key_value(mc, target_obj, &prop_key, prop_descriptor)?;
     Ok(())

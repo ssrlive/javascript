@@ -6091,6 +6091,10 @@ fn set_property_with_accessors<'gc>(
                         "Cannot set property which has only a getter"
                     )));
                 }
+                // If the existing property is non-writable, TypeError should be thrown
+                if !obj.borrow().is_writable(key) {
+                    return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                }
                 object_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
                 Ok(())
             }
@@ -6099,6 +6103,10 @@ fn set_property_with_accessors<'gc>(
                 "Cannot set property which has only a getter"
             ))),
             _ => {
+                // For plain existing properties, respect writability
+                if !obj.borrow().is_writable(key) {
+                    return Err(EvalError::Js(crate::raise_type_error!("Cannot assign to read-only property")));
+                }
                 object_set_key_value(mc, obj, key, val).map_err(EvalError::Js)?;
                 Ok(())
             }

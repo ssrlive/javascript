@@ -812,8 +812,22 @@ pub fn object_set_key_value<'gc>(
 ) -> Result<(), JSError> {
     let key = key.into();
 
-    // Disallow creating new own properties on non-extensible objects
+    // Debug log to help diagnose non-extensible assignment behavior
     let exists = obj.borrow().properties.contains_key(&key);
+    let key_desc = match &key {
+        PropertyKey::String(s) => s.clone(),
+        PropertyKey::Symbol(_) => "<symbol>".to_string(),
+    };
+    let obj_addr = format!("{:p}", &*obj.borrow());
+    log::debug!(
+        "object_set_key_value: obj={} key={} key_exists={} extensible={}",
+        obj_addr,
+        key_desc,
+        exists,
+        obj.borrow().is_extensible()
+    );
+
+    // Disallow creating new own properties on non-extensible objects
     if !exists && !obj.borrow().is_extensible() {
         return Err(raise_type_error!("Cannot add property to non-extensible object"));
     }

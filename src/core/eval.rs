@@ -6046,6 +6046,7 @@ fn set_property_with_accessors<'gc>(
     // Special-case assignment to 'length' on array objects so we can remove/resize indexed elements
     if let PropertyKey::String(s) = key
         && s == "length"
+        && crate::js_array::is_array(mc, obj)
     {
         match &val {
             Value::Number(n) => {
@@ -6751,13 +6752,17 @@ pub fn call_closure<'gc>(
         }
 
         // Minimal arguments object: expose numeric properties and length
-        object_set_length(mc, &args_obj, args.len())?;
+        // We use create_arguments_object here so we get consistent behavior with strict mode callee/caller restrictions
+        // object_set_length(mc, &args_obj, args.len())?;
 
-        if let Some(fn_ptr) = fn_obj {
-            object_set_key_value(mc, &args_obj, "callee", Value::Object(fn_ptr)).map_err(EvalError::Js)?;
-        }
+        // if let Some(fn_ptr) = fn_obj {
+        //     object_set_key_value(mc, &args_obj, "callee", Value::Object(fn_ptr)).map_err(EvalError::Js)?;
+        // }
 
-        env_set(mc, &call_env, "arguments", Value::Object(args_obj)).map_err(EvalError::Js)?;
+        let callee_val = fn_obj.map(Value::Object);
+        crate::js_class::create_arguments_object(mc, &call_env, args, callee_val).map_err(EvalError::Js)?;
+
+        // env_set(mc, &call_env, "arguments", Value::Object(args_obj)).map_err(EvalError::Js)?;
     }
 
     for (i, param) in cl.params.iter().enumerate() {

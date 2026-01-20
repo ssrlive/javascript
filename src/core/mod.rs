@@ -102,6 +102,9 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     // eval() and nested function parsing can enforce strict-mode rules unconditionally.
     object_set_key_value(mc, env, "__is_strict", Value::Boolean(true))?;
 
+    // Define 'arguments' for global scope with poison pill for strict compliance
+    crate::js_class::create_arguments_object(mc, env, &[], Some(Value::Undefined))?;
+
     let val = Value::Function("__internal_async_step_resolve".to_string());
     env_set(mc, env, "__internal_async_step_resolve", val)?;
 

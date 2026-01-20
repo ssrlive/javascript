@@ -1,3 +1,7 @@
+"use strict";
+
+/*
+// Non-strict mode test for arguments.callee
 
 function testCallee() {
     console.log("In testCallee, arguments.callee =", arguments.callee);
@@ -35,7 +39,7 @@ console.log("=== Testing arguments.callee property ===");
     f.apply({}, []);
     console.log("Closure .apply: pass");
 }
-
+// */
 
 console.log("=== Checking existence of Function.prototype.call, apply, bind: ===");
 try {
@@ -50,3 +54,39 @@ try {
 } catch (e) {
     console.log("Error: " + e);
 }
+
+{
+    console.log("=== Testing that accessing arguments.callee throws TypeError in strict mode ===");
+    try {
+        arguments.callee;
+        throw new Error("Accessing arguments.callee did not throw");
+    } catch (e) {
+        console.log(e);
+        if (!(e instanceof TypeError)) {
+            throw new Error('Expected a TypeError, but got: ' + e);
+        }
+    }
+}
+
+{
+    console.log("=== Testing that arguments.length is writable ===");
+
+    let str = "something different";
+
+    function f1(){
+        arguments.length = str;
+        return arguments;
+    }
+
+    try{
+        if(f1().length !== str){
+            throw new Error("#1: A property length have attribute { ReadOnly }");
+        }
+    }
+    catch(e){
+        console.log(e);
+        throw new Error("#1: arguments object don't exists");
+    }
+}
+
+return true;

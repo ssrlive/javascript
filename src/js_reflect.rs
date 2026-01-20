@@ -332,10 +332,7 @@ pub fn handle_reflect_method<'gc>(
             let target = args[0].clone();
 
             match target {
-                Value::Object(_) => {
-                    // For now, all objects are extensible
-                    Ok(Value::Boolean(true))
-                }
+                Value::Object(obj) => Ok(Value::Boolean(obj.borrow().is_extensible())),
                 _ => Err(raise_type_error!("Reflect.isExtensible target must be an object")),
             }
         }
@@ -371,8 +368,8 @@ pub fn handle_reflect_method<'gc>(
             let target = args[0].clone();
 
             match target {
-                Value::Object(_) => {
-                    // For now, just return true (we don't implement extensibility control yet)
+                Value::Object(obj) => {
+                    obj.borrow_mut(mc).prevent_extensions();
                     Ok(Value::Boolean(true))
                 }
                 _ => Err(raise_type_error!("Reflect.preventExtensions target must be an object")),

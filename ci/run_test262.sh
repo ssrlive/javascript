@@ -61,11 +61,13 @@ else
   BIN=""
 fi
 
+echo "JS engine binary: ${BIN}"
+
 if [[ -n "$BIN" ]]; then
   RUN_CMD="$BIN"
 else
-  echo "Warning: example binary not found, will use 'cargo run --example js --' (slower)"
-  RUN_CMD="cargo run --example js --"
+  echo "Warning: example binary not found, will use 'cargo run --all-features --example js --' (slower)"
+  RUN_CMD="cargo run --all-features --example js --"
 fi
 
 # Build harness index to speed up include/harness lookups (fast and local to harness)

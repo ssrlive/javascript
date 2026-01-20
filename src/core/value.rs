@@ -134,6 +134,8 @@ pub struct JSObjectData<'gc> {
     pub non_configurable: std::collections::HashSet<PropertyKey<'gc>>,
     pub prototype: Option<JSObjectDataPtr<'gc>>,
     pub is_function_scope: bool,
+    // Whether new own properties can be added to this object. Default true.
+    pub extensible: bool,
 }
 
 unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
@@ -159,7 +161,11 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
 
 impl<'gc> JSObjectData<'gc> {
     pub fn new() -> Self {
-        JSObjectData::default()
+        // JSObjectData::default() would initialize `extensible` to false, so ensure it's true by default
+        JSObjectData::<'_> {
+            extensible: true,
+            ..JSObjectData::default()
+        }
     }
     pub fn insert(&mut self, key: PropertyKey<'gc>, val: GcPtr<'gc, Value<'gc>>) {
         self.properties.insert(key, val);
@@ -257,6 +263,15 @@ impl<'gc> JSObjectData<'gc> {
 
     pub fn is_writable(&self, key: &PropertyKey<'gc>) -> bool {
         !self.non_writable.contains(key)
+    }
+
+    // Extensibility helpers
+    pub fn is_extensible(&self) -> bool {
+        self.extensible
+    }
+
+    pub fn prevent_extensions(&mut self) {
+        self.extensible = false;
     }
 
     pub fn is_enumerable(&self, key: &PropertyKey<'gc>) -> bool {
@@ -796,6 +811,13 @@ pub fn object_set_key_value<'gc>(
     val: Value<'gc>,
 ) -> Result<(), JSError> {
     let key = key.into();
+
+    // Disallow creating new own properties on non-extensible objects
+    let exists = obj.borrow().properties.contains_key(&key);
+    if !exists && !obj.borrow().is_extensible() {
+        return Err(raise_type_error!("Cannot add property to non-extensible object"));
+    }
+
     // If obj is an array and we're setting a numeric index, update length accordingly
     if let PropertyKey::String(s) = &key {
         if let Ok(idx) = s.parse::<usize>() {

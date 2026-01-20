@@ -1,5 +1,11 @@
 "use strict";
 
+function assert(mustBeTrue, message) {
+    if (!mustBeTrue) {
+        throw new Error(message || "Assertion failed");
+    }
+}
+
 {
     var inventory = [
         { name: "asparagus", type: "vegetables", quantity: 5 },
@@ -36,3 +42,18 @@
     console.log(result.veg.length);
     console.log(result.fruit.length);
 }
+
+{
+    console.log("==== Test non-extensible object ====");
+
+    var _8_7_2_5 = {};
+    Object.preventExtensions(_8_7_2_5);
+    try {
+        _8_7_2_5.a = 10;
+        assert(false, 'Assigning a property to a non-extensible object should throw a TypeError');
+    } catch (e) {
+        assert(e instanceof TypeError);
+    }
+}
+
+return true;

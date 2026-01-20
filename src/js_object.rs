@@ -329,6 +329,32 @@ pub fn handle_object_method<'gc>(
                 }
             }
         }
+        "isExtensible" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.isExtensible requires exactly one argument"));
+            }
+            let obj_val = args[0].clone();
+            match obj_val {
+                Value::Object(obj) => Ok(Value::Boolean(obj.borrow().is_extensible())),
+                Value::Undefined | Value::Null => Err(raise_type_error!("Cannot convert undefined or null to object")),
+                _ => {
+                    // Primitives are considered wrapped objects; treat as extensible for now
+                    Ok(Value::Boolean(true))
+                }
+            }
+        }
+        "preventExtensions" => {
+            if args.len() != 1 {
+                return Err(raise_type_error!("Object.preventExtensions requires exactly one argument"));
+            }
+            match &args[0] {
+                Value::Object(obj) => {
+                    obj.borrow_mut(mc).prevent_extensions();
+                    Ok(Value::Object(*obj))
+                }
+                _ => Err(raise_type_error!("Object.preventExtensions called on non-object")),
+            }
+        }
         "groupBy" => {
             if args.len() != 2 {
                 return Err(raise_type_error!("Object.groupBy requires exactly two arguments"));

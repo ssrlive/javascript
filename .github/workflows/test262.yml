@@ -23,12 +23,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git
 
+      - name: Build JavaScript engine
+        run: |
+          cargo build --all-features --example js
+
       - name: Run a small test262 subset
         if: ${{ !cancelled() }}
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          bash ci/run_test262.sh --limit 70 --fail-on-failure --focus language
+          bash ci/run_test262.sh --limit 100 --fail-on-failure --focus language
 
       - name: Upload results
         if: ${{ !cancelled() }}

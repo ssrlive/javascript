@@ -93,3 +93,21 @@ try {
     assert(Number.isNaN(result), '#1: __map.foo++ should be NaN');
     assert("foo" in __map, '#2: var __map={}; "foo" in __map');
 }
+
+{
+    console.log("==== Test -Infinity type ====");
+    var x=-Infinity;
+    assert(typeof(x) === "number", '#1: var x=-Infinity; typeof(x) === "number". Actual: ' + (typeof(x)));
+    assert(typeof(-Infinity) === "number", '#2: typeof(-Infinity) === "number". Actual: ' + (typeof(-Infinity)));
+}
+
+{
+    let n_inf=-Infinity;
+    assert(n_inf === Number.NEGATIVE_INFINITY, '#1: -Infinity is the same as Number.NEGATIVE_INFINITY');
+}
+
+{
+    let p_inf=+Infinity;
+    let inf=Infinity;
+    assert(p_inf === inf, '#1: Infinity is the same as +Infinity');
+}

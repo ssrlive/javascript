@@ -644,46 +644,6 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     });
                     i += 2;
                     column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '+' {
-                    tokens.push(TokenData {
-                        token: Token::AddAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '-' {
-                    tokens.push(TokenData {
-                        token: Token::SubAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    tokens.push(TokenData {
-                        token: Token::MulAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '/' {
-                    tokens.push(TokenData {
-                        token: Token::DivAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
-                } else if i + 1 < chars.len() && chars[i + 1] == '%' {
-                    tokens.push(TokenData {
-                        token: Token::ModAssign,
-                        line,
-                        column: start_col,
-                    });
-                    i += 2;
-                    column += 2;
                 } else {
                     tokens.push(TokenData {
                         token: Token::Assign,
@@ -1494,4 +1454,36 @@ fn parse_string_literal(
         return Err(raise_tokenize_error!("Unterminated string literal", current_line, current_col)); // Unterminated string literal
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn token_kinds(tokens: &[TokenData]) -> Vec<String> {
+        tokens.iter().map(|t| format!("{:?}", t.token)).collect()
+    }
+
+    #[test]
+    fn tokenize_minus_infinity() {
+        let src = "var x=-Infinity;";
+        let toks = tokenize(src).expect("tokenize failed");
+        // Expect: Var, Identifier(x), Assign, Minus, Identifier(Infinity), Semicolon
+        let kinds = token_kinds(&toks);
+        assert_eq!(kinds[0], format!("{:?}", Token::Var));
+        assert_eq!(kinds[1], format!("{:?}", Token::Identifier("x".to_string())));
+        assert_eq!(kinds[2], format!("{:?}", Token::Assign));
+        assert_eq!(kinds[3], format!("{:?}", Token::Minus));
+        assert_eq!(kinds[4], format!("{:?}", Token::Identifier("Infinity".to_string())));
+    }
+
+    #[test]
+    fn tokenize_add_sub_assign() {
+        let src = "x += 1; y -= 2;";
+        let toks = tokenize(src).expect("tokenize failed");
+        // find occurrences of AddAssign and SubAssign
+        let kinds = token_kinds(&toks);
+        assert!(kinds.iter().any(|k| k.contains("AddAssign")), "AddAssign not found: {:?}", kinds);
+        assert!(kinds.iter().any(|k| k.contains("SubAssign")), "SubAssign not found: {:?}", kinds);
+    }
 }

@@ -1,5 +1,11 @@
 "use strict";
 
+function assert(condition, message) {
+    if (!condition) {
+        throw new Error(message || "Assertion failed");
+    }
+}
+
 /*
 // Non-strict mode test for arguments.callee
 
@@ -87,6 +93,23 @@ try {
         console.log(e);
         throw new Error("#1: arguments object don't exists");
     }
+}
+
+{
+    console.log("=== Test arguments.callee property descriptor ===");
+
+    function testcase() {
+        var desc = Object.getOwnPropertyDescriptor(arguments,"callee");
+
+        assert(desc.configurable === false, 'desc.configurable');
+        assert(desc.enumerable === false, 'desc.enumerable');
+        assert(desc.hasOwnProperty('value') === false, 'desc.hasOwnProperty("value")');
+        assert(desc.hasOwnProperty('writable') === false, 'desc.hasOwnProperty("writable")');
+        assert(desc.hasOwnProperty('get') === true, 'desc.hasOwnProperty("get")');
+        assert(desc.hasOwnProperty('set') === true, 'desc.hasOwnProperty("set")');
+    }
+
+    testcase();
 }
 
 return true;

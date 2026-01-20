@@ -492,6 +492,7 @@ pub fn handle_object_method<'gc>(
 
             if let Some(val_rc) = object_get_key_value(&obj, &key) {
                 let desc_obj = new_js_object_data(mc);
+                crate::core::set_internal_prototype_from_constructor(mc, &desc_obj, env, "Object")?;
 
                 match &*val_rc.borrow() {
                     Value::Property { value, getter, setter } => {

@@ -28,7 +28,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          bash ci/run_test262.sh --limit 60 --fail-on-failure --focus language
+          bash ci/run_test262.sh --limit 70 --fail-on-failure --focus language
 
       - name: Upload results
         if: ${{ !cancelled() }}

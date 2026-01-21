@@ -1992,7 +1992,11 @@ fn eval_res<'gc>(
         StatementKind::TryCatch(tc_stmt) => {
             let tc_stmt = tc_stmt.as_ref();
             let try_stmts = tc_stmt.try_body.clone();
-            let try_res = evaluate_statements_with_context(mc, env, &try_stmts, labels);
+            // Evaluate try block in its own block environment so block-scoped lexicals
+            // (let/const/class) do not leak into the surrounding scope or into catch.
+            let try_env = crate::core::new_js_object_data(mc);
+            try_env.borrow_mut(mc).prototype = Some(*env);
+            let try_res = evaluate_statements_with_context(mc, &try_env, &try_stmts, labels);
 
             let mut result = match try_res {
                 Ok(cf) => cf,
@@ -2032,7 +2036,11 @@ fn eval_res<'gc>(
 
             if let Some(finally_stmts) = &tc_stmt.finally_body {
                 let finally_stmts_clone = finally_stmts.clone();
-                let finally_res = evaluate_statements_with_context(mc, env, &finally_stmts_clone, labels);
+                // Evaluate finally body in its own block environment to ensure any
+                // block-scoped declarations are properly localized.
+                let finally_env = crate::core::new_js_object_data(mc);
+                finally_env.borrow_mut(mc).prototype = Some(*env);
+                let finally_res = evaluate_statements_with_context(mc, &finally_env, &finally_stmts_clone, labels);
                 match finally_res {
                     Ok(ControlFlow::Normal(_)) => {
                         // If finally completes normally, return the previous result (try or catch)

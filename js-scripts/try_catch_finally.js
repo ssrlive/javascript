@@ -1,3 +1,5 @@
+"use strict";
+
 {
   class MyError extends Error {
     constructor(msg) {
@@ -80,3 +82,93 @@
   // 捕获内部的“bogus”
   // false
 }
+
+{
+  console.log("=== Test variable scoping in try-catch-finally ===");
+  (function(x) {
+    try {
+      let x = 'inner';
+      throw 0;
+    } catch (e) {
+      if (x !== 'outer') {
+        throw new Error('Test failed: x should be "outer"');
+      }
+    }
+  })('outer');
+}
+
+{
+  console.log("=== finally block let declaration only shadows outer parameter value 2 ===");
+  (function(x) {
+    try {
+      let x = 'middle';
+      {
+        let x = 'inner';
+        throw 0;
+      }
+    } catch(e) {
+
+    } finally {
+      if (x !== 'outer') {
+        throw new Error('Test failed: x should be "outer"');
+      }
+    }
+  })('outer');
+}
+
+{
+  console.log("=== verify context in finally block 1 ===");
+  
+  function fx() {}
+
+  (function(x) {
+    try {
+      let x = 'inner';
+      throw 0;
+    } catch(e) {
+    } finally {
+      fx();
+      if (x !== 'outer') {
+        throw new Error('Test failed: x should be "outer"');
+      }
+    }
+  })('outer');
+}
+
+{
+  console.log("=== try block let declaration only shadows outer parameter value 2 ===");
+
+  (function(x) {
+    try {
+      let x = 'middle';
+      {
+        let x = 'inner';
+        throw 0;
+      }
+    } catch (e) {
+      if (x !== 'outer') {
+        throw new Error('Test failed: x should be "outer"');
+      }
+    }
+  })('outer');
+}
+
+{
+  console.log("=== verify context in try block 1 ===");
+  
+  function f3() {}
+
+  (function(x) {
+    try {
+      let x = 'inner';
+      throw 0;
+    } catch (e) {
+      f3();
+      if (x !== 'outer') {
+        throw new Error('Test failed: x should be "outer"');
+      }
+    }
+  })('outer');
+}
+
+return true;

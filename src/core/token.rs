@@ -4,6 +4,16 @@ use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
 use unicode_xid::UnicodeXID;
 
+// Explicit list of grandfathered Other_ID_Start codepoints required by ECMAScript
+const OTHER_ID_START: [char; 6] = [
+    '\u{2118}', // ℘
+    '\u{212E}', // ℮
+    '\u{309B}', // ゛
+    '\u{309C}', // ゜
+    '\u{1885}', // ᢅ
+    '\u{1886}', // ᢆ
+];
+
 #[derive(Debug, Clone, PartialEq, Collect)]
 #[collect(no_drop)]
 pub enum Token {
@@ -1134,7 +1144,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
             }
             // Identifier start (Unicode-aware): include Unicode XID_Start, `$` / `_` / `#`,
             // and allow unicode escapes `\uXXXX` / `\u{...}` in identifiers.
-            c if c == '#' || c == '_' || c == '$' || UnicodeXID::is_xid_start(c) || c == '\\' => {
+            c if c == '#' || c == '_' || c == '$' || UnicodeXID::is_xid_start(c) || OTHER_ID_START.contains(&c) || c == '\\' => {
                 // Hashbang check: only valid at the start of the file, such as `#!/usr/bin/env node`
                 if chars[i] == '#' && i == 0 && i + 1 < chars.len() && chars[i + 1] == '!' {
                     // Skip until newline
@@ -1198,7 +1208,7 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
 
                     let ch = chars[i];
-                    if UnicodeXID::is_xid_continue(ch) || ch == '_' || ch == '$' || ch == '#' {
+                    if UnicodeXID::is_xid_continue(ch) || OTHER_ID_START.contains(&ch) || ch == '_' || ch == '$' || ch == '#' {
                         ident.push(ch);
                         i += 1;
                         column += 1;
@@ -1555,6 +1565,15 @@ mod tests {
         let toks = tokenize(src).expect("tokenize failed");
         let kinds = token_kinds(&toks);
         assert_eq!(kinds[0], format!("{:?}", Token::Var));
+        assert!(kinds.iter().any(|k| k.contains("Identifier")), "Identifier not found: {:?}", kinds);
+    }
+
+    #[test]
+    fn tokenize_other_id_start() {
+        let src = "var ℘; var ℮; var ゛; var ゜; var ᢅ; var ᢆ;";
+        let toks = tokenize(src).expect("tokenize failed");
+        let kinds = token_kinds(&toks);
+        // Ensure Identifier tokens appear for those special chars
         assert!(kinds.iter().any(|k| k.contains("Identifier")), "Identifier not found: {:?}", kinds);
     }
 }

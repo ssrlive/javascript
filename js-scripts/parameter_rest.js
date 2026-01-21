@@ -58,4 +58,38 @@ fn(1, 2, 3, 4);
     console.log("\n我需要做:\n%o\n当前进度为: %o\n", todos, progress);
 }
 
+{
+    console.log("=== Eval test with while(false); ===");
+    if ((0,eval)("while(false);") !== undefined) {
+        throw new Error("Indirect eval of 'while(false);' did not return undefined");
+    }
+}
+
+{
+    console.log("=== Eval test with return; ===");
+
+    var value;
+    try {
+        value = (0,eval)("return;");
+        throw new Error('#1.1: return must throw SyntaxError. Actual: ' + value);
+    } catch (e) {
+        if (!(e instanceof SyntaxError)) {
+            throw new Error('#1.2: return must throw SyntaxError. Actual: ' + e);
+        } else {
+            console.log("PASS: Caught expected SyntaxError for return statement");
+        }
+    }
+
+    try {
+        (0,eval)("return;");
+        throw new Error("Expected SyntaxError not thrown for indirect eval of return statement");
+    } catch (e) {
+        if (!(e instanceof SyntaxError)) {
+            throw new Error('Expected SyntaxError, but got: ' + e);
+        } else {
+            console.log("PASS: Caught expected SyntaxError for indirect eval of return statement");
+        }
+    }
+}
+
 console.log("All tests passed!");

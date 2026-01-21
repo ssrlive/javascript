@@ -3836,6 +3836,53 @@ fn evaluate_expr_pow_assign<'gc>(
     }
 }
 
+pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<'gc>> {
+    log::trace!("DEBUG: Checking top level return for stmts: {:#?}", stmts);
+    for stmt in stmts {
+        match &*stmt.kind {
+            StatementKind::Return(_) => {
+                log::trace!("DEBUG: Found top-level return!");
+                return Err(EvalError::Js(raise_syntax_error!("Illegal return statement")));
+            }
+            StatementKind::Block(inner) => check_top_level_return(inner)?,
+            StatementKind::If(if_stmt) => {
+                check_top_level_return(&if_stmt.then_body)?;
+                if let Some(else_body) = &if_stmt.else_body {
+                    check_top_level_return(else_body)?;
+                }
+            }
+            StatementKind::While(_, body) => check_top_level_return(body)?,
+            StatementKind::DoWhile(body, _) => check_top_level_return(body)?,
+            StatementKind::For(for_stmt) => check_top_level_return(&for_stmt.body)?,
+            StatementKind::ForOf(_, _, body) => check_top_level_return(body)?,
+            StatementKind::ForIn(_, _, _, body) => check_top_level_return(body)?,
+            StatementKind::ForOfDestructuringObject(_, _, body) => check_top_level_return(body)?,
+            StatementKind::ForOfDestructuringArray(_, _, body) => check_top_level_return(body)?,
+            StatementKind::Switch(sw) => {
+                for case in &sw.cases {
+                    match case {
+                        crate::core::SwitchCase::Case(_, body) => check_top_level_return(body)?,
+                        crate::core::SwitchCase::Default(body) => check_top_level_return(body)?,
+                    }
+                }
+            }
+            StatementKind::TryCatch(tc) => {
+                check_top_level_return(&tc.try_body)?;
+                if let Some(c) = &tc.catch_body {
+                    check_top_level_return(c)?;
+                }
+                if let Some(f) = &tc.finally_body {
+                    check_top_level_return(f)?;
+                }
+            }
+            StatementKind::Label(_, s) => check_top_level_return(std::slice::from_ref(s))?,
+            StatementKind::Export(_, Some(s)) => check_top_level_return(std::slice::from_ref(s))?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 pub fn evaluate_call_dispatch<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -3850,9 +3897,12 @@ pub fn evaluate_call_dispatch<'gc>(
             Err(e) => Err(EvalError::Js(e)),
         },
         Value::Function(name) => {
+            log::trace!("DEBUG: evaluate_call_dispatch calling native function: {}", name);
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
+                log::trace!("DEBUG: call_native_function handled {}", name);
                 return Ok(res);
             }
+            log::trace!("DEBUG: call_native_function did not handle {}", name);
             if name == "eval" {
                 let first_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
                 if let Value::String(script_str) = first_arg {
@@ -3863,6 +3913,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     }
                     let mut index = 0;
                     let statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+                    check_top_level_return(&statements)?;
                     // eval executes in the current environment
                     match evaluate_statements(mc, env, &statements) {
                         Ok(v) => Ok(v),
@@ -4602,8 +4653,24 @@ fn evaluate_expr_call<'gc>(
         this_val
     );
 
-    // Debug: log type of callable (removed temporary prints)
-    evaluate_call_dispatch(mc, env, func_val, this_val, eval_args)
+    // Is this a *direct* eval call? (IsDirectEvalCall: callee is an IdentifierReference named "eval")
+    let is_direct_eval = matches!(func_expr, Expr::Var(name, ..) if name == "eval");
+    log::trace!("DEBUG: is_direct_eval = {}", is_direct_eval);
+
+    // If this is an *indirect* call to the builtin "eval", execute it in the global environment
+    let env_for_call = if matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval {
+        // Walk up prototypes to find the top-level (global) environment
+        let mut root_env = *env;
+        while let Some(proto) = root_env.borrow().prototype {
+            root_env = proto;
+        }
+        log::trace!("DEBUG: Using global env for indirect eval: {:p}", &root_env);
+        root_env
+    } else {
+        *env
+    };
+
+    evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args)
 }
 
 fn evaluate_expr_binary<'gc>(
@@ -6203,7 +6270,17 @@ pub fn call_native_function<'gc>(
                     call_env.borrow_mut(mc).prototype = Some(*env);
                     call_env.borrow_mut(mc).is_function_scope = true;
                     object_set_key_value(mc, &call_env, "this", new_this.clone()).map_err(EvalError::Js)?;
-                    match crate::js_function::handle_global_function(mc, &func_name, rest_args, &call_env) {
+                    // If this is a call/apply that targets the builtin "eval", evaluate in the global environment
+                    let target_env_for_call = if func_name == "eval" {
+                        let mut root_env = *env;
+                        while let Some(proto) = root_env.borrow().prototype {
+                            root_env = proto;
+                        }
+                        root_env
+                    } else {
+                        call_env
+                    };
+                    match crate::js_function::handle_global_function(mc, &func_name, rest_args, &target_env_for_call) {
                         Ok(res) => Ok(Some(res)),
                         Err(e) => Err(EvalError::Js(e)),
                     }
@@ -6252,7 +6329,17 @@ pub fn call_native_function<'gc>(
                     call_env.borrow_mut(mc).prototype = Some(*env);
                     call_env.borrow_mut(mc).is_function_scope = true;
                     object_set_key_value(mc, &call_env, "this", new_this.clone()).map_err(EvalError::Js)?;
-                    match crate::js_function::handle_global_function(mc, &func_name, &rest_args, &call_env) {
+                    // If this is a call/apply that targets the builtin "eval", evaluate in the global environment
+                    let target_env_for_call = if func_name == "eval" {
+                        let mut root_env = *env;
+                        while let Some(proto) = root_env.borrow().prototype {
+                            root_env = proto;
+                        }
+                        root_env
+                    } else {
+                        call_env
+                    };
+                    match crate::js_function::handle_global_function(mc, &func_name, &rest_args, &target_env_for_call) {
                         Ok(res) => Ok(Some(res)),
                         Err(e) => Err(EvalError::Js(e)),
                     }

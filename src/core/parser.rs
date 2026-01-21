@@ -184,8 +184,8 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         }
         *index += 1; // consume )
 
-        // Skip any semicolons or line terminators before for-of body
-        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        // Skip any line terminators before for-of body (do not skip semicolons: they can be empty-statement body)
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
@@ -268,8 +268,8 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             return Err(raise_parse_error_at(t.get(*index)));
         }
         *index += 1;
-        // Skip any semicolons or line terminators before for-in body
-        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        // Skip any line terminators before for-in body (do not skip semicolons: they can be empty-statement body)
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
         let body = parse_statement_item(t, index)?;
@@ -333,8 +333,8 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
     *index += 1; // consume )
 
-    // Skip any semicolons or line terminators before for loop body
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before for loop body (do not skip semicolons: they can be empty-statement body)
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     let body = parse_statement_item(t, index)?;
@@ -426,8 +426,8 @@ fn parse_function_declaration(t: &[TokenData], index: &mut usize) -> Result<Stat
 
     let params = parse_parameters(t, index)?;
 
-    // Skip any semicolons or line terminators before the function body opening brace
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before the function body opening brace
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     if !matches!(t[*index].token, Token::LBrace) {
@@ -457,8 +457,8 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
     }
     *index += 1; // consume )
 
-    // Skip any semicolons or line terminators before a single-statement body
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before a single-statement body
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     let then_stmt = parse_statement_item(t, index)?;
@@ -475,8 +475,8 @@ fn parse_if_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, J
 
     let else_block = if *index < t.len() && matches!(t[*index].token, Token::Else) {
         *index += 1;
-        // Skip any semicolons or line terminators before else body
-        while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+        // Skip any line terminators before else body
+        while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
             *index += 1;
         }
         let else_stmt = parse_statement_item(t, index)?;
@@ -530,14 +530,20 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
     }
     *index += 1; // consume )
 
-    // Skip any semicolons or line terminators before while body
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before while body (do not skip semicolons: they can be empty-statement body)
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let body = parse_statement_item(t, index)?;
-    let body_stmts = match *body.kind {
-        StatementKind::Block(stmts) => stmts,
-        _ => vec![body],
+    // If the next token is a semicolon, that's an empty-statement body
+    let body_stmts = if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1; // consume the semicolon
+        vec![]
+    } else {
+        let body = parse_statement_item(t, index)?;
+        match *body.kind {
+            StatementKind::Block(stmts) => stmts,
+            _ => vec![body],
+        }
     };
 
     Ok(Statement {
@@ -550,20 +556,35 @@ fn parse_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement
 fn parse_do_while_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume do
-    // Skip any semicolons or line terminators before do body
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before do body (do not skip semicolons: they can be empty-statement body)
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
-    let body = parse_statement_item(t, index)?;
-    let body_stmts = match *body.kind {
-        StatementKind::Block(stmts) => stmts,
-        _ => vec![body],
+    // If the next token is a semicolon, that's an empty-statement body
+    log::trace!("parse_do_while: at index {} token={:?}", *index, t.get(*index));
+    let body_stmts = if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        log::trace!("parse_do_while: found semicolon empty body at index {}", *index);
+        *index += 1; // consume the semicolon
+        vec![]
+    } else {
+        log::trace!("parse_do_while: parsing body statement at index {}", *index);
+        let body = parse_statement_item(t, index)?;
+        log::trace!(
+            "parse_do_while: after parsing body index {}, next token={:?}",
+            *index,
+            t.get(*index)
+        );
+        match *body.kind {
+            StatementKind::Block(stmts) => stmts,
+            _ => vec![body],
+        }
     };
 
-    // Skip any semicolons or line terminators before the 'while' in a do-while
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators between do-body and the 'while' keyword
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
+
     if !matches!(t[*index].token, Token::While) {
         return Err(raise_parse_error_at(t.get(*index)));
     }
@@ -750,8 +771,8 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         return Err(raise_parse_error!("Expected block after try"));
     };
 
-    // Skip any semicolons or line terminators before catch/finally
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before catch/finally
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
 
@@ -785,8 +806,8 @@ fn parse_try_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
 
     let mut finally_body = None;
-    // Skip any semicolons or line terminators before finally (may follow a catch block)
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip any line terminators before finally (may follow a catch block)
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
     }
     if *index < t.len() && matches!(t[*index].token, Token::Finally) {

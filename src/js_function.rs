@@ -1158,12 +1158,34 @@ fn evalute_eval_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], en
             Value::String(s) => {
                 let code = utf16_to_utf8(&s);
 
+                log::trace!("eval invoked with code='{}'", code);
+
                 let mut tokens = crate::core::tokenize(&code)?;
+                // Debug: always emit token list for eval bodies containing 'return' or for small bodies
+                if code.contains("return") || code.len() < 256 {
+                    log::trace!(
+                        "eval debug: code='{}' tokens={:?}",
+                        code,
+                        tokens.iter().map(|t| (&t.token, t.line, t.column)).collect::<Vec<_>>()
+                    );
+                }
                 if tokens.last().map(|td| td.token == crate::core::Token::EOF).unwrap_or(false) {
                     tokens.pop();
                 }
-                let mut index = 0;
+
+                // index for parsing start position
+                let mut index: usize = 0;
+
                 let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+
+                if let Err(e) = crate::core::check_top_level_return(&stmts) {
+                    return Err(if let crate::core::EvalError::Js(js_err) = e {
+                        js_err
+                    } else {
+                        crate::raise_type_error!("Unknown check error")
+                    });
+                }
+
                 match crate::core::evaluate_statements(mc, env, &stmts) {
                     Ok(v) => Ok(v),
                     Err(err) => {

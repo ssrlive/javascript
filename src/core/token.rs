@@ -2,17 +2,55 @@ use crate::core::{Collect, GcTrace};
 use crate::{JSError, raise_tokenize_error};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
-use unicode_xid::UnicodeXID;
+use regress::Regex;
+use std::sync::OnceLock;
 
-// Explicit list of grandfathered Other_ID_Start codepoints required by ECMAScript
-const OTHER_ID_START: [char; 6] = [
-    '\u{2118}', // ℘
-    '\u{212E}', // ℮
-    '\u{309B}', // ゛
-    '\u{309C}', // ゜
-    '\u{1885}', // ᢅ
-    '\u{1886}', // ᢆ
-];
+// Regex-based ID_Start/ID_Continue checks using Unicode properties
+fn is_id_start(c: char) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::with_flags("^\\p{ID_Start}$", "u").unwrap());
+    re.find(c.encode_utf8(&mut [0; 4])).is_some()
+}
+
+fn is_id_continue(c: char) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::with_flags("^\\p{ID_Continue}$", "u").unwrap());
+    re.find(c.encode_utf8(&mut [0; 4])).is_some()
+}
+
+// Build a runtime table of additional ID_Start characters derived from Test262's
+// `start-unicode-17.0.0.js`. This allows us to accept characters that the
+// upstream Unicode data (used by `regress`) might not include yet.
+fn other_id_start_contains(ch: char) -> bool {
+    static TABLE: OnceLock<Vec<char>> = OnceLock::new();
+    let v = TABLE.get_or_init(|| {
+        let mut set = std::collections::BTreeSet::new();
+        // Seed with grandfathered list
+        for &c in &crate::unicode::GRANDFATHERED_OTHER_ID_START {
+            set.insert(c);
+        }
+        // Include all first characters of Test262 start-unicode (stored in `ADDITIONAL_OTHER_ID_START_RANGES`)
+        for &(lo, hi) in &crate::unicode::ADDITIONAL_OTHER_ID_START_RANGES {
+            for cp in lo..=hi {
+                if let Some(c) = std::char::from_u32(cp) {
+                    set.insert(c);
+                }
+            }
+        }
+        set.into_iter().collect()
+    });
+    v.contains(&ch)
+}
+
+fn other_id_continue_contains(ch: char) -> bool {
+    let cp = ch as u32;
+    for &(lo, hi) in crate::unicode::ADDITIONAL_OTHER_ID_CONTINUE_RANGES {
+        if lo <= cp && cp <= hi {
+            return true;
+        }
+    }
+    false
+}
 
 #[derive(Debug, Clone, PartialEq, Collect)]
 #[collect(no_drop)]
@@ -1142,9 +1180,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1; // skip closing backtick
                 column += 1;
             }
-            // Identifier start (Unicode-aware): include Unicode XID_Start, `$` / `_` / `#`,
+            // Identifier start (Unicode-aware): include Unicode ID_Start, `$` / `_` / `#`,
             // and allow unicode escapes `\uXXXX` / `\u{...}` in identifiers.
-            c if c == '#' || c == '_' || c == '$' || UnicodeXID::is_xid_start(c) || OTHER_ID_START.contains(&c) || c == '\\' => {
+            c if c == '#' || c == '_' || c == '$' || is_id_start(c) || other_id_start_contains(c) || c == '\\' => {
                 // Hashbang check: only valid at the start of the file, such as `#!/usr/bin/env node`
                 if chars[i] == '#' && i == 0 && i + 1 < chars.len() && chars[i + 1] == '!' {
                     // Skip until newline
@@ -1208,7 +1246,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     }
 
                     let ch = chars[i];
-                    if UnicodeXID::is_xid_continue(ch) || OTHER_ID_START.contains(&ch) || ch == '_' || ch == '$' || ch == '#' {
+                    if is_id_continue(ch)
+                        || other_id_continue_contains(ch)
+                        || other_id_start_contains(ch)
+                        || crate::unicode::OTHER_ID_CONTINUE.contains(&ch)
+                        || ch == '_'
+                        || ch == '$'
+                        || ch == '#'
+                    {
                         ident.push(ch);
                         i += 1;
                         column += 1;
@@ -1574,6 +1619,16 @@ mod tests {
         let toks = tokenize(src).expect("tokenize failed");
         let kinds = token_kinds(&toks);
         // Ensure Identifier tokens appear for those special chars
+        assert!(kinds.iter().any(|k| k.contains("Identifier")), "Identifier not found: {:?}", kinds);
+    }
+
+    #[test]
+    fn tokenize_id_continue_v17() {
+        // This ensures identifiers containing Unicode v17 ID_Continue codepoints are accepted
+        let src = "var _᫏᫐᫑᫒᫓᫔᫕᫖᫗᫘᫙᫚᫛᫜᫝᫠᫡᫢᫣᫤᫥᫦᫧᫨᫩᫪᫫𐻺𐻻𑭠𑭡𑭢𑭣𑭤𑭥𑭦𑭧𑷠𑷡𑷢𑷣𑷤𑷥𑷦𑷧𑷨𑷩𞛣𞛦𞛮𞛯𞛵;";
+        let toks = tokenize(src).expect("tokenize failed");
+        let kinds = token_kinds(&toks);
+        assert_eq!(kinds[0], format!("{:?}", Token::Var));
         assert!(kinds.iter().any(|k| k.contains("Identifier")), "Identifier not found: {:?}", kinds);
     }
 }

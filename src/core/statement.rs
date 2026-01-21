@@ -29,18 +29,25 @@ pub enum StatementKind {
     Class(Box<ClassDefinition>),                            // name, extends, members
     Assign(String, Expr),                                   // variable assignment
     For(Box<ForStatement>),
-    ForOf(String, Expr, Vec<Statement>), // variable, iterable, body
-    ForIn(String, Expr, Vec<Statement>), // variable, object, body
+    ForOf(String, Expr, Vec<Statement>),                      // variable, iterable, body
+    ForIn(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind (None = assignment), variable, object, body
     ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
     ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
-    While(Expr, Vec<Statement>),         // condition, body
-    DoWhile(Vec<Statement>, Expr),       // body, condition
+    While(Expr, Vec<Statement>),                              // condition, body
+    DoWhile(Vec<Statement>, Expr),                            // body, condition
     Switch(Box<SwitchStatement>),
     Break(Option<String>),
     Continue(Option<String>),
     Label(String, Box<Statement>),
     Import(Vec<ImportSpecifier>, String),                 // import specifiers, module name
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>), // export specifiers, optional inner declaration
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum VarDeclKind {
+    Var,
+    Let,
+    Const,
 }
 
 #[derive(Clone, Debug)]

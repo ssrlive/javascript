@@ -50,8 +50,10 @@ var res2, res3, res4, res5;
 
 try {
   res2 = delete yy; // throws SyntaxError in strict mode
+  assert(false, "delete yy did not throw");
 } catch (e) {
   console.log("Caught expected error for delete yy:", e.message);
+  assert(e instanceof SyntaxError, "delete yy threw wrong type of error");
   res2 = false;
 }
 
@@ -59,6 +61,7 @@ try {
   res3 = delete Math.PI; // throws TypeError in strict mode
 } catch (e) {
   console.log("Caught expected error for delete Math.PI:", e.message);
+  assert(e instanceof TypeError, "delete Math.PI threw wrong type of error");
   res3 = false;
 }
 
@@ -66,8 +69,10 @@ res4 = delete myobj.h; // returns true (configurable)
 
 try {
   res5 = delete myobj; // throws SyntaxError in strict mode
+  assert(false, "delete myobj did not throw");
 } catch (e) {
   console.log("Caught expected error for delete myobj:", e.message);
+  assert(e instanceof SyntaxError, "delete myobj threw wrong type of error");
   res5 = false;
 }
 
@@ -253,5 +258,20 @@ const objectName = new ObjectType("param1", "param2", /* …, */ "paramN");
 console.log(objectName.param1);
 console.log(objectName.param2);
 
+{
+  console.log("==== Test for-in loop ====");
+  function fn(x) {
+    let a = [];
+    for (let p in x) {
+      a.push(function () { return p; });
+    }
+    let k = 0;
+    for (let q in x) {
+      assert(q == a[k](), "for-in loop variable mismatch: " + q + " != " + a[k]());
+      ++k;
+    }
+  }
+  fn({a : [0], b : 1, c : {v : 1}, get d() {}, set e(x) {}});
+}
 
 console.log("All tests passed.");

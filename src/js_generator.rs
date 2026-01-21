@@ -264,7 +264,7 @@ fn replace_first_yield_in_statement(stmt: &mut Statement, send_value: &Value, re
             *cond = replace_first_yield_in_expr(cond, send_value, replaced);
         }
         StatementKind::ForOf(_, _, body)
-        | StatementKind::ForIn(_, _, body)
+        | StatementKind::ForIn(_, _, _, body)
         | StatementKind::ForOfDestructuringObject(_, _, body)
         | StatementKind::ForOfDestructuringArray(_, _, body) => {
             for s in body.iter_mut() {
@@ -410,7 +410,7 @@ fn replace_first_yield_statement_with_throw(stmt: &mut Statement, _throw_value: 
             false
         }
         StatementKind::ForOf(_, _, body)
-        | StatementKind::ForIn(_, _, body)
+        | StatementKind::ForIn(_, _, _, body)
         | StatementKind::ForOfDestructuringObject(_, _, body)
         | StatementKind::ForOfDestructuringArray(_, _, body)
         | StatementKind::While(_, body) => {
@@ -563,7 +563,7 @@ fn find_first_yield_in_statements(stmts: &[Statement]) -> Option<(usize, Option<
                 }
             }
             StatementKind::ForOf(_, _, body)
-            | StatementKind::ForIn(_, _, body)
+            | StatementKind::ForIn(_, _, _, body)
             | StatementKind::ForOfDestructuringObject(_, _, body)
             | StatementKind::ForOfDestructuringArray(_, _, body) => {
                 if let Some((inner_idx, _inner_opt, found)) = find_first_yield_in_statements(body) {

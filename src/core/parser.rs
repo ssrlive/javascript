@@ -255,7 +255,7 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                 _ => vec![body],
             };
             return Ok(Statement {
-                kind: Box::new(StatementKind::ForIn(name, *right, body_stmts)),
+                kind: Box::new(StatementKind::ForIn(None, name, *right, body_stmts)),
                 line,
                 column,
             });
@@ -288,7 +288,18 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         };
 
         return Ok(Statement {
-            kind: Box::new(StatementKind::ForIn(var_name, rhs, body_stmts)),
+            kind: Box::new(StatementKind::ForIn(
+                match decl_kind {
+                    Some(Token::Var) => Some(crate::core::VarDeclKind::Var),
+                    Some(Token::Let) => Some(crate::core::VarDeclKind::Let),
+                    Some(Token::Const) => Some(crate::core::VarDeclKind::Const),
+                    Some(_) => return Err(raise_parse_error!("Invalid declaration kind for for-in")),
+                    None => return Err(raise_parse_error!("Missing declaration kind for for-in")),
+                },
+                var_name,
+                rhs,
+                body_stmts,
+            )),
             line,
             column,
         });
@@ -333,12 +344,14 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     };
 
     let init_stmt = if is_decl {
-        let kind = decl_kind.unwrap();
-        let decls = init_decls.unwrap();
-        let k = match kind {
-            Token::Var => StatementKind::Var(decls),
-            Token::Let => StatementKind::Let(decls),
-            Token::Const => {
+        let decls = match init_decls {
+            Some(d) => d,
+            None => return Err(raise_parse_error!("Missing declarations in for-init")),
+        };
+        let k = match decl_kind {
+            Some(Token::Var) => StatementKind::Var(decls),
+            Some(Token::Let) => StatementKind::Let(decls),
+            Some(Token::Const) => {
                 let mut c_decls = Vec::new();
                 for (n, e) in decls {
                     if let Some(init) = e {

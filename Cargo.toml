@@ -18,27 +18,26 @@ os = ["libc", "windows-sys"]
 std = []
 
 [dependencies]
-chrono = { version = "0.4.42", features = ["serde"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+crossbeam-channel = "0.5.15"
 gc-arena = { git = "https://github.com/kyren/gc-arena.git", rev = "40c2710" }
-indexmap = "2.12.1"
+indexmap = "2.13.0"
 log = "0.4.29"
 num-bigint = "0.4.6"
 num-traits = "0.2.19"
-regress = { version = "0.10", features = ["utf16"] }
-serde_json = "1.0.145"
-thiserror = "2.0.17"
-crossbeam-channel = "0.5"
-unicode-xid = "0.2"
+regress = { version = "0.10.5", features = ["utf16"] }
+serde_json = "1.0.149"
+thiserror = "2.0.18"
 
 [target.'cfg(unix)'.dependencies]
-libc = { version = "0.2.178", optional = true }
+libc = { version = "0.2.180", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", optional = true, features = ["Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Foundation"] }
 
 [dev-dependencies]
-clap = { version = "4.5.53", features = ["derive", "cargo"] }
-criterion = { version = "0.8.0", features = ["html_reports"] }
+clap = { version = "4.5.54", features = ["derive", "cargo"] }
+criterion = { version = "0.8.1", features = ["html_reports"] }
 ctor = "0.6.3"
 env_logger = { version = "0.11.8" }
 rustyline = "17.0.2"

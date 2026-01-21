@@ -793,7 +793,7 @@ fn hoist_var_declarations<'gc>(
                 }
             }
             StatementKind::For(for_stmt) => hoist_var_declarations(mc, env, &for_stmt.body)?,
-            StatementKind::ForIn(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForIn(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::ForOf(_, _, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::ForOfDestructuringObject(_, _, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::ForOfDestructuringArray(_, _, body) => hoist_var_declarations(mc, env, body)?,
@@ -2374,8 +2374,14 @@ fn eval_res<'gc>(
 
             Err(EvalError::Js(raise_type_error!("Value is not iterable")))
         }
-        StatementKind::ForIn(var_name, iterable, body) => {
+        StatementKind::ForIn(decl_kind, var_name, iterable, body) => {
             let iter_val = evaluate_expr(mc, env, iterable)?;
+
+            // If the for-in uses `var`, ensure the variable is hoisted to function scope
+            if let Some(crate::core::VarDeclKind::Var) = decl_kind {
+                hoist_name(mc, env, var_name)?;
+            }
+
             if let Value::Object(obj) = iter_val {
                 // Collect enumerable string keys across prototype chain in insertion order
                 let mut keys: Vec<String> = Vec::new();
@@ -2399,36 +2405,73 @@ fn eval_res<'gc>(
                     current = o.borrow().prototype;
                 }
 
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
                 log::trace!("for-in keys: {keys:?}");
-                for k in &keys {
-                    // Debug: inspect the property value before executing the body
-                    if let Some(val_rc) = object_get_key_value(&obj, k) {
-                        log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
+
+                match decl_kind {
+                    // `var` declaration or assignment form: single binding in the surrounding
+                    // scope (function/global). Update that binding each iteration and run body
+                    // in the same environment (`env`).
+                    Some(crate::core::VarDeclKind::Var) | None => {
+                        for k in &keys {
+                            if let Some(val_rc) = object_get_key_value(&obj, k) {
+                                log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
+                            }
+                            env_set_recursive(mc, env, var_name, Value::String(utf8_to_utf16(k)))?;
+                            let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                            match res {
+                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Break(label) => {
+                                    if label.is_none() {
+                                        break;
+                                    }
+                                    return Ok(Some(ControlFlow::Break(label)));
+                                }
+                                ControlFlow::Continue(label) => {
+                                    if let Some(ref l) = label
+                                        && !own_labels.contains(l)
+                                    {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            }
+                        }
+                        return Ok(None);
                     }
-                    env_set(mc, &loop_env, var_name, Value::String(utf8_to_utf16(k)))?;
-                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                    match res {
-                        ControlFlow::Normal(v) => *last_value = v,
-                        ControlFlow::Break(label) => {
-                            if label.is_none() {
-                                break;
+                    // `let` / `const` declaration: create a fresh lexical environment for
+                    // each iteration so closures capture a distinct binding per iteration.
+                    Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                        for k in &keys {
+                            if let Some(val_rc) = object_get_key_value(&obj, k) {
+                                log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
                             }
-                            return Ok(Some(ControlFlow::Break(label)));
-                        }
-                        ControlFlow::Continue(label) => {
-                            if let Some(ref l) = label
-                                && !own_labels.contains(l)
-                            {
-                                return Ok(Some(ControlFlow::Continue(label)));
+                            let iter_env = new_js_object_data(mc);
+                            iter_env.borrow_mut(mc).prototype = Some(*env);
+                            env_set(mc, &iter_env, var_name, Value::String(utf8_to_utf16(k)))?;
+                            let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                            match res {
+                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Break(label) => {
+                                    if label.is_none() {
+                                        break;
+                                    }
+                                    return Ok(Some(ControlFlow::Break(label)));
+                                }
+                                ControlFlow::Continue(label) => {
+                                    if let Some(ref l) = label
+                                        && !own_labels.contains(l)
+                                    {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                             }
                         }
-                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        return Ok(None);
                     }
                 }
-                return Ok(None);
             }
             Ok(None)
         }

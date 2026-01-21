@@ -2,6 +2,7 @@ use crate::core::{Collect, GcTrace};
 use crate::{JSError, raise_tokenize_error};
 use num_bigint::BigInt;
 use num_traits::{Num, ToPrimitive};
+use unicode_xid::UnicodeXID;
 
 #[derive(Debug, Clone, PartialEq, Collect)]
 #[collect(no_drop)]
@@ -1131,7 +1132,9 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                 i += 1; // skip closing backtick
                 column += 1;
             }
-            'a'..='z' | 'A'..='Z' | '_' | '$' | '#' => {
+            // Identifier start (Unicode-aware): include Unicode XID_Start, `$` / `_` / `#`,
+            // and allow unicode escapes `\uXXXX` / `\u{...}` in identifiers.
+            c if c == '#' || c == '_' || c == '$' || UnicodeXID::is_xid_start(c) || c == '\\' => {
                 // Hashbang check: only valid at the start of the file, such as `#!/usr/bin/env node`
                 if chars[i] == '#' && i == 0 && i + 1 < chars.len() && chars[i + 1] == '!' {
                     // Skip until newline
@@ -1143,12 +1146,71 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     continue;
                 }
 
-                let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '$' || chars[i] == '#') {
-                    i += 1;
-                    column += 1;
+                let mut ident = String::new();
+                // Consume characters and escape sequences that are valid in identifier
+                while i < chars.len() {
+                    if chars[i] == '\\' {
+                        // Expect unicode escape \uXXXX or \u{...}
+                        if i + 1 < chars.len() && chars[i + 1] == 'u' {
+                            i += 2; // skip '\u'
+                            column += 2;
+                            if i < chars.len() && chars[i] == '{' {
+                                // \u{...} form
+                                i += 1; // skip '{'
+                                column += 1;
+                                let mut hex = String::new();
+                                while i < chars.len() && chars[i] != '}' {
+                                    hex.push(chars[i]);
+                                    i += 1;
+                                    column += 1;
+                                }
+                                if i >= chars.len() || chars[i] != '}' || hex.is_empty() {
+                                    return Err(raise_tokenize_error!("Invalid unicode escape in identifier", line, column));
+                                }
+                                i += 1; // skip '}'
+                                column += 1;
+                                match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
+                                    Some(ch) => ident.push(ch),
+                                    None => return Err(raise_tokenize_error!("Invalid unicode codepoint in identifier", line, column)),
+                                }
+                                continue;
+                            } else {
+                                // \uXXXX form
+                                if i + 4 > chars.len() {
+                                    return Err(raise_tokenize_error!("Invalid unicode escape in identifier", line, column));
+                                }
+                                let hex: String = chars[i..i + 4].iter().collect();
+                                if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    return Err(raise_tokenize_error!("Invalid unicode escape in identifier", line, column));
+                                }
+                                i += 4;
+                                column += 4;
+                                match u32::from_str_radix(&hex, 16).ok().and_then(std::char::from_u32) {
+                                    Some(ch) => ident.push(ch),
+                                    None => return Err(raise_tokenize_error!("Invalid unicode codepoint in identifier", line, column)),
+                                }
+                                continue;
+                            }
+                        } else {
+                            // Not a unicode escape - stop identifier parsing
+                            break;
+                        }
+                    }
+
+                    let ch = chars[i];
+                    if UnicodeXID::is_xid_continue(ch) || ch == '_' || ch == '$' || ch == '#' {
+                        ident.push(ch);
+                        i += 1;
+                        column += 1;
+                        continue;
+                    }
+                    break;
                 }
-                let ident: String = chars[start..i].iter().collect();
+
+                if ident.is_empty() {
+                    return Err(raise_tokenize_error!("Invalid identifier", line, column));
+                }
+
                 let token = if let Some(stripped) = ident.strip_prefix('#') {
                     Token::PrivateIdentifier(stripped.to_string())
                 } else {
@@ -1485,5 +1547,14 @@ mod tests {
         let kinds = token_kinds(&toks);
         assert!(kinds.iter().any(|k| k.contains("AddAssign")), "AddAssign not found: {:?}", kinds);
         assert!(kinds.iter().any(|k| k.contains("SubAssign")), "SubAssign not found: {:?}", kinds);
+    }
+
+    #[test]
+    fn tokenize_unicode_identifier() {
+        let src = "var ຆ;"; // U+0EA6 LAO LETTER HO NO
+        let toks = tokenize(src).expect("tokenize failed");
+        let kinds = token_kinds(&toks);
+        assert_eq!(kinds[0], format!("{:?}", Token::Var));
+        assert!(kinds.iter().any(|k| k.contains("Identifier")), "Identifier not found: {:?}", kinds);
     }
 }

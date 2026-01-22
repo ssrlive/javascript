@@ -32,7 +32,7 @@ jobs:
         env:
           FAIL_ON_FAILURE: 'true'
         run: |
-          bash ci/run_test262.sh --limit 340 --fail-on-failure --focus language
+          bash ci/run_test262.sh --limit 380 --fail-on-failure --focus language
 
       - name: Upload results
         if: ${{ !cancelled() }}
@@ -40,7 +40,3 @@ jobs:
         with:
           name: test262-results
           path: test262-results.log
-
-      - name: Abort on error
-        if: ${{ failure() }}
-        run: echo "Some of jobs failed" && false

@@ -29,12 +29,13 @@ pub enum StatementKind {
     Class(Box<ClassDefinition>),                            // name, extends, members
     Assign(String, Expr),                                   // variable assignment
     For(Box<ForStatement>),
-    ForOf(String, Expr, Vec<Statement>),                      // variable, iterable, body
+    ForOf(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind, variable, iterable, body
+    ForOfExpr(Expr, Expr, Vec<Statement>),                    // assignment-form for-of with expression LHS, iterable, body
     ForIn(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind (None = assignment), variable, object, body
-    ForOfDestructuringObject(Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // var { .. } of iterable
-    ForOfDestructuringArray(Vec<DestructuringElement>, Expr, Vec<Statement>), // var [ .. ] of iterable
-    While(Expr, Vec<Statement>),                              // condition, body
-    DoWhile(Vec<Statement>, Expr),                            // body, condition
+    ForOfDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // decl kind, var { .. } of iterable
+    ForOfDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // decl kind, var [ .. ] of iterable
+    While(Expr, Vec<Statement>),                                                                   // condition, body
+    DoWhile(Vec<Statement>, Expr),                                                                 // body, condition
     Switch(Box<SwitchStatement>),
     With(Box<Expr>, Vec<Statement>), // with (expr) body
     Break(Option<String>),

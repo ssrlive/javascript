@@ -294,6 +294,7 @@ impl<'gc> ClosureData<'gc> {
             captured_envs: Vec::new(),
             bound_this: None,
             is_arrow: false,
+            is_strict: false,
         }
     }
 }
@@ -314,6 +315,8 @@ pub struct ClosureData<'gc> {
     pub captured_envs: Vec<JSObjectDataPtr<'gc>>,
     pub bound_this: Option<Value<'gc>>,
     pub is_arrow: bool,
+    // Whether this function was parsed/declared in strict mode (function-level "use strict").
+    pub is_strict: bool,
 }
 
 #[derive(Clone, Collect)]

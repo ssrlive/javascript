@@ -205,6 +205,14 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
             _ => vec![body],
         };
 
+        // Map token-based decl_kind (if present) to VarDeclKind
+        let decl_kind_mapped: Option<crate::core::VarDeclKind> = decl_kind.and_then(|tk| match tk {
+            crate::Token::Var => Some(crate::core::VarDeclKind::Var),
+            crate::Token::Let => Some(crate::core::VarDeclKind::Let),
+            crate::Token::Const => Some(crate::core::VarDeclKind::Const),
+            _ => None,
+        });
+
         let kind = if let Some(pattern) = for_of_pattern {
             match pattern {
                 ForOfPattern::Object(destr_pattern) => {
@@ -221,22 +229,32 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                             _ => return Err(raise_parse_error!("Invalid element in object destructuring pattern")),
                         }
                     }
-                    StatementKind::ForOfDestructuringObject(obj_pattern, iterable, body_stmts)
+                    StatementKind::ForOfDestructuringObject(decl_kind_mapped, obj_pattern, iterable, body_stmts)
                 }
-                ForOfPattern::Array(arr_pattern) => StatementKind::ForOfDestructuringArray(arr_pattern, iterable, body_stmts),
+                ForOfPattern::Array(arr_pattern) => {
+                    StatementKind::ForOfDestructuringArray(decl_kind_mapped, arr_pattern, iterable, body_stmts)
+                }
             }
         } else {
-            let var_name = if let Some(decls) = init_decls {
+            // Non-destructuring for-of: could be a variable declaration, simple identifier, or an assignment-form expression (property/index)
+            if let Some(decls) = init_decls {
                 if decls.len() != 1 {
                     return Err(raise_parse_error!("Invalid for-of statement"));
                 }
-                decls[0].0.clone()
+                let var_name = decls[0].0.clone();
+                StatementKind::ForOf(decl_kind_mapped, var_name, iterable, body_stmts)
             } else if let Some(Expr::Var(s, _, _)) = init_expr {
-                s
+                StatementKind::ForOf(decl_kind_mapped, s, iterable, body_stmts)
+            } else if let Some(expr) = init_expr {
+                // Allow property/index expressions (assignment form) as left-hand side
+                // e.g., `for (obj.prop of iterable) ...`
+                match expr {
+                    Expr::Property(_, _) | Expr::Index(_, _) => StatementKind::ForOfExpr(expr, iterable, body_stmts),
+                    _ => return Err(raise_parse_error!("Invalid for-of left-hand side")),
+                }
             } else {
                 return Err(raise_parse_error!("Invalid for-of left-hand side"));
-            };
-            StatementKind::ForOf(var_name, iterable, body_stmts)
+            }
         };
 
         return Ok(Statement {
@@ -1346,6 +1364,18 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
             // Accept 'static' as an identifier name (e.g., `var static;`) in contexts
             // where an IdentifierName is expected.
             let name = "static".to_string();
+            *index += 1;
+            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                Some(parse_assignment(t, index)?)
+            } else {
+                None
+            };
+            decls.push((name, init));
+        } else if matches!(t[*index].token, Token::Async) {
+            // Accept 'async' as an identifier name in variable declarations
+            // when it is not acting as the async keyword (e.g., `var async = 1;`).
+            let name = "async".to_string();
             *index += 1;
             let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
                 *index += 1;
@@ -3062,7 +3092,16 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     return Err(raise_parse_error_at(tokens.get(*index)));
                 }
             } else {
-                return Err(raise_parse_error_at(tokens.get(*index)));
+                // Treat bare 'async' as an identifier name when not followed by function/arrow
+                let line = token_data.line;
+                let column = token_data.column;
+                let mut expr = Expr::Var("async".to_string(), Some(line), Some(column));
+                if *index < tokens.len() && matches!(tokens[*index].token, Token::Arrow) {
+                    *index += 1;
+                    let body = parse_arrow_body(tokens, index)?;
+                    expr = Expr::ArrowFunction(vec![DestructuringElement::Variable("async".to_string(), None)], body);
+                }
+                expr
             }
         }
         Token::LParen => {

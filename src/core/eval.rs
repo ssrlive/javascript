@@ -10,7 +10,7 @@ use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
         BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, ImportSpecifier, JSObjectDataPtr, ObjectDestructuringElement,
-        PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, is_error,
+        PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, get_own_property, is_error,
         new_js_object_data, object_get_key_value, object_set_key_value, value_to_string,
     },
     js_math::handle_math_call,
@@ -794,9 +794,9 @@ fn hoist_var_declarations<'gc>(
             }
             StatementKind::For(for_stmt) => hoist_var_declarations(mc, env, &for_stmt.body)?,
             StatementKind::ForIn(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOf(_, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOfDestructuringObject(_, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOfDestructuringArray(_, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOf(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOfDestructuringObject(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::ForOfDestructuringArray(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::While(_, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::DoWhile(body, _) => hoist_var_declarations(mc, env, body)?,
             StatementKind::TryCatch(tc_stmt) => {
@@ -848,6 +848,9 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     func_obj.borrow_mut(mc).prototype = Some(*proto);
                 }
 
+                let is_strict = body.first()
+                    .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                    .unwrap_or(false);
                 let closure_data = ClosureData {
                     params: params.clone(),
                     body: body.clone(),
@@ -856,6 +859,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     captured_envs: Vec::new(),
                     bound_this: None,
                     is_arrow: false,
+                    is_strict,
                 };
                 let closure_val = Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data));
                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -884,6 +888,9 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     func_obj.borrow_mut(mc).prototype = Some(*proto);
                 }
 
+                let is_strict = body.first()
+                    .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                    .unwrap_or(false);
                 let closure_data = ClosureData {
                     params: params.clone(),
                     body: body.clone(),
@@ -892,6 +899,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     captured_envs: Vec::new(),
                     bound_this: None,
                     is_arrow: false,
+                    is_strict,
                 };
                 let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
 
@@ -1960,6 +1968,22 @@ fn eval_res<'gc>(
             let stmts_clone = stmts.clone();
             let block_env = new_js_object_data(mc);
             block_env.borrow_mut(mc).prototype = Some(*env);
+
+            // Propagate strictness into block env as an OWN property if any ancestor
+            // environment is strict. This ensures closures created inside blocks
+            // will correctly inherit strictness even if prototypes are transiently
+            // modified (e.g., during indirect eval clearing).
+            let mut p = Some(*env);
+            while let Some(cur) = p {
+                if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
+                    && matches!(*val.borrow(), Value::Boolean(true))
+                {
+                    object_set_key_value(mc, &block_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+                    break;
+                }
+                p = cur.borrow().prototype;
+            }
+
             let res = evaluate_statements_with_context(mc, &block_env, &stmts_clone, labels)?;
             match res {
                 ControlFlow::Normal(val) => {
@@ -2257,6 +2281,7 @@ fn eval_res<'gc>(
                     break;
                 }
             }
+            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::With(obj_expr, body) => {
@@ -2284,7 +2309,12 @@ fn eval_res<'gc>(
             }
             Ok(None)
         }
-        StatementKind::ForOf(var_name, iterable, body) => {
+        StatementKind::ForOf(decl_kind_opt, var_name, iterable, body) => {
+            // Hoist var declaration if necessary
+            if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
+                hoist_name(mc, env, var_name)?;
+            }
+
             let iter_val = evaluate_expr(mc, env, iterable)?;
             let mut iterator = None;
 
@@ -2310,31 +2340,10 @@ fn eval_res<'gc>(
                     if let Value::Object(iter_obj) = res {
                         iterator = Some(iter_obj);
                     }
-                } else {
-                    // Debug why method is missing
-                    if matches!(iter_val, Value::String(_)) {
-                        let sym_ctor = object_get_key_value(env, "Symbol").unwrap();
-                        let sym_obj = if let Value::Object(o) = &*sym_ctor.borrow() { *o } else { panic!() };
-                        let iter_sym = object_get_key_value(&sym_obj, "iterator").unwrap();
-                        println!("DEBUG: ForOf String iterator missing. Symbol.iterator: {:?}", iter_sym.borrow());
-                        // check if String.prototype has it
-                        let str_ctor = object_get_key_value(env, "String").unwrap();
-                        if let Value::Object(s_obj) = &*str_ctor.borrow()
-                            && let Some(proto) = object_get_key_value(s_obj, "prototype")
-                            && let Value::Object(p_obj) = &*proto.borrow()
-                            && let Value::Symbol(s) = &*iter_sym.borrow()
-                        {
-                            let has = object_get_key_value(p_obj, s);
-                            println!("DEBUG: String.prototype[@@iterator] found: {:?}", has.is_some());
-                        }
-                    }
                 }
             }
 
             if let Some(iter_obj) = iterator {
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
-
                 loop {
                     let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
@@ -2363,8 +2372,190 @@ fn eval_res<'gc>(
                             Value::Undefined
                         };
 
-                        env_set(mc, &loop_env, var_name, value)?;
-                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                        match decl_kind_opt {
+                            Some(crate::core::VarDeclKind::Var) | None => {
+                                // var or assignment form: update existing binding
+                                crate::core::env_set_recursive(mc, env, var_name, value)?;
+                                let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Break(label) => {
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                }
+                            }
+                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                // create a fresh lexical env for each iteration
+                                let iter_env = new_js_object_data(mc);
+                                iter_env.borrow_mut(mc).prototype = Some(*env);
+                                env_set(mc, &iter_env, var_name, value)?;
+                                let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Break(label) => {
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                }
+                            }
+                        }
+                    } else {
+                        return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
+                    }
+                }
+                *last_value = Value::Undefined;
+                return Ok(None);
+            }
+
+            if let Value::Object(obj) = iter_val
+                && is_array(mc, &obj)
+            {
+                let len_val = object_get_key_value(&obj, "length").unwrap().borrow().clone();
+                let len = match len_val {
+                    Value::Number(n) => n as usize,
+                    _ => 0,
+                };
+                for i in 0..len {
+                    let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
+                    match decl_kind_opt {
+                        Some(crate::core::VarDeclKind::Var) | None => {
+                            crate::core::env_set_recursive(mc, env, var_name, val)?;
+                            let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                            match res {
+                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Break(label) => {
+                                    if label.is_none() {
+                                        break;
+                                    }
+                                    return Ok(Some(ControlFlow::Break(label)));
+                                }
+                                ControlFlow::Continue(label) => {
+                                    if let Some(ref l) = label
+                                        && !own_labels.contains(l)
+                                    {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            }
+                        }
+                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                            let iter_env = new_js_object_data(mc);
+                            iter_env.borrow_mut(mc).prototype = Some(*env);
+                            env_set(mc, &iter_env, var_name, val)?;
+                            let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                            match res {
+                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Break(label) => {
+                                    if label.is_none() {
+                                        break;
+                                    }
+                                    return Ok(Some(ControlFlow::Break(label)));
+                                }
+                                ControlFlow::Continue(label) => {
+                                    if let Some(ref l) = label
+                                        && !own_labels.contains(l)
+                                    {
+                                        return Ok(Some(ControlFlow::Continue(label)));
+                                    }
+                                }
+                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            }
+                        }
+                    }
+                }
+                *last_value = Value::Undefined;
+                return Ok(None);
+            }
+
+            Err(EvalError::Js(raise_type_error!("Value is not iterable")))
+        }
+        StatementKind::ForOfExpr(lhs, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+            let mut iterator = None;
+
+            // Try to use Symbol.iterator
+            if let Some(sym_ctor) = object_get_key_value(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(iter_sym) = object_get_key_value(sym_obj, "iterator")
+                && let Value::Symbol(iter_sym_data) = &*iter_sym.borrow()
+            {
+                let method = if let Value::Object(obj) = &iter_val {
+                    if let Some(c) = object_get_key_value(obj, iter_sym_data) {
+                        c.borrow().clone()
+                    } else {
+                        Value::Undefined
+                    }
+                } else {
+                    get_primitive_prototype_property(mc, env, &iter_val, &PropertyKey::Symbol(*iter_sym_data))?
+                };
+
+                if !matches!(method, Value::Undefined | Value::Null) {
+                    let res = evaluate_call_dispatch(mc, env, method, Some(iter_val.clone()), vec![])?;
+
+                    if let Value::Object(iter_obj) = res {
+                        iterator = Some(iter_obj);
+                    }
+                }
+            }
+
+            if let Some(iter_obj) = iterator {
+                loop {
+                    let next_method = object_get_key_value(&iter_obj, "next")
+                        .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
+                        .borrow()
+                        .clone();
+
+                    let next_res_val = evaluate_call_dispatch(mc, env, next_method, Some(Value::Object(iter_obj)), vec![])?;
+
+                    if let Value::Object(next_res) = next_res_val {
+                        let done = if let Some(done_val) = object_get_key_value(&next_res, "done") {
+                            match &*done_val.borrow() {
+                                Value::Boolean(b) => *b,
+                                _ => false,
+                            }
+                        } else {
+                            false
+                        };
+
+                        if done {
+                            break;
+                        }
+
+                        let value = if let Some(val) = object_get_key_value(&next_res, "value") {
+                            val.borrow().clone()
+                        } else {
+                            Value::Undefined
+                        };
+
+                        // Assignment form: assign to lhs expression
+                        evaluate_assign_target_with_value(mc, env, lhs, value.clone())?;
+                        let res = evaluate_statements_with_context(mc, env, body, labels)?;
                         match res {
                             ControlFlow::Normal(v) => *last_value = v,
                             ControlFlow::Break(label) => {
@@ -2387,6 +2578,7 @@ fn eval_res<'gc>(
                         return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
                     }
                 }
+                *last_value = Value::Undefined;
                 return Ok(None);
             }
 
@@ -2398,12 +2590,11 @@ fn eval_res<'gc>(
                     Value::Number(n) => n as usize,
                     _ => 0,
                 };
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
                 for i in 0..len {
                     let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
-                    env_set(mc, &loop_env, var_name, val)?;
-                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    // Assignment form: assign to lhs expression
+                    evaluate_assign_target_with_value(mc, env, lhs, val)?;
+                    let res = evaluate_statements_with_context(mc, env, body, labels)?;
                     match res {
                         ControlFlow::Normal(v) => *last_value = v,
                         ControlFlow::Break(label) => {
@@ -2491,6 +2682,7 @@ fn eval_res<'gc>(
                                 ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                             }
                         }
+                        *last_value = Value::Undefined;
                         return Ok(None);
                     }
                     // `let` / `const` declaration: create a fresh lexical environment for
@@ -2529,12 +2721,14 @@ fn eval_res<'gc>(
             }
             Ok(None)
         }
-        StatementKind::ForOfDestructuringObject(pattern, iterable, body) => {
-            // Hoist var declarations from destructuring pattern
+        StatementKind::ForOfDestructuringObject(decl_kind_opt, pattern, iterable, body) => {
+            // Hoist var declarations from destructuring pattern (var case)
             let mut names = Vec::new();
             collect_names_from_object_destructuring(pattern, &mut names);
-            for name in names {
-                hoist_name(mc, env, &name)?;
+            for name in names.iter() {
+                if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
+                    hoist_name(mc, env, name)?;
+                }
             }
 
             // Simplified: assume array for now
@@ -2543,10 +2737,18 @@ fn eval_res<'gc>(
                 && is_array(mc, &obj)
             {
                 let len = object_get_length(&obj).unwrap_or(0);
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
                 for i in 0..len {
                     let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
+                    // Determine per-iteration env depending on decl kind
+                    let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        let e = new_js_object_data(mc);
+                        e.borrow_mut(mc).prototype = Some(*env);
+                        e
+                    } else {
+                        // For var or assignment form, reuse parent env (no fresh binding)
+                        new_js_object_data(mc) // use a temporary env that delegates to parent but we'll set into parent when needed
+                    };
+
                     // Perform object destructuring
                     for elem in pattern {
                         match elem {
@@ -2561,7 +2763,14 @@ fn eval_res<'gc>(
                                     Value::Undefined
                                 };
                                 if let DestructuringElement::Variable(name, _) = value {
-                                    crate::core::env_set_recursive(mc, env, name, prop_val)?;
+                                    match decl_kind_opt {
+                                        Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                            env_set(mc, &iter_env, name, prop_val)?;
+                                        }
+                                        _ => {
+                                            crate::core::env_set_recursive(mc, env, name, prop_val)?;
+                                        }
+                                    }
                                 }
                             }
                             ObjectDestructuringElement::Rest(_name) => {
@@ -2569,7 +2778,14 @@ fn eval_res<'gc>(
                             }
                         }
                     }
-                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+
+                    let res = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        evaluate_statements_with_context(mc, &iter_env, body, labels)?
+                    } else {
+                        // var or assignment form: evaluate in parent env
+                        evaluate_statements_with_context(mc, env, body, labels)?
+                    };
+
                     match res {
                         ControlFlow::Normal(v) => *last_value = v,
                         ControlFlow::Break(label) => {
@@ -2595,12 +2811,14 @@ fn eval_res<'gc>(
                 "ForOfDestructuringObject only supports Arrays currently"
             )))
         }
-        StatementKind::ForOfDestructuringArray(pattern, iterable, body) => {
-            // Hoist var declarations from destructuring pattern
+        StatementKind::ForOfDestructuringArray(decl_kind_opt, pattern, iterable, body) => {
+            // Hoist var declarations from destructuring pattern (var case)
             let mut names = Vec::new();
             collect_names_from_destructuring(pattern, &mut names);
-            for name in names {
-                hoist_name(mc, env, &name)?;
+            for name in names.iter() {
+                if let Some(crate::core::VarDeclKind::Var) = decl_kind_opt {
+                    hoist_name(mc, env, name)?;
+                }
             }
 
             // Try iterator first (support for Map, Set, etc.)
@@ -2633,9 +2851,6 @@ fn eval_res<'gc>(
             }
 
             if let Some(iter_obj) = iterator {
-                let loop_env = new_js_object_data(mc);
-                loop_env.borrow_mut(mc).prototype = Some(*env);
-
                 loop {
                     let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
@@ -2664,44 +2879,93 @@ fn eval_res<'gc>(
                             Value::Undefined
                         };
 
-                        // Perform array destructuring on the iterator-provided value
-                        for (j, elem) in pattern.iter().enumerate() {
-                            if let DestructuringElement::Variable(name, _) = elem {
-                                let elem_val = if let Value::Object(o) = &value {
-                                    if is_array(mc, o) {
-                                        if let Some(cell) = object_get_key_value(o, j) {
-                                            cell.borrow().clone()
+                        match decl_kind_opt {
+                            Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
+                                // fresh lexical environment per iteration
+                                let iter_env = new_js_object_data(mc);
+                                iter_env.borrow_mut(mc).prototype = Some(*env);
+
+                                // perform destructuring into iter_env
+                                for (j, elem) in pattern.iter().enumerate() {
+                                    if let DestructuringElement::Variable(name, _) = elem {
+                                        let elem_val = if let Value::Object(o) = &value {
+                                            if is_array(mc, o) {
+                                                if let Some(cell) = object_get_key_value(o, j) {
+                                                    cell.borrow().clone()
+                                                } else {
+                                                    Value::Undefined
+                                                }
+                                            } else {
+                                                Value::Undefined
+                                            }
                                         } else {
                                             Value::Undefined
-                                        }
-                                    } else {
-                                        Value::Undefined
+                                        };
+                                        env_set(mc, &iter_env, name, elem_val)?;
                                     }
-                                } else {
-                                    Value::Undefined
-                                };
-                                crate::core::env_set_recursive(mc, env, name, elem_val)?;
-                            }
-                        }
+                                }
 
-                        let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
-                        match res {
-                            ControlFlow::Normal(v) => *last_value = v,
-                            ControlFlow::Break(label) => {
-                                if label.is_none() {
-                                    break;
+                                let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Break(label) => {
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                                 }
-                                return Ok(Some(ControlFlow::Break(label)));
                             }
-                            ControlFlow::Continue(label) => {
-                                if let Some(ref l) = label
-                                    && !own_labels.contains(l)
-                                {
-                                    return Ok(Some(ControlFlow::Continue(label)));
+                            _ => {
+                                // var or assignment form: bind into parent env
+                                for (j, elem) in pattern.iter().enumerate() {
+                                    if let DestructuringElement::Variable(name, _) = elem {
+                                        let elem_val = if let Value::Object(o) = &value {
+                                            if is_array(mc, o) {
+                                                if let Some(cell) = object_get_key_value(o, j) {
+                                                    cell.borrow().clone()
+                                                } else {
+                                                    Value::Undefined
+                                                }
+                                            } else {
+                                                Value::Undefined
+                                            }
+                                        } else {
+                                            Value::Undefined
+                                        };
+                                        crate::core::env_set_recursive(mc, env, name, elem_val)?;
+                                    }
+                                }
+
+                                let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                                match res {
+                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Break(label) => {
+                                        if label.is_none() {
+                                            break;
+                                        }
+                                        return Ok(Some(ControlFlow::Break(label)));
+                                    }
+                                    ControlFlow::Continue(label) => {
+                                        if let Some(ref l) = label
+                                            && !own_labels.contains(l)
+                                        {
+                                            return Ok(Some(ControlFlow::Continue(label)));
+                                        }
+                                    }
+                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                                 }
                             }
-                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                         }
                     } else {
                         return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
@@ -3023,6 +3287,50 @@ fn evaluate_expr_assign<'gc>(
             log::error!("Unsupported assignment target reached in evaluate_expr_assign: {}", variant);
             Err(EvalError::Js(raise_eval_error!("Assignment target not supported")))
         }
+    }
+}
+
+// Helper: assign a precomputed runtime value to an assignment target expression
+fn evaluate_assign_target_with_value<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    target: &Expr,
+    val: Value<'gc>,
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    match target {
+        Expr::Var(name, _, _) => {
+            env_set_recursive(mc, env, name, val.clone())?;
+            Ok(val)
+        }
+        Expr::Property(obj_expr, key) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            if let Value::Object(obj) = obj_val {
+                let key_val = PropertyKey::from(key.to_string());
+                set_property_with_accessors(mc, env, &obj, &key_val, val.clone())?;
+                Ok(val)
+            } else {
+                Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
+            }
+        }
+        Expr::Index(obj_expr, key_expr) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let key_val_res = evaluate_expr(mc, env, key_expr)?;
+
+            let key = match key_val_res {
+                Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Symbol(s) => PropertyKey::Symbol(s),
+                _ => PropertyKey::from(value_to_string(&key_val_res)),
+            };
+
+            if let Value::Object(obj) = obj_val {
+                set_property_with_accessors(mc, env, &obj, &key, val.clone())?;
+                Ok(val)
+            } else {
+                Err(EvalError::Js(raise_eval_error!("Cannot assign to property of non-object")))
+            }
+        }
+        _ => Err(EvalError::Js(raise_eval_error!("Assignment target not supported"))),
     }
 }
 
@@ -3896,11 +4204,9 @@ fn evaluate_expr_pow_assign<'gc>(
 }
 
 pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<'gc>> {
-    log::trace!("DEBUG: Checking top level return for stmts: {:#?}", stmts);
     for stmt in stmts {
         match &*stmt.kind {
             StatementKind::Return(_) => {
-                log::trace!("DEBUG: Found top-level return!");
                 return Err(EvalError::Js(raise_syntax_error!("Illegal return statement")));
             }
             StatementKind::Block(inner) => check_top_level_return(inner)?,
@@ -3913,10 +4219,10 @@ pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<
             StatementKind::While(_, body) => check_top_level_return(body)?,
             StatementKind::DoWhile(body, _) => check_top_level_return(body)?,
             StatementKind::For(for_stmt) => check_top_level_return(&for_stmt.body)?,
-            StatementKind::ForOf(_, _, body) => check_top_level_return(body)?,
+            StatementKind::ForOf(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::ForIn(_, _, _, body) => check_top_level_return(body)?,
-            StatementKind::ForOfDestructuringObject(_, _, body) => check_top_level_return(body)?,
-            StatementKind::ForOfDestructuringArray(_, _, body) => check_top_level_return(body)?,
+            StatementKind::ForOfDestructuringObject(_, _, _, body) => check_top_level_return(body)?,
+            StatementKind::ForOfDestructuringArray(_, _, _, body) => check_top_level_return(body)?,
             StatementKind::Switch(sw) => {
                 for case in &sw.cases {
                     match case {
@@ -3942,6 +4248,127 @@ pub fn check_top_level_return<'gc>(stmts: &[Statement]) -> Result<(), EvalError<
     Ok(())
 }
 
+fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Statement]) -> Result<(), EvalError<'gc>> {
+    let mut fn_names: Vec<String> = Vec::new();
+    for stmt in statements {
+        if let StatementKind::FunctionDeclaration(name, ..) = &*stmt.kind
+            && !fn_names.contains(name)
+        {
+            fn_names.push(name.clone());
+        }
+    }
+    // Check in reverse order as per spec semantics
+    for name in fn_names.iter().rev() {
+        let key = crate::core::PropertyKey::String(name.clone());
+        if crate::core::get_own_property(env, &key).is_some() && !env.borrow().is_configurable(&key) {
+            return Err(EvalError::Js(crate::raise_type_error!(format!(
+                "Cannot declare global function '{}'",
+                name
+            ))));
+        }
+    }
+    Ok(())
+}
+
+fn run_with_global_strictness_cleared<'gc, F>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    f: F,
+) -> Result<Value<'gc>, EvalError<'gc>>
+where
+    F: FnOnce() -> Result<Value<'gc>, EvalError<'gc>>,
+{
+    let original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
+
+    // Remove the __is_strict own property temporarily
+    let _ = env
+        .borrow_mut(mc)
+        .properties
+        .shift_remove(&PropertyKey::String("__is_strict".to_string()));
+
+    let res = f();
+
+    if let Some(orig) = original_strict {
+        object_set_key_value(mc, env, "__is_strict", orig).map_err(EvalError::Js)?;
+    } else {
+        // No original value -- ensure it remains removed (in case executed code set it)
+        let _ = env
+            .borrow_mut(mc)
+            .properties
+            .shift_remove(&PropertyKey::String("__is_strict".to_string()));
+    }
+
+    res
+}
+
+fn handle_eval_function<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    eval_args: &[Value<'gc>],
+) -> Result<Value<'gc>, EvalError<'gc>> {
+    let first_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
+    if let Value::String(script_str) = first_arg {
+        let script = utf16_to_utf8(&script_str);
+        let mut tokens = tokenize(&script).map_err(EvalError::Js)?;
+        if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
+            tokens.pop();
+        }
+        let mut index = 0;
+        let statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+
+        // If executing in the global environment, perform EvalDeclarationInstantiation
+        // checks for FunctionDeclarations per spec: if any function cannot be declared
+        // as a global (e.g., conflicts with non-configurable existing property such
+        // as 'NaN'), throw a TypeError and do not create any global functions.
+        if env.borrow().prototype.is_none() {
+            check_global_declarations(env, &statements)?;
+        }
+
+        // If the evaluated script begins with a "use strict" directive,
+        // create a fresh declarative environment whose prototype points
+        // to the current env so strict direct evals and strict indirect
+        // evals do not instantiate top-level bindings into the caller
+        // or global variable environment.
+        let starts_with_use_strict = statements.first()
+            .map(|s| matches!(&*s.kind, StatementKind::Expr(e) if matches!(e, Expr::StringLit(ss) if utf16_to_utf8(ss).as_str() == "use strict")))
+            .unwrap_or(false);
+
+        // Determine effective strictness
+        let caller_is_strict = object_get_key_value(env, "__is_strict")
+            .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+
+        let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+            .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+            .unwrap_or(false);
+
+        let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
+
+        // Prepare execution environment
+        let exec_env = if is_strict_eval {
+            let new_env = crate::core::new_js_object_data(mc);
+            new_env.borrow_mut(mc).prototype = Some(*env);
+            new_env.borrow_mut(mc).is_function_scope = true;
+            object_set_key_value(mc, &new_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+            new_env
+        } else {
+            *env
+        };
+
+        // Execution closure
+        let run_stmts = || check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
+
+        // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
+        if env.borrow().prototype.is_none() && !is_strict_eval {
+            run_with_global_strictness_cleared(mc, env, run_stmts)
+        } else {
+            run_stmts()
+        }
+    } else {
+        Ok(first_arg)
+    }
+}
+
 pub fn evaluate_call_dispatch<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
@@ -3956,116 +4383,11 @@ pub fn evaluate_call_dispatch<'gc>(
             Err(e) => Err(EvalError::Js(e)),
         },
         Value::Function(name) => {
-            log::trace!("DEBUG: evaluate_call_dispatch calling native function: {}", name);
             if let Some(res) = call_native_function(mc, &name, this_val.clone(), &eval_args, env)? {
-                log::trace!("DEBUG: call_native_function handled {}", name);
                 return Ok(res);
             }
-            log::trace!("DEBUG: call_native_function did not handle {}", name);
             if name == "eval" {
-                let first_arg = eval_args.first().cloned().unwrap_or(Value::Undefined);
-                if let Value::String(script_str) = first_arg {
-                    let script = utf16_to_utf8(&script_str);
-                    let mut tokens = tokenize(&script).map_err(EvalError::Js)?;
-                    if tokens.last().map(|td| td.token == Token::EOF).unwrap_or(false) {
-                        tokens.pop();
-                    }
-                    let mut index = 0;
-                    let statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
-
-                    // If executing in the global environment, perform EvalDeclarationInstantiation
-                    // checks for FunctionDeclarations per spec: if any function cannot be declared
-                    // as a global (e.g., conflicts with non-configurable existing property such
-                    // as 'NaN'), throw a TypeError and do not create any global functions.
-                    if env.borrow().prototype.is_none() {
-                        let mut fn_names: Vec<String> = Vec::new();
-                        for stmt in &statements {
-                            if let StatementKind::FunctionDeclaration(name, ..) = &*stmt.kind
-                                && !fn_names.contains(name)
-                            {
-                                fn_names.push(name.clone());
-                            }
-                        }
-                        // Check in reverse order as per spec semantics
-                        for name in fn_names.iter().rev() {
-                            let key = crate::core::PropertyKey::String(name.clone());
-                            if crate::core::get_own_property(env, &key).is_some() && !env.borrow().is_configurable(&key) {
-                                return Err(EvalError::Js(crate::raise_type_error!(format!(
-                                    "Cannot declare global function '{}'",
-                                    name
-                                ))));
-                            }
-                        }
-                    }
-
-                    // If the evaluated script begins with a "use strict" directive,
-                    // create a fresh declarative environment whose prototype points
-                    // to the current env so strict direct evals and strict indirect
-                    // evals do not instantiate top-level bindings into the caller
-                    // or global variable environment.
-                    let starts_with_use_strict = statements.first()
-                        .map(|s| matches!(&*s.kind, StatementKind::Expr(e) if matches!(e, Expr::StringLit(ss) if utf16_to_utf8(ss).as_str() == "use strict")))
-                        .unwrap_or(false);
-
-                    // By default execute in the current env. However, a strict eval
-                    // (either because the script begins with "use strict" OR the
-                    // calling environment is strict) must evaluate in a fresh
-                    // declarative environment whose prototype is the current env so
-                    // top-level bindings don't leak into the caller.
-                    let caller_is_strict = object_get_key_value(env, "__is_strict")
-                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
-                        .unwrap_or(false);
-                    // If this is an indirect eval executing in the global env, the
-                    // eval's strictness is determined by the script itself, not by
-                    // the caller's strictness. We can detect indirect eval via the
-                    // temporary "__is_indirect_eval" flag that is set on the env
-                    // for indirect calls.
-                    let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
-                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
-                        .unwrap_or(false);
-
-                    let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
-
-                    let mut exec_env = *env;
-                    if is_strict_eval {
-                        let new_env = crate::core::new_js_object_data(mc);
-                        new_env.borrow_mut(mc).prototype = Some(*env);
-                        new_env.borrow_mut(mc).is_function_scope = true;
-                        // Mark the eval env as strict so evaluate_statements will
-                        // treat it as strict even if the script doesn't contain
-                        // a "use strict" directive (direct eval inherits strictness).
-                        object_set_key_value(mc, &new_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
-                        exec_env = new_env;
-                    }
-
-                    // If executing in the global environment (indirect eval case), and
-                    // the evaluated script does NOT begin with "use strict", temporarily
-                    // clear the global strictness marker so the eval runs as non-strict.
-                    let mut original_strict: Option<crate::core::Value> = None;
-                    let mut cleared_global_strict = false;
-                    if env.borrow().prototype.is_none() && !is_strict_eval {
-                        original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
-                        object_set_key_value(mc, env, "__is_strict", Value::Boolean(false)).map_err(EvalError::Js)?;
-                        cleared_global_strict = true;
-                    }
-
-                    check_top_level_return(&statements)?;
-                    // eval executes in `exec_env` (may be new declarative env for strict eval)
-                    let res = evaluate_statements(mc, &exec_env, &statements);
-
-                    if cleared_global_strict {
-                        if let Some(orig) = original_strict {
-                            object_set_key_value(mc, env, "__is_strict", orig).map_err(EvalError::Js)?;
-                        } else {
-                            // No original value -- set to undefined so checks won't treat it as strict
-                            object_set_key_value(mc, env, "__is_strict", Value::Undefined).map_err(EvalError::Js)?;
-                        }
-                    }
-
-                    res
-                } else {
-                    Ok(first_arg)
-                }
+                handle_eval_function(mc, env, &eval_args)
             } else if let Some(method_name) = name.strip_prefix("console.") {
                 crate::js_console::handle_console_method(mc, method_name, &eval_args, env)
             } else if let Some(_method) = name.strip_prefix("os.") {
@@ -4794,7 +5116,6 @@ fn evaluate_expr_call<'gc>(
             }
         } else {
             let val = evaluate_expr(mc, env, arg_expr)?;
-            log::trace!("DEBUG: evaluated arg_expr {:?} -> {:?}", arg_expr, val);
             eval_args.push(val);
         }
     }
@@ -4809,17 +5130,8 @@ fn evaluate_expr_call<'gc>(
         }
     }
 
-    // Debug: log callee & evaluated args for every call to trace argument flow
-    log::trace!(
-        "DEBUG: evaluate_expr_call func_expr={:?} eval_args={:?} this_val={:?}",
-        func_expr,
-        eval_args,
-        this_val
-    );
-
     // Is this a *direct* eval call? (IsDirectEvalCall: callee is an IdentifierReference named "eval")
     let is_direct_eval = matches!(func_expr, Expr::Var(name, ..) if name == "eval");
-    log::trace!("DEBUG: is_direct_eval = {}", is_direct_eval);
 
     // If this is an *indirect* call to the builtin "eval", execute it in the global environment
     let is_indirect_eval_call = matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval;
@@ -4829,7 +5141,6 @@ fn evaluate_expr_call<'gc>(
         while let Some(proto) = root_env.borrow().prototype {
             root_env = proto;
         }
-        log::trace!("DEBUG: Using global env for indirect eval: {:p}", &root_env);
         root_env
     } else {
         *env
@@ -5423,6 +5734,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
+            let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
@@ -5431,6 +5745,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 captured_envs: Vec::new(),
                 bound_this: None,
                 is_arrow: false,
+                is_strict,
             };
             let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -5470,6 +5785,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 func_obj.borrow_mut(mc).prototype = Some(*proto);
             }
 
+            let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
@@ -5478,6 +5796,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 captured_envs: Vec::new(),
                 bound_this: None,
                 is_arrow: false,
+                is_strict,
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -5505,6 +5824,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Err(e) => return Err(EvalError::Js(e)),
             };
 
+            let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
+
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
@@ -5513,6 +5836,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 captured_envs: Vec::new(),
                 bound_this: Some(captured_this),
                 is_arrow: true,
+                is_strict,
             };
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val).map_err(EvalError::Js)?;
@@ -6186,6 +6510,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Err(e) => return Err(EvalError::Js(e)),
             };
 
+            let is_strict = body.first()
+                .map(|s| matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict"))
+                .unwrap_or(false);
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
@@ -6194,12 +6521,14 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 captured_envs: Vec::new(),
                 bound_this: Some(captured_this),
                 is_arrow: true,
+                is_strict,
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val).map_err(EvalError::Js)?;
 
             Ok(Value::Object(func_obj))
         }
+        Expr::ValuePlaceholder => Ok(Value::Undefined),
         _ => todo!("{expr:?}"),
     }
 }
@@ -6237,6 +6566,30 @@ fn evaluate_function_expression<'gc>(
     // only inside the function body. We implement this by setting the function's
     // closure environment to the surrounding lexical env (`*env`) and creating
     // a per-call binding (in `call_closure`) when the function is invoked.
+    let has_body_use_strict = body.first()
+        .map(|s| {
+             matches!(&*s.kind, StatementKind::Expr(crate::core::Expr::StringLit(ss)) if crate::unicode::utf16_to_utf8(ss).as_str() == "use strict")
+        })
+        .unwrap_or(false);
+
+    // Compute whether the lexical environment or any of its prototypes is marked strict.
+    // We deliberately continue traversing the prototype chain even if an own property exists
+    // and is false, to avoid transient masking by temporary non-strict markers (e.g., during
+    // indirect eval clearing). This ensures child environments correctly inherit strictness.
+    let mut proto_iter = Some(*env);
+    let mut env_strict_ancestor = false;
+    while let Some(cur) = proto_iter {
+        if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
+            && matches!(*val.borrow(), Value::Boolean(true))
+        {
+            env_strict_ancestor = true;
+            break;
+        }
+        proto_iter = cur.borrow().prototype;
+    }
+
+    let is_strict = has_body_use_strict || env_strict_ancestor;
+
     let closure_data = ClosureData {
         params: params.to_vec(),
         body: body.to_vec(),
@@ -6245,6 +6598,7 @@ fn evaluate_function_expression<'gc>(
         captured_envs: Vec::new(),
         bound_this: None,
         is_arrow: false,
+        is_strict,
     };
     let closure_val = Value::Closure(Gc::new(mc, closure_data));
     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -6958,12 +7312,6 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
     err_val
 }
 
-use std::cell::Cell;
-
-thread_local! {
-    static CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
-}
-
 pub fn call_closure<'gc>(
     mc: &MutationContext<'gc>,
     cl: &crate::core::ClosureData<'gc>,
@@ -6972,54 +7320,35 @@ pub fn call_closure<'gc>(
     env: &JSObjectDataPtr<'gc>,
     fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
-    // Increment and trace call depth for debugging runaway recursion/stack overflows
-    CALL_DEPTH.with(|d| {
-        let depth = d.get() + 1;
-        d.set(depth);
-        // Try to print first numeric argument for recursive functions like factorial
-        let first_arg = args
-            .first()
-            .map(|v| match v {
-                Value::Number(n) => n.to_string(),
-                _ => "_".to_string(),
-            })
-            .unwrap_or_else(|| "_".to_string());
-        log::trace!("call_closure enter depth={} first_arg={}", depth, first_arg);
-        if depth > 2000 {
-            // Prevent runaway recursion from completely blowing the process stack during debugging
-            log::error!("call depth exceeded threshold (depth={}). Aborting to avoid stack overflow.", depth);
-            panic!("call depth exceeded threshold");
-        }
-    });
-
-    struct DepthGuard;
-    impl Drop for DepthGuard {
-        fn drop(&mut self) {
-            CALL_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
-            CALL_DEPTH.with(|d| log::trace!("call_closure exit depth={}", d.get()));
-        }
-    }
-    let _depth_guard = DepthGuard;
-
-    // Debug: if this closure looks like a promise resolve function (param named "value"), log the incoming args
-    if !cl.params.is_empty()
-        && let DestructuringElement::Variable(name, _) = &cl.params[0]
-        && name == "value"
-    {
-        log::trace!("DEBUG: call_closure candidate 'resolve' called with args={:?}", args);
-    }
-
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(cl.env);
     call_env.borrow_mut(mc).is_function_scope = true;
+
+    // Determine whether this function is strict (either via its own 'use strict'
+    // directive at creation time or because its lexical environment is marked strict).
+    // Determine whether any ancestor of the function's lexical environment is strict.
+    let mut proto_iter = Some(cl.env);
+    let mut env_strict_ancestor = false;
+    while let Some(cur) = proto_iter {
+        if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
+            && matches!(*val.borrow(), Value::Boolean(true))
+        {
+            env_strict_ancestor = true;
+            break;
+        }
+        proto_iter = cur.borrow().prototype;
+    }
+
+    let fn_is_strict = cl.is_strict || env_strict_ancestor;
+    if fn_is_strict {
+        object_set_key_value(mc, &call_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+    }
 
     // If this is a Named Function Expression and the function object has a
     // `name` property, bind that name in the function's call environment so the
     // function can reference itself by name (e.g., `fac` inside `function fac ...`).
     if let Some(fn_obj_ptr) = fn_obj {
         if let Some(name) = fn_obj_ptr.borrow().get_property("name") {
-            // Use structured debug logging; avoid formatting full `Value` to reduce stack usage
-            log::debug!("call_closure: binding NFE name='{}' args_len={}", name, args.len());
             crate::core::env_set(mc, &call_env, &name, Value::Object(fn_obj_ptr)).map_err(EvalError::Js)?;
             // Also set a frame name on the call environment so thrown errors can
             // indicate which function they occurred in (used in stack traces).
@@ -7029,12 +7358,31 @@ pub fn call_closure<'gc>(
         object_set_key_value(mc, &call_env, "__caller", Value::Object(*env)).map_err(EvalError::Js)?;
     }
 
+    // Determine the [[This]] binding for the call.
+    // If the closure has a bound_this (from bind() or arrow capture), use it.
+    // Otherwise, if a caller supplied an explicit this_val, use it.
+    // If no this_val was supplied (bare call), we must default according to the function's strictness:
+    // - strict functions: undefined
+    // - non-strict functions: global object
     let effective_this = if let Some(bound) = &cl.bound_this {
         Some(bound.clone())
+    } else if let Some(tv) = this_val {
+        Some(tv)
     } else {
-        this_val
+        // No explicit this provided. Choose default based on function strictness.
+        if fn_is_strict {
+            Some(Value::Undefined)
+        } else {
+            // Non-strict: default to the global object (topmost env object)
+            let mut root_env = *env;
+            while let Some(proto) = root_env.borrow().prototype {
+                root_env = proto;
+            }
+            Some(Value::Object(root_env))
+        }
     };
 
+    // Always place a 'this' binding in the call environment (may be undefined)
     if let Some(tv) = effective_this {
         object_set_key_value(mc, &call_env, "this", tv.clone()).map_err(EvalError::Js)?;
     }

@@ -1730,6 +1730,7 @@ pub fn handle_function_prototype_method<'gc>(
                     captured_envs: original.captured_envs.clone(),
                     bound_this: effective_bound_this,
                     is_arrow: original.is_arrow,
+                    is_strict: original.is_strict,
                 };
 
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))

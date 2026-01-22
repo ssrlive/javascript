@@ -80,10 +80,12 @@ pub(crate) fn evaluate_this<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataP
     // environment object as the default global object.
     let mut env_opt: Option<JSObjectDataPtr> = Some(*env);
     let mut last_seen: JSObjectDataPtr = *env;
+
     while let Some(env_ptr) = env_opt {
         last_seen = env_ptr;
         if let Some(this_val_rc) = object_get_key_value(&env_ptr, "this") {
-            return Ok(this_val_rc.borrow().clone());
+            let val = this_val_rc.borrow().clone();
+            return Ok(val);
         }
         env_opt = env_ptr.borrow().prototype;
     }
@@ -143,6 +145,7 @@ pub fn create_arguments_object<'gc>(
             captured_envs: Vec::new(),
             bound_this: None,
             is_arrow: false,
+            is_strict: false,
         };
         let thrower_val = crate::core::Value::Closure(crate::core::Gc::new(mc, thrower_data));
 

@@ -1,5 +1,7 @@
 "use strict";
 
+const isNode = typeof process !== 'undefined' && !!process.versions?.node;
+
 {
   (function() {
     var x9 = 0;
@@ -14,7 +16,7 @@
   console.log('indirect_eval_var_env_test: PASS');
 }
 
-{
+if (!isNode) {
   var __10_4_2_1_2_apply = "str";
   // Test: eval.apply should act as indirect eval (global scope)
   function testcase_apply() {
@@ -38,7 +40,7 @@
   }
 }
 
-{
+if (!isNode) {
   // Test: eval.call should act as indirect eval (global scope)
   var __10_4_2_1_2_call = "str";
   function testcase_call() {
@@ -62,7 +64,7 @@
   }
 }
 
-{
+if (!isNode) {
   // Simple test to ensure indirect eval uses global environment
   var __10_4_2_1_2_indirect = "str";
   function testcase_indirect() {
@@ -163,5 +165,19 @@
   } catch(e) {
     console.log('direct_eval_mutates_local_var_strict_test: FAIL', e);
     throw e;
+  }
+}
+
+{
+  console.log('==== eval this binding in strict function scope ===');
+  var this_value_from_eval = null;
+
+  (function() {
+    this_value_from_eval = eval('this;');
+  }());
+
+  if (this_value_from_eval !== undefined) {
+    // console.log(this_value_from_eval);
+    throw new Error('Direct eval in strict function scope did not have undefined this, got ' + this_value_from_eval);
   }
 }

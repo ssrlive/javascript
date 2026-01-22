@@ -1,5 +1,7 @@
 "use strict";
 
+const isNode = typeof process !== 'undefined' && !!process.versions?.node;
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message || "Assertion failed");
@@ -11,7 +13,7 @@ function assert(condition, message) {
   assert((0,eval)("for(false;false;false);") === undefined, "Indirect eval of empty for statement did not return undefined");
 }
 
-{
+if (!isNode) {
   console.log("==== Indirect eval of various statements ====");
 
   var count_x = 0;
@@ -199,6 +201,35 @@ function assert(condition, message) {
       throw new Error("Expected no SyntaxError to be thrown");
     }
   }
+}
+
+{
+  console.log("==== const ForDeclaration: creates a fresh binding per iteration ====");
+  let s = 0;
+  let f = [undefined, undefined, undefined];
+
+  for (const x of [1, 2, 3]) {
+    s += x;
+    f[x-1] = function() { return x; }
+  }
+  assert(s === 6, "The value of `s` is `6`");
+  assert(f[0]() === 1, "`f[0]()` returns `1`");
+  assert(f[1]() === 2, "`f[1]()` returns `2`");
+  assert(f[2]() === 3, "`f[2]()` returns `3`");
+}
+
+{
+  console.log("==== leading `async` token in for-of LHS ====");
+
+  var async = { x: 0 };
+  for (async.x of [1]) ;
+  assert(async.x === 1, "The value of `async.x` is `1`");
+}
+
+{
+  console.log("==== Completion value when head has a declaration and no iteration occurs ====");
+  assert(eval('1; for (var a of []) { }') === undefined, "Completion value of first eval is not undefined");
+  assert((0,eval)('2; for (var b of []) { 3; }') === undefined, "Completion value of second eval is not undefined");
 }
 
 

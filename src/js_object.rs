@@ -546,6 +546,7 @@ pub fn handle_object_method<'gc>(
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
+                                        is_strict: false,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -568,6 +569,7 @@ pub fn handle_object_method<'gc>(
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
+                                        is_strict: false,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -594,6 +596,7 @@ pub fn handle_object_method<'gc>(
                             captured_envs: Vec::new(),
                             bound_this: None,
                             is_arrow: false,
+                            is_strict: false,
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -614,6 +617,7 @@ pub fn handle_object_method<'gc>(
                             captured_envs: Vec::new(),
                             bound_this: None,
                             is_arrow: false,
+                            is_strict: false,
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -685,6 +689,7 @@ pub fn handle_object_method<'gc>(
                                                     captured_envs: Vec::new(),
                                                     bound_this: None,
                                                     is_arrow: false,
+                                                    is_strict: false,
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -707,6 +712,7 @@ pub fn handle_object_method<'gc>(
                                                     captured_envs: Vec::new(),
                                                     bound_this: None,
                                                     is_arrow: false,
+                                                    is_strict: false,
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -735,6 +741,7 @@ pub fn handle_object_method<'gc>(
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
+                                        is_strict: false,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -756,6 +763,7 @@ pub fn handle_object_method<'gc>(
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
+                                        is_strict: false,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;

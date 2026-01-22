@@ -4,17 +4,21 @@ console.log("typeof Function = " + typeof Function);
 console.log("typeof Object = " + typeof Object);
 
 try {
-    new TypeError("msg");
-    console.log("new TypeError works");
+    throw new TypeError("msg");
 } catch (e) {
-    console.log("new TypeError failed: " + e);
+    if (!(e instanceof TypeError)) {
+        throw e;
+    }
 }
 
 try {
-    TypeError("msg");
-    console.log("TypeError() works");
+    throw TypeError("msg");
 } catch (e) {
-    console.log("TypeError() failed: " + e);
+    if (!(e instanceof TypeError)) {
+        throw e;
+    }
 }
 
-console.log("Is TypeError instance of Function? " + (TypeError instanceof Function));
+if (!(TypeError instanceof Function)) {
+    throw new Error("TypeError is not a Function");
+}

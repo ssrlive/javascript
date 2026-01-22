@@ -3157,12 +3157,26 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
     };
 
     // Handle postfix operators like index access. Accept line terminators
-    // between the primary and the postfix operator to support call-chains
+    // between the primary and certain postfix operators to support call-chains
     // split across lines (e.g. `promise.then(...)
-    // .then(...)`).
+    // .then(...)`). However, a line terminator must NOT appear before
+    // Update operators (`++`/`--`) because `x\n++` should be a SyntaxError
+    // (ASI inserts a semicolon after the expression).
     while *index < tokens.len() {
-        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
-            *index += 1;
+        // If there's a LineTerminator here, look ahead to the next non-LT token.
+        // If that token is `++` or `--`, do not treat this as a continuation
+        // (leave the LineTerminator to terminate the statement so the `++`
+        // becomes a separate (invalid) statement and produces a parse error).
+        if matches!(tokens[*index].token, Token::LineTerminator) {
+            let mut look = *index + 1;
+            while look < tokens.len() && matches!(tokens[look].token, Token::LineTerminator) {
+                look += 1;
+            }
+            if look < tokens.len() && matches!(tokens[look].token, Token::Increment | Token::Decrement) {
+                break;
+            }
+            // Otherwise consume the leading line terminators and continue
+            *index = look;
         }
         if *index >= tokens.len() {
             break;

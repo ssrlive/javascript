@@ -47,6 +47,14 @@ impl<'gc> EvalError<'gc> {
 /// Initialize the Error constructor and its prototype.
 pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let error_ctor = new_js_object_data(mc);
+    // Set the internal prototype of the constructor object so it behaves like a Function
+    if let Some(func_val_rc) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_val_rc.borrow()
+        && let Some(func_proto_rc) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*func_proto_rc.borrow()
+    {
+        error_ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
     object_set_key_value(mc, &error_ctor, "__is_constructor", Value::Boolean(true))?;
     object_set_key_value(mc, &error_ctor, "__native_ctor", Value::String(utf8_to_utf16("Error")))?;
 
@@ -96,6 +104,14 @@ fn initialize_native_error<'gc>(
     parent_proto: Value<'gc>,
 ) -> Result<(), JSError> {
     let ctor = new_js_object_data(mc);
+    // Ensure the native ctor object has Function.prototype as its internal prototype
+    if let Some(func_val_rc) = object_get_key_value(env, "Function")
+        && let Value::Object(func_ctor) = &*func_val_rc.borrow()
+        && let Some(func_proto_rc) = object_get_key_value(func_ctor, "prototype")
+        && let Value::Object(func_proto) = &*func_proto_rc.borrow()
+    {
+        ctor.borrow_mut(mc).prototype = Some(*func_proto);
+    }
     object_set_key_value(mc, &ctor, "__is_constructor", Value::Boolean(true))?;
     object_set_key_value(mc, &ctor, "__native_ctor", Value::String(utf8_to_utf16(name)))?;
 

@@ -276,8 +276,8 @@ for f in "${ordered[@]}"; do
 
   # cleanup temporary test file if created
   if [[ "$cleanup_tmp" == "true" && -n "$tmp" ]]; then
-    # rm -f "$tmp"
-    echo "$tmp"
+    rm -f "$tmp"
+    # echo "$tmp"
   fi
 
 done

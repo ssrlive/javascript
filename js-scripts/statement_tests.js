@@ -129,5 +129,77 @@ function assert(condition, message) {
   }
 }
 
+{
+  console.log("==== Indirect eval of var statement ====");
+  assert((0,eval)("var x = 1") === undefined, "Indirect eval of var statement did not return undefined");
+}
+
+{
+  console.log("==== Indirect eval of invalid syntax with line terminator ====");
+  try {
+    (0,eval)("x = 1; x\u000A++");
+    throw new Error("Expected SyntaxError was not thrown");
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) {
+      throw e;
+    }
+  }
+}
+
+{
+  console.log("==== Indirect eval of strict mode var declaration does not leak to global scope ====");
+  if (!('foo_88' in this)) {
+    (1,eval)('"use strict"; var foo_88 = 88;');
+    if ('foo_88' in this) {
+      throw new Error("Strict indirect eval leaked a top level declaration");
+    }
+  }
+}
+
+{
+  console.log("==== Direct eval of strict mode var declaration does not leak to calling context ====");
+
+  var leakedVar_99 = 0;
+  function directEvalStrict() {
+    eval('"use strict"; var leakedVar_99 = 99;');
+    assert(leakedVar_99 === 0, "Direct eval in strict mode leaked a variable to the calling context");
+  }
+
+  directEvalStrict();
+}
+
+{
+  console.log("==== Indirect eval of strict mode function declaration does not leak to calling context ====");
+  function testcase_strict() {
+    eval("function fun(x){ return x }");
+    assert(typeof (fun) === "undefined", "Indirect eval in strict mode leaked function declaration to calling context");
+  }
+  testcase_strict();
+}
+
+{
+  console.log("==== Direct eval of strict mode function declaration does not leak to calling context ====");
+  function testcase_direct_eval_strict_func() {
+    eval("'use strict'; function _10_4_2_1_4_fun(){}");
+    assert(typeof _10_4_2_1_4_fun === "undefined", "Strict indirect eval leaked function declaration to calling context");
+  }
+  testcase_direct_eval_strict_func();
+}
+
+{
+  console.log("==== Direct eval of invalid syntax with line terminator ====");
+  var x_plus_plus;
+  function tests() {
+    eval("x_plus_plus = 1; x_plus_plus\u000A++");
+  }
+  try {
+    tests();
+  } catch (e) {
+    if (!(e instanceof SyntaxError)) {
+      throw new Error("Expected no SyntaxError to be thrown");
+    }
+  }
+}
+
 
 console.log("All tests passed.");

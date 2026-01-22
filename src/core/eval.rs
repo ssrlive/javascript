@@ -1135,6 +1135,8 @@ pub fn evaluate_statements_with_labels<'gc>(
             log::trace!("evaluate_statements: indirect strict eval - creating declarative env");
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
+            // Prevent hoisting into the global env: treat this declarative env as a function scope
+            new_env.borrow_mut(mc).is_function_scope = true;
             exec_env = new_env;
         }
 
@@ -1222,7 +1224,6 @@ fn eval_res<'gc>(
             Ok(None)
         }
         StatementKind::Var(decls) => {
-            let mut last_init = Value::Undefined;
             for (name, expr_opt) in decls {
                 if let Some(expr) = expr_opt {
                     let val = match evaluate_expr(mc, env, expr) {
@@ -1230,7 +1231,6 @@ fn eval_res<'gc>(
                         Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                     };
 
-                    last_init = val.clone();
                     let mut target_env = *env;
                     while !target_env.borrow().is_function_scope {
                         if let Some(proto) = target_env.borrow().prototype {
@@ -1242,7 +1242,7 @@ fn eval_res<'gc>(
                     env_set(mc, &target_env, name, val)?;
                 }
             }
-            *last_value = last_init;
+            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::Const(decls) => {
@@ -3998,26 +3998,60 @@ pub fn evaluate_call_dispatch<'gc>(
                         }
                     }
 
-                    // If this is an indirect eval (executing in the global env), and the
-                    // evaluated script does not begin with a "use strict" directive,
-                    // temporarily clear the global strictness marker so the eval runs as
-                    // non-strict code. Restore the original value afterwards.
+                    // If the evaluated script begins with a "use strict" directive,
+                    // create a fresh declarative environment whose prototype points
+                    // to the current env so strict direct evals and strict indirect
+                    // evals do not instantiate top-level bindings into the caller
+                    // or global variable environment.
+                    let starts_with_use_strict = statements.first()
+                        .map(|s| matches!(&*s.kind, StatementKind::Expr(e) if matches!(e, Expr::StringLit(ss) if utf16_to_utf8(ss).as_str() == "use strict")))
+                        .unwrap_or(false);
+
+                    // By default execute in the current env. However, a strict eval
+                    // (either because the script begins with "use strict" OR the
+                    // calling environment is strict) must evaluate in a fresh
+                    // declarative environment whose prototype is the current env so
+                    // top-level bindings don't leak into the caller.
+                    let caller_is_strict = object_get_key_value(env, "__is_strict")
+                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                        .unwrap_or(false);
+                    // If this is an indirect eval executing in the global env, the
+                    // eval's strictness is determined by the script itself, not by
+                    // the caller's strictness. We can detect indirect eval via the
+                    // temporary "__is_indirect_eval" flag that is set on the env
+                    // for indirect calls.
+                    let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
+                        .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
+                        .unwrap_or(false);
+
+                    let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
+
+                    let mut exec_env = *env;
+                    if is_strict_eval {
+                        let new_env = crate::core::new_js_object_data(mc);
+                        new_env.borrow_mut(mc).prototype = Some(*env);
+                        new_env.borrow_mut(mc).is_function_scope = true;
+                        // Mark the eval env as strict so evaluate_statements will
+                        // treat it as strict even if the script doesn't contain
+                        // a "use strict" directive (direct eval inherits strictness).
+                        object_set_key_value(mc, &new_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+                        exec_env = new_env;
+                    }
+
+                    // If executing in the global environment (indirect eval case), and
+                    // the evaluated script does NOT begin with "use strict", temporarily
+                    // clear the global strictness marker so the eval runs as non-strict.
                     let mut original_strict: Option<crate::core::Value> = None;
                     let mut cleared_global_strict = false;
-                    if env.borrow().prototype.is_none() {
-                        let starts_with_use_strict = statements.first()
-                            .map(|s| matches!(&*s.kind, StatementKind::Expr(e) if matches!(e, Expr::StringLit(ss) if utf16_to_utf8(ss).as_str() == "use strict")))
-                            .unwrap_or(false);
-                        if !starts_with_use_strict {
-                            original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
-                            object_set_key_value(mc, env, "__is_strict", Value::Boolean(false)).map_err(EvalError::Js)?;
-                            cleared_global_strict = true;
-                        }
+                    if env.borrow().prototype.is_none() && !is_strict_eval {
+                        original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
+                        object_set_key_value(mc, env, "__is_strict", Value::Boolean(false)).map_err(EvalError::Js)?;
+                        cleared_global_strict = true;
                     }
 
                     check_top_level_return(&statements)?;
-                    // eval executes in the current environment
-                    let res = evaluate_statements(mc, env, &statements);
+                    // eval executes in `exec_env` (may be new declarative env for strict eval)
+                    let res = evaluate_statements(mc, &exec_env, &statements);
 
                     if cleared_global_strict {
                         if let Some(orig) = original_strict {
@@ -4504,6 +4538,26 @@ pub fn evaluate_call_dispatch<'gc>(
                             Ok(crate::js_array::handle_array_constructor(mc, &eval_args, env)?)
                         } else if name == &crate::unicode::utf8_to_utf16("Function") {
                             Ok(crate::js_function::handle_global_function(mc, "Function", &eval_args, env)?)
+                        } else if name == &crate::unicode::utf8_to_utf16("Error")
+                            || name == &crate::unicode::utf8_to_utf16("TypeError")
+                            || name == &crate::unicode::utf8_to_utf16("ReferenceError")
+                            || name == &crate::unicode::utf8_to_utf16("RangeError")
+                            || name == &crate::unicode::utf8_to_utf16("SyntaxError")
+                        {
+                            // For native Error constructors, calling them as a function
+                            // should produce a new Error object with the provided message.
+                            let msg_val = eval_args.first().cloned().unwrap_or(Value::Undefined);
+                            // The constructor's "prototype" property points to the error prototype
+                            if let Some(prototype_rc) = object_get_key_value(&obj, "prototype")
+                                && let Value::Object(proto_ptr) = &*prototype_rc.borrow()
+                            {
+                                let err = crate::core::create_error(mc, Some(*proto_ptr), msg_val).map_err(EvalError::Js)?;
+                                Ok(err)
+                            } else {
+                                // Fallback: create error with no prototype
+                                let err = crate::core::create_error(mc, None, msg_val).map_err(EvalError::Js)?;
+                                Ok(err)
+                            }
                         } else {
                             Err(EvalError::Js(raise_eval_error!("Not a function")))
                         }

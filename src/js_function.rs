@@ -1632,7 +1632,6 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
     }
 }
 
-#[allow(dead_code)]
 pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
     let func_ctor = new_js_object_data(mc);
     object_set_key_value(mc, &func_ctor, "name", Value::String(utf8_to_utf16("Function")))?;
@@ -1663,6 +1662,19 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
         .set_non_enumerable(crate::core::PropertyKey::from("constructor"));
 
     crate::core::env_set(mc, env, "Function", Value::Object(func_ctor))?;
+
+    // Ensure any native constructors created earlier (e.g., Error, TypeError)
+    // get Function.prototype as their internal prototype so `instanceof Function`
+    // behaves correctly.
+    let native_constructors = ["Error", "ReferenceError", "TypeError", "RangeError", "SyntaxError"];
+    for name in native_constructors {
+        if let Some(ctor_rc) = crate::core::object_get_key_value(env, name)
+            && let Value::Object(ctor_obj) = &*ctor_rc.borrow()
+        {
+            ctor_obj.borrow_mut(mc).prototype = Some(func_proto);
+        }
+    }
+
     Ok(())
 }
 

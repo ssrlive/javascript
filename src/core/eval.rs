@@ -972,8 +972,8 @@ pub fn evaluate_statements<'gc>(
         ControlFlow::Normal(val) => Ok(val),
         ControlFlow::Return(val) => Ok(val),
         ControlFlow::Throw(val, line, column) => Err(EvalError::Throw(val, line, column)),
-        ControlFlow::Break(_) => Err(EvalError::Js(raise_eval_error!("break statement not in loop or switch"))),
-        ControlFlow::Continue(_) => Err(EvalError::Js(raise_eval_error!("continue statement not in loop"))),
+        ControlFlow::Break(_) => Err(EvalError::Js(raise_syntax_error!("break statement not in loop or switch"))),
+        ControlFlow::Continue(_) => Err(EvalError::Js(raise_syntax_error!("continue statement not in loop"))),
     }
 }
 
@@ -1111,31 +1111,50 @@ pub fn evaluate_statements_with_labels<'gc>(
     labels: &[String],
     own_labels: &[String],
 ) -> Result<ControlFlow<'gc>, EvalError<'gc>> {
-    // If this statement sequence begins with a "use strict" directive, mark the
-    // environment so eval'd code and nested parsing can behave as strict code.
+    // If this statement sequence begins with a "use strict" directive, we
+    // need to mark the evaluation environment as strict. For indirect evals
+    // executed in the global environment, strict-mode eval code must not
+    // instantiate top-level FunctionDeclarations into the global variable
+    // environment. In that case we create a fresh declarative environment with
+    // its prototype set to the global env and perform hoisting/evaluation there
+    // so declarations don't leak into the global scope.
+    let mut exec_env = *env;
     if let Some(stmt0) = statements.first()
         && let StatementKind::Expr(expr) = &*stmt0.kind
         && let Expr::StringLit(s) = expr
         && utf16_to_utf8(s).as_str() == "use strict"
     {
         log::trace!("evaluate_statements: detected 'use strict' directive; marking env as strict");
-        object_set_key_value(mc, env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+        // If this env (or its prototype chain) indicates it is an indirect eval
+        // invocation, create a fresh declarative environment whose prototype is
+        // the current env so hoisting occurs on the new env and does not mutate
+        // the global bindings.
+        if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval")
+            && matches!(*flag_rc.borrow(), Value::Boolean(true))
+        {
+            log::trace!("evaluate_statements: indirect strict eval - creating declarative env");
+            let new_env = crate::core::new_js_object_data(mc);
+            new_env.borrow_mut(mc).prototype = Some(*env);
+            exec_env = new_env;
+        }
+
+        object_set_key_value(mc, &exec_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
     }
 
-    hoist_declarations(mc, env, statements)?;
+    hoist_declarations(mc, &exec_env, statements)?;
 
-    // If the environment is marked strict, scan for certain forbidden patterns
-    // such as assignment to the Identifier 'arguments' in function bodies which
-    // should be a SyntaxError under strict mode (matching Test262 expectations
-    // for eval'd code in strict contexts).
-    if let Some(is_strict_cell) = object_get_key_value(env, "__is_strict")
+    // If the execution environment is marked strict, scan for certain forbidden
+    // patterns such as assignment to the Identifier 'arguments' in function
+    // bodies which should be a SyntaxError under strict mode (matching Test262
+    // expectations for eval'd code in strict contexts).
+    if let Some(is_strict_cell) = object_get_key_value(&exec_env, "__is_strict")
         && let Value::Boolean(true) = *is_strict_cell.borrow()
     {
         for stmt in statements {
             if check_stmt_for_arguments_assignment(stmt) {
                 log::debug!("evaluate_statements: detected assignment to 'arguments' in function body under strict mode");
                 // Construct a SyntaxError object and throw it so it behaves like a JS exception
-                if let Some(syn_ctor_val) = object_get_key_value(env, "SyntaxError")
+                if let Some(syn_ctor_val) = object_get_key_value(&exec_env, "SyntaxError")
                     && let Value::Object(syn_ctor) = &*syn_ctor_val.borrow()
                     && let Some(proto_val_rc) = object_get_key_value(syn_ctor, "prototype")
                     && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
@@ -1154,7 +1173,7 @@ pub fn evaluate_statements_with_labels<'gc>(
 
     let mut last_value = Value::Undefined;
     for stmt in statements {
-        if let Some(cf) = eval_res(mc, stmt, &mut last_value, env, labels, own_labels)? {
+        if let Some(cf) = eval_res(mc, stmt, &mut last_value, &exec_env, labels, own_labels)? {
             return Ok(cf);
         }
     }
@@ -1909,9 +1928,7 @@ fn eval_res<'gc>(
         }
         StatementKind::Throw(expr) => {
             let val = evaluate_expr(mc, env, expr)?;
-            if let Value::Object(obj) = val
-                && is_error(&val)
-            {
+            if let Value::Object(obj) = val {
                 let mut filename = String::new();
                 if let Some(val_ptr) = object_get_key_value(env, "__filepath")
                     && let Value::String(s) = &*val_ptr.borrow()
@@ -1926,7 +1943,11 @@ fn eval_res<'gc>(
                 }
                 let frame = format!("at {} ({}:{}:{})", frame_name, filename, stmt.line, stmt.column);
                 let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
-                let new_stack = format!("{}\n    {}", current_stack, frame);
+                let new_stack = if current_stack.is_empty() {
+                    frame.clone()
+                } else {
+                    format!("{}\n    {}", current_stack, frame)
+                };
                 obj.borrow_mut(mc)
                     .set_property(mc, "stack", Value::String(utf8_to_utf16(&new_stack)));
 
@@ -2235,6 +2256,31 @@ fn eval_res<'gc>(
                 if !is_true {
                     break;
                 }
+            }
+            Ok(None)
+        }
+        StatementKind::With(obj_expr, body) => {
+            let obj_val = evaluate_expr(mc, env, obj_expr)?;
+            let with_env = new_js_object_data(mc);
+            with_env.borrow_mut(mc).prototype = Some(*env);
+
+            // Copy own properties of the object into the with-environment so they
+            // shadow outer bindings during the evaluation of the body.
+            if let Value::Object(o) = obj_val {
+                for (k, v) in o.borrow().properties.iter() {
+                    if let crate::core::PropertyKey::String(s) = k {
+                        object_set_key_value(mc, &with_env, s, v.borrow().clone())?;
+                    }
+                }
+            }
+
+            let res = evaluate_statements_with_context(mc, &with_env, body, labels)?;
+            match res {
+                ControlFlow::Normal(v) => *last_value = v,
+                ControlFlow::Break(label) => return Ok(Some(ControlFlow::Break(label))),
+                ControlFlow::Continue(label) => return Ok(Some(ControlFlow::Continue(label))),
+                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
+                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
             }
             Ok(None)
         }
@@ -2845,13 +2891,26 @@ fn refresh_error_by_additional_stack_frame<'gc>(
     if let EvalError::Js(js_err) = &mut e {
         js_err.inner.stack.push(frame.clone());
     }
-    if let EvalError::Throw(val, ..) = &mut e
-        && is_error(val)
-        && let Value::Object(obj) = val
-    {
-        let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
-        let new_stack = format!("{}\n    {}", current_stack, frame);
-        obj.borrow_mut(mc).set_property(mc, "stack", new_stack.into());
+
+    if let EvalError::Throw(val, l, c) = &mut e {
+        if !is_error(val) {
+            *l = Some(line);
+            *c = Some(column);
+        }
+        if let Value::Object(obj) = val {
+            // For user-defined/non-native thrown objects (e.g., Test262Error),
+            // prefer reporting the caller site as the top-level JS location so
+            // test harnesses can point at the assertion call site. For native
+            // Error instances created via `new Error`, preserve the original
+            // throw-site as the top-level location.
+            let current_stack = obj.borrow().get_property("stack").unwrap_or_default();
+            let new_stack = if current_stack.is_empty() {
+                frame.clone()
+            } else {
+                format!("{}\n    {}", current_stack, frame)
+            };
+            obj.borrow_mut(mc).set_property(mc, "stack", new_stack.into());
+        }
     }
     e
 }
@@ -3913,12 +3972,63 @@ pub fn evaluate_call_dispatch<'gc>(
                     }
                     let mut index = 0;
                     let statements = parse_statements(&tokens, &mut index).map_err(EvalError::Js)?;
+
+                    // If executing in the global environment, perform EvalDeclarationInstantiation
+                    // checks for FunctionDeclarations per spec: if any function cannot be declared
+                    // as a global (e.g., conflicts with non-configurable existing property such
+                    // as 'NaN'), throw a TypeError and do not create any global functions.
+                    if env.borrow().prototype.is_none() {
+                        let mut fn_names: Vec<String> = Vec::new();
+                        for stmt in &statements {
+                            if let StatementKind::FunctionDeclaration(name, ..) = &*stmt.kind
+                                && !fn_names.contains(name)
+                            {
+                                fn_names.push(name.clone());
+                            }
+                        }
+                        // Check in reverse order as per spec semantics
+                        for name in fn_names.iter().rev() {
+                            let key = crate::core::PropertyKey::String(name.clone());
+                            if crate::core::get_own_property(env, &key).is_some() && !env.borrow().is_configurable(&key) {
+                                return Err(EvalError::Js(crate::raise_type_error!(format!(
+                                    "Cannot declare global function '{}'",
+                                    name
+                                ))));
+                            }
+                        }
+                    }
+
+                    // If this is an indirect eval (executing in the global env), and the
+                    // evaluated script does not begin with a "use strict" directive,
+                    // temporarily clear the global strictness marker so the eval runs as
+                    // non-strict code. Restore the original value afterwards.
+                    let mut original_strict: Option<crate::core::Value> = None;
+                    let mut cleared_global_strict = false;
+                    if env.borrow().prototype.is_none() {
+                        let starts_with_use_strict = statements.first()
+                            .map(|s| matches!(&*s.kind, StatementKind::Expr(e) if matches!(e, Expr::StringLit(ss) if utf16_to_utf8(ss).as_str() == "use strict")))
+                            .unwrap_or(false);
+                        if !starts_with_use_strict {
+                            original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
+                            object_set_key_value(mc, env, "__is_strict", Value::Boolean(false)).map_err(EvalError::Js)?;
+                            cleared_global_strict = true;
+                        }
+                    }
+
                     check_top_level_return(&statements)?;
                     // eval executes in the current environment
-                    match evaluate_statements(mc, env, &statements) {
-                        Ok(v) => Ok(v),
-                        Err(e) => Err(e),
+                    let res = evaluate_statements(mc, env, &statements);
+
+                    if cleared_global_strict {
+                        if let Some(orig) = original_strict {
+                            object_set_key_value(mc, env, "__is_strict", orig).map_err(EvalError::Js)?;
+                        } else {
+                            // No original value -- set to undefined so checks won't treat it as strict
+                            object_set_key_value(mc, env, "__is_strict", Value::Undefined).map_err(EvalError::Js)?;
+                        }
                     }
+
+                    res
                 } else {
                     Ok(first_arg)
                 }
@@ -4658,7 +4768,8 @@ fn evaluate_expr_call<'gc>(
     log::trace!("DEBUG: is_direct_eval = {}", is_direct_eval);
 
     // If this is an *indirect* call to the builtin "eval", execute it in the global environment
-    let env_for_call = if matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval {
+    let is_indirect_eval_call = matches!(func_val, Value::Function(ref name) if name == "eval") && !is_direct_eval;
+    let env_for_call = if is_indirect_eval_call {
         // Walk up prototypes to find the top-level (global) environment
         let mut root_env = *env;
         while let Some(proto) = root_env.borrow().prototype {
@@ -4670,7 +4781,19 @@ fn evaluate_expr_call<'gc>(
         *env
     };
 
-    evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args)
+    if is_indirect_eval_call {
+        // Temporarily mark the global env so eval can detect it was called indirectly.
+        object_set_key_value(mc, &env_for_call, "__is_indirect_eval", Value::Boolean(true)).map_err(EvalError::Js)?;
+        let res = evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args);
+        // Remove temporary marker to avoid leaking into future calls.
+        let _ = env_for_call
+            .borrow_mut(mc)
+            .properties
+            .shift_remove(&PropertyKey::String("__is_indirect_eval".to_string()));
+        res
+    } else {
+        evaluate_call_dispatch(mc, &env_for_call, func_val, this_val, eval_args)
+    }
 }
 
 fn evaluate_expr_binary<'gc>(
@@ -6728,7 +6851,27 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         _ => ("Error", full_msg.clone()),
     };
 
-    let error_proto = if let Some(err_ctor_val) = object_get_key_value(env, name)
+    // Prefer global (root) constructors so created Error objects have the same
+    // constructor identity as user-visible global constructors (avoids mismatches
+    // when errors are created in nested or eval environments).
+    let mut root_env = *env;
+    while let Some(proto) = root_env.borrow().prototype {
+        root_env = proto;
+    }
+
+    let error_proto = if let Some(err_ctor_val) = object_get_key_value(&root_env, name)
+        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else if let Some(err_ctor_val) = object_get_key_value(&root_env, "Error")
+        && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
+        && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        Some(*proto)
+    } else if let Some(err_ctor_val) = object_get_key_value(env, name)
         && let Value::Object(err_ctor) = &*err_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(err_ctor, "prototype")
         && let Value::Object(proto) = &*proto_val.borrow()
@@ -6967,8 +7110,8 @@ pub fn call_closure<'gc>(
         ControlFlow::Return(val) => Ok(val),
         ControlFlow::Normal(_) => Ok(Value::Undefined),
         ControlFlow::Throw(v, line, column) => Err(EvalError::Throw(v, line, column)),
-        ControlFlow::Break(_) => Err(EvalError::Js(raise_eval_error!("break statement not in loop or switch"))),
-        ControlFlow::Continue(_) => Err(EvalError::Js(raise_eval_error!("continue statement not in loop"))),
+        ControlFlow::Break(_) => Err(EvalError::Js(raise_syntax_error!("break statement not in loop or switch"))),
+        ControlFlow::Continue(_) => Err(EvalError::Js(raise_syntax_error!("continue statement not in loop"))),
     }
 }
 

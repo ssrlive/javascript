@@ -36,6 +36,7 @@ pub enum StatementKind {
     While(Expr, Vec<Statement>),                              // condition, body
     DoWhile(Vec<Statement>, Expr),                            // body, condition
     Switch(Box<SwitchStatement>),
+    With(Box<Expr>, Vec<Statement>), // with (expr) body
     Break(Option<String>),
     Continue(Option<String>),
     Label(String, Box<Statement>),

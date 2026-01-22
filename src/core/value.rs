@@ -914,9 +914,19 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             current = parent_rc;
         } else {
             // Reached global scope (or end of chain) and variable not found.
-            // In strict mode, this is a ReferenceError.
-            // Since our engine is strict-only, we should error here instead of creating a global.
-            return Err(crate::raise_reference_error!(format!("{} is not defined", key)));
+            // If the global environment is operating in strict mode, this is a ReferenceError.
+            // If the global environment is non-strict, create a new global binding instead (as per
+            // ECMAScript non-strict assignment semantics for unresolvable references).
+            if let Some(is_strict_cell) = object_get_key_value(&current, "__is_strict") {
+                if let crate::core::Value::Boolean(true) = *is_strict_cell.borrow() {
+                    return Err(crate::raise_reference_error!(format!("{} is not defined", key)));
+                } else {
+                    return env_set(mc, &current, key, val);
+                }
+            } else {
+                // No explicit strictness marker: be permissive and create the global binding
+                return env_set(mc, &current, key, val);
+            }
         }
     }
 }

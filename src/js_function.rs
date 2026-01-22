@@ -1176,7 +1176,51 @@ fn evalute_eval_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], en
                 // index for parsing start position
                 let mut index: usize = 0;
 
-                let stmts = crate::core::parse_statements(&tokens, &mut index)?;
+                let mut stmts = crate::core::parse_statements(&tokens, &mut index)?;
+
+                // If this is an indirect eval executed in the global env and the eval code
+                // is strict (starts with "use strict"), do not instantiate top-level
+                // FunctionDeclarations into the (global) variable environment. Convert
+                // them into function expressions so they don't create bindings.
+                let is_indirect_eval = if let Some(flag) = crate::core::object_get_key_value(env, "__is_indirect_eval") {
+                    matches!(*flag.borrow(), crate::core::Value::Boolean(true))
+                } else {
+                    false
+                };
+                log::trace!(
+                    "DEBUG: eval env ptr={:p} __is_indirect_eval present={}",
+                    env,
+                    crate::core::object_get_key_value(env, "__is_indirect_eval").is_some()
+                );
+                log::trace!("DEBUG: is_indirect_eval = {}", is_indirect_eval);
+                if is_indirect_eval {
+                    log::trace!("DEBUG: eval env has __is_indirect_eval flag");
+                    if let Some(first) = stmts.first()
+                        && let crate::core::StatementKind::Expr(expr) = &*first.kind
+                        && let crate::core::Expr::StringLit(s) = expr
+                        && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
+                    {
+                        let mut converted = 0;
+                        for stmt in stmts.iter_mut() {
+                            if let crate::core::StatementKind::FunctionDeclaration(name, params, body, _is_generator, _is_async) =
+                                &*stmt.kind
+                            {
+                                let func_expr = crate::core::Expr::Function(Some(name.clone()), params.clone(), body.clone());
+                                *stmt.kind = crate::core::StatementKind::Expr(func_expr);
+                                converted += 1;
+                            }
+                        }
+                        log::trace!(
+                            "DEBUG: indirect strict eval - converted {} top-level function declarations into expressions",
+                            converted
+                        );
+                    } else {
+                        log::trace!(
+                            "DEBUG: indirect eval detected but not strict or no first-string; is_indirect_eval={}",
+                            is_indirect_eval
+                        );
+                    }
+                }
 
                 if let Err(e) = crate::core::check_top_level_return(&stmts) {
                     return Err(if let crate::core::EvalError::Js(js_err) = e {
@@ -1186,7 +1230,24 @@ fn evalute_eval_function<'gc>(mc: &MutationContext<'gc>, args: &[Value<'gc>], en
                     });
                 }
 
-                match crate::core::evaluate_statements(mc, env, &stmts) {
+                // If this was an indirect eval and the eval is strict (starts with "use strict"),
+                // execute it in a fresh declarative environment whose prototype is the global env.
+                // This prevents top-level FunctionDeclarations from creating global bindings (they
+                // will instead be bound to the new declarative env and won't leak into the caller).
+                let mut exec_env = *env;
+                if is_indirect_eval
+                    && let Some(first) = stmts.first()
+                    && let crate::core::StatementKind::Expr(expr) = &*first.kind
+                    && let crate::core::Expr::StringLit(s) = expr
+                    && crate::unicode::utf16_to_utf8(s).as_str() == "use strict"
+                {
+                    log::trace!("DEBUG: indirect strict eval - creating fresh declarative environment");
+                    let new_env = crate::core::new_js_object_data(mc);
+                    new_env.borrow_mut(mc).prototype = Some(*env);
+                    exec_env = new_env;
+                }
+
+                match crate::core::evaluate_statements(mc, &exec_env, &stmts) {
                     Ok(v) => Ok(v),
                     Err(err) => {
                         // Convert parse/eval errors into a thrown JS Error object so that

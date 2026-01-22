@@ -124,12 +124,12 @@ mod control_flow_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Err(err) => match err.kind() {
-                JSErrorKind::EvaluationError { message, .. } => {
+                JSErrorKind::SyntaxError { message, .. } => {
                     assert!(message.contains("break statement not in loop or switch"));
                 }
-                _ => panic!("Expected EvaluationError for break, got {:?}", err),
+                _ => panic!("Expected SyntaxError for break, got {:?}", err),
             },
-            _ => panic!("Expected EvaluationError for break, got {:?}", result),
+            _ => panic!("Expected SyntaxError for break, got {:?}", result),
         }
     }
 
@@ -146,12 +146,12 @@ mod control_flow_tests {
         let result = evaluate_script(script, None::<&std::path::Path>);
         match result {
             Err(err) => match err.kind() {
-                JSErrorKind::EvaluationError { message, .. } => {
+                JSErrorKind::SyntaxError { message, .. } => {
                     assert!(message.contains("continue statement not in loop"));
                 }
-                _ => panic!("Expected EvaluationError for continue, got {:?}", err),
+                _ => panic!("Expected SyntaxError for continue, got {:?}", err),
             },
-            _ => panic!("Expected EvaluationError for continue, got {:?}", result),
+            _ => panic!("Expected SyntaxError for continue, got {:?}", result),
         }
     }
 

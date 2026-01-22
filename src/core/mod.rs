@@ -94,8 +94,18 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
     crate::js_generator::initialize_generator(mc, env)?;
 
     env_set(mc, env, "undefined", Value::Undefined)?;
+    // Make global 'undefined', 'NaN', and 'Infinity' non-writable and non-configurable per ECMAScript
+    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("undefined"));
+    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("undefined"));
+
     env_set(mc, env, "NaN", Value::Number(f64::NAN))?;
+    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("NaN"));
+    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("NaN"));
+
     env_set(mc, env, "Infinity", Value::Number(f64::INFINITY))?;
+    env.borrow_mut(mc).set_non_configurable(crate::core::PropertyKey::from("Infinity"));
+    env.borrow_mut(mc).set_non_writable(crate::core::PropertyKey::from("Infinity"));
+
     env_set(mc, env, "eval", Value::Function("eval".to_string()))?;
 
     // This engine operates in strict mode only; mark the global environment accordingly so

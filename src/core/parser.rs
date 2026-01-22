@@ -32,9 +32,19 @@ pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statem
 }
 
 fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
-    // Skip leading semicolons or line terminators when parsing a single statement
-    while *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
+    // Skip leading line terminators when parsing a single statement.
+    // A leading semicolon denotes an empty statement, so consume it and return a ValuePlaceholder expression.
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
         *index += 1;
+    }
+    // Empty statement (single semicolon)
+    if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+        *index += 1;
+        return Ok(Statement {
+            kind: Box::new(StatementKind::Expr(crate::core::Expr::ValuePlaceholder)),
+            line: t[*index - 1].line,
+            column: t[*index - 1].column,
+        });
     }
     if *index >= t.len() {
         return Err(raise_parse_error!("Unexpected end of input"));
@@ -77,6 +87,7 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
                 })
             }
         }
+        Token::With => parse_with_statement(t, index),
         _ => {
             if let Token::Identifier(name) = &start_token.token
                 && *index + 1 < t.len()
@@ -743,6 +754,39 @@ fn parse_continue_statement(t: &[TokenData], index: &mut usize) -> Result<Statem
     })
 }
 
+fn parse_with_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    let start = *index;
+    let line = t[start].line;
+    let column = t[start].column;
+    *index += 1; // consume 'with'
+    if !matches!(t[*index].token, Token::LParen) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume (
+    let obj_expr = parse_expression(t, index)?;
+    if !matches!(t[*index].token, Token::RParen) {
+        return Err(raise_parse_error_at(t.get(*index)));
+    }
+    *index += 1; // consume )
+
+    // Skip any line terminators before the statement body
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
+    let stmt = parse_statement_item(t, index)?;
+    let body_stmts = match *stmt.kind {
+        StatementKind::Block(stmts) => stmts,
+        _ => vec![stmt],
+    };
+
+    Ok(Statement {
+        kind: Box::new(StatementKind::With(Box::new(obj_expr), body_stmts)),
+        line,
+        column,
+    })
+}
+
 fn parse_throw_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
     let start = *index;
     *index += 1; // consume throw
@@ -1290,6 +1334,18 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
 
         if let Token::Identifier(name) = &t[*index].token {
             let name = name.clone();
+            *index += 1;
+            let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
+                *index += 1;
+                Some(parse_assignment(t, index)?)
+            } else {
+                None
+            };
+            decls.push((name, init));
+        } else if matches!(t[*index].token, Token::Static) {
+            // Accept 'static' as an identifier name (e.g., `var static;`) in contexts
+            // where an IdentifierName is expected.
+            let name = "static".to_string();
             *index += 1;
             let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
                 *index += 1;

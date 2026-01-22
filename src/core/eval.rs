@@ -1032,6 +1032,15 @@ pub fn evaluate_statements_with_context<'gc>(
     evaluate_statements_with_labels(mc, env, statements, labels, &[])
 }
 
+pub fn evaluate_statements_with_context_and_last_value<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+    labels: &[String],
+) -> Result<(ControlFlow<'gc>, Value<'gc>), EvalError<'gc>> {
+    evaluate_statements_with_labels_and_last(mc, env, statements, labels, &[])
+}
+
 fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
     match e {
         Expr::Assign(lhs, _rhs) => {
@@ -1188,6 +1197,65 @@ pub fn evaluate_statements_with_labels<'gc>(
         }
     }
     Ok(ControlFlow::Normal(last_value))
+}
+
+pub fn evaluate_statements_with_labels_and_last<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+    statements: &[Statement],
+    labels: &[String],
+    own_labels: &[String],
+) -> Result<(ControlFlow<'gc>, Value<'gc>), EvalError<'gc>> {
+    // This mirrors evaluate_statements_with_labels but returns the last_value alongside the ControlFlow
+
+    let mut exec_env = *env;
+    if let Some(stmt0) = statements.first()
+        && let StatementKind::Expr(expr) = &*stmt0.kind
+        && let Expr::StringLit(s) = expr
+        && utf16_to_utf8(s).as_str() == "use strict"
+    {
+        if let Some(flag_rc) = object_get_key_value(env, "__is_indirect_eval")
+            && matches!(*flag_rc.borrow(), Value::Boolean(true))
+        {
+            let new_env = crate::core::new_js_object_data(mc);
+            new_env.borrow_mut(mc).prototype = Some(*env);
+            new_env.borrow_mut(mc).is_function_scope = true;
+            exec_env = new_env;
+        }
+
+        object_set_key_value(mc, &exec_env, "__is_strict", Value::Boolean(true)).map_err(EvalError::Js)?;
+    }
+
+    hoist_declarations(mc, &exec_env, statements)?;
+
+    if let Some(is_strict_cell) = object_get_key_value(&exec_env, "__is_strict")
+        && let Value::Boolean(true) = *is_strict_cell.borrow()
+    {
+        for stmt in statements {
+            if check_stmt_for_arguments_assignment(stmt) {
+                if let Some(syn_ctor_val) = object_get_key_value(&exec_env, "SyntaxError")
+                    && let Value::Object(syn_ctor) = &*syn_ctor_val.borrow()
+                    && let Some(proto_val_rc) = object_get_key_value(syn_ctor, "prototype")
+                    && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
+                {
+                    let msg = Value::String(utf8_to_utf16("Strict mode violation: assignment to 'arguments'"));
+                    let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg).map_err(EvalError::Js)?;
+                    return Err(EvalError::Throw(err_obj, Some(stmt.line), Some(stmt.column)));
+                }
+                return Err(EvalError::Js(raise_syntax_error!(
+                    "Strict mode violation: assignment to 'arguments'"
+                )));
+            }
+        }
+    }
+
+    let mut last_value = Value::Undefined;
+    for stmt in statements {
+        if let Some(cf) = eval_res(mc, stmt, &mut last_value, &exec_env, labels, own_labels)? {
+            return Ok((cf, last_value));
+        }
+    }
+    Ok((ControlFlow::Normal(last_value.clone()), last_value))
 }
 
 fn eval_res<'gc>(
@@ -1984,13 +2052,18 @@ fn eval_res<'gc>(
                 p = cur.borrow().prototype;
             }
 
-            let res = evaluate_statements_with_context(mc, &block_env, &stmts_clone, labels)?;
+            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts_clone, labels)?;
             match res {
-                ControlFlow::Normal(val) => {
-                    *last_value = val;
+                ControlFlow::Normal(_) => {
+                    *last_value = vbody;
                     Ok(None)
                 }
-                other => Ok(Some(other)),
+                other => {
+                    if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                        *last_value = vbody;
+                    }
+                    Ok(Some(other))
+                }
             }
         }
         StatementKind::If(if_stmt) => {
@@ -2010,25 +2083,35 @@ fn eval_res<'gc>(
                 let stmts = if_stmt.then_body.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &stmts, labels)?;
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts, labels)?;
                 match res {
-                    ControlFlow::Normal(val) => {
-                        *last_value = val;
+                    ControlFlow::Normal(_) => {
+                        *last_value = vbody;
                         Ok(None)
                     }
-                    other => Ok(Some(other)),
+                    other => {
+                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
+                        Ok(Some(other))
+                    }
                 }
             } else if let Some(else_stmts) = &if_stmt.else_body {
                 let stmts = else_stmts.clone();
                 let block_env = new_js_object_data(mc);
                 block_env.borrow_mut(mc).prototype = Some(*env);
-                let res = evaluate_statements_with_context(mc, &block_env, &stmts, labels)?;
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &block_env, &stmts, labels)?;
                 match res {
-                    ControlFlow::Normal(val) => {
-                        *last_value = val;
+                    ControlFlow::Normal(_) => {
+                        *last_value = vbody;
                         Ok(None)
                     }
-                    other => Ok(Some(other)),
+                    other => {
+                        if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
+                        Ok(Some(other))
+                    }
                 }
             } else {
                 Ok(None)
@@ -2041,10 +2124,15 @@ fn eval_res<'gc>(
             // (let/const/class) do not leak into the surrounding scope or into catch.
             let try_env = crate::core::new_js_object_data(mc);
             try_env.borrow_mut(mc).prototype = Some(*env);
-            let try_res = evaluate_statements_with_context(mc, &try_env, &try_stmts, labels);
+            let try_res = evaluate_statements_with_context_and_last_value(mc, &try_env, &try_stmts, labels);
 
             let mut result = match try_res {
-                Ok(cf) => cf,
+                Ok((cf, val)) => {
+                    if !matches!(val, Value::Undefined) {
+                        *last_value = val;
+                    }
+                    cf
+                }
                 Err(e) => match e {
                     EvalError::Js(js_err) => {
                         let val = js_error_to_value(mc, env, &js_err);
@@ -2066,9 +2154,15 @@ fn eval_res<'gc>(
                 }
 
                 let catch_stmts_clone = catch_stmts.clone();
-                let catch_res = evaluate_statements_with_context(mc, &catch_env, &catch_stmts_clone, labels);
+                let catch_res = evaluate_statements_with_context_and_last_value(mc, &catch_env, &catch_stmts_clone, labels);
                 match catch_res {
-                    Ok(cf) => result = cf,
+                    Ok((cf, val)) => {
+                        // Catch executed.
+                        if !matches!(val, Value::Undefined) {
+                            *last_value = val;
+                        }
+                        result = cf
+                    }
                     Err(e) => match e {
                         EvalError::Js(js_err) => {
                             let val = js_error_to_value(mc, env, &js_err);
@@ -2085,14 +2179,22 @@ fn eval_res<'gc>(
                 // block-scoped declarations are properly localized.
                 let finally_env = crate::core::new_js_object_data(mc);
                 finally_env.borrow_mut(mc).prototype = Some(*env);
-                let finally_res = evaluate_statements_with_context(mc, &finally_env, &finally_stmts_clone, labels);
+                let finally_res = evaluate_statements_with_context_and_last_value(mc, &finally_env, &finally_stmts_clone, labels);
                 match finally_res {
-                    Ok(ControlFlow::Normal(_)) => {
-                        // If finally completes normally, return the previous result (try or catch)
-                    }
-                    Ok(other) => {
-                        // If finally is abrupt (return, throw, break, continue), it overrides.
-                        result = other;
+                    Ok((other, val)) => {
+                        match other {
+                            ControlFlow::Normal(_) => {
+                                // Normal completion of finally -> ignore value, keep result
+                            }
+                            _ => {
+                                // Abrupt completion -> override result
+                                // If break/continue, we might need value
+                                if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(val, Value::Undefined) {
+                                    *last_value = val;
+                                }
+                                result = other;
+                            }
+                        }
                     }
                     Err(e) => match e {
                         EvalError::Js(js_err) => {
@@ -2131,14 +2233,24 @@ fn eval_res<'gc>(
             let effective_labels = if new_labels.is_empty() { labels } else { &new_labels };
             let mut new_own = own_labels.to_vec();
             new_own.push(label.clone());
-            let res = evaluate_statements_with_labels(mc, env, &stmts, effective_labels, &new_own)?;
+            let (res, vbody) = evaluate_statements_with_labels_and_last(mc, env, &stmts, effective_labels, &new_own)?;
             match res {
-                ControlFlow::Normal(val) => {
-                    *last_value = val;
+                ControlFlow::Normal(_) => {
+                    *last_value = vbody;
                     Ok(None)
                 }
-                ControlFlow::Break(Some(ref l)) if l == label => Ok(None),
-                other => Ok(Some(other)),
+                ControlFlow::Break(Some(ref l)) if l == label => {
+                    if !matches!(vbody, Value::Undefined) {
+                        *last_value = vbody;
+                    }
+                    Ok(None)
+                }
+                other => {
+                    if matches!(other, ControlFlow::Break(_) | ControlFlow::Continue(_)) && !matches!(vbody, Value::Undefined) {
+                        *last_value = vbody;
+                    }
+                    Ok(Some(other))
+                }
             }
         }
         StatementKind::Break(label) => Ok(Some(ControlFlow::Break(label.clone()))),
@@ -2166,10 +2278,13 @@ fn eval_res<'gc>(
                         break;
                     }
                 }
-                let res = evaluate_statements_with_context(mc, &loop_env, &for_stmt.body, labels)?;
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, &for_stmt.body, labels)?;
                 match res {
-                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Normal(_) => *last_value = vbody,
                     ControlFlow::Break(label) => {
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
                         if label.is_none() {
                             break;
                         }
@@ -2183,6 +2298,9 @@ fn eval_res<'gc>(
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
                         if let Some(ref l) = label {
                             if own_labels.contains(l) {
                                 // Match! Continue this loop.
@@ -2218,16 +2336,25 @@ fn eval_res<'gc>(
                 if !is_true {
                     break;
                 }
-                let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, body, labels)?;
                 match res {
-                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Normal(_) => *last_value = vbody,
                     ControlFlow::Break(label) => {
                         if label.is_none() {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             break;
+                        }
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
                         }
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
                         if let Some(ref l) = label {
                             if own_labels.contains(l) {
                                 // Match! Continue this loop.
@@ -2246,16 +2373,25 @@ fn eval_res<'gc>(
             let loop_env = new_js_object_data(mc);
             loop_env.borrow_mut(mc).prototype = Some(*env);
             loop {
-                let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, body, labels)?;
                 match res {
-                    ControlFlow::Normal(v) => *last_value = v,
+                    ControlFlow::Normal(_) => *last_value = vbody,
                     ControlFlow::Break(label) => {
                         if label.is_none() {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             break;
+                        }
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
                         }
                         return Ok(Some(ControlFlow::Break(label)));
                     }
                     ControlFlow::Continue(label) => {
+                        if !matches!(&vbody, Value::Undefined) {
+                            *last_value = vbody;
+                        }
                         if let Some(ref l) = label {
                             if own_labels.contains(l) {
                                 // Match! Continue this loop.
@@ -2281,7 +2417,6 @@ fn eval_res<'gc>(
                     break;
                 }
             }
-            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::With(obj_expr, body) => {
@@ -2315,7 +2450,19 @@ fn eval_res<'gc>(
                 hoist_name(mc, env, var_name)?;
             }
 
-            let iter_val = evaluate_expr(mc, env, iterable)?;
+            // If this is a lexical (let/const) declaration, create a head lexical environment
+            // which contains an uninitialized binding (TDZ) for the loop variable. The
+            // iterable expression is evaluated with this head env to ensure TDZ accesses
+            // throw ReferenceError as per spec.
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                env_set(mc, &he, var_name, Value::Uninitialized)?;
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
             let mut iterator = None;
 
             // Try to use Symbol.iterator
@@ -2344,6 +2491,8 @@ fn eval_res<'gc>(
             }
 
             if let Some(iter_obj) = iterator {
+                // V is the last normal completion value per spec ForIn/OfBodyEvaluation
+                let mut v = Value::Undefined;
                 loop {
                     let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
@@ -2376,24 +2525,32 @@ fn eval_res<'gc>(
                             Some(crate::core::VarDeclKind::Var) | None => {
                                 // var or assignment form: update existing binding
                                 crate::core::env_set_recursive(mc, env, var_name, value)?;
-                                let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                                 match res {
-                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Normal(_) => v = vbody.clone(),
                                     ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        *last_value = v.clone();
                                         if label.is_none() {
                                             break;
                                         }
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
+                                            *last_value = v.clone();
                                             return Ok(Some(ControlFlow::Continue(label)));
                                         }
                                     }
-                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                                 }
                             }
                             Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
@@ -2401,24 +2558,32 @@ fn eval_res<'gc>(
                                 let iter_env = new_js_object_data(mc);
                                 iter_env.borrow_mut(mc).prototype = Some(*env);
                                 env_set(mc, &iter_env, var_name, value)?;
-                                let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                                 match res {
-                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Normal(_) => v = vbody.clone(),
                                     ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
+                                        *last_value = v.clone();
                                         if label.is_none() {
                                             break;
                                         }
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            v = vbody.clone();
+                                        }
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
+                                            *last_value = v.clone();
                                             return Ok(Some(ControlFlow::Continue(label)));
                                         }
                                     }
-                                    ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                    ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                    ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                    ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                                 }
                             }
                         }
@@ -2426,7 +2591,7 @@ fn eval_res<'gc>(
                         return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
                     }
                 }
-                *last_value = Value::Undefined;
+                *last_value = v.clone();
                 return Ok(None);
             }
 
@@ -2438,58 +2603,76 @@ fn eval_res<'gc>(
                     Value::Number(n) => n as usize,
                     _ => 0,
                 };
+                // Track last normal completion value (V)
+                let mut v = Value::Undefined;
                 for i in 0..len {
                     let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
                     match decl_kind_opt {
                         Some(crate::core::VarDeclKind::Var) | None => {
                             crate::core::env_set_recursive(mc, env, var_name, val)?;
-                            let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                             match res {
-                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Normal(_) => v = vbody.clone(),
                                 ControlFlow::Break(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        v = vbody.clone();
+                                    }
+                                    *last_value = v.clone();
                                     if label.is_none() {
                                         break;
                                     }
                                     return Ok(Some(ControlFlow::Break(label)));
                                 }
                                 ControlFlow::Continue(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        v = vbody.clone();
+                                    }
                                     if let Some(ref l) = label
                                         && !own_labels.contains(l)
                                     {
+                                        *last_value = v.clone();
                                         return Ok(Some(ControlFlow::Continue(label)));
                                     }
                                 }
-                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                             }
                         }
                         Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
                             env_set(mc, &iter_env, var_name, val)?;
-                            let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                             match res {
-                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Normal(_) => v = vbody.clone(),
                                 ControlFlow::Break(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        v = vbody.clone();
+                                    }
+                                    *last_value = v.clone();
                                     if label.is_none() {
                                         break;
                                     }
                                     return Ok(Some(ControlFlow::Break(label)));
                                 }
                                 ControlFlow::Continue(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        v = vbody.clone();
+                                    }
                                     if let Some(ref l) = label
                                         && !own_labels.contains(l)
                                     {
+                                        *last_value = v.clone();
                                         return Ok(Some(ControlFlow::Continue(label)));
                                     }
                                 }
-                                ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                                ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                                ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                                ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                             }
                         }
                     }
                 }
-                *last_value = Value::Undefined;
+                *last_value = v.clone();
                 return Ok(None);
             }
 
@@ -2525,6 +2708,8 @@ fn eval_res<'gc>(
             }
 
             if let Some(iter_obj) = iterator {
+                // V is the last normal completion value per spec ForIn/OfBodyEvaluation
+                let mut v = Value::Undefined;
                 loop {
                     let next_method = object_get_key_value(&iter_obj, "next")
                         .ok_or(EvalError::Js(raise_type_error!("Iterator has no next method")))?
@@ -2555,30 +2740,38 @@ fn eval_res<'gc>(
 
                         // Assignment form: assign to lhs expression
                         evaluate_assign_target_with_value(mc, env, lhs, value.clone())?;
-                        let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                        let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                         match res {
-                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Normal(_) => v = vbody.clone(),
                             ControlFlow::Break(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    v = vbody.clone();
+                                }
+                                *last_value = v.clone();
                                 if label.is_none() {
                                     break;
                                 }
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
                             ControlFlow::Continue(label) => {
+                                if !matches!(&vbody, Value::Undefined) {
+                                    v = vbody.clone();
+                                }
                                 if let Some(ref l) = label
                                     && !own_labels.contains(l)
                                 {
+                                    *last_value = v.clone();
                                     return Ok(Some(ControlFlow::Continue(label)));
                                 }
                             }
-                            ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                            ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                            ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                            ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                         }
                     } else {
                         return Err(EvalError::Js(raise_type_error!("Iterator result is not an object")));
                     }
                 }
-                *last_value = Value::Undefined;
+                *last_value = v.clone();
                 return Ok(None);
             }
 
@@ -2590,30 +2783,40 @@ fn eval_res<'gc>(
                     Value::Number(n) => n as usize,
                     _ => 0,
                 };
+                let mut v = Value::Undefined;
                 for i in 0..len {
                     let val = object_get_key_value(&obj, i).unwrap().borrow().clone();
                     // Assignment form: assign to lhs expression
                     evaluate_assign_target_with_value(mc, env, lhs, val)?;
-                    let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                    let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                     match res {
-                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Normal(_) => v = vbody.clone(),
                         ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                v = vbody.clone();
+                            }
+                            *last_value = v.clone();
                             if label.is_none() {
                                 break;
                             }
                             return Ok(Some(ControlFlow::Break(label)));
                         }
                         ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                v = vbody.clone();
+                            }
                             if let Some(ref l) = label
                                 && !own_labels.contains(l)
                             {
+                                *last_value = v.clone();
                                 return Ok(Some(ControlFlow::Continue(label)));
                             }
                         }
-                        ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
-                        ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
+                        ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                        ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
                     }
                 }
+                *last_value = v.clone();
                 return Ok(None);
             }
 
@@ -2662,16 +2865,22 @@ fn eval_res<'gc>(
                                 log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
                             }
                             env_set_recursive(mc, env, var_name, Value::String(utf8_to_utf16(k)))?;
-                            let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                             match res {
-                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Normal(_) => *last_value = vbody,
                                 ControlFlow::Break(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        *last_value = vbody;
+                                    }
                                     if label.is_none() {
                                         break;
                                     }
                                     return Ok(Some(ControlFlow::Break(label)));
                                 }
                                 ControlFlow::Continue(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        *last_value = vbody;
+                                    }
                                     if let Some(ref l) = label
                                         && !own_labels.contains(l)
                                     {
@@ -2682,7 +2891,6 @@ fn eval_res<'gc>(
                                 ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                             }
                         }
-                        *last_value = Value::Undefined;
                         return Ok(None);
                     }
                     // `let` / `const` declaration: create a fresh lexical environment for
@@ -2695,16 +2903,22 @@ fn eval_res<'gc>(
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
                             env_set(mc, &iter_env, var_name, Value::String(utf8_to_utf16(k)))?;
-                            let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                            let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                             match res {
-                                ControlFlow::Normal(v) => *last_value = v,
+                                ControlFlow::Normal(_) => *last_value = vbody,
                                 ControlFlow::Break(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        *last_value = vbody;
+                                    }
                                     if label.is_none() {
                                         break;
                                     }
                                     return Ok(Some(ControlFlow::Break(label)));
                                 }
                                 ControlFlow::Continue(label) => {
+                                    if !matches!(&vbody, Value::Undefined) {
+                                        *last_value = vbody;
+                                    }
                                     if let Some(ref l) = label
                                         && !own_labels.contains(l)
                                     {
@@ -2731,8 +2945,22 @@ fn eval_res<'gc>(
                 }
             }
 
+            // If this is a lexical (let/const) declaration, create a head env with
+            // TDZ bindings for the names so that iterable evaluation will see the
+            // bindings as uninitialized and trigger ReferenceError on access.
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                for name in names.iter() {
+                    env_set(mc, &he, name, Value::Uninitialized)?;
+                }
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+
             // Simplified: assume array for now
-            let iter_val = evaluate_expr(mc, env, iterable)?;
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
             if let Value::Object(obj) = iter_val
                 && is_array(mc, &obj)
             {
@@ -2779,22 +3007,28 @@ fn eval_res<'gc>(
                         }
                     }
 
-                    let res = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
-                        evaluate_statements_with_context(mc, &iter_env, body, labels)?
+                    let (res, vbody) = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                        evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?
                     } else {
                         // var or assignment form: evaluate in parent env
-                        evaluate_statements_with_context(mc, env, body, labels)?
+                        evaluate_statements_with_context_and_last_value(mc, env, body, labels)?
                     };
 
                     match res {
-                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Normal(_) => *last_value = vbody,
                         ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             if label.is_none() {
                                 break;
                             }
                             return Ok(Some(ControlFlow::Break(label)));
                         }
                         ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             if let Some(ref l) = label
                                 && !own_labels.contains(l)
                             {
@@ -2822,7 +3056,20 @@ fn eval_res<'gc>(
             }
 
             // Try iterator first (support for Map, Set, etc.)
-            let iter_val = evaluate_expr(mc, env, iterable)?;
+            // If this is a lexical (let/const) declaration, create a head env with
+            // TDZ bindings for each name in the pattern so that iterable evaluation
+            // sees the inner bindings in TDZ and will throw on access.
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                for name in names.iter() {
+                    env_set(mc, &he, name, Value::Uninitialized)?;
+                }
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
             let mut iterator = None;
 
             // Try to use Symbol.iterator
@@ -2905,16 +3152,22 @@ fn eval_res<'gc>(
                                     }
                                 }
 
-                                let res = evaluate_statements_with_context(mc, &iter_env, body, labels)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &iter_env, body, labels)?;
                                 match res {
-                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Normal(_) => *last_value = vbody,
                                     ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            *last_value = vbody;
+                                        }
                                         if label.is_none() {
                                             break;
                                         }
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            *last_value = vbody;
+                                        }
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
@@ -2946,16 +3199,22 @@ fn eval_res<'gc>(
                                     }
                                 }
 
-                                let res = evaluate_statements_with_context(mc, env, body, labels)?;
+                                let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                                 match res {
-                                    ControlFlow::Normal(v) => *last_value = v,
+                                    ControlFlow::Normal(_) => *last_value = vbody,
                                     ControlFlow::Break(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            *last_value = vbody;
+                                        }
                                         if label.is_none() {
                                             break;
                                         }
                                         return Ok(Some(ControlFlow::Break(label)));
                                     }
                                     ControlFlow::Continue(label) => {
+                                        if !matches!(&vbody, Value::Undefined) {
+                                            *last_value = vbody;
+                                        }
                                         if let Some(ref l) = label
                                             && !own_labels.contains(l)
                                         {
@@ -3002,16 +3261,22 @@ fn eval_res<'gc>(
                             crate::core::env_set_recursive(mc, env, name, elem_val)?;
                         }
                     }
-                    let res = evaluate_statements_with_context(mc, &loop_env, body, labels)?;
+                    let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, body, labels)?;
                     match res {
-                        ControlFlow::Normal(v) => *last_value = v,
+                        ControlFlow::Normal(_) => *last_value = vbody,
                         ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             if label.is_none() {
                                 break;
                             }
                             return Ok(Some(ControlFlow::Break(label)));
                         }
                         ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                *last_value = vbody;
+                            }
                             if let Some(ref l) = label
                                 && !own_labels.contains(l)
                             {
@@ -3073,31 +3338,47 @@ fn eval_res<'gc>(
             for i in start..sw_stmt.cases.len() {
                 match &sw_stmt.cases[i] {
                     crate::core::SwitchCase::Case(_test, stmts) => {
-                        let res = evaluate_statements_with_context(mc, &switch_env, stmts, labels)?;
+                        let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &switch_env, stmts, labels)?;
                         match res {
-                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Normal(_) => *last_value = vbody,
                             ControlFlow::Break(label) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
                                 if label.is_none() {
                                     return Ok(None);
                                 }
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
-                            ControlFlow::Continue(label) => return Ok(Some(ControlFlow::Continue(label))),
+                            ControlFlow::Continue(label) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
                             ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                         }
                     }
                     crate::core::SwitchCase::Default(stmts) => {
-                        let res = evaluate_statements_with_context(mc, &switch_env, stmts, labels)?;
+                        let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &switch_env, stmts, labels)?;
                         match res {
-                            ControlFlow::Normal(v) => *last_value = v,
+                            ControlFlow::Normal(_) => *last_value = vbody,
                             ControlFlow::Break(label) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
                                 if label.is_none() {
                                     return Ok(None);
                                 }
                                 return Ok(Some(ControlFlow::Break(label)));
                             }
-                            ControlFlow::Continue(label) => return Ok(Some(ControlFlow::Continue(label))),
+                            ControlFlow::Continue(label) => {
+                                if !matches!(vbody, Value::Undefined) {
+                                    *last_value = vbody;
+                                }
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
                             ControlFlow::Return(v) => return Ok(Some(ControlFlow::Return(v))),
                             ControlFlow::Throw(v, l, c) => return Ok(Some(ControlFlow::Throw(v, l, c))),
                         }
@@ -4359,11 +4640,15 @@ fn handle_eval_function<'gc>(
         let run_stmts = || check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
 
         // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
-        if env.borrow().prototype.is_none() && !is_strict_eval {
+        let res = if env.borrow().prototype.is_none() && !is_strict_eval {
             run_with_global_strictness_cleared(mc, env, run_stmts)
         } else {
             run_stmts()
+        };
+        if let Ok(v) = &res {
+            log::trace!("handle_eval_function result={}", crate::core::value_to_string(v));
         }
+        res
     } else {
         Ok(first_arg)
     }

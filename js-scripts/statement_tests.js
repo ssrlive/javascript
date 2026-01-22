@@ -232,5 +232,97 @@ if (!isNode) {
   assert((0,eval)('2; for (var b of []) { 3; }') === undefined, "Completion value of second eval is not undefined");
 }
 
+{
+  console.log("==== Completion value when head has a declaration and iteration is cancelled ====");
+
+  assert(eval('1; for (var a of [0]) { break; }') === undefined, "Completion value of first eval is not undefined");
+  assert(eval('2; for (var b of [0]) { 3; break; }') === 3, "Completion value of second eval is not 3");
+
+  assert(
+    eval('4; outer: do { for (var a of [0]) { continue outer; } } while (false)') === undefined,
+    "Completion value of third eval is not undefined"
+  );
+  assert(
+    eval('5; outer: do { for (var b of [0]) { 6; continue outer; } } while (false)') === 6,
+    "Completion value of fourth eval is not 6"
+  );
+}
+
+{
+  console.log("==== Extra sanity check tests ====");
+
+  // 1. Label with block
+  assert(eval("1; L: { 2; break L; }") === 2, "Label block break");
+
+  // 2. Switch break
+  assert(eval("switch(1){ case 1: 5; break; }") === 5, "Switch break");
+
+  // 3. Try break
+  assert(eval("L: try { 1; break L; } finally {}") === 1, "Try break with finally normal");
+
+  // 4. Try break overridden by finally
+  assert(eval("L: try { 1; break L; } finally { 2; }") === 1, "Try break with finally normal (value check)"); 
+  // NOTE: Finally block completion value (2) is discarded if interaction is Normal.
+  // The completion of Try is (Break, L, 1).
+  // Finally is (Normal, empty).
+  // Result is (Break, L, 1).
+  // Label catches L. Result (Normal, 1).
+  // So 1 is correct.
+
+  // 5. Try break overridden by finally break
+  assert(eval("outer: try { 1; break outer; } finally { 2; break outer; }") === 2, "Finally break overrides");
+}
+
+{
+  console.log("==== ForIn/Of: Bound names of ForDeclaration are in TDZ (for-of) ====");
+  try {
+    let x = 1;
+    for (const x of [x]) {}
+    throw new Error("Expected ReferenceError was not thrown");
+  } catch (e) {
+    if (!(e instanceof ReferenceError)) {
+      throw e;
+    }
+  }
+}
+
+{
+  console.log("==== Completion value when head has a declaration and iteration occurs ====");
+  assert(eval('1; for (var a of [0]) { }') === undefined, "Completion value of first eval is not undefined");
+  assert(eval('2; for (var b of [0]) { 3; }') === 3, "Completion value of second eval is not 3");
+}
+
+{
+  console.log("==== Completion value when head has no declaration and iteration is cancelled ====");
+  assert(eval('var a; 1; for (a of [0]) { break; }') === undefined, "Completion value of first eval is not undefined");
+  assert(eval('var b; 2; for (b of [0]) { 3; break; }') === 3, "Completion value of second eval is not 3");
+  assert(
+    eval('var a; 4; outer: do { for (a of [0]) { continue outer; } } while (false)') === undefined,
+    "Completion value of third eval is not undefined"
+  );
+  assert(
+    eval('var b; 5; outer: do { for (b of [0]) { 6; continue outer; } } while (false)') === 6,
+    "Completion value of fourth eval is not 6"
+  );
+}
+
+{
+  console.log("==== Completion value when head has no declaration and iteration occurs ====");
+  assert(eval('var a; 1; for (a of [0]) { }') === undefined, "Completion value of first eval is not undefined");
+  assert(eval('var b; 2; for (b of [0]) { 3; }') === 3, "Completion value of second eval is not 3");
+}
+
+{
+  console.log("==== ForIn/Of: Bound names of ForDeclaration are in TDZ (for-of) ====");
+  try {
+    let x = 1;
+    for (let x of [x]) {}
+    throw new Error("Expected ReferenceError was not thrown");
+  } catch (e) {
+    if (!(e instanceof ReferenceError)) {
+      throw e;
+    }
+  }
+}
 
 console.log("All tests passed.");

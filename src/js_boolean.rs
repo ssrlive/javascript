@@ -1,4 +1,4 @@
-use crate::core::{JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value};
+use crate::core::{EvalError, JSObjectDataPtr, MutationContext, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::env_set;
 use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
@@ -66,7 +66,7 @@ pub fn to_boolean(val: &Value<'_>) -> bool {
     }
 }
 
-pub fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+pub fn boolean_constructor<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     if let Some(arg) = args.first() {
         Ok(Value::Boolean(to_boolean(arg)))
     } else {

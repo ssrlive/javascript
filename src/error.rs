@@ -40,9 +40,11 @@ pub enum JSErrorKind {
 #[derive(Debug)]
 pub struct JSErrorData {
     pub kind: JSErrorKind,
-    pub file: String,
-    pub line: usize,
-    pub method: String,
+    pub rust_file: String,
+    pub rust_line: Option<usize>,
+    pub rust_method: String,
+    pub js_file: String,
+    pub js_method: String,
     pub js_line: Option<usize>,
     pub js_column: Option<usize>,
     pub stack: Vec<String>,
@@ -55,13 +57,15 @@ pub struct JSError {
 
 impl JSError {
     // Provide a constructor for use by macros
-    pub fn new(kind: JSErrorKind, file: String, line: usize, method: String) -> Self {
+    pub fn new(kind: JSErrorKind, rust_file: String, rust_method: String, rust_line: Option<usize>) -> Self {
         Self {
             inner: Box::new(JSErrorData {
                 kind,
-                file,
-                line,
-                method,
+                rust_file,
+                rust_method,
+                rust_line,
+                js_file: "<anonymous>".to_string(),
+                js_method: "<anonymous>".to_string(),
                 js_line: None,
                 js_column: None,
                 stack: Vec::new(),
@@ -98,64 +102,24 @@ impl JSError {
     /// Get the error message without location information
     pub fn message(&self) -> String {
         match &self.inner.kind {
-            JSErrorKind::TokenizationError { message } => format!("SyntaxError: {}", message),
-            JSErrorKind::ParseError { message } => format!("SyntaxError: {}", message),
+            JSErrorKind::TokenizationError { message } => format!("SyntaxError: {message}"),
+            JSErrorKind::ParseError { message } => format!("SyntaxError: {message}"),
             JSErrorKind::EvaluationError { message } => {
                 if message == "error" {
                     "Error: An error occurred during evaluation".to_string()
                 } else {
-                    format!("Error: {}", message)
+                    format!("Error: {message}")
                 }
             }
-            JSErrorKind::InfiniteLoopError { iterations } => {
-                format!("Error: Infinite loop detected (executed {} iterations)", iterations)
-            }
-            JSErrorKind::VariableNotFound { name } => {
-                format!("ReferenceError: '{}' is not defined", name)
-            }
-            JSErrorKind::TypeError { message } => format!("TypeError: {}", message),
-            JSErrorKind::RangeError { message } => format!("RangeError: {}", message),
-            JSErrorKind::SyntaxError { message } => format!("SyntaxError: {}", message),
-            JSErrorKind::ReferenceError { message } => format!("ReferenceError: {}", message),
-            JSErrorKind::RuntimeError { message } => format!("Error: {}", message),
+            JSErrorKind::InfiniteLoopError { iterations } => format!("Error: Infinite loop detected (executed {iterations} iterations)"),
+            JSErrorKind::VariableNotFound { name } => format!("ReferenceError: '{name}' is not defined"),
+            JSErrorKind::TypeError { message } => format!("TypeError: {message}"),
+            JSErrorKind::RangeError { message } => format!("RangeError: {message}"),
+            JSErrorKind::SyntaxError { message } => format!("SyntaxError: {message}"),
+            JSErrorKind::ReferenceError { message } => format!("ReferenceError: {message}"),
+            JSErrorKind::RuntimeError { message } => format!("Error: {message}"),
             JSErrorKind::Throw(msg) => msg.clone(),
-            /*
-            JSErrorKind::Throw { value } => {
-                // If the thrown value is an object, prefer a human-friendly
-                // message that includes the constructor name and/or message
-                // property instead of the generic [object Object] string.
-                let mut result = None;
-                if let crate::core::Value::Object(obj) = value {
-                    // Try constructor.name
-                    if let Some(ctor_val_rc) = object_get_key_value(obj, &"constructor".into())
-                        && let crate::core::Value::Object(ctor_obj) = &*ctor_val_rc.borrow()
-                        && let Some(name_val_rc) = object_get_key_value(ctor_obj, &"name".into())
-                        && let crate::core::Value::String(name_utf16) = &*name_val_rc.borrow()
-                    {
-                        let ctor_name = crate::unicode::utf16_to_utf8(name_utf16);
-                        // prefer a message property if present
-                        if let Some(msg_val_rc) = object_get_key_value(obj, &"message".into())
-                            && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
-                        {
-                            let msg = crate::unicode::utf16_to_utf8(msg_utf16);
-                            result = Some(format!("Uncaught {}: {}", ctor_name, msg));
-                        } else {
-                            result = Some(format!("Uncaught {}", ctor_name));
-                        }
-                    }
-                    // Fallback: if object has a message property, use it
-                    if result.is_none()
-                        && let Some(msg_val_rc) = object_get_key_value(obj, &"message".into())
-                        && let crate::core::Value::String(msg_utf16) = &*msg_val_rc.borrow()
-                    {
-                        let msg = crate::unicode::utf16_to_utf8(msg_utf16);
-                        result = Some(format!("Uncaught {}", msg));
-                    }
-                }
-                result.unwrap_or_else(|| format!("Uncaught {}", crate::core::value_to_string(value)))
-            }
-            // */
-            JSErrorKind::IoError(e) => format!("IOError: {}", e),
+            JSErrorKind::IoError(e) => format!("IOError: {e}"),
         }
     }
 
@@ -163,15 +127,19 @@ impl JSError {
     pub fn user_message(&self) -> String {
         let msg = self.message();
 
-        if let Some(line) = self.inner.js_line {
-            if let Some(col) = self.inner.js_column {
-                format!("{} at line {}:{}", msg, line, col)
-            } else {
-                format!("{} at line {}", msg, line)
+        let mut extra = String::new();
+        if let Some(js_line) = self.inner.js_line {
+            extra.push_str(&format!(" at line {js_line}"));
+            if let Some(js_column) = self.inner.js_column {
+                extra.push_str(&format!(":{js_column}"));
             }
-        } else {
-            msg
         }
+        msg + &extra
+    }
+
+    pub fn native_message(&self) -> String {
+        let line = self.inner.rust_line.map_or("".to_string(), |l| format!(":{}", l.to_string()));
+        format!("{} {}{}", self.inner.rust_method, self.inner.rust_file, line)
     }
 }
 
@@ -179,7 +147,19 @@ impl JSError {
 impl std::fmt::Display for JSError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let data = &self.inner;
-        write!(f, "{} at {} {}:{}", data.kind, data.method, data.file, data.line)
+        let native_location = self.native_message();
+        let mut extra = String::new();
+        if let Some(js_line) = data.js_line {
+            extra.push_str(&format!(":{js_line}"));
+            if let Some(js_column) = data.js_column {
+                extra.push_str(&format!(":{js_column}"));
+            }
+        }
+        write!(
+            f,
+            "{} at {} {}{}\nOccurred at native code {}",
+            data.kind, data.js_method, data.js_file, extra, native_location
+        )
     }
 }
 
@@ -194,7 +174,7 @@ impl std::error::Error for JSError {
 // we fill in "<unknown>" for file and method, and set line to 0
 impl From<std::io::Error> for JSError {
     fn from(err: std::io::Error) -> Self {
-        JSError::new(JSErrorKind::IoError(err), "<unknown>".to_string(), 0, "<unknown>".to_string())
+        JSError::new(JSErrorKind::IoError(err), "<unknown>".to_string(), "<unknown>".to_string(), None)
     }
 }
 
@@ -218,7 +198,12 @@ macro_rules! function_name {
 #[doc(hidden)]
 macro_rules! make_js_error {
     ($kind:expr) => {
-        $crate::JSError::new($kind, file!().to_string(), line!() as usize, $crate::function_name!().to_string())
+        $crate::JSError::new(
+            $kind,
+            file!().to_string(),
+            $crate::function_name!().to_string(),
+            Some(line!() as usize),
+        )
     };
 }
 
@@ -237,11 +222,6 @@ macro_rules! raise_tokenize_error {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! raise_parse_error {
-    () => {
-        $crate::make_js_error!($crate::JSErrorKind::ParseError {
-            message: "parse error".to_string()
-        })
-    };
     ($msg:expr, $line:expr, $col:expr) => {{
         let mut err = $crate::make_js_error!($crate::JSErrorKind::ParseError { message: $msg.to_string() });
         err.set_js_location($line, $col);
@@ -267,6 +247,17 @@ macro_rules! raise_parse_error_with_token {
         err.set_js_location($token.line, $token.column);
         err
     }};
+}
+
+#[macro_export]
+#[doc(hidden)]
+macro_rules! raise_parse_error_at {
+    ($token_opt:expr) => {
+        match $token_opt {
+            Some(tok) => $crate::raise_parse_error_with_token!(tok),
+            None => $crate::raise_parse_error!("parse error".to_string()),
+        }
+    };
 }
 
 #[macro_export]

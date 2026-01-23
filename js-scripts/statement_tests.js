@@ -325,4 +325,46 @@ if (!isNode) {
   }
 }
 
+{
+  console.log("==== Error in Array entry access during traversal using for..of ====");
+
+  var array = [];
+  Object.defineProperty(array, '0', {
+    get: function() { throw new Error('myerr'); }
+  });
+  assert(array.length === 1, "Array length is 1");
+  var iterationCount = 0;
+  try {
+    for (var value of array) {
+      iterationCount += 1;
+      throw new Error("Loop body should not be executed");
+    }
+    throw new Error("Loop should not complete");
+  } catch (e) {
+    assert(e instanceof Error, "Caught exception is an Error");
+    assert(e.message === 'myerr', "Caught error message is 'myerr'");
+  }
+  assert(iterationCount === 0, "The loop body is not evaluated");
+}
+
+{
+  console.log("==== Completion value when head has a declaration and iteration is skipped (for-in) ====");
+  assert(eval('1; for (var a in undefined) { }') === undefined, "Completion value of first eval is not undefined");
+  assert(eval('2; for (var b in undefined) { 3; }') === undefined, "Completion value of second eval is not undefined");
+  assert(eval('4; for (var c in null) { }') === undefined, "Completion value of third eval is not undefined");
+  assert(eval('5; for (var d in null) { 6; }') === undefined, "Completion value of fourth eval is not undefined");
+}
+
+{
+  console.log("==== ForIn: The head's declaration may contain duplicate entries ====");
+  var iterCount = 0;
+
+  for (var [x, x] in { ab: null }) {
+    assert(x === 'b', "The value of `x` is `'b'`");
+    iterCount += 1;
+  }
+
+  assert(iterCount === 1, "The value of `iterCount` is `1`");
+}
+
 console.log("All tests passed.");

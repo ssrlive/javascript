@@ -2,8 +2,8 @@ use crate::core::JSSet;
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::{
     core::{
-        JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data, object_get_key_value,
-        object_set_key_value, values_equal,
+        EvalError, JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
+        object_get_key_value, object_set_key_value, values_equal,
     },
     error::JSError,
     js_array::{create_array, set_array_length},
@@ -90,7 +90,7 @@ pub(crate) fn handle_set_constructor<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let set = Gc::new(mc, GcCell::new(JSSet { values: Vec::new() }));
 
-    initialize_collection_from_iterable(args, "Set", |value| {
+    initialize_collection_from_iterable(mc, env, args, "Set", |value| {
         // Check if value already exists
         let exists = set.borrow().values.iter().any(|v| values_equal(mc, &value, v));
         if !exists {
@@ -127,11 +127,11 @@ pub(crate) fn handle_set_instance_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "add" => {
-            if args.len() != 1 {
-                return Err(raise_eval_error!("Set.prototype.add requires exactly one argument"));
+            if args.is_empty() {
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.add requires at least one argument")));
             }
             let value = args[0].clone();
 
@@ -145,7 +145,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "has" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("Set.prototype.has requires exactly one argument"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.has requires exactly one argument")));
             }
             let value = args[0].clone();
 
@@ -154,7 +154,9 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "delete" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("Set.prototype.delete requires exactly one argument"));
+                return Err(EvalError::Js(raise_eval_error!(
+                    "Set.prototype.delete requires exactly one argument"
+                )));
             }
             let value = args[0].clone();
 
@@ -166,38 +168,40 @@ pub(crate) fn handle_set_instance_method<'gc>(
         }
         "clear" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.clear takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.clear takes no arguments")));
             }
             set.borrow_mut(mc).values.clear();
             Ok(Value::Undefined)
         }
         "size" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.size is a getter"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.size is a getter")));
             }
             Ok(Value::Number(set.borrow().values.len() as f64))
         }
         "values" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.values takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.values takes no arguments")));
             }
-            create_set_iterator(mc, _env, *set, "values")
+            create_set_iterator(mc, _env, *set, "values").map_err(EvalError::Js)
         }
         "keys" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.keys takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.keys takes no arguments")));
             }
-            create_set_iterator(mc, _env, *set, "values") // Set keys are same as values
+            create_set_iterator(mc, _env, *set, "values").map_err(EvalError::Js) // Set keys are same as values
         }
         "entries" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.entries takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Set.prototype.entries takes no arguments")));
             }
-            create_set_iterator(mc, _env, *set, "entries")
+            create_set_iterator(mc, _env, *set, "entries").map_err(EvalError::Js)
         }
         "forEach" => {
             if args.is_empty() {
-                return Err(raise_eval_error!("Set.prototype.forEach requires at least one argument"));
+                return Err(EvalError::Js(raise_eval_error!(
+                    "Set.prototype.forEach requires at least one argument"
+                )));
             }
             let callback = args[0].clone();
             let this_arg = args.get(1).cloned();
@@ -205,18 +209,10 @@ pub(crate) fn handle_set_instance_method<'gc>(
             let values = set.borrow().values.clone();
 
             // Helper to execute closure
-            let execute = |cl: &crate::core::ClosureData<'gc>| -> Result<(), JSError> {
+            let execute = |cl: &crate::core::ClosureData<'gc>| -> Result<(), EvalError<'gc>> {
                 for value in &values {
                     let call_args = vec![value.clone(), value.clone(), this_val.clone()];
-                    match crate::core::call_closure(mc, cl, this_arg.clone(), &call_args, _env, None) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Err(match e {
-                                crate::core::EvalError::Js(err) => err,
-                                crate::core::EvalError::Throw(val, _, _) => crate::raise_throw_error!(val),
-                            });
-                        }
-                    }
+                    crate::core::call_closure(mc, cl, this_arg.clone(), &call_args, _env, None)?;
                 }
                 Ok(())
             };
@@ -226,21 +222,34 @@ pub(crate) fn handle_set_instance_method<'gc>(
                     if let Some(cl_val) = object_get_key_value(&obj, "__closure__") {
                         match &*cl_val.borrow() {
                             Value::Closure(cl) => execute(cl)?,
-                            _ => return Err(crate::raise_type_error!("Set.prototype.forEach callback is not a closure")),
+                            _ => {
+                                return Err(EvalError::Js(crate::raise_type_error!(
+                                    "Set.prototype.forEach callback is not a closure"
+                                )));
+                            }
                         }
                     } else if let Some(_native_ctor) = object_get_key_value(&obj, "__native_ctor") {
                         // Native function object
-                        return Err(raise_eval_error!("Native functions in forEach not supported yet"));
+                        return Err(EvalError::Js(raise_eval_error!("Native functions in forEach not supported yet")));
                     } else {
-                        return Err(crate::raise_type_error!("Set.prototype.forEach callback is not a function"));
+                        return Err(EvalError::Js(crate::raise_type_error!(
+                            "Set.prototype.forEach callback is not a function"
+                        )));
                     }
                 }
                 Value::Closure(cl) => execute(&cl)?,
-                _ => return Err(crate::raise_type_error!("Set.prototype.forEach callback must be a function")),
+                _ => {
+                    return Err(EvalError::Js(crate::raise_type_error!(
+                        "Set.prototype.forEach callback must be a function"
+                    )));
+                }
             }
             Ok(Value::Undefined)
         }
-        _ => Err(raise_eval_error!(format!("Set.prototype.{} is not implemented", method))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!(
+            "Set.prototype.{} is not implemented",
+            method
+        )))),
     }
 }
 

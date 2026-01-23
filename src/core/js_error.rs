@@ -20,15 +20,12 @@ impl<'gc> From<EvalError<'gc>> for JSError {
     fn from(e: EvalError<'gc>) -> Self {
         match e {
             EvalError::Js(j) => j,
-            EvalError::Throw(v, l, _c) => {
+            EvalError::Throw(v, line, column) => {
                 let msg = value_to_string(&v);
-                let line = l.unwrap_or(0);
-                crate::JSError::new(
-                    crate::error::JSErrorKind::Throw(msg),
-                    "unknown".to_string(),
-                    line,
-                    "unknown".to_string(),
-                )
+                let mut e = crate::make_js_error!(crate::error::JSErrorKind::Throw(msg));
+                e.inner.js_line = line;
+                e.inner.js_column = column;
+                e
             }
         }
     }

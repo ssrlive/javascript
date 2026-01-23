@@ -267,9 +267,24 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
         let start_col = column;
         match chars[i] {
             // Treat common whitespace characters (including VT, FF, NBSP) as whitespace
-            ' ' | '\t' | '\r' | '\u{000B}' | '\u{000C}' | '\u{00A0}' => {
+            ' ' | '\t' | '\u{000B}' | '\u{000C}' | '\u{00A0}' => {
                 i += 1;
                 column += 1;
+            }
+            // Carriage Return (CR) and CRLF should be treated as a line terminator
+            '\r' => {
+                tokens.push(TokenData {
+                    token: Token::LineTerminator,
+                    line,
+                    column,
+                });
+                i += 1;
+                // If followed by LF, consume it as part of the same terminator
+                if i < chars.len() && chars[i] == '\n' {
+                    i += 1;
+                }
+                line += 1;
+                column = 1;
             }
             // Line terminators: LF, LS (U+2028), PS (U+2029)
             '\n' | '\u{2028}' | '\u{2029}' => {

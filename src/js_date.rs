@@ -1,5 +1,5 @@
 use crate::PropertyKey;
-use crate::core::{GcPtr, JSObjectDataPtr};
+use crate::core::{EvalError, GcPtr, JSObjectDataPtr};
 use crate::core::{MutationContext, Value, env_set, get_own_property, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::error::JSError;
 use crate::unicode::{utf8_to_utf16, utf16_to_utf8};
@@ -247,7 +247,7 @@ pub(crate) fn handle_date_constructor<'gc>(
     mc: &MutationContext<'gc>,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let timestamp = if args.is_empty() {
@@ -263,7 +263,7 @@ pub(crate) fn handle_date_constructor<'gc>(
                 if let Some(timestamp) = parse_date_string(&date_str) {
                     timestamp
                 } else {
-                    return Err(raise_type_error!("Invalid date"));
+                    return Err(EvalError::Js(raise_type_error!("Invalid date")));
                 }
             }
             Value::Number(n) => {
@@ -271,7 +271,7 @@ pub(crate) fn handle_date_constructor<'gc>(
                 *n
             }
             _ => {
-                return Err(raise_type_error!("Invalid date"));
+                return Err(EvalError::Js(raise_type_error!("Invalid date")));
             }
         }
     } else {
@@ -281,7 +281,7 @@ pub(crate) fn handle_date_constructor<'gc>(
             match arg {
                 Value::Number(n) => components.push(*n),
                 _ => {
-                    return Err(raise_type_error!("Date constructor arguments must be numbers"));
+                    return Err(EvalError::Js(raise_type_error!("Date constructor arguments must be numbers")));
                 }
             }
         }
@@ -289,7 +289,7 @@ pub(crate) fn handle_date_constructor<'gc>(
         if let Some(timestamp) = construct_date_from_components(&components) {
             timestamp
         } else {
-            return Err(raise_type_error!("Invalid date"));
+            return Err(EvalError::Js(raise_type_error!("Invalid date")));
         }
     };
 
@@ -309,10 +309,10 @@ pub(crate) fn handle_date_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let obj_ptr = match obj {
         Value::Object(o) => o,
-        _ => return Err(raise_type_error!("TypeError: Date method called on non-object")),
+        _ => return Err(EvalError::Js(raise_type_error!("TypeError: Date method called on non-object"))),
     };
 
     match method {
@@ -414,7 +414,7 @@ pub(crate) fn handle_date_method<'gc>(
         }
         "setFullYear" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Date.setFullYear() takes 1 to 3 arguments"));
+                return Err(EvalError::Js(raise_type_error!("Date.setFullYear() takes 1 to 3 arguments")));
             }
             let current_timestamp = get_time_stamp_value(obj_ptr)?;
             let current_dt = Utc
@@ -428,14 +428,14 @@ pub(crate) fn handle_date_method<'gc>(
             let year = if let Value::Number(y) = year_val {
                 *y as i32
             } else {
-                return Err(raise_type_error!("Date.setFullYear() year must be a number"));
+                return Err(EvalError::Js(raise_type_error!("Date.setFullYear() year must be a number")));
             };
 
             let month = if args.len() >= 2 {
                 let month_val = &args[1];
                 match month_val {
                     Value::Number(m) => *m as u32,
-                    _ => return Err(raise_type_error!("Date.setFullYear() month must be a number")),
+                    _ => return Err(EvalError::Js(raise_type_error!("Date.setFullYear() month must be a number"))),
                 }
             } else {
                 current_dt.month() - 1
@@ -446,7 +446,7 @@ pub(crate) fn handle_date_method<'gc>(
                 if let Value::Number(d) = day_val {
                     *d as u32
                 } else {
-                    return Err(raise_type_error!("Date.setFullYear() day must be a number"));
+                    return Err(EvalError::Js(raise_type_error!("Date.setFullYear() day must be a number")));
                 }
             } else {
                 current_dt.day()
@@ -466,22 +466,22 @@ pub(crate) fn handle_date_method<'gc>(
         }
         "setTime" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Date.setTime() takes 1 argument"));
+                return Err(EvalError::Js(raise_type_error!("Date.setTime() takes 1 argument")));
             }
             let time_val = &args[0];
             let Value::Number(time) = time_val else {
-                return Err(raise_type_error!("Date.setTime() argument must be a number"));
+                return Err(EvalError::Js(raise_type_error!("Date.setTime() argument must be a number")));
             };
             set_time_stamp_value(mc, obj_ptr, *time)?;
             Ok(Value::Number(*time))
         }
         "setDate" => {
             if args.is_empty() {
-                return Err(raise_type_error!("Date.setDate() takes 1 argument"));
+                return Err(EvalError::Js(raise_type_error!("Date.setDate() takes 1 argument")));
             }
             let day_val = &args[0];
             let Value::Number(day_n) = day_val else {
-                return Err(raise_type_error!("Date.setDate() argument must be a number"));
+                return Err(EvalError::Js(raise_type_error!("Date.setDate() argument must be a number")));
             };
             let current_timestamp = get_time_stamp_value(obj_ptr)?;
             if let Some(current_dt) = Utc.timestamp_millis_opt(current_timestamp as i64).single() {
@@ -532,7 +532,7 @@ pub(crate) fn handle_date_method<'gc>(
                 let formatted = dt.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                 Ok(Value::String(utf8_to_utf16(&formatted)))
             } else {
-                Err(raise_type_error!("Invalid time value"))
+                Err(EvalError::Js(raise_type_error!("Invalid time value")))
             }
         }
         "toUTCString" => {
@@ -585,16 +585,16 @@ pub(crate) fn handle_date_method<'gc>(
                 Ok(Value::String(utf8_to_utf16("Invalid Date")))
             }
         }
-        _ => Err(raise_eval_error!(format!("Date has no method '{method}'"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!("Date has no method '{method}'")))),
     }
 }
 
 /// Handle Date static method calls
-pub(crate) fn handle_date_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, JSError> {
+pub(crate) fn handle_date_static_method<'gc>(method: &str, args: &[Value<'gc>]) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "now" => {
             if !args.is_empty() {
-                return Err(raise_type_error!("Date.now() takes no arguments"));
+                return Err(EvalError::Js(raise_type_error!("Date.now() takes no arguments")));
             }
             use std::time::{SystemTime, UNIX_EPOCH};
             let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -602,7 +602,7 @@ pub(crate) fn handle_date_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
         }
         "parse" => {
             if args.len() != 1 {
-                return Err(raise_type_error!("Date.parse() takes exactly 1 argument"));
+                return Err(EvalError::Js(raise_type_error!("Date.parse() takes exactly 1 argument")));
             }
             // Argument is already evaluated
             let arg_val = &args[0];
@@ -620,7 +620,7 @@ pub(crate) fn handle_date_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
         "UTC" => {
             // Date.UTC(year, month[, day[, hour[, minute[, second[, millisecond]]]]])
             if args.len() < 2 {
-                return Err(raise_type_error!("Date.UTC() requires at least year and month"));
+                return Err(EvalError::Js(raise_type_error!("Date.UTC() requires at least year and month")));
             }
             // Coerce args to numbers
             let eval_num = |i: usize, default: f64| -> Result<f64, JSError> {
@@ -680,6 +680,6 @@ pub(crate) fn handle_date_static_method<'gc>(method: &str, args: &[Value<'gc>]) 
             }
             Ok(Value::Number(f64::NAN))
         }
-        _ => Err(raise_eval_error!(format!("Date has no static method '{method}'"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!("Date has no static method '{method}'")))),
     }
 }

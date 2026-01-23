@@ -3,9 +3,9 @@ use crate::core::{
     JSMap, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
     object_get_key_value, object_set_key_value, values_equal,
 };
-use crate::error::JSError;
 use crate::js_array::{create_array, set_array_length};
 use crate::unicode::utf8_to_utf16;
+use crate::{JSError, core::EvalError};
 
 /// Initialize Map constructor and prototype
 pub fn initialize_map<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -83,13 +83,16 @@ pub(crate) fn handle_map_constructor<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let map = Gc::new(mc, GcCell::new(JSMap { entries: Vec::new() }));
 
-    initialize_collection_from_iterable(args, "Map", |entry| {
-        if let Value::Object(entry_obj) = entry
-            && let (Some(key_val), Some(value_val)) = (object_get_key_value(&entry_obj, "0"), object_get_key_value(&entry_obj, "1"))
-        {
-            map.borrow_mut(mc)
-                .entries
-                .push((key_val.borrow().clone(), value_val.borrow().clone()));
+    initialize_collection_from_iterable(mc, env, args, "Map", |entry| {
+        if let Value::Object(entry_obj) = entry {
+            let key_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, &PropertyKey::from("0".to_string()));
+            let value_val_opt = crate::core::get_property_with_accessors(mc, env, &entry_obj, &PropertyKey::from("1".to_string()));
+            match (key_val_opt, value_val_opt) {
+                (Ok(key_val), Ok(value_val)) => {
+                    map.borrow_mut(mc).entries.push((key_val, value_val));
+                }
+                (Err(e), _) | (_, Err(e)) => return Err(e.into()),
+            }
         }
         Ok(())
     })?;
@@ -121,11 +124,11 @@ pub(crate) fn handle_map_instance_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "set" => {
             if args.len() != 2 {
-                return Err(raise_eval_error!("Map.prototype.set requires exactly two arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.set requires exactly two arguments")));
             }
             let key = args[0].clone();
             let value = args[1].clone();
@@ -139,7 +142,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "get" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("Map.prototype.get requires exactly one argument"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.get requires exactly one argument")));
             }
             let key = args[0].clone();
 
@@ -152,7 +155,7 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "has" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("Map.prototype.has requires exactly one argument"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.has requires exactly one argument")));
             }
             let key = args[0].clone();
 
@@ -161,7 +164,9 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "delete" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("Map.prototype.delete requires exactly one argument"));
+                return Err(EvalError::Js(raise_eval_error!(
+                    "Map.prototype.delete requires exactly one argument"
+                )));
             }
             let key = args[0].clone();
 
@@ -173,36 +178,39 @@ pub(crate) fn handle_map_instance_method<'gc>(
         }
         "clear" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Map.prototype.clear takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.clear takes no arguments")));
             }
             map.borrow_mut(mc).entries.clear();
             Ok(Value::Undefined)
         }
         "size" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Map.prototype.size is a getter"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.size is a getter")));
             }
             Ok(Value::Number(map.borrow().entries.len() as f64))
         }
         "keys" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Map.prototype.keys takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.keys takes no arguments")));
             }
-            create_map_iterator(mc, env, *map, "keys")
+            create_map_iterator(mc, env, *map, "keys").map_err(EvalError::Js)
         }
         "values" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Map.prototype.values takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.values takes no arguments")));
             }
-            create_map_iterator(mc, env, *map, "values")
+            create_map_iterator(mc, env, *map, "values").map_err(EvalError::Js)
         }
         "entries" => {
             if !args.is_empty() {
-                return Err(raise_eval_error!("Map.prototype.entries takes no arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Map.prototype.entries takes no arguments")));
             }
-            create_map_iterator(mc, env, *map, "entries")
+            create_map_iterator(mc, env, *map, "entries").map_err(EvalError::Js)
         }
-        _ => Err(raise_eval_error!(format!("Map.prototype.{} is not implemented", method))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!(
+            "Map.prototype.{} is not implemented",
+            method
+        )))),
     }
 }
 

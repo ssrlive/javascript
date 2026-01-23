@@ -32,6 +32,8 @@ pub enum StatementKind {
     ForOf(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind, variable, iterable, body
     ForOfExpr(Expr, Expr, Vec<Statement>),                    // assignment-form for-of with expression LHS, iterable, body
     ForIn(Option<VarDeclKind>, String, Expr, Vec<Statement>), // decl kind (None = assignment), variable, object, body
+    ForInDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // decl kind, var { .. } in object
+    ForInDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // decl kind, var [ .. ] in object
     ForOfDestructuringObject(Option<VarDeclKind>, Vec<ObjectDestructuringElement>, Expr, Vec<Statement>), // decl kind, var { .. } of iterable
     ForOfDestructuringArray(Option<VarDeclKind>, Vec<DestructuringElement>, Expr, Vec<Statement>), // decl kind, var [ .. ] of iterable
     While(Expr, Vec<Statement>),                                                                   // condition, body
@@ -308,4 +310,10 @@ unsafe impl<'gc> Collect<'gc> for DestructuringElement {
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum ForOfPattern {
+    Object(Vec<DestructuringElement>),
+    Array(Vec<DestructuringElement>),
 }

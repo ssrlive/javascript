@@ -2,7 +2,7 @@
 use crate::core::get_own_property;
 use crate::core::{ClassDefinition, ClassMember};
 use crate::core::{
-    ClosureData, DestructuringElement, Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data,
+    ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data,
 };
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::core::{object_get_key_value, object_set_key_value, value_to_string};
@@ -175,7 +175,7 @@ pub(crate) fn evaluate_new<'gc>(
     env: &JSObjectDataPtr<'gc>,
     constructor_val: Value<'gc>,
     evaluated_args: &[Value<'gc>],
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Evaluate arguments first
 
     // Log pointer/type of the evaluated constructor value for diagnostics
@@ -219,7 +219,8 @@ pub(crate) fn evaluate_new<'gc>(
                     // Attach a debug identifier to help correlate runtime instances
                     // with logs (printed as a pointer string).
                     let dbg_ptr_str = format!("{:p}", Gc::as_ptr(instance));
-                    object_set_key_value(mc, &instance, "__dbg_ptr__", Value::String(utf8_to_utf16(&dbg_ptr_str)))?;
+                    object_set_key_value(mc, &instance, "__dbg_ptr__", Value::String(utf8_to_utf16(&dbg_ptr_str)))
+                        .map_err(EvalError::Js)?;
                     log::debug!(
                         "DBG evaluate_new - created instance ptr={:p} __dbg_ptr__={}",
                         Gc::as_ptr(instance),
@@ -230,9 +231,9 @@ pub(crate) fn evaluate_new<'gc>(
                     if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                         if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                             instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                            object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
+                            object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj)).map_err(EvalError::Js)?;
                         } else {
-                            object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
+                            object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone()).map_err(EvalError::Js)?;
                         }
                     }
 
@@ -245,16 +246,17 @@ pub(crate) fn evaluate_new<'gc>(
                         evaluated_args,
                         None,
                         Some(env),
-                    )?;
+                    )
+                    .map_err(EvalError::Js)?;
 
                     // Create the arguments object
-                    create_arguments_object(mc, &func_env, evaluated_args, None)?;
+                    create_arguments_object(mc, &func_env, evaluated_args, None).map_err(EvalError::Js)?;
 
                     // Execute constructor body
                     evaluate_statements(mc, &func_env, body)?;
 
                     // Ensure instance.constructor points back to the constructor object
-                    object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj))?;
+                    object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
 
                     return Ok(Value::Object(instance));
                 }
@@ -272,7 +274,7 @@ pub(crate) fn evaluate_new<'gc>(
 
             // Check if this is Array constructor
             if get_own_property(&class_obj, &"__is_array_constructor".into()).is_some() {
-                return Ok(crate::js_array::handle_array_constructor(mc, evaluated_args, env)?);
+                return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
             }
 
             // Check if this is a TypedArray constructor
@@ -301,10 +303,10 @@ pub(crate) fn evaluate_new<'gc>(
                 if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
-                        object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
+                        object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj)).map_err(EvalError::Js)?;
                     } else {
                         // Fallback: store whatever prototype value was provided
-                        object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
+                        object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone()).map_err(EvalError::Js)?;
                     }
                 }
 
@@ -312,7 +314,7 @@ pub(crate) fn evaluate_new<'gc>(
                 for member in &class_def.members {
                     if let ClassMember::Property(prop_name, value_expr) = member {
                         let value = evaluate_expr(mc, env, value_expr)?;
-                        object_set_key_value(mc, &instance, prop_name, value)?;
+                        object_set_key_value(mc, &instance, prop_name, value).map_err(EvalError::Js)?;
                     } else if let ClassMember::PrivateProperty(prop_name, value_expr) = member {
                         // Store instance private fields under a key prefixed with '#'
                         let value = evaluate_expr(mc, env, value_expr)?;
@@ -332,7 +334,8 @@ pub(crate) fn evaluate_new<'gc>(
                             evaluated_args,
                             None,
                             Some(env),
-                        )?;
+                        )
+                        .map_err(EvalError::Js)?;
 
                         // Execute constructor body
                         let result = crate::core::evaluate_statements_with_context(mc, &func_env, body, &[])?;
@@ -348,7 +351,7 @@ pub(crate) fn evaluate_new<'gc>(
                         if let Some(final_this) = object_get_key_value(&func_env, "this") {
                             if let Value::Object(final_instance) = &*final_this.borrow() {
                                 // Ensure instance.constructor points back to the constructor object
-                                object_set_key_value(mc, final_instance, "constructor", Value::Object(class_obj))?;
+                                object_set_key_value(mc, final_instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
                                 return Ok(Value::Object(*final_instance));
                             }
                         }
@@ -358,17 +361,17 @@ pub(crate) fn evaluate_new<'gc>(
 
                 // Also set an own `constructor` property on the instance so `err.constructor`
                 // resolves directly to the canonical constructor object.
-                object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj))?;
+                object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
 
                 return Ok(Value::Object(instance));
             }
             // Check if this is the Number constructor object
             if object_get_key_value(&class_obj, "MAX_VALUE").is_some() {
-                return handle_number_constructor(mc, evaluated_args, env);
+                return Ok(crate::js_number::number_constructor(mc, evaluated_args, env)?);
             }
             // Check for constructor-like singleton objects created by the evaluator
             if get_own_property(&class_obj, &"__is_string_constructor".into()).is_some() {
-                return handle_string_constructor(mc, evaluated_args, env);
+                return crate::js_string::string_constructor(mc, evaluated_args, env);
             }
             if get_own_property(&class_obj, &"__is_boolean_constructor".into()).is_some() {
                 return handle_boolean_constructor(mc, evaluated_args, env);
@@ -549,10 +552,10 @@ pub(crate) fn evaluate_new<'gc>(
                     return crate::js_date::handle_date_constructor(mc, evaluated_args, env);
                 }
                 "Array" => {
-                    return Ok(crate::js_array::handle_array_constructor(mc, evaluated_args, env)?);
+                    return crate::js_array::handle_array_constructor(mc, evaluated_args, env);
                 }
                 "RegExp" => {
-                    return Ok(crate::js_regexp::handle_regexp_constructor(mc, evaluated_args)?);
+                    return crate::js_regexp::handle_regexp_constructor(mc, evaluated_args);
                 }
                 "Object" => {
                     return handle_object_constructor(mc, evaluated_args, env);
@@ -608,7 +611,7 @@ pub(crate) fn evaluate_new<'gc>(
         }
     }
 
-    Err(raise_type_error!("Constructor is not callable"))
+    Err(EvalError::Js(raise_type_error!("Constructor is not callable")))
 }
 
 pub(crate) fn create_class_object<'gc>(
@@ -1569,7 +1572,7 @@ pub(crate) fn handle_object_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     if evaluated_args.is_empty() {
         // Object() - create empty object
         let obj = new_js_object_data(mc);
@@ -1665,7 +1668,7 @@ pub(crate) fn handle_number_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let num_val = if evaluated_args.is_empty() {
         // Number() - returns 0
         0.0
@@ -1706,7 +1709,7 @@ pub(crate) fn handle_boolean_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let bool_val = if evaluated_args.is_empty() {
         // Boolean() - returns false
         false
@@ -1725,11 +1728,11 @@ pub(crate) fn handle_boolean_constructor<'gc>(
 
     // Create Boolean object
     let obj = new_js_object_data(mc);
-    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string()))?;
-    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string()))?;
-    object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val))?;
+    object_set_key_value(mc, &obj, "valueOf", Value::Function("Boolean_valueOf".to_string())).map_err(EvalError::Js)?;
+    object_set_key_value(mc, &obj, "toString", Value::Function("Boolean_toString".to_string())).map_err(EvalError::Js)?;
+    object_set_key_value(mc, &obj, "__value__", Value::Boolean(bool_val)).map_err(EvalError::Js)?;
     // Set internal prototype to Boolean.prototype if available
-    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean")?;
+    crate::core::set_internal_prototype_from_constructor(mc, &obj, env, "Boolean").map_err(EvalError::Js)?;
     Ok(Value::Object(obj))
 }
 
@@ -1780,7 +1783,7 @@ pub(crate) fn handle_string_constructor<'gc>(
     mc: &MutationContext<'gc>,
     evaluated_args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     let str_val = if evaluated_args.is_empty() {
         // String() - returns empty string
         Vec::new()

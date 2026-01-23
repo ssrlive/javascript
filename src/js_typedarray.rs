@@ -1,8 +1,8 @@
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value};
-use crate::error::JSError;
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
+use crate::{JSError, core::EvalError};
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Condvar;
@@ -56,21 +56,21 @@ pub fn handle_atomics_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Helper to extract TypedArray from first argument
     if args.is_empty() {
-        return Err(raise_eval_error!("Atomics method requires arguments"));
+        return Err(EvalError::Js(raise_eval_error!("Atomics method requires arguments")));
     }
     // Special-case Atomics.isLockFree which accepts a size (in bytes)
     // and does not require a TypedArray as the first argument.
     if method == "isLockFree" {
         if args.len() != 1 {
-            return Err(raise_eval_error!("Atomics.isLockFree requires 1 argument"));
+            return Err(EvalError::Js(raise_eval_error!("Atomics.isLockFree requires 1 argument")));
         }
         let size_val = args[0].clone();
         let size = match size_val {
             Value::Number(n) => n as usize,
-            _ => return Err(raise_eval_error!("Atomics.isLockFree argument must be a number")),
+            _ => return Err(EvalError::Js(raise_eval_error!("Atomics.isLockFree argument must be a number"))),
         };
 
         #[allow(clippy::match_like_matches_macro, clippy::needless_bool)]
@@ -89,42 +89,42 @@ pub fn handle_atomics_method<'gc>(
             if let Value::TypedArray(ta) = &*ta_rc.borrow() {
                 *ta
             } else {
-                return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+                return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
             }
         } else {
-            return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+            return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
         }
     } else {
-        return Err(raise_eval_error!("First argument to Atomics must be a TypedArray"));
+        return Err(EvalError::Js(raise_eval_error!("First argument to Atomics must be a TypedArray")));
     };
 
     match method {
         "load" => {
             if args.len() != 2 {
-                return Err(raise_eval_error!("Atomics.load requires 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Atomics.load requires 2 arguments")));
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let v = ta_obj.get(idx)?;
             Ok(Value::Number(v as f64))
         }
         "store" => {
             if args.len() != 3 {
-                return Err(raise_eval_error!("Atomics.store requires 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Atomics.store requires 3 arguments")));
             }
             let idx_val = args[1].clone();
             let val_val = args[2].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let v = match val_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics value must be a number or BigInt")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics value must be a number or BigInt"))),
             };
             let old = ta_obj.get(idx)?;
             ta_obj.set(mc, idx, v as f64)?;
@@ -132,24 +132,24 @@ pub fn handle_atomics_method<'gc>(
         }
         "compareExchange" => {
             if args.len() != 4 {
-                return Err(raise_eval_error!("Atomics.compareExchange requires 4 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Atomics.compareExchange requires 4 arguments")));
             }
             let idx_val = args[1].clone();
             let expected_val = args[2].clone();
             let replacement_val = args[3].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics expected must be a number or BigInt"))),
             };
             let replacement = match replacement_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics replacement must be a number or BigInt")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics replacement must be a number or BigInt"))),
             };
             let old = ta_obj.get(idx)?;
             if (old as i64) == (expected as i64) {
@@ -159,19 +159,19 @@ pub fn handle_atomics_method<'gc>(
         }
         "add" | "sub" | "and" | "or" | "xor" | "exchange" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!(format!("Atomics.{} invalid args", method)));
+                return Err(EvalError::Js(raise_eval_error!(format!("Atomics.{} invalid args", method))));
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let operand = if args.len() == 3 {
                 let v = args[2].clone();
                 match v {
                     Value::Number(n) => n as i64,
                     Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                    _ => return Err(raise_eval_error!("Atomics operand must be a number or BigInt")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("Atomics operand must be a number or BigInt"))),
                 }
             } else {
                 0
@@ -192,18 +192,18 @@ pub fn handle_atomics_method<'gc>(
         "wait" => {
             // Atomics.wait(typedArray, index, value[, timeout])
             if args.len() < 3 || args.len() > 4 {
-                return Err(raise_eval_error!("Atomics.wait requires 3 or 4 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Atomics.wait requires 3 or 4 arguments")));
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let expected_val = args[2].clone();
             let expected = match expected_val {
                 Value::Number(n) => n as i64,
                 Value::BigInt(b) => b.to_i64().unwrap_or(0),
-                _ => return Err(raise_eval_error!("Atomics expected must be a number or BigInt")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics expected must be a number or BigInt"))),
             };
 
             // Check current value
@@ -281,18 +281,18 @@ pub fn handle_atomics_method<'gc>(
         "notify" => {
             // Atomics.notify(typedArray, index[, count])
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("Atomics.notify requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("Atomics.notify requires 2 or 3 arguments")));
             }
             let idx_val = args[1].clone();
             let idx = match idx_val {
                 Value::Number(n) => n as usize,
-                _ => return Err(raise_eval_error!("Atomics index must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("Atomics index must be a number"))),
             };
             let count = if args.len() == 3 {
                 let cval = args[2].clone();
                 match cval {
                     Value::Number(n) => n as usize,
-                    _ => return Err(raise_eval_error!("Atomics count must be a number")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("Atomics count must be a number"))),
                 }
             } else {
                 usize::MAX
@@ -324,7 +324,9 @@ pub fn handle_atomics_method<'gc>(
             }
             Ok(Value::Number(awakened as f64))
         }
-        _ => Err(raise_eval_error!(format!("Atomics method '{method}' not implemented"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!(
+            "Atomics method '{method}' not implemented"
+        )))),
     }
 }
 
@@ -966,65 +968,65 @@ pub fn handle_dataview_method<'gc>(
     method: &str,
     args: &[Value<'gc>],
     _env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     // Get the DataView from the object
     let dv_val = object_get_key_value(object, "__dataview");
     let data_view_rc = if let Some(dv_val) = dv_val {
         if let Value::DataView(dv) = &*dv_val.borrow() {
             *dv
         } else {
-            return Err(raise_eval_error!("Invalid DataView object"));
+            return Err(EvalError::Js(raise_eval_error!("Invalid DataView object")));
         }
     } else {
-        return Err(raise_eval_error!("DataView method called on non-DataView object"));
+        return Err(EvalError::Js(raise_eval_error!("DataView method called on non-DataView object")));
     };
 
     match method {
         // Get methods - use immutable borrow
         "getInt8" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("DataView.getInt8 requires exactly 1 argument"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getInt8 requires exactly 1 argument")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let data_view = data_view_rc;
             data_view
                 .get_int8(offset)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getUint8" => {
             if args.len() != 1 {
-                return Err(raise_eval_error!("DataView.getUint8 requires exactly 1 argument"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getUint8 requires exactly 1 argument")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let data_view = data_view_rc;
             data_view
                 .get_uint8(offset)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getInt16" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getInt16 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getInt16 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1033,22 +1035,22 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_int16(offset, little_endian)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getUint16" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getUint16 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getUint16 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1057,22 +1059,22 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_uint16(offset, little_endian)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getInt32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getInt32 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getInt32 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1081,22 +1083,22 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_int32(offset, little_endian)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getUint32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getUint32 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getUint32 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1105,22 +1107,22 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_uint32(offset, little_endian)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getFloat32" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getFloat32 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getFloat32 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1129,22 +1131,22 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_float32(offset, little_endian)
                 .map(|v| Value::Number(v as f64))
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         "getFloat64" => {
             if args.is_empty() || args.len() > 2 {
-                return Err(raise_eval_error!("DataView.getFloat64 requires 1 or 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.getFloat64 requires 1 or 2 arguments")));
             }
             let offset_val = args[0].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let little_endian = if args.len() > 1 {
                 let le_val = args[1].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
@@ -1153,216 +1155,222 @@ pub fn handle_dataview_method<'gc>(
             data_view
                 .get_float64(offset, little_endian)
                 .map(Value::Number)
-                .map_err(|e| raise_eval_error!(e))
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))
         }
         // Set methods - use mutable borrow
         "setInt8" => {
             if args.len() != 2 {
-                return Err(raise_eval_error!("DataView.setInt8 requires exactly 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setInt8 requires exactly 2 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as i8,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
-            data_view_rc.set_int8(offset, value).map_err(|e| raise_eval_error!(e))?;
+            data_view_rc
+                .set_int8(offset, value)
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setUint8" => {
             if args.len() != 2 {
-                return Err(raise_eval_error!("DataView.setUint8 requires exactly 2 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setUint8 requires exactly 2 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as u8,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
-            data_view_rc.set_uint8(offset, value).map_err(|e| raise_eval_error!(e))?;
+            data_view_rc
+                .set_uint8(offset, value)
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setInt16" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setInt16 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setInt16 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as i16,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_int16(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setUint16" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setUint16 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setUint16 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as u16,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_uint16(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setInt32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setInt32 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setInt32 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as i32,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_int32(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setUint32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setUint32 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setUint32 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as u32,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_uint32(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setFloat32" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setFloat32 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setFloat32 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n as f32,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_float32(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         "setFloat64" => {
             if args.len() < 2 || args.len() > 3 {
-                return Err(raise_eval_error!("DataView.setFloat64 requires 2 or 3 arguments"));
+                return Err(EvalError::Js(raise_eval_error!("DataView.setFloat64 requires 2 or 3 arguments")));
             }
             let offset_val = args[0].clone();
             let value_val = args[1].clone();
             let offset = match offset_val {
                 Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => n as usize,
-                _ => return Err(raise_eval_error!("DataView offset must be a non-negative integer")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView offset must be a non-negative integer"))),
             };
             let value = match value_val {
                 Value::Number(n) => n,
-                _ => return Err(raise_eval_error!("DataView value must be a number")),
+                _ => return Err(EvalError::Js(raise_eval_error!("DataView value must be a number"))),
             };
             let little_endian = if args.len() > 2 {
                 let le_val = args[2].clone();
                 match le_val {
                     Value::Boolean(b) => b,
-                    _ => return Err(raise_eval_error!("DataView littleEndian must be a boolean")),
+                    _ => return Err(EvalError::Js(raise_eval_error!("DataView littleEndian must be a boolean"))),
                 }
             } else {
                 false
             };
             data_view_rc
                 .set_float64(offset, value, little_endian)
-                .map_err(|e| raise_eval_error!(e))?;
+                .map_err(|e| EvalError::Js(raise_eval_error!(e)))?;
             Ok(Value::Undefined)
         }
         // Property accessors
         "buffer" => Ok(Value::ArrayBuffer(data_view_rc.buffer)),
         "byteLength" => Ok(Value::Number(data_view_rc.byte_length as f64)),
         "byteOffset" => Ok(Value::Number(data_view_rc.byte_offset as f64)),
-        _ => Err(raise_eval_error!(format!("DataView method '{method}' not implemented"))),
+        _ => Err(EvalError::Js(raise_eval_error!(format!(
+            "DataView method '{method}' not implemented"
+        )))),
     }
 }
 

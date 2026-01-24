@@ -82,6 +82,18 @@ fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement,
             }
         }
         Token::With => parse_with_statement(t, index),
+        Token::Debugger => {
+            // consume debugger statement
+            *index += 1; // consume debugger
+            if *index < t.len() && matches!(t[*index].token, Token::Semicolon) {
+                *index += 1;
+            }
+            Ok(Statement {
+                kind: Box::new(StatementKind::Debugger),
+                line,
+                column,
+            })
+        }
         _ => {
             if let Token::Identifier(name) = &start_token.token
                 && *index + 1 < t.len()

@@ -43,6 +43,7 @@ pub enum StatementKind {
     With(Box<Expr>, Vec<Statement>), // with (expr) body
     Break(Option<String>),
     Continue(Option<String>),
+    Debugger,
     Label(String, Box<Statement>),
     Import(Vec<ImportSpecifier>, String),                 // import specifiers, module name
     Export(Vec<ExportSpecifier>, Option<Box<Statement>>), // export specifiers, optional inner declaration

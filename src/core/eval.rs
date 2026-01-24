@@ -2466,6 +2466,7 @@ fn eval_res<'gc>(
         }
         StatementKind::Break(label) => Ok(Some(ControlFlow::Break(label.clone()))),
         StatementKind::Continue(label) => Ok(Some(ControlFlow::Continue(label.clone()))),
+        StatementKind::Debugger => Ok(None),
         StatementKind::For(for_stmt) => {
             let for_stmt = for_stmt.as_ref();
             let loop_env = new_js_object_data(mc);

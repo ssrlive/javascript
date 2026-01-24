@@ -260,7 +260,7 @@ JS
     done
 
     # if the test references `assert` but none of the includes supply it, prepend harness/assert.js if available
-    if grep -q '\<assert\>' "$f"; then
+    if grep -qE '\<assert\>|\<verifyProperty\>' "$f"; then
       have_assert=false
       for p in "${resolved_includes[@]}"; do
         if [[ -z "$p" ]]; then

@@ -29,7 +29,7 @@ pub fn handle_generator_function_call<'gc>(
         GcCell::new(crate::core::JSGenerator {
             params: closure.params.clone(),
             body: closure.body.clone(),
-            env: closure.env,
+            env: closure.env.expect("closure env must exist"),
             // Store call-time arguments so parameter bindings can be created
             // when the generator actually starts executing on the first `next()`.
             args: args.to_vec(),
@@ -45,7 +45,7 @@ pub fn handle_generator_function_call<'gc>(
     object_set_key_value(mc, &gen_obj, "__generator__", Value::Generator(generator))?;
 
     // Set prototype to Generator.prototype if available
-    if let Some(gen_ctor_val) = crate::core::env_get(&closure.env, "Generator")
+    if let Some(gen_ctor_val) = crate::core::env_get(closure.env.as_ref().expect("Generator needs env"), "Generator")
         && let Value::Object(gen_ctor_obj) = &*gen_ctor_val.borrow()
         && let Some(proto_val) = object_get_key_value(gen_ctor_obj, "prototype")
         && let Value::Object(proto_obj) = &*proto_val.borrow()

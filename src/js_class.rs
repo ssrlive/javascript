@@ -139,14 +139,10 @@ pub fn create_arguments_object<'gc>(
 
         // Construct thrower closure
         let thrower_data = crate::core::ClosureData {
-            params: Vec::new(),
             body: thrower_body,
-            env: *func_env, // Capture current env? Or global? Ideally empty/global env.
-            home_object: crate::core::GcCell::new(None),
-            captured_envs: Vec::new(),
-            bound_this: None,
-            is_arrow: false,
-            is_strict: false,
+            env: Some(*func_env), // Capture current env? Or global? Ideally empty/global env.
+            enforce_strictness_inheritance: true,
+            ..ClosureData::default()
         };
         let thrower_val = crate::core::Value::Closure(crate::core::Gc::new(mc, thrower_data));
 
@@ -247,7 +243,7 @@ pub(crate) fn evaluate_new<'gc>(
                     // Prepare function environment with 'this' bound to the instance
                     let func_env = prepare_call_env_with_this(
                         mc,
-                        Some(captured_env),
+                        captured_env.as_ref(),
                         Some(Value::Object(instance)),
                         Some(params),
                         evaluated_args,
@@ -586,7 +582,7 @@ pub(crate) fn evaluate_new<'gc>(
             // Use pre-evaluated args (calculated at top)
             let func_env = prepare_call_env_with_this(
                 mc,
-                Some(captured_env),
+                captured_env.as_ref(),
                 Some(Value::Object(instance)),
                 Some(params),
                 evaluated_args,
@@ -754,7 +750,7 @@ pub(crate) fn create_class_object<'gc>(
         match member {
             ClassMember::Method(method_name, params, body) => {
                 // Create a closure for the method
-                let closure_data = ClosureData::new(params, body, env, Some(prototype_obj));
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, method_name, method_closure)?;
             }
@@ -889,7 +885,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::StaticMethod(method_name, params, body) => {
                 // Add static method to class object
-                let closure_data = ClosureData::new(params, body, env, Some(class_obj));
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, method_name, method_closure)?;
             }
@@ -919,7 +915,7 @@ pub(crate) fn create_class_object<'gc>(
                     format!("#{method_name}")
                 };
 
-                let closure_data = ClosureData::new(params, body, env, Some(prototype_obj));
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(prototype_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &prototype_obj, &final_key, method_closure)?;
             }
@@ -1036,7 +1032,7 @@ pub(crate) fn create_class_object<'gc>(
             }
             ClassMember::PrivateStaticMethod(method_name, params, body) => {
                 // Add private static method to class object using the '#name' key
-                let closure_data = ClosureData::new(params, body, env, Some(class_obj));
+                let closure_data = ClosureData::new(params, body, Some(*env), Some(class_obj));
                 let method_closure = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &class_obj, format!("#{method_name}"), method_closure)?;
             }
@@ -1115,7 +1111,7 @@ pub(crate) fn call_class_method<'gc>(
                 // Create function environment based on the closure's captured env and bind params, binding `this` to the instance
                 let func_env = prepare_call_env_with_this(
                     mc,
-                    Some(captured_env),
+                    captured_env.as_ref(),
                     Some(Value::Object(*object)),
                     Some(params),
                     evaluated_args,
@@ -1321,7 +1317,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                         Value::Closure(cl) => {
                                             let cl_data = cl;
                                             let call_env = crate::core::new_js_object_data(mc);
-                                            call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                                            call_env.borrow_mut(mc).prototype = cl_data.env;
                                             call_env.borrow_mut(mc).is_function_scope = true;
                                             object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
                                             let body_clone = cl_data.body.clone();
@@ -1335,7 +1331,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                                 if let Value::Closure(cl) = &*cl_rc.borrow() {
                                                     let cl_data = cl;
                                                     let call_env = crate::core::new_js_object_data(mc);
-                                                    call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                                                    call_env.borrow_mut(mc).prototype = cl_data.env;
                                                     call_env.borrow_mut(mc).is_function_scope = true;
                                                     object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
                                                     let body_clone = cl_data.body.clone();
@@ -1417,7 +1413,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                                     Value::Closure(cl) => {
                                                         let cl_data = cl;
                                                         let call_env = crate::core::new_js_object_data(mc);
-                                                        call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                                                        call_env.borrow_mut(mc).prototype = cl_data.env;
                                                         call_env.borrow_mut(mc).is_function_scope = true;
                                                         object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
                                                         let body_clone = cl_data.body.clone();
@@ -1525,7 +1521,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                 // Create function environment and bind params/this
                                 let func_env = prepare_call_env_with_this(
                                     mc,
-                                    Some(captured_env),
+                                    captured_env.as_ref(),
                                     Some(this_val.borrow().clone()),
                                     Some(params),
                                     evaluated_args,
@@ -1568,7 +1564,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                                             // Create function environment and bind params/this
                                             let func_env = prepare_call_env_with_this(
                                                 mc,
-                                                Some(captured_env),
+                                                captured_env.as_ref(),
                                                 Some(this_val.borrow().clone()),
                                                 Some(params),
                                                 evaluated_args,
@@ -1618,7 +1614,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                         // Create function environment with 'this' bound to the instance and bind params
                         let func_env = prepare_call_env_with_this(
                             mc,
-                            Some(captured_env),
+                            captured_env.as_ref(),
                             Some(Value::Object(*instance)),
                             Some(params),
                             evaluated_args,

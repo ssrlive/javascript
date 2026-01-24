@@ -342,7 +342,7 @@ pub fn handle_global_function<'gc>(
                         let captured_env = &data.env;
                         let func_env = prepare_function_call_env(
                             mc,
-                            Some(captured_env),
+                            captured_env.as_ref(),
                             Some(receiver_val),
                             Some(params),
                             &evaluated_args,
@@ -377,7 +377,7 @@ pub fn handle_global_function<'gc>(
                             let captured_env = &data.env;
                             let func_env = prepare_function_call_env(
                                 mc,
-                                Some(captured_env),
+                                captured_env.as_ref(),
                                 Some(receiver_val),
                                 Some(params),
                                 &evaluated_args,
@@ -463,7 +463,7 @@ pub fn handle_global_function<'gc>(
                         let captured_env = &data.env;
                         let func_env = prepare_function_call_env(
                             mc,
-                            Some(captured_env),
+                            captured_env.as_ref(),
                             Some(receiver_val),
                             Some(params),
                             &evaluated_args,
@@ -506,7 +506,7 @@ pub fn handle_global_function<'gc>(
                             let captured_env = &data.env;
                             let func_env = prepare_function_call_env(
                                 mc,
-                                Some(captured_env),
+                                captured_env.as_ref(),
                                 Some(receiver_val),
                                 Some(params),
                                 &evaluated_args,
@@ -1007,10 +1007,19 @@ fn function_constructor<'gc>(
     let mut index = 0;
     let stmts = crate::core::parse_statements(&tokens, &mut index)?;
 
+    // Find global environment (Function constructor always creates functions in global scope)
+    let mut global_env = *env;
+    while let Some(proto) = global_env.borrow().prototype {
+        global_env = proto;
+    }
+
     if let Some(Statement { kind, .. }) = stmts.first() {
         if let StatementKind::FunctionDeclaration(_n, params, body, _i, _a) = &**kind {
-            // Create a closure with the current environment (should be global ideally, but current is acceptable for now)
-            Ok(Value::Closure(Gc::new(mc, ClosureData::new(params, body, env, None))))
+            // Create a closure with the global environment
+            let mut closure_data = ClosureData::new(params, body, Some(global_env), None);
+            // Function constructor created functions should not inherit strict mode from the context
+            closure_data.enforce_strictness_inheritance = false;
+            Ok(Value::Closure(Gc::new(mc, closure_data)))
         } else {
             Err(EvalError::Js(raise_type_error!("Failed to parse function body")))
         }
@@ -1684,14 +1693,13 @@ pub fn handle_function_prototype_method<'gc>(
     this_value: &Value<'gc>,
     method: &str,
     args: &[Value<'gc>],
-    _env: &JSObjectDataPtr<'gc>,
+    env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match method {
         "bind" => {
+            let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
             // function.bind(thisArg, ...args)
             if let Value::Closure(closure_gc) = this_value {
-                let this_arg = args.first().cloned().unwrap_or(Value::Undefined);
-
                 let original = closure_gc;
                 // Check if already bound?
                 // logic: if already bound, subsequent binds (of this) are ignored?
@@ -1732,17 +1740,21 @@ pub fn handle_function_prototype_method<'gc>(
                     bound_this: effective_bound_this,
                     is_arrow: original.is_arrow,
                     is_strict: original.is_strict,
+                    native_target: None,
+                    enforce_strictness_inheritance: true,
                 };
 
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
-            } else if let Value::Function(_) = this_value {
-                // Binding native function: not supported
-                // Return original for now or undefined? Returning original is wrong 'this'.
-                // Returning undefined throws error.
-                // Let's return the function itself (broken binding) or error.
-                Err(EvalError::Js(crate::raise_type_error!(
-                    "Binding native functions not supported yet"
-                )))
+            } else if let Value::Function(name) = this_value {
+                let effective_bound_this = Some(this_arg);
+                let new_closure_data = ClosureData {
+                    env: Some(*env),
+                    bound_this: effective_bound_this,
+                    native_target: Some(name.clone()),
+                    enforce_strictness_inheritance: true,
+                    ..ClosureData::default()
+                };
+                Ok(Value::Closure(Gc::new(mc, new_closure_data)))
             } else {
                 Err(EvalError::Js(crate::raise_type_error!(
                     "Function.prototype.bind called on non-function"

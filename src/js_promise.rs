@@ -618,7 +618,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     );
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
                     log::trace!("callback args={:?}", args);
-                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, caller_env_opt.as_ref())?;
+                    let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(mc, &func_env, &body) {
                         Ok(result) => {
                             log::trace!(
@@ -709,7 +709,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                 // Call the callback and resolve the new promise with the result
                 if let Some((params, body, captured_env)) = extract_closure_from_value(&callback) {
                     let args = vec![promise.borrow().value.clone().unwrap_or(Value::Undefined)];
-                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, caller_env_opt.as_ref())?;
+                    let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, caller_env_opt.as_ref())?;
                     match evaluate_statements(mc, &func_env, &body) {
                         Ok(result) => {
                             resolve_promise(mc, &new_promise, result, &func_env);
@@ -794,7 +794,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
 
                 if is_arrow {
                     // Arrow functions: use closure semantics so bound_this is respected
-                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, None)?;
+                    let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, None)?;
                     let _ = evaluate_statements(mc, &func_env, &body)?;
                 } else {
                     // Non-arrow function: follow strict-mode semantics when applicable.
@@ -855,7 +855,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                 }
 
                 if is_arrow {
-                    let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &args, None)?;
+                    let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &args, None)?;
                     let _ = evaluate_statements(mc, &func_env, &body)?;
                 } else {
                     // Strict-mode: use undefined as `this` for plain function calls
@@ -1255,7 +1255,7 @@ fn create_resolve_function_direct<'gc>(
 
     Value::Closure(Gc::new(
         mc,
-        ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, &env, None),
+        ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, Some(env), None),
     ))
 }
 
@@ -1276,7 +1276,12 @@ fn create_reject_function_direct<'gc>(
 
     Value::Closure(Gc::new(
         mc,
-        ClosureData::new(&[DestructuringElement::Variable("reason".to_string(), None)], &body, &env, None),
+        ClosureData::new(
+            &[DestructuringElement::Variable("reason".to_string(), None)],
+            &body,
+            Some(env),
+            None,
+        ),
     ))
 }
 
@@ -1516,9 +1521,9 @@ pub fn handle_promise_constructor_direct<'gc>(
     // Create executor function environment and bind resolve/reject into params
     let executor_args = vec![resolve_func.clone(), reject_func.clone()];
     let executor_env = if params.is_empty() {
-        crate::core::prepare_closure_call_env(mc, &captured_env, None, &[], None).map_err(EvalError::Js)?
+        crate::core::prepare_closure_call_env(mc, Some(&captured_env), None, &[], None).map_err(EvalError::Js)?
     } else {
-        crate::core::prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &executor_args, None).map_err(EvalError::Js)?
+        crate::core::prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None).map_err(EvalError::Js)?
     };
 
     log::trace!("About to call executor function");
@@ -1676,10 +1681,10 @@ pub fn handle_promise_then_direct<'gc>(
                     Expr::Var("value".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let env = new_js_object_data(mc);
                 env_set(mc, &env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
-                env
+                Some(env)
             },
             None,
         );
@@ -1705,10 +1710,10 @@ pub fn handle_promise_then_direct<'gc>(
                     Expr::Var("reason".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let env = new_js_object_data(mc);
                 env_set(mc, &env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
-                env
+                Some(env)
             },
             None,
         );
@@ -1835,10 +1840,10 @@ pub fn handle_promise_catch_direct<'gc>(
                 Expr::Var("value".to_string(), None, None),
             ],
         ))],
-        &{
+        {
             let env = new_js_object_data(mc);
             env_set(mc, &env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
-            env
+            Some(env)
         },
         None,
     );
@@ -1866,10 +1871,10 @@ pub fn handle_promise_catch_direct<'gc>(
                     Expr::Var("reason".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let env = new_js_object_data(mc);
                 env_set(mc, &env, "__new_promise", Value::Promise(new_promise.clone())).unwrap();
-                env
+                Some(env)
             },
             None,
         );
@@ -1984,18 +1989,18 @@ pub fn handle_promise_finally_direct<'gc>(
             // Return the original value
             stmt_return(Some(Expr::Var("value".to_string(), None, None))),
         ],
-        &{
+        {
             let new_env = env.clone();
             // Add the finally callback to the environment
             if let Some(callback) = on_finally {
                 object_set_key_value(mc, &new_env, "finally_func", callback)?;
             } else {
                 // No-op if no callback provided
-                let closure_data = ClosureData::new(&[], &[], &new_env, None);
+                let closure_data = ClosureData::new(&[], &[], Some(new_env), None);
                 let noop = Value::Closure(Gc::new(mc, closure_data));
                 object_set_key_value(mc, &new_env, "finally_func", noop)?;
             }
-            new_env
+            Some(new_env)
         },
         None,
     );
@@ -2102,14 +2107,14 @@ pub fn resolve_promise<'gc>(
                             Expr::Var("val".to_string(), None, None),
                         ],
                     ))],
-                    &{
+                    {
                         let new_env = new_js_object_data(mc);
                         // Ensure the helper names and globals are reachable via prototype chain by
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(env.clone());
                         // Bind current promise on the env so the helper can access it
                         env_set(mc, &new_env, "__current_promise", Value::Promise(current_promise.clone())).unwrap();
-                        new_env
+                        Some(new_env)
                     },
                     None,
                 ),
@@ -2126,13 +2131,13 @@ pub fn resolve_promise<'gc>(
                             Expr::Var("reason".to_string(), None, None),
                         ],
                     ))],
-                    &{
+                    {
                         let new_env = new_js_object_data(mc);
                         // Ensure the helper names and globals are reachable via prototype chain by
                         // setting the new env's prototype to the caller's env
                         new_env.borrow_mut(mc).prototype = Some(env.clone());
                         env_set(mc, &new_env, "__current_promise", Value::Promise(current_promise)).unwrap();
-                        new_env
+                        Some(new_env)
                     },
                     None,
                 ),
@@ -2384,7 +2389,7 @@ pub fn handle_promise_static_method<'gc>(
                                     remove_unhandled_checks_for_promise(Gc::as_ptr(promise_ref.clone()) as usize);
                                     // Attach a no-op rejection handler to silence future unhandled rejection checks
                                     let noop_env = new_js_object_data(mc);
-                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], &noop_env, None)));
+                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], Some(noop_env), None)));
                                     // Attach catch to promise to mark it as handled
                                     perform_promise_then(mc, promise_ref.clone(), None, Some(noop_closure), None, env)?;
                                     return Ok(Value::Object(result_promise_obj));
@@ -2403,10 +2408,10 @@ pub fn handle_promise_static_method<'gc>(
                                                     Expr::Var("__state".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone.clone()))?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -2423,10 +2428,10 @@ pub fn handle_promise_static_method<'gc>(
                                                     Expr::Var("__state".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone))?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -2609,7 +2614,7 @@ pub fn handle_promise_static_method<'gc>(
                                     remove_unhandled_checks_for_promise(Gc::as_ptr(promise_ref.clone()) as usize);
                                     // Attach no-op rejection handler to silence future unhandled rejection checks for already-rejected promises
                                     let noop_env = new_js_object_data(mc);
-                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], &noop_env, None)));
+                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], Some(noop_env), None)));
                                     perform_promise_then(mc, promise_ref.clone(), None, Some(noop_closure), None, env)?;
                                 }
                                 PromiseState::Pending => {
@@ -2726,7 +2731,7 @@ pub fn handle_promise_static_method<'gc>(
                                             Expr::Var("__result_promise".to_string(), None, None),
                                         ],
                                     ))],
-                                    &{
+                                    {
                                         let new_env = env.clone();
                                         object_set_key_value(
                                             mc,
@@ -2734,7 +2739,7 @@ pub fn handle_promise_static_method<'gc>(
                                             "__result_promise",
                                             Value::Promise(result_promise_clone.clone()),
                                         )?;
-                                        new_env
+                                        Some(new_env)
                                     },
                                     None,
                                 ),
@@ -2755,7 +2760,7 @@ pub fn handle_promise_static_method<'gc>(
                                             Expr::Var("__result_promise".to_string(), None, None),
                                         ],
                                     ))],
-                                    &{
+                                    {
                                         let new_env = env.clone();
                                         object_set_key_value(
                                             mc,
@@ -2765,7 +2770,7 @@ pub fn handle_promise_static_method<'gc>(
                                         )?;
                                         object_set_key_value(mc, &new_env, "__total", Value::Number(num_promises as f64))?;
                                         object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise_clone))?;
-                                        new_env
+                                        Some(new_env)
                                     },
                                     None,
                                 ),
@@ -2850,7 +2855,7 @@ pub fn handle_promise_static_method<'gc>(
                                                     Expr::Var("__result_promise".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(
                                                     mc,
@@ -2858,7 +2863,7 @@ pub fn handle_promise_static_method<'gc>(
                                                     "__result_promise",
                                                     Value::Promise(result_promise_clone.clone()),
                                                 )?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -2875,7 +2880,7 @@ pub fn handle_promise_static_method<'gc>(
                                                     Expr::Var("__result_promise".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(
                                                     mc,
@@ -2883,7 +2888,7 @@ pub fn handle_promise_static_method<'gc>(
                                                     "__result_promise",
                                                     Value::Promise(result_promise_clone),
                                                 )?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -3359,11 +3364,11 @@ fn create_allsettled_resolve_callback<'gc>(
                     Expr::Var("value".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
                 env_set(mc, &env, "__state_env", Value::Object(state_env.clone())).unwrap();
-                env
+                Some(env)
             },
             None,
         ),
@@ -3392,11 +3397,11 @@ fn create_allsettled_reject_callback<'gc>(
                     Expr::Var("reason".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let env = new_js_object_data(mc);
                 env.borrow_mut(mc).prototype = Some(parent_env);
                 env_set(mc, &env, "__state_env", Value::Object(state_env.clone())).unwrap();
-                env
+                Some(env)
             },
             None,
         ),
@@ -4157,7 +4162,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                     }
                                     remove_unhandled_checks_for_promise(Gc::as_ptr(promise_ref.clone()) as usize);
                                     let noop_env = new_js_object_data(mc);
-                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], &noop_env, None)));
+                                    let noop_closure = Value::Closure(Gc::new(mc, ClosureData::new(&[], &[], Some(noop_env), None)));
                                     perform_promise_then(mc, promise_ref.clone(), None, Some(noop_closure), None, env)?;
                                     return Ok(Value::Object(result_promise_obj));
                                 }
@@ -4174,10 +4179,10 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     Expr::Var("__state".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone.clone()))?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -4194,10 +4199,10 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     Expr::Var("__state".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(mc, &new_env, "__state", Value::Object(state_obj_clone))?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -4311,7 +4316,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     Expr::Var("__result_promise".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(
                                                     mc,
@@ -4319,7 +4324,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     "__result_promise",
                                                     Value::Promise(result_promise_clone.clone()),
                                                 )?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -4336,7 +4341,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     Expr::Var("__result_promise".to_string(), None, None),
                                                 ],
                                             ))],
-                                            &{
+                                            {
                                                 let new_env = env.clone();
                                                 object_set_key_value(
                                                     mc,
@@ -4344,7 +4349,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                                     "__result_promise",
                                                     Value::Promise(result_promise_clone),
                                                 )?;
-                                                new_env
+                                                Some(new_env)
                                             },
                                             None,
                                         ),
@@ -4425,9 +4430,9 @@ pub fn handle_promise_constructor_val<'gc>(
     if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(executor) {
         let executor_args = vec![resolve_func, reject_func];
         let executor_env = if params.is_empty() {
-            crate::core::prepare_closure_call_env(mc, &captured_env, None, &[], None).map_err(EvalError::Js)?
+            prepare_closure_call_env(mc, Some(&captured_env), None, &[], None)?
         } else {
-            crate::core::prepare_closure_call_env(mc, &captured_env, Some(&params[..]), &executor_args, None).map_err(EvalError::Js)?
+            prepare_closure_call_env(mc, Some(&captured_env), Some(&params[..]), &executor_args, None)?
         };
         log::trace!("Promise executor params={:?}", params);
         crate::core::evaluate_statements(mc, &executor_env, &body)?;
@@ -4495,11 +4500,11 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                 Expr::Var("__orig_value".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
                                             object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4515,10 +4520,10 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                 Expr::Var("__reason".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4562,7 +4567,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                         Expr::Var("__orig_value".to_string(), None, None),
                                                     ],
                                                 ))],
-                                                &{
+                                                {
                                                     let new_env = env.clone();
                                                     object_set_key_value(
                                                         mc,
@@ -4571,7 +4576,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                         Value::Promise(result_promise.clone()),
                                                     )?;
                                                     object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
-                                                    new_env
+                                                    Some(new_env)
                                                 },
                                                 None,
                                             ),
@@ -4587,7 +4592,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                         Expr::Var("__reason".to_string(), None, None),
                                                     ],
                                                 ))],
-                                                &{
+                                                {
                                                     let new_env = env.clone();
                                                     object_set_key_value(
                                                         mc,
@@ -4595,7 +4600,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                         "__result_promise",
                                                         Value::Promise(result_promise.clone()),
                                                     )?;
-                                                    new_env
+                                                    Some(new_env)
                                                 },
                                                 None,
                                             ),
@@ -4640,11 +4645,11 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                 Expr::Var("__orig_value".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
                                             object_set_key_value(mc, &new_env, "__orig_value", orig_value.clone())?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4660,10 +4665,10 @@ pub fn __internal_promise_finally_resolve<'gc>(
                                                 Expr::Var("__reason".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4729,11 +4734,11 @@ pub fn __internal_promise_finally_reject<'gc>(
                                                 Expr::Var("__orig_reason".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
                                             object_set_key_value(mc, &new_env, "__orig_reason", orig_reason.clone())?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4749,10 +4754,10 @@ pub fn __internal_promise_finally_reject<'gc>(
                                                 Expr::Var("__reason".to_string(), None, None),
                                             ],
                                         ))],
-                                        &{
+                                        {
                                             let new_env = env.clone();
                                             object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
-                                            new_env
+                                            Some(new_env)
                                         },
                                         None,
                                     ),
@@ -4792,11 +4797,11 @@ pub fn __internal_promise_finally_reject<'gc>(
                                             Expr::Var("__orig_reason".to_string(), None, None),
                                         ],
                                     ))],
-                                    &{
+                                    {
                                         let new_env = env.clone();
                                         object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
                                         object_set_key_value(mc, &new_env, "__orig_reason", orig_reason.clone())?;
-                                        new_env
+                                        Some(new_env)
                                     },
                                     None,
                                 ),
@@ -4812,10 +4817,10 @@ pub fn __internal_promise_finally_reject<'gc>(
                                             Expr::Var("__reason".to_string(), None, None),
                                         ],
                                     ))],
-                                    &{
+                                    {
                                         let new_env = env.clone();
                                         object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(result_promise.clone()))?;
-                                        new_env
+                                        Some(new_env)
                                     },
                                     None,
                                 ),
@@ -4863,11 +4868,11 @@ pub fn handle_promise_finally_val<'gc>(
                     Expr::Var("__result_promise".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let new_env = env.clone();
                 object_set_key_value(mc, &new_env, "__on_finally", on_finally_val.clone())?;
                 object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(new_promise.clone()))?;
-                new_env
+                Some(new_env)
             },
             None,
         ),
@@ -4885,11 +4890,11 @@ pub fn handle_promise_finally_val<'gc>(
                     Expr::Var("__result_promise".to_string(), None, None),
                 ],
             ))],
-            &{
+            {
                 let new_env = env.clone();
                 object_set_key_value(mc, &new_env, "__on_finally", on_finally_val.clone())?;
                 object_set_key_value(mc, &new_env, "__result_promise", Value::Promise(new_promise.clone()))?;
-                new_env
+                Some(new_env)
             },
             None,
         ),

@@ -367,4 +367,12 @@ if (!isNode) {
   assert(iterCount === 1, "The value of `iterCount` is `1`");
 }
 
+{
+    // eval - a Function assigning into 'eval' will not throw any error
+    // if contained within strict mode and its body does not start with strict mode
+    console.log("==== Indirect eval of function assigning to 'eval' in strict mode ====");
+    var f = Function('eval = 42;');
+    f();
+}
+
 console.log("All tests passed.");

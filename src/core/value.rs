@@ -283,18 +283,16 @@ impl<'gc> ClosureData<'gc> {
     pub fn new(
         params: &[DestructuringElement],
         body: &[Statement],
-        env: &JSObjectDataPtr<'gc>,
+        env: Option<JSObjectDataPtr<'gc>>,
         home_object: Option<JSObjectDataPtr<'gc>>,
     ) -> Self {
         ClosureData {
             params: params.to_vec(),
             body: body.to_vec(),
-            env: *env,
+            env,
             home_object: GcCell::new(home_object),
-            captured_envs: Vec::new(),
-            bound_this: None,
-            is_arrow: false,
-            is_strict: false,
+            enforce_strictness_inheritance: true,
+            ..ClosureData::default()
         }
     }
 }
@@ -305,18 +303,21 @@ pub struct SymbolData {
     pub description: Option<String>,
 }
 
-#[derive(Clone, Collect)]
+#[derive(Clone, Collect, Default)]
 #[collect(no_drop)]
 pub struct ClosureData<'gc> {
     pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
-    pub env: JSObjectDataPtr<'gc>,
+    pub env: Option<JSObjectDataPtr<'gc>>,
     pub home_object: GcCell<Option<JSObjectDataPtr<'gc>>>,
     pub captured_envs: Vec<JSObjectDataPtr<'gc>>,
     pub bound_this: Option<Value<'gc>>,
     pub is_arrow: bool,
     // Whether this function was parsed/declared in strict mode (function-level "use strict").
     pub is_strict: bool,
+    pub native_target: Option<String>,
+    // For Function() constructor: do not inherit strictness from environment
+    pub enforce_strictness_inheritance: bool,
 }
 
 #[derive(Clone, Collect)]

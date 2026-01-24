@@ -520,7 +520,7 @@ fn test_labeled_block_parenthesis_after_block_asi() {
             (function(){ out.push('PAREN'); })();
             return out.join('|');
         }
-        let result = s8();
+        s8();
     "#;
 
     let result = evaluate_script(script, None::<&std::path::Path>).unwrap();

@@ -1,4 +1,4 @@
-use crate::core::{Expr, JSProxy, Statement, StatementKind};
+use crate::core::{ClosureData, Expr, JSProxy, Statement, StatementKind, prepare_closure_call_env};
 use crate::core::{Gc, GcCell, MutationContext};
 use crate::env_set;
 use crate::{
@@ -104,7 +104,7 @@ pub(crate) fn handle_proxy_revocable<'gc>(
         Gc::new(mc, GcCell::new(Value::Function("Proxy.__internal_revoke".to_string()))),
     );
 
-    let revoke_func = Value::Closure(Gc::new(mc, crate::core::ClosureData::new(&[], &revoke_body, &revoke_env, None)));
+    let revoke_func = Value::Closure(Gc::new(mc, ClosureData::new(&[], &revoke_body, Some(revoke_env), None)));
 
     // Create the revocable result object
     let result_obj = new_js_object_data(mc);
@@ -135,7 +135,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
         // stores the executable closure under the internal `__closure__` key.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
             // Create execution environment for the trap and bind parameters
-            let trap_env = crate::core::prepare_closure_call_env(mc, &captured_env, Some(&params), &args, None).map_err(EvalError::Js)?;
+            let trap_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, None)?;
 
             // Evaluate the body
             return evaluate_statements(mc, &trap_env, &body);

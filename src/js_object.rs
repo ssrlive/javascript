@@ -395,7 +395,7 @@ pub fn handle_object_method<'gc>(
 
                     let key_val = if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&callback_val) {
                         let args = vec![val.clone(), Value::Number(i as f64)];
-                        let func_env = prepare_closure_call_env(mc, &captured_env, Some(&params), &args, Some(env))?;
+                        let func_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, Some(env))?;
                         crate::core::evaluate_statements(mc, &func_env, &body)?
                     } else {
                         return Err(raise_type_error!("Object.groupBy expects a function as second argument"));
@@ -570,12 +570,14 @@ pub fn handle_object_method<'gc>(
                                     let closure_data = crate::core::ClosureData {
                                         params: Vec::new(),
                                         body: body.clone(),
-                                        env: *captured_env,
+                                        env: Some(*captured_env),
                                         home_object: crate::core::GcCell::new(None),
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
                                         is_strict: false,
+                                        native_target: None,
+                                        enforce_strictness_inheritance: true,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -593,12 +595,14 @@ pub fn handle_object_method<'gc>(
                                     let closure_data = crate::core::ClosureData {
                                         params: params.clone(),
                                         body: body.clone(),
-                                        env: *captured_env,
+                                        env: Some(*captured_env),
                                         home_object: crate::core::GcCell::new(None),
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
                                         is_strict: false,
+                                        native_target: None,
+                                        enforce_strictness_inheritance: true,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -620,12 +624,14 @@ pub fn handle_object_method<'gc>(
                         let closure_data = crate::core::ClosureData {
                             params: Vec::new(),
                             body: body.clone(),
-                            env: *captured_env,
+                            env: Some(*captured_env),
                             home_object: crate::core::GcCell::new(None),
                             captured_envs: Vec::new(),
                             bound_this: None,
                             is_arrow: false,
                             is_strict: false,
+                            native_target: None,
+                            enforce_strictness_inheritance: true,
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -641,12 +647,14 @@ pub fn handle_object_method<'gc>(
                         let closure_data = crate::core::ClosureData {
                             params: params.clone(),
                             body: body.clone(),
-                            env: *captured_env,
+                            env: Some(*captured_env),
                             home_object: crate::core::GcCell::new(None),
                             captured_envs: Vec::new(),
                             bound_this: None,
                             is_arrow: false,
                             is_strict: false,
+                            native_target: None,
+                            enforce_strictness_inheritance: true,
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -713,12 +721,14 @@ pub fn handle_object_method<'gc>(
                                                 let closure_data = crate::core::ClosureData {
                                                     params: Vec::new(),
                                                     body: body.clone(),
-                                                    env: *captured_env,
+                                                    env: Some(*captured_env),
                                                     home_object: crate::core::GcCell::new(None),
                                                     captured_envs: Vec::new(),
                                                     bound_this: None,
                                                     is_arrow: false,
                                                     is_strict: false,
+                                                    native_target: None,
+                                                    enforce_strictness_inheritance: true,
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -736,12 +746,14 @@ pub fn handle_object_method<'gc>(
                                                 let closure_data = crate::core::ClosureData {
                                                     params: params.clone(),
                                                     body: body.clone(),
-                                                    env: *captured_env,
+                                                    env: Some(*captured_env),
                                                     home_object: crate::core::GcCell::new(None),
                                                     captured_envs: Vec::new(),
                                                     bound_this: None,
                                                     is_arrow: false,
                                                     is_strict: false,
+                                                    native_target: None,
+                                                    enforce_strictness_inheritance: true,
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -765,12 +777,14 @@ pub fn handle_object_method<'gc>(
                                     let closure_data = crate::core::ClosureData {
                                         params: Vec::new(),
                                         body: body.clone(),
-                                        env: *captured_env,
+                                        env: Some(*captured_env),
                                         home_object: crate::core::GcCell::new(None),
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
                                         is_strict: false,
+                                        native_target: None,
+                                        enforce_strictness_inheritance: true,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -787,12 +801,14 @@ pub fn handle_object_method<'gc>(
                                     let closure_data = crate::core::ClosureData {
                                         params: params.clone(),
                                         body: body.clone(),
-                                        env: *captured_env,
+                                        env: Some(*captured_env),
                                         home_object: crate::core::GcCell::new(None),
                                         captured_envs: Vec::new(),
                                         bound_this: None,
                                         is_arrow: false,
                                         is_strict: false,
+                                        native_target: None,
+                                        enforce_strictness_inheritance: true,
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -1236,8 +1252,15 @@ pub(crate) fn handle_value_of_method<'gc>(
                         let _params = &data.params;
                         let body = data.body.clone();
                         let captured_env = &data.env;
-                        let func_env =
-                            prepare_function_call_env(mc, Some(captured_env), Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                        let func_env = prepare_function_call_env(
+                            mc,
+                            Some(captured_env.as_ref().unwrap()),
+                            Some(Value::Object(*obj)),
+                            None,
+                            &[],
+                            None,
+                            Some(env),
+                        )?;
                         let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
                         if matches!(
                             result,
@@ -1257,7 +1280,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                             return crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), args, env);
                         }
 
-                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj)), None, &[], None, Some(env))?;
+                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj)), None, &[], None, env)?;
                         // let res = crate::js_function::handle_global_function(mc, &func_name, &[], &func_env)?;
                         // if matches!(
                         //     res,
@@ -1278,8 +1301,15 @@ pub(crate) fn handle_value_of_method<'gc>(
                             let _params = &data.params;
                             let body = data.body.clone();
                             let captured_env = &data.env;
-                            let func_env =
-                                prepare_function_call_env(mc, Some(captured_env), Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                            let func_env = prepare_function_call_env(
+                                mc,
+                                Some(captured_env.as_ref().unwrap()),
+                                Some(Value::Object(*obj)),
+                                None,
+                                &[],
+                                None,
+                                Some(env),
+                            )?;
                             let result = crate::core::evaluate_statements(mc, &func_env, &body)?;
                             if matches!(
                                 result,
@@ -1301,7 +1331,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         }
         Value::Function(name) => Ok(Value::Function(name.clone())),
         Value::Closure(data) | Value::AsyncClosure(data) => {
-            let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
+            let closure_data = ClosureData::new(&data.params, &data.body, data.env, None);
             Ok(Value::Closure(Gc::new(mc, closure_data)))
         }
         Value::ClassDefinition(class_def) => Ok(Value::ClassDefinition(*class_def)),
@@ -1319,7 +1349,7 @@ pub(crate) fn handle_value_of_method<'gc>(
         Value::WeakMap(weakmap) => Ok(Value::WeakMap(*weakmap)),
         Value::WeakSet(weakset) => Ok(Value::WeakSet(*weakset)),
         Value::GeneratorFunction(_, data) => {
-            let closure_data = ClosureData::new(&data.params, &data.body, &data.env, None);
+            let closure_data = ClosureData::new(&data.params, &data.body, data.env, None);
             Ok(Value::GeneratorFunction(None, Gc::new(mc, closure_data)))
         }
         Value::Generator(generator) => Ok(Value::Generator(*generator)),

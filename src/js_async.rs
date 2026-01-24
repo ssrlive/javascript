@@ -164,7 +164,7 @@ fn create_async_step_callback<'gc>(
 
     Value::Closure(Gc::new(
         mc,
-        ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, &env, None),
+        ClosureData::new(&[DestructuringElement::Variable("value".to_string(), None)], &body, Some(env), None),
     ))
 }
 

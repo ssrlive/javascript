@@ -29,7 +29,7 @@ pub fn load_module<'gc>(mc: &MutationContext<'gc>, module_name: &str, base_path:
                     line: 0,
                     column: 0,
                 }],
-                &module_exports,
+                Some(module_exports),
                 None,
             ),
         ));

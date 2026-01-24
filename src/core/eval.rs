@@ -792,11 +792,64 @@ fn hoist_var_declarations<'gc>(
                     hoist_var_declarations(mc, env, else_stmts)?;
                 }
             }
-            StatementKind::For(for_stmt) => hoist_var_declarations(mc, env, &for_stmt.body)?,
-            StatementKind::ForIn(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOf(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOfDestructuringObject(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
-            StatementKind::ForOfDestructuringArray(_, _, _, body) => hoist_var_declarations(mc, env, body)?,
+            StatementKind::For(for_stmt) => {
+                if let Some(init) = &for_stmt.init {
+                    hoist_var_declarations(mc, env, std::slice::from_ref(init))?;
+                }
+                hoist_var_declarations(mc, env, &for_stmt.body)?;
+            }
+            StatementKind::ForIn(decl, name, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    hoist_name(mc, env, name)?;
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
+            StatementKind::ForOf(decl, name, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    hoist_name(mc, env, name)?;
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
+            StatementKind::ForOfDestructuringObject(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_object_destructuring(pattern, &mut names);
+                    for name in names {
+                        hoist_name(mc, env, &name)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
+            StatementKind::ForOfDestructuringArray(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_destructuring(pattern, &mut names);
+                    for name in names {
+                        hoist_name(mc, env, &name)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
+            StatementKind::ForInDestructuringObject(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_object_destructuring(pattern, &mut names);
+                    for name in names {
+                        hoist_name(mc, env, &name)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
+            StatementKind::ForInDestructuringArray(decl, pattern, _, body) => {
+                if let Some(crate::core::VarDeclKind::Var) = decl {
+                    let mut names = Vec::new();
+                    collect_names_from_destructuring(pattern, &mut names);
+                    for name in names {
+                        hoist_name(mc, env, &name)?;
+                    }
+                }
+                hoist_var_declarations(mc, env, body)?;
+            }
             StatementKind::While(_, body) => hoist_var_declarations(mc, env, body)?,
             StatementKind::DoWhile(body, _) => hoist_var_declarations(mc, env, body)?,
             StatementKind::TryCatch(tc_stmt) => {
@@ -854,12 +907,10 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 let closure_data = ClosureData {
                     params: params.clone(),
                     body: body.clone(),
-                    env: *env,
-                    home_object: GcCell::new(None),
-                    captured_envs: Vec::new(),
-                    bound_this: None,
-                    is_arrow: false,
+                    env: Some(*env),
                     is_strict,
+                    enforce_strictness_inheritance: true,
+                    ..ClosureData::default()
                 };
                 let closure_val = Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data));
                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -894,12 +945,10 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 let closure_data = ClosureData {
                     params: params.clone(),
                     body: body.clone(),
-                    env: *env,
-                    home_object: GcCell::new(None),
-                    captured_envs: Vec::new(),
-                    bound_this: None,
-                    is_arrow: false,
+                    env: Some(*env),
                     is_strict,
+                    enforce_strictness_inheritance: true,
+                    ..ClosureData::default()
                 };
                 let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
 
@@ -1041,11 +1090,11 @@ pub fn evaluate_statements_with_context_and_last_value<'gc>(
     evaluate_statements_with_labels_and_last(mc, env, statements, labels, &[])
 }
 
-fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
+fn check_expr_for_forbidden_assignment(e: &Expr) -> bool {
     match e {
         Expr::Assign(lhs, _rhs) => {
             if let Expr::Var(name, ..) = &**lhs {
-                return name == "arguments";
+                return name == "arguments" || name == "eval";
             }
             false
         }
@@ -1055,12 +1104,12 @@ fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
         | Expr::Index(obj, _)
         | Expr::OptionalProperty(obj, _)
         | Expr::OptionalCall(obj, _)
-        | Expr::OptionalIndex(obj, _) => check_expr_for_arguments_assignment(obj),
+        | Expr::OptionalIndex(obj, _) => check_expr_for_forbidden_assignment(obj),
         Expr::Binary(l, _, r) | Expr::Comma(l, r) | Expr::Conditional(l, r, _) => {
-            check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r)
+            check_expr_for_forbidden_assignment(l) || check_expr_for_forbidden_assignment(r)
         }
         Expr::LogicalAnd(l, r) | Expr::LogicalOr(l, r) | Expr::NullishCoalescing(l, r) => {
-            check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r)
+            check_expr_for_forbidden_assignment(l) || check_expr_for_forbidden_assignment(r)
         }
         Expr::AddAssign(l, r)
         | Expr::SubAssign(l, r)
@@ -1075,7 +1124,14 @@ fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
         | Expr::UnsignedRightShiftAssign(l, r)
         | Expr::LogicalAndAssign(l, r)
         | Expr::LogicalOrAssign(l, r)
-        | Expr::NullishAssign(l, r) => check_expr_for_arguments_assignment(l) || check_expr_for_arguments_assignment(r),
+        | Expr::NullishAssign(l, r) => {
+            if let Expr::Var(name, ..) = &**l
+                && (name == "arguments" || name == "eval")
+            {
+                return true;
+            }
+            check_expr_for_forbidden_assignment(l) || check_expr_for_forbidden_assignment(r)
+        }
         Expr::UnaryNeg(inner)
         | Expr::UnaryPlus(inner)
         | Expr::LogicalNot(inner)
@@ -1088,35 +1144,154 @@ fn check_expr_for_arguments_assignment(e: &Expr) -> bool {
         | Expr::PostIncrement(inner)
         | Expr::PostDecrement(inner)
         | Expr::Increment(inner)
-        | Expr::Decrement(inner) => check_expr_for_arguments_assignment(inner),
+        | Expr::Decrement(inner) => check_expr_for_forbidden_assignment(inner),
+        Expr::Function(_, _, body)
+        | Expr::GeneratorFunction(_, _, body)
+        | Expr::AsyncFunction(_, _, body)
+        | Expr::AsyncArrowFunction(_, body)
+        | Expr::ArrowFunction(_, body) => body.iter().any(check_stmt_for_forbidden_assignment),
         _ => false,
     }
 }
 
-fn check_stmt_for_arguments_assignment(stmt: &Statement) -> bool {
+fn check_expr_for_var_forbidden_names(e: &Expr) -> bool {
+    match e {
+        Expr::Function(name, _, body) | Expr::GeneratorFunction(name, _, body) | Expr::AsyncFunction(name, _, body) => {
+            if let Some(n) = name
+                && (n == "eval" || n == "arguments")
+            {
+                return true;
+            }
+            body.iter().any(check_stmt_for_var_forbidden_names)
+        }
+        Expr::ArrowFunction(_, body) | Expr::AsyncArrowFunction(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
+        Expr::Binary(l, _, r) => check_expr_for_var_forbidden_names(l) || check_expr_for_var_forbidden_names(r),
+        Expr::Assign(l, r) => check_expr_for_var_forbidden_names(l) || check_expr_for_var_forbidden_names(r),
+        Expr::Call(callee, args) => check_expr_for_var_forbidden_names(callee) || args.iter().any(check_expr_for_var_forbidden_names),
+        Expr::UnaryNeg(val)
+        | Expr::UnaryPlus(val)
+        | Expr::BitNot(val)
+        | Expr::LogicalNot(val)
+        | Expr::Increment(val)
+        | Expr::Decrement(val)
+        | Expr::TypeOf(val)
+        | Expr::Void(val)
+        | Expr::Delete(val)
+        | Expr::Await(val)
+        | Expr::Spread(val) => check_expr_for_var_forbidden_names(val),
+        // Simplification: We need to traverse structure to find function expressions.
+        _ => false,
+    }
+}
+
+fn check_stmt_for_var_forbidden_names(stmt: &Statement) -> bool {
     match &*stmt.kind {
-        StatementKind::Expr(e) => check_expr_for_arguments_assignment(e),
+        StatementKind::Var(decls) | StatementKind::Let(decls) => {
+            for (name, _) in decls {
+                if name == "eval" || name == "arguments" {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::Const(decls) => {
+            for (name, _) in decls {
+                if name == "eval" || name == "arguments" {
+                    return true;
+                }
+            }
+            false
+        }
+        StatementKind::FunctionDeclaration(name, _, body, _, _) => {
+            if name == "eval" || name == "arguments" {
+                return true;
+            }
+            body.iter().any(check_stmt_for_var_forbidden_names)
+        }
+        StatementKind::Class(def) => def.name == "eval" || def.name == "arguments",
+        StatementKind::Block(stmts) => stmts.iter().any(check_stmt_for_var_forbidden_names),
         StatementKind::If(if_stmt) => {
-            check_expr_for_arguments_assignment(&if_stmt.condition)
-                || if_stmt.then_body.iter().any(check_stmt_for_arguments_assignment)
+            if_stmt.then_body.iter().any(check_stmt_for_var_forbidden_names)
                 || if_stmt
                     .else_body
                     .as_ref()
-                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+                    .is_some_and(|b| b.iter().any(check_stmt_for_var_forbidden_names))
         }
-        StatementKind::Block(stmts) => stmts.iter().any(check_stmt_for_arguments_assignment),
+        StatementKind::For(for_stmt) => {
+            if let Some(init) = &for_stmt.init
+                && check_stmt_for_var_forbidden_names(init)
+            {
+                return true;
+            }
+            for_stmt.body.iter().any(check_stmt_for_var_forbidden_names)
+        }
+        StatementKind::ForOf(_, name, _, body) | StatementKind::ForIn(_, name, _, body) => {
+            if name == "eval" || name == "arguments" {
+                return true;
+            }
+            body.iter().any(check_stmt_for_var_forbidden_names)
+        }
+        StatementKind::ForOfDestructuringObject(_, _, _, body)
+        | StatementKind::ForOfDestructuringArray(_, _, _, body)
+        | StatementKind::ForInDestructuringObject(_, _, _, body)
+        | StatementKind::ForInDestructuringArray(_, _, _, body)
+        | StatementKind::ForOfExpr(_, _, body)
+        | StatementKind::ForInExpr(_, _, body)
+        | StatementKind::While(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
+        StatementKind::DoWhile(body, _) => body.iter().any(check_stmt_for_var_forbidden_names),
+        StatementKind::Switch(switch_stmt) => switch_stmt.cases.iter().any(|c| match c {
+            crate::core::SwitchCase::Case(_, stmts) => stmts.iter().any(check_stmt_for_var_forbidden_names),
+            crate::core::SwitchCase::Default(stmts) => stmts.iter().any(check_stmt_for_var_forbidden_names),
+        }),
+        StatementKind::With(_, body) => body.iter().any(check_stmt_for_var_forbidden_names),
         StatementKind::TryCatch(try_stmt) => {
-            try_stmt.try_body.iter().any(check_stmt_for_arguments_assignment)
+            if let Some(param) = &try_stmt.catch_param
+                && (param == "eval" || param == "arguments")
+            {
+                return true;
+            }
+            try_stmt.try_body.iter().any(check_stmt_for_var_forbidden_names)
                 || try_stmt
                     .catch_body
                     .as_ref()
-                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+                    .is_some_and(|b| b.iter().any(check_stmt_for_var_forbidden_names))
                 || try_stmt
                     .finally_body
                     .as_ref()
-                    .is_some_and(|b| b.iter().any(check_stmt_for_arguments_assignment))
+                    .is_some_and(|b| b.iter().any(check_stmt_for_var_forbidden_names))
         }
-        StatementKind::FunctionDeclaration(_, _, body, _, _) => body.iter().any(check_stmt_for_arguments_assignment),
+        StatementKind::Label(_, stmt) => check_stmt_for_var_forbidden_names(stmt),
+        StatementKind::Expr(e) => check_expr_for_var_forbidden_names(e),
+        StatementKind::Return(Some(e)) => check_expr_for_var_forbidden_names(e),
+        StatementKind::Throw(e) => check_expr_for_var_forbidden_names(e),
+        _ => false,
+    }
+}
+
+fn check_stmt_for_forbidden_assignment(stmt: &Statement) -> bool {
+    match &*stmt.kind {
+        StatementKind::Expr(e) => check_expr_for_forbidden_assignment(e),
+        StatementKind::If(if_stmt) => {
+            check_expr_for_forbidden_assignment(&if_stmt.condition)
+                || if_stmt.then_body.iter().any(check_stmt_for_forbidden_assignment)
+                || if_stmt
+                    .else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_forbidden_assignment))
+        }
+        StatementKind::Block(stmts) => stmts.iter().any(check_stmt_for_forbidden_assignment),
+        StatementKind::TryCatch(try_stmt) => {
+            try_stmt.try_body.iter().any(check_stmt_for_forbidden_assignment)
+                || try_stmt
+                    .catch_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_forbidden_assignment))
+                || try_stmt
+                    .finally_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(check_stmt_for_forbidden_assignment))
+        }
+        StatementKind::FunctionDeclaration(_, _, body, _, _) => body.iter().any(check_stmt_for_forbidden_assignment),
         _ => false,
     }
 }
@@ -1170,22 +1345,32 @@ pub fn evaluate_statements_with_labels<'gc>(
         && let Value::Boolean(true) = *is_strict_cell.borrow()
     {
         for stmt in statements {
-            if check_stmt_for_arguments_assignment(stmt) {
-                log::debug!("evaluate_statements: detected assignment to 'arguments' in function body under strict mode");
+            let mut err_msg = None;
+            if check_stmt_for_forbidden_assignment(stmt) {
+                err_msg = Some("Strict mode violation: assignment to 'arguments' or 'eval'");
+            } else if check_stmt_for_var_forbidden_names(stmt) {
+                err_msg = Some("Strict mode violation: invalid variable name 'eval' or 'arguments'");
+            }
+
+            if let Some(msg_str) = err_msg {
+                log::debug!("evaluate_statements: strict mode violation: {}", msg_str);
                 // Construct a SyntaxError object and throw it so it behaves like a JS exception
                 if let Some(syn_ctor_val) = object_get_key_value(&exec_env, "SyntaxError")
                     && let Value::Object(syn_ctor) = &*syn_ctor_val.borrow()
                     && let Some(proto_val_rc) = object_get_key_value(syn_ctor, "prototype")
                     && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
                 {
-                    let msg = Value::String(utf8_to_utf16("Strict mode violation: assignment to 'arguments'"));
+                    let msg = Value::String(utf8_to_utf16(msg_str));
                     let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg)?;
+
+                    // DEBUG: Check constructor name
+                    // In real code we wouldn't do this, but for debugging why assert.throws fails:
+                    // log::error!("Throwing Strict Violation Error: {:?}", err_obj);
+
                     return Err(EvalError::Throw(err_obj, None, None));
                 }
                 // If we couldn't construct a SyntaxError instance for some reason, fall back
-                return Err(EvalError::Js(raise_syntax_error!(
-                    "Strict mode violation: assignment to 'arguments'"
-                )));
+                return Err(EvalError::Js(raise_syntax_error!(msg_str)));
             }
         }
     }
@@ -1232,19 +1417,24 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
         && let Value::Boolean(true) = *is_strict_cell.borrow()
     {
         for stmt in statements {
-            if check_stmt_for_arguments_assignment(stmt) {
+            let mut err_msg = None;
+            if check_stmt_for_forbidden_assignment(stmt) {
+                err_msg = Some("Strict mode violation: assignment to 'arguments' or 'eval'");
+            } else if check_stmt_for_var_forbidden_names(stmt) {
+                err_msg = Some("Strict mode violation: invalid variable name 'eval' or 'arguments'");
+            }
+
+            if let Some(msg_str) = err_msg {
                 if let Some(syn_ctor_val) = object_get_key_value(&exec_env, "SyntaxError")
                     && let Value::Object(syn_ctor) = &*syn_ctor_val.borrow()
                     && let Some(proto_val_rc) = object_get_key_value(syn_ctor, "prototype")
                     && let Value::Object(proto_ptr) = &*proto_val_rc.borrow()
                 {
-                    let msg = Value::String(utf8_to_utf16("Strict mode violation: assignment to 'arguments'"));
+                    let msg = Value::String(utf8_to_utf16(msg_str));
                     let err_obj = crate::core::create_error(mc, Some(*proto_ptr), msg)?;
                     return Err(EvalError::Throw(err_obj, Some(stmt.line), Some(stmt.column)));
                 }
-                return Err(EvalError::Js(raise_syntax_error!(
-                    "Strict mode violation: assignment to 'arguments'"
-                )));
+                return Err(EvalError::Js(raise_syntax_error!(msg_str)));
             }
         }
     }
@@ -1256,6 +1446,26 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
         }
     }
     Ok((ControlFlow::Normal(last_value.clone()), last_value))
+}
+
+fn set_name_if_anonymous<'gc>(mc: &MutationContext<'gc>, val: &Value<'gc>, expr: &Expr, name: &str) -> Result<(), EvalError<'gc>> {
+    let should_set = match expr {
+        Expr::Function(None, ..)
+        | Expr::GeneratorFunction(None, ..)
+        | Expr::AsyncFunction(None, ..)
+        | Expr::ArrowFunction(..)
+        | Expr::AsyncArrowFunction(..) => true,
+        Expr::Class(def) => def.name.is_empty(),
+        _ => false,
+    };
+
+    if should_set && let Value::Object(obj) = val {
+        let key = PropertyKey::String("name".to_string());
+        object_set_key_value(mc, obj, "name", Value::String(utf8_to_utf16(name)))?;
+        obj.borrow_mut(mc).set_non_writable(key.clone());
+        obj.borrow_mut(mc).set_non_enumerable(key);
+    }
+    Ok(())
 }
 
 fn eval_res<'gc>(
@@ -1283,20 +1493,22 @@ fn eval_res<'gc>(
             }
         }
         StatementKind::Let(decls) => {
-            let mut last_init = Value::Undefined;
+            let mut _last_init = Value::Undefined;
             for (name, expr_opt) in decls {
                 let val = if let Some(expr) = expr_opt {
-                    match evaluate_expr(mc, env, expr) {
+                    let v = match evaluate_expr(mc, env, expr) {
                         Ok(v) => v,
                         Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
-                    }
+                    };
+                    set_name_if_anonymous(mc, &v, expr, name)?;
+                    v
                 } else {
                     Value::Undefined
                 };
-                last_init = val.clone();
+                _last_init = val.clone();
                 env_set(mc, env, name, val)?;
             }
-            *last_value = last_init;
+            // *last_value = _last_init;
             Ok(None)
         }
         StatementKind::Var(decls) => {
@@ -1306,6 +1518,7 @@ fn eval_res<'gc>(
                         Ok(v) => v,
                         Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                     };
+                    set_name_if_anonymous(mc, &val, expr, name)?;
 
                     let mut target_env = *env;
                     while !target_env.borrow().is_function_scope {
@@ -1318,22 +1531,22 @@ fn eval_res<'gc>(
                     env_set(mc, &target_env, name, val)?;
                 }
             }
-            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::Const(decls) => {
-            let mut last_init = Value::Undefined;
+            let mut _last_init = Value::Undefined;
             for (name, expr) in decls {
                 let val = match evaluate_expr(mc, env, expr) {
                     Ok(v) => v,
                     Err(e) => return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e)),
                 };
-                last_init = val.clone();
+                set_name_if_anonymous(mc, &val, expr, name)?;
+                _last_init = val.clone();
                 // Bind value and mark the binding as const so subsequent assignments fail
                 env_set(mc, env, name, val)?;
                 env.borrow_mut(mc).set_const(name.clone());
             }
-            *last_value = last_init;
+            // *last_value = _last_init;
             Ok(None)
         }
         StatementKind::Class(class_def) => {
@@ -1342,7 +1555,7 @@ fn eval_res<'gc>(
             if let Err(e) = crate::js_class::create_class_object(mc, &class_def.name, &class_def.extends, &class_def.members, env, true) {
                 return Err(refresh_error_by_additional_stack_frame(mc, env, stmt.line, stmt.column, e.into()));
             }
-            *last_value = Value::Undefined;
+            // *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::Import(specifiers, source) => {
@@ -1389,7 +1602,6 @@ fn eval_res<'gc>(
                     }
                 }
             }
-            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::Export(specifiers, inner_stmt) => {
@@ -1467,7 +1679,6 @@ fn eval_res<'gc>(
                 }
             }
 
-            *last_value = Value::Undefined;
             Ok(None)
         }
         StatementKind::Return(expr_opt) => {
@@ -6488,12 +6699,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
-                env: *env,
-                home_object: GcCell::new(None),
-                captured_envs: Vec::new(),
-                bound_this: None,
-                is_arrow: false,
+                env: Some(*env),
                 is_strict,
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
             };
             let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -6539,12 +6748,10 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
-                env: *env,
-                home_object: GcCell::new(None),
-                captured_envs: Vec::new(),
-                bound_this: None,
-                is_arrow: false,
+                env: Some(*env),
                 is_strict,
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -6579,12 +6786,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
-                env: *env,
-                home_object: GcCell::new(None),
-                captured_envs: Vec::new(),
+                env: Some(*env),
                 bound_this: Some(captured_this),
                 is_arrow: true,
                 is_strict,
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
             };
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -7129,7 +7336,11 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Value::Closure(c) => *c,
                 _ => panic!("Expr::Getter evaluated to invalid value: {:?}", val),
             };
-            Ok(Value::Getter(closure.body.clone(), closure.env, None))
+            Ok(Value::Getter(
+                closure.body.clone(),
+                closure.env.expect("Getter closure requires env"),
+                None,
+            ))
         }
         Expr::Setter(func_expr) => {
             let val = evaluate_expr(mc, env, func_expr)?;
@@ -7150,7 +7361,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 Value::Closure(c) => *c,
                 _ => panic!("Expr::Setter evaluated to invalid value: {:?}", val),
             };
-            Ok(Value::Setter(closure.params.clone(), closure.body.clone(), closure.env, None))
+            Ok(Value::Setter(
+                closure.params.clone(),
+                closure.body.clone(),
+                closure.env.expect("Setter closure requires env"),
+                None,
+            ))
         }
         Expr::TaggedTemplate(tag_expr, strings, exprs) => {
             // Evaluate the tag function
@@ -7273,12 +7489,12 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_data = ClosureData {
                 params: params.to_vec(),
                 body: body.clone(),
-                env: *env,
-                home_object: GcCell::new(None),
-                captured_envs: Vec::new(),
+                env: Some(*env),
                 bound_this: Some(captured_this),
                 is_arrow: true,
                 is_strict,
+                enforce_strictness_inheritance: true,
+                ..ClosureData::default()
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -7350,12 +7566,10 @@ fn evaluate_function_expression<'gc>(
     let closure_data = ClosureData {
         params: params.to_vec(),
         body: body.to_vec(),
-        env: *env,
-        home_object: GcCell::new(None),
-        captured_envs: Vec::new(),
-        bound_this: None,
-        is_arrow: false,
+        env: Some(*env),
         is_strict,
+        enforce_strictness_inheritance: true,
+        ..ClosureData::default()
     };
     let closure_val = Value::Closure(Gc::new(mc, closure_data));
     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -7917,7 +8131,7 @@ pub(crate) fn call_accessor<'gc>(
         Value::Closure(cl) => {
             let cl_data = cl;
             let call_env = crate::core::new_js_object_data(mc);
-            call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+            call_env.borrow_mut(mc).prototype = cl_data.env;
             call_env.borrow_mut(mc).is_function_scope = true;
             object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
             // Propagate [[HomeObject]] if present on the closure
@@ -7939,7 +8153,7 @@ pub(crate) fn call_accessor<'gc>(
                 {
                     let cl_data = cl;
                     let call_env = crate::core::new_js_object_data(mc);
-                    call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+                    call_env.borrow_mut(mc).prototype = cl_data.env;
                     call_env.borrow_mut(mc).is_function_scope = true;
                     object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
                     object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
@@ -7965,7 +8179,7 @@ fn call_setter<'gc>(
         Value::Closure(cl) => {
             let cl_data = cl;
             let call_env = crate::core::new_js_object_data(mc);
-            call_env.borrow_mut(mc).prototype = Some(cl_data.env);
+            call_env.borrow_mut(mc).prototype = cl_data.env;
             call_env.borrow_mut(mc).is_function_scope = true;
             object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
 
@@ -8091,28 +8305,46 @@ pub fn call_closure<'gc>(
     env: &JSObjectDataPtr<'gc>,
     fn_obj: Option<JSObjectDataPtr<'gc>>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
+    if let Some(target_name) = &cl.native_target {
+        let effective_this = if let Some(bound) = &cl.bound_this {
+            Some(bound.clone())
+        } else {
+            this_val
+        };
+        if let Some(res) = crate::core::call_native_function(mc, target_name, effective_this, args, env)? {
+            return Ok(res);
+        }
+        let msg = format!("Native function binding failed for {target_name}");
+        return Err(EvalError::Js(crate::raise_type_error!(msg)));
+    }
+
     let call_env = crate::core::new_js_object_data(mc);
-    call_env.borrow_mut(mc).prototype = Some(cl.env);
+    call_env.borrow_mut(mc).prototype = cl.env;
     call_env.borrow_mut(mc).is_function_scope = true;
 
     // Determine whether this function is strict (either via its own 'use strict'
     // directive at creation time or because its lexical environment is marked strict).
     // Determine whether any ancestor of the function's lexical environment is strict.
-    let mut proto_iter = Some(cl.env);
     let mut env_strict_ancestor = false;
-    while let Some(cur) = proto_iter {
-        if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
-            && matches!(*val.borrow(), Value::Boolean(true))
-        {
-            env_strict_ancestor = true;
-            break;
+    if cl.enforce_strictness_inheritance {
+        let mut proto_iter = cl.env;
+        while let Some(cur) = proto_iter {
+            if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
+                && matches!(*val.borrow(), Value::Boolean(true))
+            {
+                env_strict_ancestor = true;
+                break;
+            }
+            proto_iter = cur.borrow().prototype;
         }
-        proto_iter = cur.borrow().prototype;
     }
 
     let fn_is_strict = cl.is_strict || env_strict_ancestor;
     if fn_is_strict {
         object_set_key_value(mc, &call_env, "__is_strict", Value::Boolean(true))?;
+    } else {
+        // Explicitly set to false to shadow any potential strict ancestor (e.g. if we suppressed inheritance)
+        object_set_key_value(mc, &call_env, "__is_strict", Value::Boolean(false))?;
     }
 
     // If this is a Named Function Expression and the function object has a
@@ -8371,11 +8603,11 @@ pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<Destruct
     match val {
         Value::Closure(cl) => {
             let data = cl;
-            Some((data.params.clone(), data.body.clone(), data.env))
+            Some((data.params.clone(), data.body.clone(), data.env?))
         }
         Value::AsyncClosure(cl) => {
             let data = cl;
-            Some((data.params.clone(), data.body.clone(), data.env))
+            Some((data.params.clone(), data.body.clone(), data.env?))
         }
         Value::Object(obj) => {
             if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
@@ -8383,11 +8615,11 @@ pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<Destruct
                 match &*closure_val {
                     Value::Closure(cl) => {
                         let data = cl;
-                        Some((data.params.clone(), data.body.clone(), data.env))
+                        Some((data.params.clone(), data.body.clone(), data.env?))
                     }
                     Value::AsyncClosure(cl) => {
                         let data = cl;
-                        Some((data.params.clone(), data.body.clone(), data.env))
+                        Some((data.params.clone(), data.body.clone(), data.env?))
                     }
                     _ => None,
                 }
@@ -8505,12 +8737,12 @@ pub fn prepare_function_call_env<'gc>(
 
 pub fn prepare_closure_call_env<'gc>(
     mc: &MutationContext<'gc>,
-    captured_env: &JSObjectDataPtr<'gc>,
+    captured_env: Option<&JSObjectDataPtr<'gc>>,
     params_opt: Option<&[DestructuringElement]>,
     args: &[Value<'gc>],
     _caller_env: Option<&JSObjectDataPtr<'gc>>,
 ) -> Result<JSObjectDataPtr<'gc>, JSError> {
-    prepare_function_call_env(mc, Some(captured_env), None, params_opt, args, None, _caller_env)
+    prepare_function_call_env(mc, captured_env, None, params_opt, args, None, _caller_env)
 }
 
 #[allow(dead_code)]
@@ -8733,7 +8965,7 @@ fn evaluate_expr_new<'gc>(
                         }
 
                         let call_env = crate::core::new_js_object_data(mc);
-                        call_env.borrow_mut(mc).prototype = Some(cl.env);
+                        call_env.borrow_mut(mc).prototype = cl.env;
                         call_env.borrow_mut(mc).is_function_scope = true;
                         object_set_key_value(mc, &call_env, "this", Value::Object(instance))?;
 

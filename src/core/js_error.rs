@@ -143,7 +143,6 @@ pub fn create_error<'gc>(
     let error_obj = new_js_object_data(mc);
     error_obj.borrow_mut(mc).prototype = prototype;
 
-    object_set_key_value(mc, &error_obj, "name", Value::String(utf8_to_utf16("Error")))?;
     object_set_key_value(mc, &error_obj, "message", message.clone())?;
 
     let msg_str = if let Value::String(s) = &message {

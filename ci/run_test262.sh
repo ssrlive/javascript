@@ -356,6 +356,25 @@ JS
     test_to_run="$tmp"
   fi
 
+  # Final safety: if the test references Test262Error but we are about to run
+  # the original file (no tmp), create a tmp that prepends harness/sta.js so
+  # Test262Error is defined. This guarantees consistent behavior regardless of
+  # which earlier branch ran.
+  if grep -q '\<Test262Error\>' "$f"; then
+    if [[ "$test_to_run" == "$f" ]]; then
+      sta_path="${HARNESS_INDEX['sta.js']:-}"
+      if [[ -n "$sta_path" ]]; then
+        tmp=$(mktemp /tmp/test262.XXXXXX.js)
+        cat "$sta_path" >> "$tmp"
+        echo -e "\n" >> "$tmp"
+        cat "$f" >> "$tmp"
+        test_to_run="$tmp"
+        cleanup_tmp=true
+        # echo "DEBUG: created tmp with sta.js prepended for $f (final safety prep)" >&2
+      fi
+    fi
+  fi
+
   echo "RUN $f"
   # run with timeout to avoid hangs
   if timeout 10s $RUN_CMD "$test_to_run" > /tmp/test262_run_out 2>&1; then

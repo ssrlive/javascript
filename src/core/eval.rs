@@ -2473,6 +2473,11 @@ fn eval_res<'gc>(
             if let Some(init_stmt) = &for_stmt.init {
                 evaluate_statements_with_context(mc, &loop_env, std::slice::from_ref(init_stmt), labels)?;
             }
+            // The `for` statement's completion value is `undefined` if the loop
+            // is not entered. Reset `last_value` after the init so it doesn't
+            // retain the init's result when the test is false and the loop
+            // body is never evaluated.
+            *last_value = Value::Undefined;
             loop {
                 if let Some(test_expr) = &for_stmt.test {
                     let cond_val = evaluate_expr(mc, &loop_env, test_expr)?;
@@ -2533,6 +2538,11 @@ fn eval_res<'gc>(
         StatementKind::While(cond, body) => {
             let loop_env = new_js_object_data(mc);
             loop_env.borrow_mut(mc).prototype = Some(*env);
+            // Per ECMAScript completion semantics, the loop's completion value is
+            // `undefined` if the loop is not entered or if it completes abruptly
+            // with no value (e.g., `break;`). Ensure we start with `undefined` so
+            // previous statement results don't leak through.
+            *last_value = Value::Undefined;
             loop {
                 let cond_val = evaluate_expr(mc, &loop_env, cond)?;
                 let is_true = match cond_val {
@@ -2583,6 +2593,10 @@ fn eval_res<'gc>(
         StatementKind::DoWhile(body, cond) => {
             let loop_env = new_js_object_data(mc);
             loop_env.borrow_mut(mc).prototype = Some(*env);
+            // As with `while`, initialize the completion value to `undefined` to
+            // avoid leaking prior values when the body completes abruptly with
+            // no value (e.g., `break;`).
+            *last_value = Value::Undefined;
             loop {
                 let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, &loop_env, body, labels)?;
                 match res {

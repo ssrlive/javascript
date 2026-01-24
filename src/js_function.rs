@@ -321,6 +321,7 @@ pub fn handle_global_function<'gc>(
                             }
                             let receiver_val = args[0].clone();
                             let forwarded_args = args[1..].to_vec();
+                            println!("DEBUG Function.prototype.call forwarded args: {:?}", forwarded_args);
                             let call_env = prepare_call_env_with_this(mc, Some(env), Some(receiver_val), None, &[], None, Some(env))?;
                             return handle_global_function(mc, &func_name, &forwarded_args, &call_env);
                         }
@@ -578,13 +579,11 @@ pub fn handle_global_function<'gc>(
                     return match crate::js_array::handle_array_iterator_next(mc, &obj, env) {
                         Ok(v) => Ok(v),
                         Err(EvalError::Js(j)) => Err(EvalError::Js(j)),
-                        Err(EvalError::Throw(val, line, column)) => Err(EvalError::Js(JSError::new(
-                            JSErrorKind::Throw(crate::core::value_to_string(&val)),
-                            "unknown".to_string(),
-                            "unknown".to_string(),
-                            line,
-                            column,
-                        ))),
+                        Err(EvalError::Throw(val, line, column)) => {
+                            let mut e = make_js_error!(JSErrorKind::Throw(crate::core::value_to_string(&val)));
+                            e.set_js_location(line.unwrap_or(0), column.unwrap_or(0));
+                            Err(EvalError::Js(e))
+                        }
                     };
                 }
                 return Err(EvalError::Js(raise_type_error!(

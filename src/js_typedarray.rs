@@ -489,7 +489,20 @@ pub fn make_dataview_prototype<'gc>(mc: &MutationContext<'gc>) -> Result<JSObjec
 }
 
 /// Create TypedArray constructors
-pub fn make_typedarray_constructors<'gc>(mc: &MutationContext<'gc>) -> Result<Vec<(String, JSObjectDataPtr<'gc>)>, JSError> {
+pub fn make_typedarray_constructors<'gc>(
+    mc: &MutationContext<'gc>,
+    env: &JSObjectDataPtr<'gc>,
+) -> Result<Vec<(String, JSObjectDataPtr<'gc>)>, JSError> {
+    // Look up Object.prototype for inheritance fallback
+    let mut object_prototype = None;
+    if let Some(obj_val) = crate::core::env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(proto_val) = object_get_key_value(obj_ctor, "prototype")
+        && let Value::Object(proto) = &*proto_val.borrow()
+    {
+        object_prototype = Some(*proto);
+    }
+
     let kinds = vec![
         ("Int8Array", TypedArrayKind::Int8),
         ("Uint8Array", TypedArrayKind::Uint8),
@@ -507,7 +520,7 @@ pub fn make_typedarray_constructors<'gc>(mc: &MutationContext<'gc>) -> Result<Ve
     let mut constructors = Vec::new();
 
     for (name, kind) in kinds {
-        let constructor = make_typedarray_constructor(mc, name, kind)?;
+        let constructor = make_typedarray_constructor(mc, name, kind, object_prototype)?;
         constructors.push((name.to_string(), constructor));
     }
 
@@ -530,13 +543,23 @@ fn typedarray_kind_to_number(kind: &TypedArrayKind) -> i32 {
     }
 }
 
-fn make_typedarray_constructor<'gc>(mc: &MutationContext<'gc>, name: &str, kind: TypedArrayKind) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn make_typedarray_constructor<'gc>(
+    mc: &MutationContext<'gc>,
+    name: &str,
+    kind: TypedArrayKind,
+    object_prototype: Option<JSObjectDataPtr<'gc>>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
     // Mark as TypedArray constructor with kind
     let kind_value = typedarray_kind_to_number(&kind);
 
     let obj = new_js_object_data(mc);
 
-    object_set_key_value(mc, &obj, "prototype", Value::Object(make_typedarray_prototype(mc, kind)?))?;
+    object_set_key_value(
+        mc,
+        &obj,
+        "prototype",
+        Value::Object(make_typedarray_prototype(mc, kind, object_prototype)?),
+    )?;
     object_set_key_value(mc, &obj, "name", Value::String(utf8_to_utf16(name)))?;
 
     object_set_key_value(mc, &obj, "__kind", Value::Number(kind_value as f64))?;
@@ -544,8 +567,18 @@ fn make_typedarray_constructor<'gc>(mc: &MutationContext<'gc>, name: &str, kind:
     Ok(obj)
 }
 
-fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKind) -> Result<JSObjectDataPtr<'gc>, JSError> {
+fn make_typedarray_prototype<'gc>(
+    mc: &MutationContext<'gc>,
+    kind: TypedArrayKind,
+    object_prototype: Option<JSObjectDataPtr<'gc>>,
+) -> Result<JSObjectDataPtr<'gc>, JSError> {
     let proto = new_js_object_data(mc);
+
+    if let Some(proto_proto) = object_prototype {
+        proto.borrow_mut(mc).prototype = Some(proto_proto);
+        object_set_key_value(mc, &proto, "__proto__", Value::Object(proto_proto))?;
+        proto.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+    }
 
     // Store the kind in the prototype for later use
     let kind_value = match kind {
@@ -563,7 +596,17 @@ fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKin
     };
 
     object_set_key_value(mc, &proto, "__kind", Value::Number(kind_value as f64))?;
+    // Make internal kind non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("__kind".to_string()));
     object_set_key_value(mc, &proto, "constructor", Value::Function("TypedArray".to_string()))?;
+    // constructor is non-enumerable per spec
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("constructor".to_string()));
 
     // TypedArray properties and methods
     object_set_key_value(
@@ -576,6 +619,11 @@ fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKin
             setter: None,
         },
     )?;
+    // buffer accessor is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("buffer".to_string()));
     object_set_key_value(
         mc,
         &proto,
@@ -586,6 +634,11 @@ fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKin
             setter: None,
         },
     )?;
+    // byteLength accessor is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("byteLength".to_string()));
     object_set_key_value(
         mc,
         &proto,
@@ -596,6 +649,11 @@ fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKin
             setter: None,
         },
     )?;
+    // byteOffset accessor is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("byteOffset".to_string()));
     object_set_key_value(
         mc,
         &proto,
@@ -606,10 +664,24 @@ fn make_typedarray_prototype<'gc>(mc: &MutationContext<'gc>, kind: TypedArrayKin
             setter: None,
         },
     )?;
-
+    // length accessor is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("length".to_string()));
     // Array methods that TypedArrays inherit
     object_set_key_value(mc, &proto, "set", Value::Function("TypedArray.prototype.set".to_string()))?;
+    // set is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("set".to_string()));
     object_set_key_value(mc, &proto, "subarray", Value::Function("TypedArray.prototype.subarray".to_string()))?;
+    // subarray is non-enumerable
+    proto
+        .borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("subarray".to_string()));
 
     Ok(proto)
 }
@@ -941,9 +1013,26 @@ pub fn handle_typedarray_constructor<'gc>(
     // Create the TypedArray object
     let obj = new_js_object_data(mc);
 
-    // Set prototype first
-    let proto = make_typedarray_prototype(mc, kind.clone())?;
-    obj.borrow_mut(mc).prototype = Some(proto);
+    // Set prototype from constructor
+    if let Some(proto_val) = object_get_key_value(constructor_obj, "prototype") {
+        if let Value::Object(proto_obj) = &*proto_val.borrow() {
+            obj.borrow_mut(mc).prototype = Some(*proto_obj);
+            object_set_key_value(mc, &obj, "__proto__", Value::Object(*proto_obj))?;
+            obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+        } else {
+            // Fallback: create new prototype (legacy behavior, though incorrect for identity)
+            let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
+            obj.borrow_mut(mc).prototype = Some(proto);
+            object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
+            obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+        }
+    } else {
+        // Fallback
+        let proto = make_typedarray_prototype(mc, kind.clone(), None)?;
+        obj.borrow_mut(mc).prototype = Some(proto);
+        object_set_key_value(mc, &obj, "__proto__", Value::Object(proto))?;
+        obj.borrow_mut(mc).set_non_enumerable(crate::core::PropertyKey::from("__proto__"));
+    }
 
     // Create TypedArray instance
     let typed_array = Gc::new(
@@ -957,6 +1046,10 @@ pub fn handle_typedarray_constructor<'gc>(
     );
 
     object_set_key_value(mc, &obj, "__typedarray", Value::TypedArray(typed_array))?;
+    // __typedarray is an internal slot marker and should not be enumerable
+    obj.borrow_mut(mc)
+        .non_enumerable
+        .insert(crate::core::PropertyKey::String("__typedarray".to_string()));
 
     Ok(Value::Object(obj))
 }
@@ -1750,7 +1843,7 @@ pub fn initialize_typedarray<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataP
     let dataview = make_dataview_constructor(mc)?;
     crate::core::env_set(mc, env, "DataView", Value::Object(dataview))?;
 
-    let typed_arrays = make_typedarray_constructors(mc)?;
+    let typed_arrays = make_typedarray_constructors(mc, env)?;
     for (name, ctor) in typed_arrays {
         crate::core::env_set(mc, env, &name, Value::Object(ctor))?;
     }

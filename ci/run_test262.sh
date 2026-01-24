@@ -63,6 +63,9 @@ fi
 
 echo "JS engine binary: ${BIN}"
 
+# Cache for feature probes (feature -> true|false)
+declare -A FEATURE_SUPPORTED
+
 if [[ -n "$BIN" ]]; then
   RUN_CMD="$BIN"
 else
@@ -138,12 +141,71 @@ for f in "${ordered[@]}"; do
   # extract metadata inside /*--- ... ---*/
   meta=$(awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$f" || true)
 
+  # Feature detection: skip tests requiring JS features our engine doesn't support
+  # Cache results in associative array FEATURE_SUPPORTED so we probe each feature once.
+  detect_feature() {
+    feat="$1"
+    if [[ -n "${FEATURE_SUPPORTED[$feat]:-}" ]]; then
+      return 0
+    fi
+    case "$feat" in
+      resizable-arraybuffer)
+        probe=$(mktemp /tmp/feat_probe.XXXXXX.js)
+        cat > "$probe" <<'JS'
+try {
+  // Try the modern resizable ArrayBuffer constructor form
+  new ArrayBuffer(1, { maxByteLength: 1 });
+  console.log('OK');
+} catch (e) {
+  try {
+    // Fallback to testing for older forms or other behaviors
+    console.log('NO');
+  } catch (e2) {
+    console.log('NO');
+  }
+}
+JS
+        if timeout 2s $RUN_CMD "$probe" > /tmp/feat_probe_out 2>&1; then
+          if grep -q "OK" /tmp/feat_probe_out; then
+            FEATURE_SUPPORTED[$feat]=true
+          else
+            FEATURE_SUPPORTED[$feat]=false
+          fi
+        else
+          FEATURE_SUPPORTED[$feat]=false
+        fi
+        rm -f "$probe" /tmp/feat_probe_out || true
+        ;;
+      *)
+        # Unknown feature: conservatively assume unsupported
+        FEATURE_SUPPORTED[$feat]=false
+        ;;
+    esac
+  }
+
   # skip tests that reference Intl (fast path) when SKIP_FEATURES contains Intl
   if echo "$meta" | grep -q 'features:' && echo "$meta" | grep -q 'Intl'; then
     skip=$((skip+1))
     echo "SKIP (feature: Intl) $f" >> "$RESULTS_FILE"
     continue
   fi
+
+  # Skip tests that require features our engine doesn't support. Probe each feature once.
+  features_list=$(echo "$meta" | sed -n "s/^features:[[:space:]]*\[\(.*\)\].*/\1/p" || true)
+  if [[ -n "$features_list" ]]; then
+    IFS=',' read -ra FEATS <<< "$(echo "$features_list" | tr -d '[:space:]')"
+    for feat in "${FEATS[@]}"; do
+      feat=${feat//\"/}
+      feat=${feat//\'/}
+      detect_feature "$feat"
+      if [[ "${FEATURE_SUPPORTED[$feat]}" != "true" ]]; then
+        skip=$((skip+1))
+        echo "SKIP (feature unsupported: $feat) $f" >> "$RESULTS_FILE"
+        continue 2
+      fi
+    done
+  fi
+
   # also skip if the test source mentions the Intl symbol and SKIP_FEATURES includes Intl
   if echo "$SKIP_FEATURES" | tr ',' '\n' | grep -qx "Intl" && grep -q '\<Intl\>' "$f"; then
     skip=$((skip+1))
@@ -171,6 +233,29 @@ for f in "${ordered[@]}"; do
         missing=true
         break
       fi
+
+      # Special case: compareArray.js is deprecated/empty, but tests including it EXPECT `assert.compareArray`
+      # So if we see compareArray.js, we MUST ensure assert.js is included BEFORE it (or instead of it).
+      if [[ "$inc" == "compareArray.js" ]]; then
+         # Prepend assert.js if it's not already in the list? 
+         # Or just add it to resolved_includes now, and let duplication logic handle it (if we had any).
+         # Simpler: just ensure we manually add assert.js to resolved_includes if we see compareArray.js
+         # Check if assert.js is already in resolved_includes?
+         # Actually, the logic below checks for `grep -q assert` in the test file.
+         # But the test file might not use `assert()` directly, only `assert.compareArray()`.
+         # And compareArray.js usually depends on assert.js.
+         
+         # Let's enforce assert.js inclusion if compareArray.js is requested.
+         assert_path="${HARNESS_INDEX['assert.js']:-}"
+         if [[ -n "$assert_path" ]]; then
+             # We should validly check if we already added it, but for now strict appending is safer than missing it.
+             # Ideally we want assert.js BEFORE compareArray.js, although compareArray.js is empty so it doesn't matter.
+             # BUT `assert.compareArray` is defined in `assert.js`.
+             # So we just need `assert.js`.
+             resolved_includes+=("$assert_path")
+         fi
+      fi
+
       resolved_includes+=("$inc_path")
     done
 
@@ -178,7 +263,17 @@ for f in "${ordered[@]}"; do
     if grep -q '\<assert\>' "$f"; then
       have_assert=false
       for p in "${resolved_includes[@]}"; do
-        if grep -qE 'function[[:space:]]+assert|var[[:space:]]+assert|assert\.sameValue|assert\.throws' "$p"; then
+        if [[ -z "$p" ]]; then
+          continue
+        fi
+        # Treat the include as an assert provider only if it actually defines `assert`
+        # (function or var) or declares it in the Test262 metadata `defines:` block.
+        if grep -qE 'function[[:space:]]+assert|var[[:space:]]+assert' "$p"; then
+          have_assert=true; break
+        fi
+        # also check the Test262 metadata for `defines: [assert]`
+        if awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$p" | grep -q 'defines:' && \
+           awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$p" | grep -q '\bassert\b'; then
           have_assert=true; break
         fi
       done

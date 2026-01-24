@@ -192,3 +192,34 @@ fn test_js_typedarray_different_construction_patterns_via_script() {
     let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
     assert_eq!(result, "\"Different construction patterns work\"");
 }
+
+#[test]
+fn test_js_for_in_resizable_buffer_via_script() {
+    // Regression test for for-in enumeration over TypedArrays backed by resizable ArrayBuffers
+    let script = r#"
+        function CreateResizableArrayBuffer(initial, max) {
+           try {
+               return new ArrayBuffer(initial, { maxByteLength: max });
+           } catch (e) {
+               throw new Error('Resizable ArrayBuffer not supported: ' + e);
+           }
+        }
+        const ctors = [
+           Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array,
+           Int32Array, Uint32Array, Float32Array, Float64Array
+        ];
+        let rab = CreateResizableArrayBuffer(100, 200);
+        for (let ctor of ctors) {
+            const ta = new ctor(rab, 0, 3);
+            let keys = '';
+            for (const key in ta) {
+                keys += key;
+            }
+            if (keys !== '012') throw new Error(ctor.name + ' keys mismatch: ' + keys);
+        }
+        "OK";
+    "#;
+
+    let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+    assert_eq!(result, "\"OK\"");
+}

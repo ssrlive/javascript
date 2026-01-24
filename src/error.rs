@@ -138,7 +138,7 @@ impl JSError {
     }
 
     pub fn native_message(&self) -> String {
-        let line = self.inner.rust_line.map_or("".to_string(), |l| format!(":{}", l.to_string()));
+        let line = self.inner.rust_line.map_or("".to_string(), |line| format!(":{line}"));
         format!("{} {}{}", self.inner.rust_method, self.inner.rust_file, line)
     }
 }

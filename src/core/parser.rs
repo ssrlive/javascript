@@ -25,6 +25,7 @@ pub fn parse_statements(t: &[TokenData], index: &mut usize) -> Result<Vec<Statem
 }
 
 fn parse_statement_item(t: &[TokenData], index: &mut usize) -> Result<Statement, JSError> {
+    log::trace!("parse_statement_item: starting at index {} token={:?}", *index, t.get(*index));
     // Skip leading line terminators when parsing a single statement.
     // A leading semicolon denotes an empty statement, so consume it and return a ValuePlaceholder expression.
     while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
@@ -151,8 +152,15 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
     *index += 1; // consume (
 
+    // Skip any leading line terminators after the opening paren so constructs like
+    // `for (\n let ...` are correctly recognized as declarations.
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+
     // Check for declaration
     let is_decl = matches!(t[*index].token, Token::Var | Token::Let | Token::Const);
+    log::trace!("parse_for_statement: is_decl={} token={:?}", is_decl, t.get(*index));
 
     let mut init_expr: Option<Expr> = None;
     let mut init_decls: Option<Vec<(String, Option<Expr>)>> = None;
@@ -166,12 +174,27 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
         // Check for destructuring
         if matches!(t[*index].token, Token::LBrace) {
             let pattern = parse_object_destructuring_pattern(t, index)?;
+            log::trace!(
+                "parse_for_statement: parsed object destructuring pattern, index {} token={:?}",
+                *index,
+                t.get(*index)
+            );
             for_of_pattern = Some(ForOfPattern::Object(pattern));
         } else if matches!(t[*index].token, Token::LBracket) {
             let pattern = parse_array_destructuring_pattern(t, index)?;
+            log::trace!(
+                "parse_for_statement: parsed array destructuring pattern, index {} token={:?}",
+                *index,
+                t.get(*index)
+            );
             for_of_pattern = Some(ForOfPattern::Array(pattern));
         } else {
             let decls = parse_variable_declaration_list(t, index)?;
+            log::trace!(
+                "parse_for_statement: parsed var declaration list, index {} token={:?}",
+                *index,
+                t.get(*index)
+            );
             init_decls = Some(decls);
         }
     } else if !matches!(t[*index].token, Token::Semicolon) {
@@ -261,26 +284,68 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     let mut is_for_in = false;
     let mut for_in_rhs = None;
 
+    // Allow line terminators between the left-hand side and the 'in' keyword
+    // so constructs like `for (let [x] \n in obj)` are accepted.
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
+    log::trace!("parse_for_statement: token before 'in' check={:?}", t.get(*index));
+
     if *index < t.len() && matches!(t[*index].token, Token::In) {
         is_for_in = true;
         *index += 1;
         for_in_rhs = Some(parse_expression(t, index)?);
     } else if !is_decl && init_expr.is_some() && matches!(t[*index].token, Token::RParen) {
-        // Check if init_expr is `x in y`.
-        if let Some(Expr::Binary(left, BinaryOp::In, right)) = init_expr.clone()
-            && let Expr::Var(name, _, _) = *left
+        // Check if init_expr contains an `in` as the left-most element of a comma expression
+        // or as a top-level Binary op. If found, extract the LHS and RHS appropriately.
+        fn extract_in(expr: Expr) -> Option<(Box<Expr>, Expr)> {
+            match expr {
+                Expr::Binary(left, BinaryOp::In, right) => Some((left, *right)),
+                Expr::Comma(left, right) => {
+                    if let Some((inner_left, inner_right)) = extract_in(*left) {
+                        Some((inner_left, Expr::Comma(Box::new(inner_right), right)))
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+
+        if let Some(init) = init_expr.clone()
+            && let Some((left, right_expr)) = extract_in(init)
         {
-            *index += 1; // consume )
-            let body = parse_statement_item(t, index)?;
-            let body_stmts = match *body.kind {
-                StatementKind::Block(b) => b,
-                _ => vec![body],
-            };
-            return Ok(Statement {
-                kind: Box::new(StatementKind::ForIn(None, name, *right, body_stmts)),
-                line,
-                column,
-            });
+            match *left {
+                // Simple identifier assignment-form
+                Expr::Var(name, _, _) => {
+                    *index += 1; // consume )
+                    let body = parse_statement_item(t, index)?;
+                    let body_stmts = match *body.kind {
+                        StatementKind::Block(b) => b,
+                        _ => vec![body],
+                    };
+                    return Ok(Statement {
+                        kind: Box::new(StatementKind::ForIn(None, name, right_expr, body_stmts)),
+                        line,
+                        column,
+                    });
+                }
+                // Member/index assignment-form
+                Expr::Property(_, _) | Expr::Index(_, _) => {
+                    *index += 1; // consume )
+                    let body = parse_statement_item(t, index)?;
+                    let body_stmts = match *body.kind {
+                        StatementKind::Block(b) => b,
+                        _ => vec![body],
+                    };
+                    return Ok(Statement {
+                        kind: Box::new(StatementKind::ForInExpr(*left, right_expr, body_stmts)),
+                        line,
+                        column,
+                    });
+                }
+                _ => {}
+            }
         }
     }
 
@@ -354,6 +419,22 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
                         column,
                     });
                 }
+            }
+        }
+
+        // Assignment-form for-in: allow expressions like `for (x in obj)` or `for (a.b in obj)`
+        if init_decls.is_none()
+            && let Some(expr) = init_expr
+        {
+            match expr {
+                Expr::Property(_, _) | Expr::Index(_, _) | Expr::Var(_, _, _) => {
+                    return Ok(Statement {
+                        kind: Box::new(StatementKind::ForInExpr(expr, rhs, body_stmts)),
+                        line,
+                        column,
+                    });
+                }
+                _ => {}
             }
         }
 
@@ -2317,7 +2398,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         Token::Class => {
             // Class Expression
             // class [Identifier] [extends Expression] { ClassBody }
-            let _name = if *index < tokens.len() {
+            let name = if *index < tokens.len() {
                 if let Token::Identifier(n) = &tokens[*index].token {
                     let n = n.clone();
                     *index += 1;
@@ -2329,28 +2410,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                 "".to_string()
             };
 
-            let _extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
-                *index += 1; // consume extends
-                Some(parse_expression(tokens, index)?)
-            } else {
-                None
-            };
-
-            // Class Expression
-            let name = if *index < tokens.len() {
-                if let Token::Identifier(n) = &tokens[*index].token {
-                    let n = n.clone();
-                    *index += 1;
-                    n
-                } else {
-                    "".to_string()
-                }
-            } else {
-                "".to_string()
-            };
-
             let extends = if *index < tokens.len() && matches!(tokens[*index].token, Token::Extends) {
-                *index += 1;
+                *index += 1; // consume extends
                 Some(parse_expression(tokens, index)?)
             } else {
                 None
@@ -2630,7 +2691,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     break;
                 }
                 if *index >= tokens.len() {
-                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                    return Err(raise_parse_error_at!(tokens.last()));
                 }
                 // Check for spread
                 if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
@@ -2897,71 +2958,89 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
         }
         Token::LBracket => {
             // Parse array literal
+            log::trace!("parse_primary: entering LBracket at index {}", *index);
             log::trace!(
-                "parse_primary: starting array literal; next tokens (first 12): {:?}",
-                tokens.iter().take(12).collect::<Vec<_>>()
+                "parse_primary: tokens at idx-1 {:?}, idx {:?}, idx+1 {:?}",
+                tokens.get(*index).map(|t| &t.token),
+                tokens.get(*index).map(|t| &t.token),
+                tokens.get(*index + 1).map(|t| &t.token)
             );
-            let mut elements = Vec::new();
-            if *index < tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
-                // Empty array []
-                *index += 1; // consume ]
-                return Ok(Expr::Array(elements));
+
+            // Robust empty-array detection: handle cases where *index points to
+            // either the '[' or the following ']' (depending on call-site behavior).
+            if *index < tokens.len()
+                && matches!(tokens[*index].token, Token::RBracket)
+                && *index > 0
+                && matches!(tokens[*index - 1].token, Token::LBracket)
+            {
+                // *index currently points at ']' (e.g. caller advanced past '[' already)
+                *index += 1; // consume ']'
+                log::trace!("parse_primary: detected empty array (case: idx at ']') -> new idx {}", *index);
+                Expr::Array(Vec::new())
+            } else {
+                // Otherwise, consume '[' and parse elements normally
+                log::trace!(
+                    "parse_primary: starting array literal; next tokens (first 12): {:?}",
+                    tokens.iter().take(12).collect::<Vec<_>>()
+                );
+                log::trace!("parse_primary: after '[' token at index {} -> {:?}", *index, tokens.get(*index));
+                let mut elements = Vec::new();
+                loop {
+                    // Skip leading blank lines inside array literals to avoid
+                    // attempting to parse a `]` or other tokens as elements.
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                        *index += 1;
+                    }
+                    // If next token is a closing bracket then the array is complete
+                    // This handles trailing commas like `[1, 2,]` correctly — we should
+                    // stop and not attempt to parse a non-existent element.
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
+                        *index += 1; // consume ]
+                        log::trace!(
+                            "parse_primary: completed array literal with {} elements; remaining tokens (first 12): {:?}",
+                            elements.len(),
+                            tokens.iter().take(12).collect::<Vec<_>>()
+                        );
+                        break;
+                    }
+
+                    log::trace!("parse_primary: array element next token: {:?}", tokens.get(*index));
+                    // Support elisions (sparse arrays) where a comma without an
+                    // expression indicates an empty slot, e.g. `[ , ]` or `[a,,b]`.
+                    if matches!(tokens[*index].token, Token::Comma) {
+                        // Push an explicit `None` element to represent the elision (hole)
+                        elements.push(None);
+                        *index += 1; // consume comma representing empty slot
+                        // After consuming the comma, allow the loop to continue and
+                        // possibly encounter another comma or the closing bracket.
+                        // If the next token is RBracket we'll handle completion below.
+                        continue;
+                    }
+
+                    // Parse element expression
+                    let elem = parse_assignment(tokens, index)?;
+                    elements.push(Some(elem));
+
+                    // Check for comma or end. Allow intervening line terminators
+                    // between elements so array items can be split across lines.
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                        *index += 1;
+                    }
+
+                    if *index >= tokens.len() {
+                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                    }
+                    if matches!(tokens[*index].token, Token::RBracket) {
+                        *index += 1; // consume ]
+                        break;
+                    } else if matches!(tokens[*index].token, Token::Comma) {
+                        *index += 1; // consume ,
+                    } else {
+                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                    }
+                }
+                Expr::Array(elements)
             }
-            loop {
-                // Skip leading blank lines inside array literals to avoid
-                // attempting to parse a `]` or other tokens as elements.
-                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
-                    *index += 1;
-                }
-                // If next token is a closing bracket then the array is complete
-                // This handles trailing commas like `[1, 2,]` correctly — we should
-                // stop and not attempt to parse a non-existent element.
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::RBracket) {
-                    *index += 1; // consume ]
-                    log::trace!(
-                        "parse_primary: completed array literal with {} elements; remaining tokens (first 12): {:?}",
-                        elements.len(),
-                        tokens.iter().take(12).collect::<Vec<_>>()
-                    );
-                    break;
-                }
-
-                log::trace!("parse_primary: array element next token: {:?}", tokens.get(*index));
-                // Support elisions (sparse arrays) where a comma without an
-                // expression indicates an empty slot, e.g. `[ , ]` or `[a,,b]`.
-                if matches!(tokens[*index].token, Token::Comma) {
-                    // Push an explicit `None` element to represent the elision (hole)
-                    elements.push(None);
-                    *index += 1; // consume comma representing empty slot
-                    // After consuming the comma, allow the loop to continue and
-                    // possibly encounter another comma or the closing bracket.
-                    // If the next token is RBracket we'll handle completion below.
-                    continue;
-                }
-
-                // Parse element expression
-                let elem = parse_assignment(tokens, index)?;
-                elements.push(Some(elem));
-
-                // Check for comma or end. Allow intervening line terminators
-                // between elements so array items can be split across lines.
-                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
-                    *index += 1;
-                }
-
-                if *index >= tokens.len() {
-                    return Err(raise_parse_error_at!(tokens.get(*index)));
-                }
-                if matches!(tokens[*index].token, Token::RBracket) {
-                    *index += 1; // consume ]
-                    break;
-                } else if matches!(tokens[*index].token, Token::Comma) {
-                    *index += 1; // consume ,
-                } else {
-                    return Err(raise_parse_error_at!(tokens.get(*index)));
-                }
-            }
-            Expr::Array(elements)
         }
         Token::Function | Token::FunctionStar => {
             let is_generator = matches!(current, Token::FunctionStar);
@@ -3261,6 +3340,7 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
     // Update operators (`++`/`--`) because `x\n++` should be a SyntaxError
     // (ASI inserts a semicolon after the expression).
     while *index < tokens.len() {
+        log::trace!("parse_primary: postfix loop at idx {} -> {:?}", *index, tokens.get(*index));
         // If there's a LineTerminator here, look ahead to the next non-LT token.
         // If that token is `++` or `--`, do not treat this as a continuation
         // (leave the LineTerminator to terminate the statement so the `++`
@@ -3534,6 +3614,11 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
     if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBracket) {
         return Err(raise_parse_error_at!(tokens.get(*index)));
     }
+    // Debug: print a slice of upcoming tokens for analysis
+    log::trace!(
+        "parse_array_destructuring_pattern start tokens (first 20): {:?}",
+        tokens.iter().skip(*index).take(20).collect::<Vec<_>>()
+    );
     *index += 1; // consume [
 
     let mut pattern = Vec::new();
@@ -3598,6 +3683,11 @@ pub fn parse_array_destructuring_pattern(tokens: &[TokenData], index: &mut usize
                 }
                 if !init_tokens.is_empty() {
                     let tmp = init_tokens.clone();
+                    log::trace!("parse_array_destructuring_pattern: default init tokens (tokens): {:?}", tmp);
+                    log::trace!(
+                        "parse_array_destructuring_pattern: default init tokens (tokens.tokens): {:?}",
+                        tmp.iter().map(|t| &t.token).collect::<Vec<_>>()
+                    );
                     let expr = parse_expression(&tmp, &mut 0)?;
                     default_expr = Some(Box::new(expr));
                 }
@@ -3720,6 +3810,11 @@ pub fn parse_object_destructuring_pattern(tokens: &[TokenData], index: &mut usiz
                         }
                         if !init_tokens.is_empty() {
                             let tmp = init_tokens.clone();
+                            log::trace!("parse_object_destructuring_pattern: default init tokens (tokens): {:?}", tmp);
+                            log::trace!(
+                                "parse_object_destructuring_pattern: default init tokens (tokens.tokens): {:?}",
+                                tmp.iter().map(|t| &t.token).collect::<Vec<_>>()
+                            );
                             let expr = parse_expression(&tmp, &mut 0)?;
                             default_expr = Some(Box::new(expr));
                         }

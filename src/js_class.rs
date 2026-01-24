@@ -5,7 +5,8 @@ use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data,
 };
 use crate::core::{Gc, GcCell, MutationContext};
-use crate::core::{object_get_key_value, object_set_key_value, value_to_string};
+use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, value_to_string};
+use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
 use crate::{error::JSError, unicode::utf8_to_utf16};
 // use crate::core::error::{create_js_error, raise_type_error};
@@ -197,12 +198,18 @@ pub(crate) fn evaluate_new<'gc>(
 
     match constructor_val {
         Value::Object(class_obj) => {
+            log::debug!("evaluate_new - constructor is Value::Object ptr={:p}", Gc::as_ptr(class_obj));
+            if let Some(cd_val_rc) = object_get_key_value(&class_obj, "__class_def__") {
+                log::debug!("evaluate_new - constructor __class_def__ present variant={:?}", *cd_val_rc.borrow());
+            } else {
+                log::debug!("evaluate_new - constructor __class_def__ not present");
+            }
             // If this object wraps a closure (created from a function
             // expression/declaration), treat it as a constructor by
             // extracting the internal closure and invoking it as a
             // constructor. This allows script-defined functions stored
             // as objects to be used with `new` while still exposing
-            // assignable `prototype` properties.
+            // assignable `prototype` properties."}
             if let Some(cl_val_rc) = object_get_key_value(&class_obj, "__closure__") {
                 let closure_data = match &*cl_val_rc.borrow() {
                     Value::Closure(data) | Value::AsyncClosure(data) => Some(*data),
@@ -278,9 +285,9 @@ pub(crate) fn evaluate_new<'gc>(
             }
 
             // Check if this is a TypedArray constructor
-            // if get_own_property(&class_obj, &"__kind".into()).is_some() {
-            //     return crate::js_typedarray::handle_typedarray_constructor(&class_obj, args, env);
-            // }
+            if get_own_property(&class_obj, &"__kind".into()).is_some() {
+                return Ok(handle_typedarray_constructor(mc, &class_obj, evaluated_args, env)?);
+            }
 
             // Check if this is ArrayBuffer constructor
             // if get_own_property(&class_obj, &"__arraybuffer".into()).is_some() {
@@ -296,6 +303,13 @@ pub(crate) fn evaluate_new<'gc>(
             if let Some(class_def_val) = object_get_key_value(&class_obj, "__class_def__")
                 && let Value::ClassDefinition(ref class_def) = *class_def_val.borrow()
             {
+                log::debug!(
+                    "evaluate_new - class constructor matched __class_def__ name={} class_obj ptr={:p} extends={:?} members_len={}",
+                    class_def.name,
+                    Gc::as_ptr(class_obj),
+                    class_def.extends,
+                    class_def.members.len()
+                );
                 // Create instance
                 let instance = new_js_object_data(mc);
 
@@ -323,8 +337,10 @@ pub(crate) fn evaluate_new<'gc>(
                 }
 
                 // Call constructor if it exists
+                let mut constructor_found = false;
                 for member in &class_def.members {
                     if let ClassMember::Constructor(params, body) = member {
+                        constructor_found = true;
                         // Use pre-evaluated args
                         let func_env = prepare_call_env_with_this(
                             mc,
@@ -352,6 +368,8 @@ pub(crate) fn evaluate_new<'gc>(
                             if let Value::Object(final_instance) = &*final_this.borrow() {
                                 // Ensure instance.constructor points back to the constructor object
                                 object_set_key_value(mc, final_instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
+                                // Make the instance's `constructor` non-enumerable so for..in skips it
+                                final_instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
                                 return Ok(Value::Object(*final_instance));
                             }
                         }
@@ -359,11 +377,46 @@ pub(crate) fn evaluate_new<'gc>(
                     }
                 }
 
-                // Also set an own `constructor` property on the instance so `err.constructor`
-                // resolves directly to the canonical constructor object.
-                object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
+                if !constructor_found {
+                    if class_def.extends.is_some() {
+                        // Derived class default constructor: constructor(...args) { super(...args); }
+                        // Delegate to parent constructor
+                        if let Some(proto_val) = object_get_key_value(&class_obj, "__proto__") {
+                            let parent_ctor = proto_val.borrow().clone();
+                            // Call parent constructor
+                            let parent_inst = evaluate_new(mc, env, parent_ctor, evaluated_args)?;
+                            if let Value::Object(inst_obj) = &parent_inst {
+                                // Fix prototype to point to this class's prototype
+                                if let Some(prototype_val) = object_get_key_value(&class_obj, "prototype") {
+                                    if let Value::Object(proto_obj) = &*prototype_val.borrow() {
+                                        inst_obj.borrow_mut(mc).prototype = Some(*proto_obj);
+                                        object_set_key_value(mc, inst_obj, "__proto__", Value::Object(*proto_obj))
+                                            .map_err(EvalError::Js)?;
+                                    }
+                                }
+                                // Fix constructor property
+                                object_set_key_value(mc, inst_obj, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
+                                inst_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+                                // Fix __proto__ non-enumerable
+                                inst_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
 
-                return Ok(Value::Object(instance));
+                                return Ok(parent_inst);
+                            } else {
+                                return Ok(parent_inst);
+                            }
+                        } else {
+                            return Err(EvalError::Js(raise_type_error!("Parent constructor not found")));
+                        }
+                    } else {
+                        // Base class default constructor (empty)
+                        // Also set an own `constructor` property on the instance so `err.constructor`
+                        // resolves directly to the canonical constructor object.
+                        object_set_key_value(mc, &instance, "constructor", Value::Object(class_obj)).map_err(EvalError::Js)?;
+                        // Make the instance's `constructor` non-enumerable so it doesn't show up in for..in
+                        instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
+                        return Ok(Value::Object(instance));
+                    }
+                }
             }
             // Check if this is the Number constructor object
             if object_get_key_value(&class_obj, "MAX_VALUE").is_some() {
@@ -413,8 +466,11 @@ pub(crate) fn evaluate_new<'gc>(
                     if let Value::Object(proto_obj) = &*prototype_val.borrow() {
                         instance.borrow_mut(mc).prototype = Some(*proto_obj);
                         object_set_key_value(mc, &instance, "__proto__", Value::Object(*proto_obj))?;
+                        // Ensure the instance __proto__ helper property is non-enumerable
+                        instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
                     } else {
                         object_set_key_value(mc, &instance, "__proto__", prototype_val.borrow().clone())?;
+                        instance.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
                     }
                 }
 
@@ -641,17 +697,26 @@ pub(crate) fn create_class_object<'gc>(
     if let Some(parent_expr) = extends {
         // Evaluate the extends expression to get the parent class object
         let parent_val = evaluate_expr(mc, env, parent_expr)?;
+        log::debug!("create_class_object class={} parent_val={:?}", name, parent_val);
+
         if let Value::Object(parent_class_obj) = parent_val {
             // Get the parent class's prototype
-            if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype")
-                && let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow()
-            {
-                // Set the child class prototype's internal prototype pointer and __proto__ property
-                prototype_obj.borrow_mut(mc).prototype = Some(*parent_proto_obj);
-                object_set_key_value(mc, &prototype_obj, "__proto__", Value::Object(*parent_proto_obj))?;
+            if let Some(parent_proto_val) = object_get_key_value(&parent_class_obj, "prototype") {
+                log::debug!(
+                    "create_class_object class={} found parent prototype {:?}",
+                    name,
+                    parent_proto_val.borrow()
+                );
+                if let Value::Object(parent_proto_obj) = &*parent_proto_val.borrow() {
+                    prototype_obj.borrow_mut(mc).prototype = Some(*parent_proto_obj);
+                    object_set_key_value(mc, &prototype_obj, "__proto__", Value::Object(*parent_proto_obj))?;
+                }
+            } else {
+                log::debug!("create_class_object class={} parent has no prototype property", name);
             }
-        } else {
-            return Err(raise_eval_error!("Parent class expression did not evaluate to a class constructor"));
+
+            // Set the class object's __proto__ to the parent class object (inherit static methods)
+            object_set_key_value(mc, &class_obj, "__proto__", Value::Object(parent_class_obj))?;
         }
     } else {
         // No `extends`: link prototype.__proto__ to `Object.prototype` if available so
@@ -662,6 +727,9 @@ pub(crate) fn create_class_object<'gc>(
 
     object_set_key_value(mc, &class_obj, "prototype", Value::Object(prototype_obj))?;
     object_set_key_value(mc, &prototype_obj, "constructor", Value::Object(class_obj))?;
+    // Make prototype internal properties non-enumerable so for..in does not list them
+    prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
+    prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));
 
     // Store class definition for later use
     let class_def = ClassDefinition {
@@ -673,9 +741,13 @@ pub(crate) fn create_class_object<'gc>(
     // Store class definition in a special property
     let class_def_val = Value::ClassDefinition(Gc::new(mc, class_def));
     object_set_key_value(mc, &class_obj, "__class_def__", class_def_val.clone())?;
+    // Make internal class definition property non-enumerable on the constructor
+    class_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__class_def__"));
 
     // Store class definition in prototype as well for instanceof checks
     object_set_key_value(mc, &prototype_obj, "__class_def__", class_def_val)?;
+    // And make the prototype's internal class marker non-enumerable so it isn't enumerated by for..in
+    prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__class_def__"));
 
     // Add methods to prototype
     for member in members {

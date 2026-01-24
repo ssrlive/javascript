@@ -683,6 +683,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
             if !args.is_empty() {
                 // let callback_val = evaluate_expr(mc, env, &args[0])?;
                 let callback_val = args[0].clone();
+                println!("DEBUG Array.map callback arg: {:?}", callback_val);
                 let current_len = get_array_length(mc, object).unwrap_or(0);
 
                 let new_array = create_array(mc, env)?;
@@ -693,17 +694,23 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
                         // Support inline closures wrapped as objects with __closure__ like forEach does.
-                        let actual_func = if let Value::Object(obj) = &callback_val {
+                        // Also, constructors are represented as objects; if a constructor object
+                        // is passed (has a __native_ctor string), treat it as a global function
+                        // with that name so it can be called.
+                        let mut actual_callback_val = callback_val.clone();
+                        if let Value::Object(obj) = &callback_val {
+                            // Closure wrapper
                             if let Some(prop) = object_get_key_value(obj, "__closure__") {
-                                prop.borrow().clone()
-                            } else {
-                                callback_val.clone()
+                                actual_callback_val = prop.borrow().clone();
+                            } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
+                                if let Value::String(name_vec) = &*nc.borrow() {
+                                    let name = crate::unicode::utf16_to_utf8(name_vec);
+                                    actual_callback_val = Value::Function(name);
+                                }
                             }
-                        } else {
-                            callback_val.clone()
-                        };
+                        }
 
-                        let res = match &actual_func {
+                        let res = match &actual_callback_val {
                             Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, &call_args, env, None)?,
                             Value::Function(name) => crate::js_function::handle_global_function(mc, name, &call_args, env)?,
                             _ => return Err(EvalError::Js(raise_eval_error!("Array.map callback must be a function"))),

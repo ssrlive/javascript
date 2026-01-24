@@ -61,6 +61,7 @@ jobs:
         cargo run --all-features --example js -- js-scripts/es6_module_test_03.js
         cargo run --all-features --example js -- js-scripts/eval_direct_indirect_tests.js
         cargo run --all-features --example js -- js-scripts/expressions_n_operators.js
+        cargo run --all-features --example js -- js-scripts/for-in-tests.js
         cargo run --all-features --example js -- js-scripts/function_arguments_callee.js
         cargo run --all-features --example js -- js-scripts/function_object.js
         cargo run --all-features --example js -- js-scripts/globel_assert.js

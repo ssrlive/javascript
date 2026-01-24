@@ -2136,7 +2136,7 @@ fn eval_res<'gc>(
                 Err(e) => match e {
                     EvalError::Js(js_err) => {
                         let val = js_error_to_value(mc, env, &js_err);
-                        ControlFlow::Throw(val, js_err.inner.line, js_err.inner.column)
+                        ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column)
                     }
                     EvalError::Throw(val, line, column) => ControlFlow::Throw(val, line, column),
                 },
@@ -2166,7 +2166,7 @@ fn eval_res<'gc>(
                     Err(e) => match e {
                         EvalError::Js(js_err) => {
                             let val = js_error_to_value(mc, env, &js_err);
-                            result = ControlFlow::Throw(val, js_err.inner.line, js_err.inner.column);
+                            result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
                         }
                         EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
                     },
@@ -2199,7 +2199,7 @@ fn eval_res<'gc>(
                     Err(e) => match e {
                         EvalError::Js(js_err) => {
                             let val = js_error_to_value(mc, env, &js_err);
-                            result = ControlFlow::Throw(val, js_err.inner.line, js_err.inner.column);
+                            result = ControlFlow::Throw(val, js_err.inner.js_line, js_err.inner.js_column);
                         }
                         EvalError::Throw(val, line, column) => result = ControlFlow::Throw(val, line, column),
                     },
@@ -2823,7 +2823,19 @@ fn eval_res<'gc>(
             Err(EvalError::Js(raise_type_error!("Value is not iterable")))
         }
         StatementKind::ForIn(decl_kind, var_name, iterable, body) => {
-            let iter_val = evaluate_expr(mc, env, iterable)?;
+            // If this is a lexical (let/const) declaration, create a head env with
+            // TDZ binding for the loop variable so that iterable evaluation will see the
+            // binding as uninitialized and throw ReferenceError on access.
+            let mut head_env: Option<JSObjectDataPtr<'gc>> = None;
+            if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind {
+                let he = new_js_object_data(mc);
+                he.borrow_mut(mc).prototype = Some(*env);
+                env_set(mc, &he, var_name, Value::Uninitialized)?;
+                head_env = Some(he);
+            }
+            let iter_eval_env = head_env.as_ref().unwrap_or(env);
+
+            let iter_val = evaluate_expr(mc, iter_eval_env, iterable)?;
 
             // If the evaluated expression is null or undefined, the iteration is skipped per spec
             // and the completion value of the ForIn statement is empty (represented as `undefined`).
@@ -2838,22 +2850,30 @@ fn eval_res<'gc>(
             }
 
             if let Value::Object(obj) = iter_val {
-                // Collect enumerable string keys across prototype chain in insertion order
+                // Collect enumerable string keys across prototype chain using "ordinary own property keys"
+                // semantics so that array index keys (numeric) are ordered first, then other
+                // string keys in insertion order.
                 let mut keys: Vec<String> = Vec::new();
                 let mut seen = std::collections::HashSet::new();
                 let mut current = Some(obj);
                 while let Some(o) = current {
-                    for (key, _val) in o.borrow().properties.iter() {
-                        if !o.borrow().is_enumerable(key) {
-                            continue;
-                        }
+                    // Obtain the object's own property keys in ordinary own property keys order
+                    // (array index keys sorted numerically, followed by other string keys,
+                    // then symbol keys). This ensures per-object ordering matches the spec.
+                    let own_keys = crate::core::value::ordinary_own_property_keys(&o);
+                    for key in own_keys.iter() {
                         if let PropertyKey::String(s) = key {
                             if s == "length" {
                                 continue;
                             }
+                            // Record that this name exists on the chain so that it
+                            // shadows properties further down the prototype chain,
+                            // even if the current property is non-enumerable.
                             if !seen.contains(s) {
-                                keys.push(s.clone());
                                 seen.insert(s.clone());
+                                if o.borrow().is_enumerable(key) {
+                                    keys.push(s.clone());
+                                }
                             }
                         }
                     }
@@ -2862,15 +2882,48 @@ fn eval_res<'gc>(
 
                 log::trace!("for-in keys: {keys:?}");
 
+                // Per spec, the iteration completion value V starts as undefined
+                *last_value = Value::Undefined;
+
                 match decl_kind {
                     // `var` declaration or assignment form: single binding in the surrounding
                     // scope (function/global). Update that binding each iteration and run body
                     // in the same environment (`env`).
                     Some(crate::core::VarDeclKind::Var) | None => {
                         for k in &keys {
+                            // Skip keys that were deleted (or otherwise no longer exist).
+                            // `object_get_key_value` only looks at the property map, but TypedArray
+                            // indexed elements are conceptual own properties (0..length-1)
+                            // and may not be materialized. Handle that specially here so
+                            // for-in will iterate over typed array indices even when they
+                            // aren't present in the properties map.
+                            let mut key_present = false;
                             if let Some(val_rc) = object_get_key_value(&obj, k) {
                                 log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
+                                key_present = true;
+                            } else {
+                                log::trace!("for-in missing property {k}, checking typedarray indices...");
+                                // Check for a TypedArray element for numeric index keys.
+                                if let Ok(idx) = k.parse::<usize>() {
+                                    log::trace!("for-in numeric key parsed: {idx}");
+                                    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string())) {
+                                        log::trace!("for-in object has __typedarray marker");
+                                        if let Value::TypedArray(ta) = &*ta_cell.borrow()
+                                            && idx < ta.length
+                                        {
+                                            match ta.get(idx) {
+                                                Ok(num) => log::trace!("for-in property {k} -> {}", num),
+                                                Err(_) => log::trace!("for-in property {k} -> <typedarray element error>"),
+                                            }
+                                            key_present = true;
+                                        }
+                                    }
+                                }
                             }
+                            if !key_present {
+                                continue;
+                            }
+
                             env_set_recursive(mc, env, var_name, Value::String(utf8_to_utf16(k)))?;
                             let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
                             match res {
@@ -2904,9 +2957,29 @@ fn eval_res<'gc>(
                     // each iteration so closures capture a distinct binding per iteration.
                     Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) => {
                         for k in &keys {
+                            // Skip keys that were deleted (or otherwise no longer exist)
+                            let mut key_present = false;
                             if let Some(val_rc) = object_get_key_value(&obj, k) {
                                 log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
+                                key_present = true;
+                            } else {
+                                // Check for a TypedArray element for numeric index keys.
+                                if let Ok(idx) = k.parse::<usize>()
+                                    && let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+                                    && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                                    && idx < ta.length
+                                {
+                                    match ta.get(idx) {
+                                        Ok(num) => log::trace!("for-in property {k} -> {}", num),
+                                        Err(_) => log::trace!("for-in property {k} -> <typedarray element error>"),
+                                    }
+                                    key_present = true;
+                                }
                             }
+                            if !key_present {
+                                continue;
+                            }
+
                             let iter_env = new_js_object_data(mc);
                             iter_env.borrow_mut(mc).prototype = Some(*env);
                             env_set(mc, &iter_env, var_name, Value::String(utf8_to_utf16(k)))?;
@@ -2940,6 +3013,103 @@ fn eval_res<'gc>(
                     }
                 }
             }
+            Ok(None)
+        }
+        StatementKind::ForInExpr(lhs, iterable, body) => {
+            let iter_val = evaluate_expr(mc, env, iterable)?;
+
+            // If the evaluated expression is null or undefined, the iteration is skipped per spec
+            // and the completion value of the ForIn statement is empty (represented as `undefined`).
+            if matches!(iter_val, Value::Undefined | Value::Null) {
+                *last_value = Value::Undefined;
+                return Ok(None);
+            }
+
+            if let Value::Object(obj) = iter_val {
+                // Collect enumerable string keys across prototype chain in insertion order
+                let mut keys: Vec<String> = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut current = Some(obj);
+                while let Some(o) = current {
+                    for (key, _val) in o.borrow().properties.iter() {
+                        if let PropertyKey::String(s) = key {
+                            if s == "length" {
+                                continue;
+                            }
+                            if !seen.contains(s) {
+                                seen.insert(s.clone());
+                                if o.borrow().is_enumerable(key) {
+                                    keys.push(s.clone());
+                                }
+                            }
+                        }
+                    }
+                    current = o.borrow().prototype;
+                }
+
+                log::trace!("for-in expr keys: {keys:?}");
+
+                // Per spec, the iteration completion value V starts as undefined
+                *last_value = Value::Undefined;
+
+                let mut v = Value::Undefined;
+                for k in &keys {
+                    // Skip keys that were deleted (or otherwise no longer exist)
+                    let mut key_present = false;
+                    if let Some(val_rc) = object_get_key_value(&obj, k) {
+                        log::trace!("for-in property {k} -> {}", value_to_string(&val_rc.borrow()));
+                        key_present = true;
+                    } else {
+                        // Check for a TypedArray element for numeric index keys.
+                        if let Ok(idx) = k.parse::<usize>()
+                            && let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+                            && let Value::TypedArray(ta) = &*ta_cell.borrow()
+                            && idx < ta.length
+                        {
+                            match ta.get(idx) {
+                                Ok(num) => log::trace!("for-in property {k} -> {}", num),
+                                Err(_) => log::trace!("for-in property {k} -> <typedarray element error>"),
+                            }
+                            key_present = true;
+                        }
+                    }
+                    if !key_present {
+                        continue;
+                    }
+
+                    evaluate_assign_target_with_value(mc, env, lhs, Value::String(utf8_to_utf16(k)))?;
+                    let (res, vbody) = evaluate_statements_with_context_and_last_value(mc, env, body, labels)?;
+                    match res {
+                        ControlFlow::Normal(_) => v = vbody.clone(),
+                        ControlFlow::Break(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                v = vbody.clone();
+                            }
+                            *last_value = v.clone();
+                            if label.is_none() {
+                                break;
+                            }
+                            return Ok(Some(ControlFlow::Break(label)));
+                        }
+                        ControlFlow::Continue(label) => {
+                            if !matches!(&vbody, Value::Undefined) {
+                                v = vbody.clone();
+                            }
+                            if let Some(ref l) = label
+                                && !own_labels.contains(l)
+                            {
+                                *last_value = v.clone();
+                                return Ok(Some(ControlFlow::Continue(label)));
+                            }
+                        }
+                        ControlFlow::Return(val) => return Ok(Some(ControlFlow::Return(val))),
+                        ControlFlow::Throw(val, l, c) => return Ok(Some(ControlFlow::Throw(val, l, c))),
+                    }
+                }
+                *last_value = v.clone();
+                return Ok(None);
+            }
+
             Ok(None)
         }
         StatementKind::ForInDestructuringObject(decl_kind_opt, pattern, iterable, body) => {
@@ -2983,16 +3153,15 @@ fn eval_res<'gc>(
                 let mut current = Some(obj);
                 while let Some(o) = current {
                     for (key, _val) in o.borrow().properties.iter() {
-                        if !o.borrow().is_enumerable(key) {
-                            continue;
-                        }
                         if let PropertyKey::String(s) = key {
                             if s == "length" {
                                 continue;
                             }
                             if !seen.contains(s) {
-                                keys.push(s.clone());
                                 seen.insert(s.clone());
+                                if o.borrow().is_enumerable(key) {
+                                    keys.push(s.clone());
+                                }
                             }
                         }
                     }
@@ -3001,7 +3170,15 @@ fn eval_res<'gc>(
 
                 log::trace!("for-in-destructuring keys: {keys:?}");
 
+                // Per spec, the iteration completion value V starts as undefined
+                *last_value = Value::Undefined;
+
                 for k in &keys {
+                    // Skip keys that were deleted (or otherwise no longer exist)
+                    if object_get_key_value(&obj, k).is_none() {
+                        continue;
+                    }
+
                     // Prepare per-iteration environment depending on decl kind
                     let iter_env = if let Some(crate::core::VarDeclKind::Let) | Some(crate::core::VarDeclKind::Const) = decl_kind_opt {
                         let e = new_js_object_data(mc);
@@ -6592,16 +6769,30 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             Ok(Value::Undefined)
         }
         Expr::TypeOf(expr) => {
-            // typeof handles ReferenceError for undeclared variables
+            // typeof has special semantics: if the evaluation of the operand throws a
+            // ReferenceError due to an *unresolvable* reference (identifier not found),
+            // the result is "undefined" instead of throwing. However, if the ReferenceError
+            // is due to accessing an uninitialized lexical binding (TDZ), the ReferenceError
+            // must be propagated. Distinguish these cases here.
             let val_result = evaluate_expr(mc, env, expr);
             let val = match val_result {
                 Ok(v) => v,
-                Err(_e) => {
-                    // Check if it is a ReferenceError (simplistic check for now, assuming EvalError could be it)
-                    // Ideally we check if the error kind is ReferenceError.
-                    // For now, if evaluation fails, return undefined (as string "undefined")
-                    // This covers `typeof nonExistentVar` -> "undefined"
-                    Value::Undefined
+                Err(e) => {
+                    match e {
+                        EvalError::Js(js_err) => {
+                            // If this is a ReferenceError for an unresolvable reference ("is not defined"),
+                            // treat it as undefined. Otherwise rethrow the error (propagate it).
+                            let msg = js_err.message();
+                            if msg.ends_with(" is not defined") {
+                                Value::Undefined
+                            } else {
+                                return Err(EvalError::Js(js_err));
+                            }
+                        }
+                        // For thrown values (EvalError::Throw) or other EvalError variants,
+                        // propagate the error so semantics are preserved.
+                        other => return Err(other),
+                    }
                 }
             };
 

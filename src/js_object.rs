@@ -188,6 +188,14 @@ fn define_property_internal<'gc>(
         target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
     }
 
+    // If enumerable flag explicitly set to false, mark property as non-enumerable
+    if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
+        && let Value::Boolean(is_enum) = &*enum_rc.borrow()
+        && !*is_enum
+    {
+        target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
+    }
+
     // Install property on target object
     object_set_key_value(mc, target_obj, &prop_key, prop_descriptor)?;
     Ok(())
@@ -448,21 +456,42 @@ pub fn handle_object_method<'gc>(
                     for (key, desc_val) in props_obj.borrow().properties.iter() {
                         if let Value::Object(desc_obj) = &*desc_val.borrow() {
                             // Handle property descriptor
-                            let value = if let Some(val) = object_get_key_value(desc_obj, "value") {
+                            let _value = if let Some(val) = object_get_key_value(desc_obj, "value") {
                                 val.borrow().clone()
                             } else {
                                 Value::Undefined
                             };
-
-                            // For now, we just set the value directly
-                            // Full property descriptor support would require more complex implementation
-                            object_set_key_value(mc, &new_obj, key, value)?;
+                            let mut desc_obj_copy = desc_obj.borrow().clone();
+                            let desc_obj_ptr = new_js_object_data(mc);
+                            for (k, v) in desc_obj_copy.properties.drain(..) {
+                                object_set_key_value(mc, &desc_obj_ptr, k, v.borrow().clone())?;
+                            }
+                            define_property_internal(mc, &new_obj, key.clone(), &desc_obj_ptr)?;
                         }
                     }
                 }
             }
 
             Ok(Value::Object(new_obj))
+        }
+        "setPrototypeOf" => {
+            if args.len() != 2 {
+                return Err(raise_type_error!("Object.setPrototypeOf requires exactly two arguments"));
+            }
+            match &args[0] {
+                Value::Object(obj) => match args[1] {
+                    Value::Object(proto_obj) => {
+                        obj.borrow_mut(mc).prototype = Some(proto_obj);
+                        Ok(Value::Object(*obj))
+                    }
+                    Value::Undefined | Value::Null => {
+                        obj.borrow_mut(mc).prototype = None;
+                        Ok(Value::Object(*obj))
+                    }
+                    _ => Err(raise_type_error!("Object.setPrototypeOf prototype must be an object or null")),
+                },
+                _ => Err(raise_type_error!("Object.setPrototypeOf target must be an object")),
+            }
         }
         "getOwnPropertySymbols" => {
             if args.len() != 1 {

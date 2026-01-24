@@ -777,9 +777,29 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
     let mut string_keys: Vec<PropertyKey<'gc>> = Vec::new();
     let mut symbol_keys: Vec<PropertyKey<'gc>> = Vec::new();
 
+    // Special-case TypedArray instances: their indexed elements are conceptually own
+    // properties (0..length-1) which should appear in ordinary own property keys
+    // even if we don't materialize them in the object's properties map.
+    let mut typed_indices: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string())) {
+        if let Value::TypedArray(ta) = &*ta_cell.borrow() {
+            for i in 0..ta.length {
+                let s = i.to_string();
+                // push as numeric index entry (keeps numeric ordering)
+                indices.push((i as u64, PropertyKey::String(s.clone())));
+                typed_indices.insert(s);
+            }
+        }
+    }
+
     for k in obj.borrow().properties.keys() {
         match k {
             PropertyKey::String(s) => {
+                // If this property is one of the typed array index helpers we already
+                // added above, skip it to avoid duplication.
+                if typed_indices.contains(s) {
+                    continue;
+                }
                 // Check canonical numeric index: no leading + or spaces; must roundtrip to same string
                 if let Ok(parsed) = s.parse::<u64>() {
                     // canonical representation check (no leading zeros except "0")

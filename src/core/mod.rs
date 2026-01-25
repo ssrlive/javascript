@@ -534,15 +534,8 @@ pub fn set_internal_prototype_from_constructor<'gc>(
         // set internal prototype pointer (store Weak to avoid cycles)
         log::trace!("setting prototype for ctor='{}' proto_obj={:p}", ctor_name, Gc::as_ptr(proto_obj));
         obj.borrow_mut(mc).prototype = Some(proto_obj);
-        // Also set the `__proto__` own property so `obj.__proto__` accesses match expectations
-        match object_set_key_value(mc, obj, "__proto__", Value::Object(proto_obj)) {
-            Ok(_) => {
-                // __proto__ should be non-enumerable
-                obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__proto__"));
-                log::trace!("set_internal_prototype_from_constructor: set __proto__ own property");
-            }
-            Err(e) => log::trace!("set_internal_prototype_from_constructor: failed to set __proto__: {:?}", e),
-        }
+        // Do not create an own `__proto__` property for this helper; only set the internal prototype pointer.
+        log::trace!("set_internal_prototype_from_constructor: set internal prototype pointer");
     }
     Ok(())
 }

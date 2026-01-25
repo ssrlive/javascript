@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, EvalError, Expr, Gc, JSObjectDataPtr, MutationContext, Statement, StatementKind, Value, evaluate_expr,
     has_own_property_value, new_js_object_data, prepare_function_call_env,
 };
-use crate::core::{object_get_key_value, object_set_key_value};
+use crate::core::{PropertyKey, object_get_key_value, object_set_key_value};
 use crate::error::{JSError, JSErrorKind};
 use crate::js_array::handle_array_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -97,6 +97,7 @@ pub fn handle_global_function<'gc>(
             )));
         }
         "Object.prototype.hasOwnProperty" => return handle_object_has_own_property(args, env),
+        "Object.prototype.propertyIsEnumerable" => return handle_object_property_is_enumerable(args, env),
         "RegExp.prototype.exec" => {
             if let Some(this_rc) = crate::core::env_get(env, "this") {
                 let this_val = this_rc.borrow().clone();
@@ -1639,6 +1640,30 @@ fn handle_object_has_own_property<'gc>(args: &[Value<'gc>], env: &JSObjectDataPt
         }
     } else {
         Err(EvalError::Js(raise_eval_error!("hasOwnProperty called without this")))
+    }
+}
+
+fn handle_object_property_is_enumerable<'gc>(args: &[Value<'gc>], env: &JSObjectDataPtr<'gc>) -> Result<Value<'gc>, EvalError<'gc>> {
+    if args.len() != 1 {
+        return Err(EvalError::Js(raise_eval_error!("propertyIsEnumerable requires one argument")));
+    }
+    let key_val = args[0].clone();
+    let Some(this_rc) = crate::core::env_get(env, "this") else {
+        return Err(EvalError::Js(raise_eval_error!("propertyIsEnumerable called without this")));
+    };
+    let this_val = this_rc.borrow().clone();
+    match this_val {
+        Value::Object(obj) => {
+            // Convert key value to a PropertyKey
+            let key: PropertyKey<'gc> = key_val.into();
+
+            // Check own property and enumerability
+            if crate::core::get_own_property(&obj, &key).is_some() {
+                return Ok(Value::Boolean(obj.borrow().is_enumerable(&key)));
+            }
+            Ok(Value::Boolean(false))
+        }
+        _ => Ok(Value::Boolean(false)),
     }
 }
 

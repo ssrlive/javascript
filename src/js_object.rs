@@ -75,18 +75,18 @@ pub fn initialize_object_module<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDa
     Ok(())
 }
 
-fn define_property_internal<'gc>(
+pub(crate) fn define_property_internal<'gc>(
     mc: &MutationContext<'gc>,
     target_obj: &JSObjectDataPtr<'gc>,
-    prop_key: PropertyKey<'gc>,
+    prop_key: &PropertyKey<'gc>,
     desc_obj: &JSObjectDataPtr<'gc>,
 ) -> Result<(), JSError> {
     // Extract descriptor fields
     let value_rc_opt = object_get_key_value(desc_obj, "value");
 
     // If the property exists and is non-configurable on the target, apply ECMAScript-compatible checks
-    if let Some(existing_rc) = object_get_key_value(target_obj, &prop_key)
-        && !target_obj.borrow().is_configurable(&prop_key)
+    if let Some(existing_rc) = object_get_key_value(target_obj, prop_key)
+        && !target_obj.borrow().is_configurable(prop_key)
     {
         // If descriptor explicitly sets configurable true -> throw
         if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
@@ -99,7 +99,7 @@ fn define_property_internal<'gc>(
         if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
             && let Value::Boolean(new_enum) = &*enum_rc.borrow()
         {
-            let existing_enum = target_obj.borrow().is_enumerable(&prop_key);
+            let existing_enum = target_obj.borrow().is_enumerable(prop_key);
             if *new_enum != existing_enum {
                 return Err(raise_type_error!("Cannot change enumerability of non-configurable property"));
             }
@@ -123,14 +123,14 @@ fn define_property_internal<'gc>(
             if let Some(wrc) = object_get_key_value(desc_obj, "writable")
                 && let Value::Boolean(new_writable) = &*wrc.borrow()
                 && *new_writable
-                && !target_obj.borrow().is_writable(&prop_key)
+                && !target_obj.borrow().is_writable(prop_key)
             {
                 return Err(raise_type_error!("Cannot make non-writable property writable"));
             }
 
             // If attempting to change value while not writable and values differ -> throw
             if let Some(new_val_rc) = value_rc_opt.as_ref()
-                && !target_obj.borrow().is_writable(&prop_key)
+                && !target_obj.borrow().is_writable(prop_key)
             {
                 // get existing value for comparison
                 let existing_val = match &*existing_rc.borrow() {
@@ -180,24 +180,55 @@ fn define_property_internal<'gc>(
         setter: setter_opt,
     };
 
-    // If writable flag explicitly set to false, mark property as non-writable
-    if let Some(wrc) = object_get_key_value(desc_obj, "writable")
-        && let Value::Boolean(is_writable) = &*wrc.borrow()
-        && !*is_writable
+    // If descriptor explicitly sets configurable flag, apply it (set or clear non-configurable)
+    if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
+        && let Value::Boolean(is_cfg) = &*cfg_rc.borrow()
     {
-        target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+        if *is_cfg {
+            log::trace!("define_property_internal: setting configurable=true for {:?}", prop_key);
+            target_obj.borrow_mut(mc).set_configurable(prop_key.clone());
+        } else {
+            log::trace!("define_property_internal: setting configurable=false for {:?}", prop_key);
+            target_obj.borrow_mut(mc).set_non_configurable(prop_key.clone());
+        }
     }
 
-    // If enumerable flag explicitly set to false, mark property as non-enumerable
-    if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
-        && let Value::Boolean(is_enum) = &*enum_rc.borrow()
-        && !*is_enum
-    {
-        target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
+    // Only update writable/enumerable if property is configurable or does not exist
+    let is_configurable = target_obj.borrow().is_configurable(prop_key);
+    if is_configurable {
+        // If writable flag explicitly set to false, mark property as non-writable
+        if let Some(wrc) = object_get_key_value(desc_obj, "writable")
+            && let Value::Boolean(is_writable) = &*wrc.borrow()
+            && !*is_writable
+        {
+            target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+        }
+        // If writable flag explicitly set to true, clear non-writable
+        if let Some(wrc) = object_get_key_value(desc_obj, "writable")
+            && let Value::Boolean(is_writable) = &*wrc.borrow()
+            && *is_writable
+        {
+            target_obj.borrow_mut(mc).set_writable(prop_key.clone());
+        }
+
+        // If enumerable flag explicitly set to false, mark property as non-enumerable
+        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
+            && let Value::Boolean(is_enum) = &*enum_rc.borrow()
+            && !*is_enum
+        {
+            target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
+        }
+        // If enumerable flag explicitly set to true, clear non-enumerable
+        if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable")
+            && let Value::Boolean(is_enum) = &*enum_rc.borrow()
+            && *is_enum
+        {
+            target_obj.borrow_mut(mc).set_enumerable(prop_key.clone());
+        }
     }
 
-    // Install property on target object
-    object_set_key_value(mc, target_obj, &prop_key, prop_descriptor)?;
+    // Always update value
+    object_set_key_value(mc, target_obj, prop_key, prop_descriptor)?;
     Ok(())
 }
 
@@ -466,7 +497,7 @@ pub fn handle_object_method<'gc>(
                             for (k, v) in desc_obj_copy.properties.drain(..) {
                                 object_set_key_value(mc, &desc_obj_ptr, k, v.borrow().clone())?;
                             }
-                            define_property_internal(mc, &new_obj, key.clone(), &desc_obj_ptr)?;
+                            define_property_internal(mc, &new_obj, key, &desc_obj_ptr)?;
                         }
                     }
                 }
@@ -957,7 +988,7 @@ pub fn handle_object_method<'gc>(
                 _ => return Err(raise_type_error!("Property descriptor must be an object")),
             };
 
-            define_property_internal(mc, &target_obj, prop_key, &desc_obj)?;
+            define_property_internal(mc, &target_obj, &prop_key, &desc_obj)?;
             Ok(Value::Object(target_obj))
         }
         "defineProperties" => {
@@ -992,7 +1023,7 @@ pub fn handle_object_method<'gc>(
                     _ => return Err(raise_type_error!("Property descriptor must be an object")),
                 };
 
-                define_property_internal(mc, &target_obj, key.clone(), &desc_obj)?;
+                define_property_internal(mc, &target_obj, key, &desc_obj)?;
             }
 
             Ok(Value::Object(target_obj))

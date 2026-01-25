@@ -176,9 +176,19 @@ impl<'gc> JSObjectData<'gc> {
     pub fn set_non_configurable(&mut self, key: PropertyKey<'gc>) {
         self.non_configurable.insert(key);
     }
+
+    pub fn set_configurable(&mut self, key: PropertyKey<'gc>) {
+        self.non_configurable.remove(&key);
+    }
+
     pub fn set_non_writable(&mut self, key: PropertyKey<'gc>) {
         self.non_writable.insert(key);
     }
+
+    pub fn set_writable(&mut self, key: PropertyKey<'gc>) {
+        self.non_writable.remove(&key);
+    }
+
     pub fn is_const(&self, key: &str) -> bool {
         self.constants.contains(key)
     }
@@ -255,6 +265,10 @@ impl<'gc> JSObjectData<'gc> {
 
     pub fn set_non_enumerable(&mut self, key: PropertyKey<'gc>) {
         self.non_enumerable.insert(key);
+    }
+
+    pub fn set_enumerable(&mut self, key: PropertyKey<'gc>) {
+        self.non_enumerable.remove(&key);
     }
 
     pub fn is_configurable(&self, key: &PropertyKey<'gc>) -> bool {
@@ -672,7 +686,14 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
         Value::DataView(_) => "[object DataView]".to_string(),
         Value::TypedArray(_) => "[object TypedArray]".to_string(),
         Value::Property { .. } => "[Property]".to_string(),
-        _ => "[unknown]".to_string(),
+        Value::Symbol(sym) => {
+            if let Some(desc) = &sym.description {
+                format!("Symbol({desc})")
+            } else {
+                "Symbol()".to_string()
+            }
+        }
+        Value::Uninitialized => "[uninitialized]".to_string(),
     }
 }
 

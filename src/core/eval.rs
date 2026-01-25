@@ -753,7 +753,25 @@ fn hoist_name<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: 
         }
     }
     if env_get_own(&target_env, name).is_none() {
-        env_set(mc, &target_env, name, Value::Undefined)?;
+        // If target is global object, use CreateGlobalVarBinding semantics
+        // For indirect eval, CreateGlobalVarBinding(..., true) should be used which creates
+        // a configurable=true property. Detect indirect eval marker on the global env.
+        if target_env.borrow().prototype.is_none() {
+            let deletable = if let Some(flag) = crate::core::object_get_key_value(&target_env, "__is_indirect_eval") {
+                matches!(*flag.borrow(), Value::Boolean(true))
+            } else {
+                false
+            };
+            let key = PropertyKey::String(name.to_string());
+            let desc_obj = crate::core::new_js_object_data(mc);
+            object_set_key_value(mc, &desc_obj, "value", Value::Undefined)?;
+            object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
+            object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(true))?;
+            object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(deletable))?;
+            crate::js_object::define_property_internal(mc, &target_env, &key, &desc_obj)?;
+        } else {
+            env_set(mc, &target_env, name, Value::Undefined)?;
+        }
     }
     Ok(())
 }
@@ -889,6 +907,11 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
     for stmt in statements {
         if let StatementKind::FunctionDeclaration(name, params, body, is_generator, is_async) = &*stmt.kind {
             let mut body_clone = body.clone();
+            log::trace!(
+                "hoist_declarations: found function declaration '{}'; exec env proto is_none={}",
+                name,
+                env.borrow().prototype.is_none()
+            );
             if *is_generator {
                 // Create a generator function object (hoisted)
                 let func_obj = crate::core::new_js_object_data(mc);
@@ -959,8 +982,38 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
                 if let Value::Object(func_obj) = &func {
                     object_set_key_value(mc, func_obj, "name", Value::String(utf8_to_utf16(name)))?;
+                    // CreateGlobalFunctionBinding semantics when executing in the global environment
+                    let key = crate::core::PropertyKey::String(name.clone());
+                    if env.borrow().prototype.is_none() {
+                        let existing = crate::core::get_own_property(env, &key);
+                        log::trace!(
+                            "hoist_declarations: creating global function binding for '{}' existing={:?} is_configurable={}",
+                            name,
+                            existing,
+                            env.borrow().is_configurable(&key)
+                        );
+                        if existing.is_none() || env.borrow().is_configurable(&key) {
+                            let desc_obj = crate::core::new_js_object_data(mc);
+                            object_set_key_value(mc, &desc_obj, "value", Value::Object(*func_obj))?;
+                            object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
+                            object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(true))?;
+                            object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(true))?;
+                            crate::js_object::define_property_internal(mc, env, &key, &desc_obj)?;
+                        } else {
+                            let desc_obj = crate::core::new_js_object_data(mc);
+                            object_set_key_value(mc, &desc_obj, "value", Value::Object(*func_obj))?;
+                            crate::js_object::define_property_internal(mc, env, &key, &desc_obj)?;
+                        }
+                        log::trace!(
+                            "hoist_declarations: after create binding is_configurable={}",
+                            env.borrow().is_configurable(&key)
+                        );
+                    } else {
+                        env_set(mc, env, name, Value::Object(*func_obj))?;
+                    }
+                } else {
+                    env_set(mc, env, name, func)?;
                 }
-                env_set(mc, env, name, func)?;
             }
         }
     }
@@ -5232,11 +5285,31 @@ fn check_global_declarations<'gc>(env: &JSObjectDataPtr<'gc>, statements: &[Stat
     // Check in reverse order as per spec semantics
     for name in fn_names.iter().rev() {
         let key = crate::core::PropertyKey::String(name.clone());
-        if crate::core::get_own_property(env, &key).is_some() && !env.borrow().is_configurable(&key) {
-            return Err(EvalError::Js(crate::raise_type_error!(format!(
-                "Cannot declare global function '{}'",
-                name
-            ))));
+        if let Some(existing_rc) = crate::core::get_own_property(env, &key) {
+            // If it's configurable we can replace it freely
+            if env.borrow().is_configurable(&key) {
+                continue;
+            }
+
+            // If the existing property is an accessor, defining a data value would be incompatible
+            let existing_is_accessor = match &*existing_rc.borrow() {
+                crate::core::Value::Property { getter, setter, .. } => getter.is_some() || setter.is_some(),
+                crate::core::Value::Getter(..) | crate::core::Value::Setter(..) => true,
+                _ => false,
+            };
+
+            if existing_is_accessor {
+                return Err(EvalError::Js(crate::raise_type_error!(format!(
+                    "Cannot declare global function '{name}'"
+                ))));
+            }
+
+            // If it's a non-writable data property and non-configurable, we cannot change its value
+            if !env.borrow().is_writable(&key) {
+                return Err(EvalError::Js(crate::raise_type_error!(format!(
+                    "Cannot declare global function '{name}'"
+                ))));
+            }
         }
     }
     Ok(())
@@ -7521,13 +7594,43 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
     }
 }
 
-fn evaluate_var<'gc>(_mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<Value<'gc>, JSError> {
+fn evaluate_var<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, name: &str) -> Result<Value<'gc>, JSError> {
+    // env_get returns the raw stored slot. If a property descriptor (Value::Property) was installed
+    // via DefinePropertyOrThrow, unwrap the stored value. For accessor descriptors, call accessor.
     if let Some(val_ptr) = env_get(env, name) {
         let val = val_ptr.borrow().clone();
         if let Value::Uninitialized = val {
             return Err(raise_reference_error!(format!("Cannot access '{}' before initialization", name)));
         }
-        return Ok(val);
+        match val {
+            Value::Property {
+                value: Some(v),
+                getter: _,
+                setter: _,
+            } => return Ok(v.borrow().clone()),
+            Value::Property {
+                value: None,
+                getter: _,
+                setter: _,
+            } => return Ok(Value::Undefined),
+            Value::Getter(..) | Value::Setter(..) => {
+                // Unlikely for environment bindings, but support by delegating to accessor call
+                // Use helper to invoke accessor and return its result
+                if let Some(val_rc) = env_get(env, name)
+                    && let Value::Getter(..) = &*val_rc.borrow()
+                {
+                    // Call the getter accessor
+                    let obj_key = PropertyKey::String(name.to_string());
+                    let res = get_property_with_accessors(mc, env, env, &obj_key).map_err(|e| match e {
+                        EvalError::Js(js) => js,
+                        _ => raise_eval_error!("Accessor invocation failed"),
+                    })?;
+                    return Ok(res);
+                }
+                return Err(raise_eval_error!("Accessor not supported on environment binding"));
+            }
+            other => return Ok(other),
+        }
     }
     Err(raise_reference_error!(format!("{} is not defined", name)))
 }

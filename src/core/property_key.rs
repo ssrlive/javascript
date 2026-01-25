@@ -1,5 +1,5 @@
-use crate::core::SymbolData;
 use crate::core::{Collect, Gc};
+use crate::core::{SymbolData, Value};
 
 #[derive(Clone, Debug, Collect)]
 #[collect(no_drop)]
@@ -50,6 +50,21 @@ impl<'gc> From<String> for PropertyKey<'gc> {
 impl<'gc> From<&String> for PropertyKey<'gc> {
     fn from(s: &String) -> Self {
         PropertyKey::String(s.clone())
+    }
+}
+
+impl<'gc> From<&Value<'gc>> for PropertyKey<'gc> {
+    fn from(v: &Value<'gc>) -> Self {
+        match v {
+            Value::Symbol(sd) => PropertyKey::Symbol(*sd),
+            other => PropertyKey::String(crate::core::value_to_string(other)),
+        }
+    }
+}
+
+impl<'gc> From<Value<'gc>> for PropertyKey<'gc> {
+    fn from(v: Value<'gc>) -> Self {
+        PropertyKey::from(&v)
     }
 }
 

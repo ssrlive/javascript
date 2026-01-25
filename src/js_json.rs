@@ -157,22 +157,30 @@ fn js_value_to_json_value<'gc>(mc: &MutationContext<'gc>, js_value: &Value<'gc>)
 
 // Minimal JSON stringifier that respects JS property ordering defined by ordinary_own_property_keys.
 fn js_value_to_json_string<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>) -> Option<String> {
-    fn escape_json_str(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        for ch in s.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
-            }
-        }
-        out
-    }
+    inner(mc, v, 0)
+}
 
+fn escape_json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+// Inner helper with depth to avoid infinite recursion on cycles
+fn inner<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>, depth: usize) -> Option<String> {
+    if depth > 32 {
+        return None;
+    }
     match v {
         Value::Undefined => None,
         Value::Boolean(b) => Some(if *b { "true".to_string() } else { "false".to_string() }),
@@ -195,7 +203,7 @@ fn js_value_to_json_string<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>) -> Op
                 for i in 0..len {
                     let key = i.to_string();
                     if let Some(val_rc) = get_own_property(obj, &key.into()) {
-                        if let Some(item_str) = js_value_to_json_string(mc, &val_rc.borrow()) {
+                        if let Some(item_str) = inner(mc, &val_rc.borrow(), depth + 1) {
                             parts.push(item_str);
                         } else {
                             parts.push("null".to_string());
@@ -214,10 +222,10 @@ fn js_value_to_json_string<'gc>(mc: &MutationContext<'gc>, v: &Value<'gc>) -> Op
                             continue;
                         }
                         if let Some(val_rc) = object_get_key_value(obj, &key) {
-                            if let Some(val_str) = js_value_to_json_string(mc, &val_rc.borrow()) {
+                            if let Some(val_str) = inner(mc, &val_rc.borrow(), depth + 1) {
                                 parts.push(format!("\"{}\":{}", escape_json_str(s), val_str));
                             } else {
-                                // skip undefined/functions
+                                // skip undefined/functions or deep/cyclic values
                             }
                         }
                     }

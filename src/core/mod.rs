@@ -110,8 +110,7 @@ pub fn initialize_global_constructors<'gc>(mc: &MutationContext<'gc>, env: &JSOb
 
     // This engine operates in strict mode only; mark the global environment accordingly so
     // eval() and nested function parsing can enforce strict-mode rules unconditionally.
-    // (Disabled) Do not force global strictness here; comment out instead of removing the line.
-    // object_set_key_value(mc, env, "__is_strict", Value::Boolean(true))?;
+    env_set_strictness(mc, env, true)?;
 
     // Define 'arguments' for global scope with poison pill for strict compliance
     crate::js_class::create_arguments_object(mc, env, &[], Some(Value::Undefined))?;

@@ -929,6 +929,22 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     Ok(())
 }
 
+pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
+    if let Some(is_strict_cell) = get_own_property(env, &PropertyKey::String("__is_strict".to_string())) {
+        if let crate::core::Value::Boolean(is_strict) = *is_strict_cell.borrow() {
+            return is_strict;
+        }
+    }
+    false
+}
+
+pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
+    let val = Value::Boolean(is_strict);
+    let val_ptr = Gc::new(mc, GcCell::new(val));
+    env.borrow_mut(mc).insert(PropertyKey::String("__is_strict".to_string()), val_ptr);
+    Ok(())
+}
+
 // Helper: Check whether the given object has an own property corresponding to a
 // given JS `Value` (as passed to hasOwnProperty / propertyIsEnumerable). This
 // centralizes conversion from various `Value` variants (String/Number/Boolean/
@@ -962,12 +978,8 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
             // If the global environment is operating in strict mode, this is a ReferenceError.
             // If the global environment is non-strict, create a new global binding instead (as per
             // ECMAScript non-strict assignment semantics for unresolvable references).
-            if let Some(is_strict_cell) = object_get_key_value(&current, "__is_strict") {
-                if let crate::core::Value::Boolean(true) = *is_strict_cell.borrow() {
-                    return Err(crate::raise_reference_error!(format!("{} is not defined", key)));
-                } else {
-                    return env_set(mc, &current, key, val);
-                }
+            if env_get_strictness(&current) {
+                return Err(crate::raise_reference_error!(format!("{key} is not defined")));
             } else {
                 // No explicit strictness marker: be permissive and create the global binding
                 return env_set(mc, &current, key, val);

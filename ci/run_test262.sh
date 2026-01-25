@@ -356,6 +356,14 @@ JS
     test_to_run="$tmp"
   fi
 
+  # Ensure all non-module tests are executed under strict semantics by prepending 'use strict'
+  # Create a temporary file that begins with a strict directive and then run that
+  strict_tmp=$(mktemp /tmp/test262.strict.XXXXXX.js)
+  echo '"use strict";' > "$strict_tmp"
+  cat "$test_to_run" >> "$strict_tmp"
+  test_to_run="$strict_tmp"
+  cleanup_tmp=true
+
   # Final safety: if the test references Test262Error but we are about to run
   # the original file (no tmp), create a tmp that prepends harness/sta.js so
   # Test262Error is defined. This guarantees consistent behavior regardless of

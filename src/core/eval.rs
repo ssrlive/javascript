@@ -1,4 +1,4 @@
-use crate::core::{ExportSpecifier, Gc, GcCell, MutationContext, object_get_length, object_set_length};
+use crate::core::{Gc, GcCell, MutationContext};
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_bigint::bigint_constructor;
 use crate::js_date::{handle_date_method, handle_date_static_method, is_date_object};
@@ -9,9 +9,10 @@ use crate::js_string::{handle_string_method, string_from_char_code, string_from_
 use crate::{
     JSError, JSErrorKind, PropertyKey, Value,
     core::{
-        BinaryOp, ClosureData, DestructuringElement, EvalError, Expr, ImportSpecifier, JSObjectDataPtr, ObjectDestructuringElement,
-        PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_set, env_set_recursive, get_own_property, is_error,
-        new_js_object_data, object_get_key_value, object_set_key_value, value_to_string,
+        BinaryOp, ClosureData, DestructuringElement, EvalError, ExportSpecifier, Expr, ImportSpecifier, JSObjectDataPtr,
+        ObjectDestructuringElement, PromiseState, Statement, StatementKind, create_error, env_get, env_get_own, env_get_strictness,
+        env_set, env_set_recursive, env_set_strictness, is_error, new_js_object_data, object_get_key_value, object_get_length,
+        object_set_key_value, object_set_length, value_to_string,
     },
     js_math::handle_math_call,
     raise_eval_error, raise_reference_error,
@@ -1367,7 +1368,7 @@ pub fn evaluate_statements_with_labels<'gc>(
             exec_env = new_env;
         }
 
-        object_set_key_value(mc, &exec_env, "__is_strict", Value::Boolean(true))?;
+        env_set_strictness(mc, &exec_env, true)?;
     }
 
     hoist_declarations(mc, &exec_env, statements)?;
@@ -1376,9 +1377,7 @@ pub fn evaluate_statements_with_labels<'gc>(
     // patterns such as assignment to the Identifier 'arguments' in function
     // bodies which should be a SyntaxError under strict mode (matching Test262
     // expectations for eval'd code in strict contexts).
-    if let Some(is_strict_cell) = object_get_key_value(&exec_env, "__is_strict")
-        && let Value::Boolean(true) = *is_strict_cell.borrow()
-    {
+    if env_get_strictness(&exec_env) {
         for stmt in statements {
             let mut err_msg = None;
             if check_stmt_for_forbidden_assignment(stmt) {
@@ -1443,14 +1442,12 @@ pub fn evaluate_statements_with_labels_and_last<'gc>(
             exec_env = new_env;
         }
 
-        object_set_key_value(mc, &exec_env, "__is_strict", Value::Boolean(true))?;
+        env_set_strictness(mc, &exec_env, true)?;
     }
 
     hoist_declarations(mc, &exec_env, statements)?;
 
-    if let Some(is_strict_cell) = object_get_key_value(&exec_env, "__is_strict")
-        && let Value::Boolean(true) = *is_strict_cell.borrow()
-    {
+    if env_get_strictness(&exec_env) {
         for stmt in statements {
             let mut err_msg = None;
             if check_stmt_for_forbidden_assignment(stmt) {
@@ -2289,10 +2286,8 @@ fn eval_res<'gc>(
             // modified (e.g., during indirect eval clearing).
             let mut p = Some(*env);
             while let Some(cur) = p {
-                if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
-                    && matches!(*val.borrow(), Value::Boolean(true))
-                {
-                    object_set_key_value(mc, &block_env, "__is_strict", Value::Boolean(true))?;
+                if env_get_strictness(&cur) {
+                    env_set_strictness(mc, &block_env, true)?;
                     break;
                 }
                 p = cur.borrow().prototype;
@@ -4235,6 +4230,22 @@ fn evaluate_expr_assign<'gc>(
     let val = evaluate_expr(mc, env, value_expr)?;
     match target {
         Expr::Var(name, _, _) => {
+            // Disallow assignment to the special 'arguments' binding in strict-function scope
+            if name == "arguments" {
+                let caller_is_strict = env_get_strictness(env);
+                log::trace!(
+                    "DEBUG: assignment to 'arguments' detected: env ptr={:p} is_function_scope={} caller_is_strict={}",
+                    env,
+                    env.borrow().is_function_scope,
+                    caller_is_strict
+                );
+                if env.borrow().is_function_scope && caller_is_strict {
+                    return Err(EvalError::Js(crate::raise_syntax_error!(
+                        "Assignment to 'arguments' is not allowed in strict mode"
+                    )));
+                }
+            }
+
             env_set_recursive(mc, env, name, val.clone())?;
             Ok(val)
         }
@@ -4306,6 +4317,22 @@ fn evaluate_assign_target_with_value<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match target {
         Expr::Var(name, _, _) => {
+            // Disallow assignment to the special 'arguments' binding in strict-function scope
+            if name == "arguments" {
+                let caller_is_strict = env_get_strictness(env);
+                log::trace!(
+                    "DEBUG: assignment-to-arguments (assign_target_with_value): env ptr={:p} is_function_scope={} caller_is_strict={}",
+                    env,
+                    env.borrow().is_function_scope,
+                    caller_is_strict
+                );
+                if env.borrow().is_function_scope && caller_is_strict {
+                    return Err(EvalError::Js(crate::raise_syntax_error!(
+                        "Assignment to 'arguments' is not allowed in strict mode"
+                    )));
+                }
+            }
+
             env_set_recursive(mc, env, name, val.clone())?;
             Ok(val)
         }
@@ -5305,25 +5332,14 @@ fn run_with_global_strictness_cleared<'gc, F>(
 where
     F: FnOnce() -> Result<Value<'gc>, EvalError<'gc>>,
 {
-    let original_strict = object_get_key_value(env, "__is_strict").map(|c| c.borrow().clone());
+    let original_strict = env_get_strictness(env);
 
     // Remove the __is_strict own property temporarily
-    let _ = env
-        .borrow_mut(mc)
-        .properties
-        .shift_remove(&PropertyKey::String("__is_strict".to_string()));
+    env_set_strictness(mc, env, false)?;
 
     let res = f();
 
-    if let Some(orig) = original_strict {
-        object_set_key_value(mc, env, "__is_strict", orig)?;
-    } else {
-        // No original value -- ensure it remains removed (in case executed code set it)
-        let _ = env
-            .borrow_mut(mc)
-            .properties
-            .shift_remove(&PropertyKey::String("__is_strict".to_string()));
-    }
+    env_set_strictness(mc, env, original_strict)?;
 
     res
 }
@@ -5361,9 +5377,7 @@ fn handle_eval_function<'gc>(
             .unwrap_or(false);
 
         // Determine effective strictness
-        let caller_is_strict = object_get_key_value(env, "__is_strict")
-            .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
-            .unwrap_or(false);
+        let caller_is_strict = env_get_strictness(env);
 
         let is_indirect_eval = object_get_key_value(env, "__is_indirect_eval")
             .map(|c| matches!(*c.borrow(), Value::Boolean(true)))
@@ -5372,11 +5386,13 @@ fn handle_eval_function<'gc>(
         let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
 
         // Prepare execution environment
-        let exec_env = if is_strict_eval {
+        // For direct evals, execute in the caller environment. For indirect strict evals,
+        // create a new declarative environment so top-level bindings do not affect caller.
+        let exec_env = if is_indirect_eval && is_strict_eval {
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
             new_env.borrow_mut(mc).is_function_scope = true;
-            object_set_key_value(mc, &new_env, "__is_strict", Value::Boolean(true))?;
+            env_set_strictness(mc, &new_env, true)?;
             new_env
         } else {
             *env
@@ -5385,12 +5401,27 @@ fn handle_eval_function<'gc>(
         // Execution closure
         let run_stmts = || check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
 
+        // If this is a direct strict eval executed in a non-strict caller, temporarily set
+        // the caller env as strict for the duration of the eval so semantics match strict eval
+        // without creating an isolated declarative env (which would hide existing bindings).
+        let mut original_strict_marker = false;
+        if !is_indirect_eval && is_strict_eval {
+            original_strict_marker = env_get_strictness(env);
+            env_set_strictness(mc, env, true)?;
+        }
+
         // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
         let res = if env.borrow().prototype.is_none() && !is_strict_eval {
             run_with_global_strictness_cleared(mc, env, run_stmts)
         } else {
             run_stmts()
         };
+
+        // Restore original strictness marker if we modified it
+        if !is_indirect_eval && is_strict_eval {
+            env_set_strictness(mc, env, original_strict_marker)?;
+        }
+
         if let Ok(v) = &res {
             log::trace!("handle_eval_function result={}", crate::core::value_to_string(v));
         }
@@ -7652,9 +7683,7 @@ fn evaluate_function_expression<'gc>(
     let mut proto_iter = Some(*env);
     let mut env_strict_ancestor = false;
     while let Some(cur) = proto_iter {
-        if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
-            && matches!(*val.borrow(), Value::Boolean(true))
-        {
+        if env_get_strictness(&cur) {
             env_strict_ancestor = true;
             break;
         }
@@ -8429,9 +8458,7 @@ pub fn call_closure<'gc>(
     if cl.enforce_strictness_inheritance {
         let mut proto_iter = cl.env;
         while let Some(cur) = proto_iter {
-            if let Some(val) = get_own_property(&cur, &PropertyKey::String("__is_strict".to_string()))
-                && matches!(*val.borrow(), Value::Boolean(true))
-            {
+            if env_get_strictness(&cur) {
                 env_strict_ancestor = true;
                 break;
             }
@@ -8440,12 +8467,8 @@ pub fn call_closure<'gc>(
     }
 
     let fn_is_strict = cl.is_strict || env_strict_ancestor;
-    if fn_is_strict {
-        object_set_key_value(mc, &call_env, "__is_strict", Value::Boolean(true))?;
-    } else {
-        // Explicitly set to false to shadow any potential strict ancestor (e.g. if we suppressed inheritance)
-        object_set_key_value(mc, &call_env, "__is_strict", Value::Boolean(false))?;
-    }
+    // Explicitly set to false to shadow any potential strict ancestor (e.g. if we suppressed inheritance)
+    env_set_strictness(mc, &call_env, fn_is_strict)?;
 
     // If this is a Named Function Expression and the function object has a
     // `name` property, bind that name in the function's call environment so the

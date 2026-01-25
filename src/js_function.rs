@@ -63,6 +63,26 @@ fn validate_number_args(args: &[Value], count: usize) -> Result<Vec<f64>, JSErro
     Ok(numbers)
 }
 
+fn propagate_closure_strictness<'gc>(
+    mc: &MutationContext<'gc>,
+    func_env: &JSObjectDataPtr<'gc>,
+    data: &crate::core::ClosureData<'gc>,
+) -> Result<(), JSError> {
+    let mut env_strict_ancestor = false;
+    if data.enforce_strictness_inheritance {
+        let mut proto_iter = data.env;
+        while let Some(cur) = proto_iter {
+            if crate::core::env_get_strictness(&cur) {
+                env_strict_ancestor = true;
+                break;
+            }
+            proto_iter = cur.borrow().prototype;
+        }
+    }
+    crate::core::env_set_strictness(mc, func_env, data.is_strict || env_strict_ancestor)?;
+    Ok(())
+}
+
 pub fn handle_global_function<'gc>(
     mc: &MutationContext<'gc>,
     func_name: &str,
@@ -351,6 +371,8 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
+                        propagate_closure_strictness(mc, &func_env, &data)?;
+
                         // For raw closures (without wrapper object), we don't have a stable object identity for 'callee'.
                         // But we can check if there's a reference to the function object in the `this` binding? No.
                         // However, Function.prototype.call is usually called as `func.call(...)`.
@@ -385,6 +407,8 @@ pub fn handle_global_function<'gc>(
                                 None,
                                 Some(env),
                             )?;
+
+                            propagate_closure_strictness(mc, &func_env, data)?;
 
                             crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(callee_for_arguments))?;
 
@@ -472,6 +496,8 @@ pub fn handle_global_function<'gc>(
                             Some(env),
                         )?;
 
+                        propagate_closure_strictness(mc, &func_env, &data)?;
+
                         crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(callee_for_arguments))?;
 
                         return crate::core::evaluate_statements(mc, &func_env, body);
@@ -514,6 +540,8 @@ pub fn handle_global_function<'gc>(
                                 None,
                                 Some(env),
                             )?;
+
+                            propagate_closure_strictness(mc, &func_env, data)?;
 
                             crate::js_class::create_arguments_object(mc, &func_env, &evaluated_args, Some(Value::Object(object)))?;
 
@@ -1192,6 +1220,21 @@ fn evalute_eval_function<'gc>(
                 let code = utf16_to_utf8(&s);
 
                 log::trace!("eval invoked with code='{}'", code);
+
+                // Fast-path optimization: if the evaluated string (after optional
+                // leading whitespace) is a single-line comment that does not contain
+                // any line terminator characters, it is a no-op and we can avoid
+                // tokenization/parsing which is expensive in tight loops like S7.4_A5.
+                let code_trim = code.trim_start();
+                if code_trim.starts_with("//")
+                    && !code.contains('\n')
+                    && !code.contains('\r')
+                    && !code.contains('\u{2028}')
+                    && !code.contains('\u{2029}')
+                {
+                    log::trace!("eval fast-path: comment-only to EOF, returning undefined");
+                    return Ok(Value::Undefined);
+                }
 
                 let mut tokens = crate::core::tokenize(&code).map_err(EvalError::Js)?;
                 // Debug: always emit token list for eval bodies containing 'return' or for small bodies

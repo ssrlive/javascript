@@ -3322,6 +3322,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
             // Not an arrow function; parse as parenthesized expression
             let expr_inner = parse_expression(tokens, index)?;
+            // Allow line terminators between the inner expression and the closing ')'
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
                 return Err(raise_parse_error_at!(tokens.get(*index)));
             }

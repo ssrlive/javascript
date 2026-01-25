@@ -152,10 +152,7 @@ pub(crate) fn number_constructor<'gc>(
             Value::Number(n) => Ok(Value::Number(*n)),
             Value::String(s) => {
                 let str_val = utf16_to_utf8(s);
-                match str_val.trim().parse::<f64>() {
-                    Ok(n) => Ok(Value::Number(n)),
-                    Err(_) => Ok(Value::Number(f64::NAN)),
-                }
+                Ok(Value::Number(string_to_f64(str_val.trim()).unwrap_or(f64::NAN)))
             }
             Value::Boolean(b) => Ok(Value::Number(if *b { 1.0 } else { 0.0 })),
             Value::Null => Ok(Value::Number(0.0)),
@@ -167,10 +164,7 @@ pub(crate) fn number_constructor<'gc>(
                     Value::Number(n) => Ok(Value::Number(n)),
                     Value::String(s) => {
                         let str_val = utf16_to_utf8(&s);
-                        match str_val.trim().parse::<f64>() {
-                            Ok(n) => Ok(Value::Number(n)),
-                            Err(_) => Ok(Value::Number(f64::NAN)),
-                        }
+                        Ok(Value::Number(string_to_f64(str_val.trim()).unwrap_or(f64::NAN)))
                     }
                     Value::Boolean(b) => Ok(Value::Number(if b { 1.0 } else { 0.0 })),
                     _ => Ok(Value::Number(f64::NAN)),
@@ -180,6 +174,19 @@ pub(crate) fn number_constructor<'gc>(
         }
     } else {
         Ok(Value::Number(0.0)) // Number() with no args returns 0
+    }
+}
+
+pub(crate) fn string_to_f64(s: &str) -> Result<f64, JSError> {
+    let trimmed = s.trim();
+    if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
+        Ok(i64::from_str_radix(hex, 16).map(|v| v as f64)?)
+    } else if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
+        Ok(i64::from_str_radix(bin, 2).map(|v| v as f64)?)
+    } else if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
+        Ok(i64::from_str_radix(oct, 8).map(|v| v as f64)?)
+    } else {
+        Ok(trimmed.parse::<f64>()?)
     }
 }
 

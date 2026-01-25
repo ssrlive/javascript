@@ -1564,7 +1564,22 @@ pub fn string_from_char_code<'gc>(args: &[Value<'gc>]) -> Result<Value<'gc>, Eva
     for arg in args {
         let num = match arg {
             Value::Number(n) => *n,
-            _ => 0.0,
+            Value::Boolean(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Value::Null => 0.0,
+            Value::Undefined => f64::NAN,
+            Value::String(s) => {
+                let s = utf16_to_utf8(s);
+                crate::js_number::string_to_f64(s.trim()).unwrap_or(f64::NAN)
+            }
+            Value::BigInt(_) => return Err(EvalError::Js(crate::raise_type_error!("Cannot convert a BigInt value to a number"))),
+            Value::Symbol(_) => return Err(EvalError::Js(crate::raise_type_error!("Cannot convert Symbol"))),
+            _ => f64::NAN,
         };
         let u = num as u16;
         chars.push(u);

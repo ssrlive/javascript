@@ -42,25 +42,7 @@ fn to_number<'gc>(val: &Value<'gc>) -> Result<f64, EvalError<'gc>> {
             if trimmed.is_empty() {
                 return Ok(0.0);
             }
-            if let Some(hex) = trimmed.strip_prefix("0x").or_else(|| trimmed.strip_prefix("0X")) {
-                if hex.is_empty() {
-                    return Ok(f64::NAN);
-                }
-                return Ok(i64::from_str_radix(hex, 16).map(|v| v as f64).unwrap_or(f64::NAN));
-            }
-            if let Some(bin) = trimmed.strip_prefix("0b").or_else(|| trimmed.strip_prefix("0B")) {
-                if bin.is_empty() {
-                    return Ok(f64::NAN);
-                }
-                return Ok(i64::from_str_radix(bin, 2).map(|v| v as f64).unwrap_or(f64::NAN));
-            }
-            if let Some(oct) = trimmed.strip_prefix("0o").or_else(|| trimmed.strip_prefix("0O")) {
-                if oct.is_empty() {
-                    return Ok(f64::NAN);
-                }
-                return Ok(i64::from_str_radix(oct, 8).map(|v| v as f64).unwrap_or(f64::NAN));
-            }
-            Ok(trimmed.parse::<f64>().unwrap_or(f64::NAN))
+            Ok(crate::js_number::string_to_f64(trimmed).unwrap_or(f64::NAN))
         }
         Value::BigInt(_) => Err(EvalError::Js(crate::raise_type_error!("Cannot convert a BigInt value to a number"))),
         Value::Symbol(_) => Err(EvalError::Js(crate::raise_type_error!("Cannot convert Symbol"))),

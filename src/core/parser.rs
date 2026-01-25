@@ -478,28 +478,48 @@ fn parse_for_statement(t: &[TokenData], index: &mut usize) -> Result<Statement, 
     }
 
     // Standard for loop
+    // Skip line terminators between the init and the first semicolon
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if !matches!(t[*index].token, Token::Semicolon) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
     *index += 1; // consume ;
 
+    // Skip line terminators before test expression or semicolon
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     let test = if !matches!(t[*index].token, Token::Semicolon) {
         Some(parse_expression(t, index)?)
     } else {
         None
     };
 
+    // Skip line terminators before the second semicolon
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if !matches!(t[*index].token, Token::Semicolon) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
     *index += 1; // consume ;
 
+    // Skip line terminators before update expression or closing paren
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     let update = if !matches!(t[*index].token, Token::RParen) {
         Some(parse_expression(t, index)?)
     } else {
         None
     };
 
+    // Skip line terminators before the closing ')'
+    while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+        *index += 1;
+    }
     if !matches!(t[*index].token, Token::RParen) {
         return Err(raise_parse_error_at!(t.get(*index)));
     }
@@ -1515,6 +1535,10 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
         if let Token::Identifier(name) = &t[*index].token {
             let name = name.clone();
             *index += 1;
+            // Allow line terminators between the identifier and an optional initializer
+            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
             let init = if *index < t.len() && matches!(t[*index].token, Token::Assign) {
                 *index += 1;
                 Some(parse_assignment(t, index)?)
@@ -1522,6 +1546,10 @@ fn parse_variable_declaration_list(t: &[TokenData], index: &mut usize) -> Result
                 None
             };
             decls.push((name, init));
+            // Skip line terminators before checking for a comma separating declarations
+            while *index < t.len() && matches!(t[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
         } else if matches!(t[*index].token, Token::Static) {
             // Accept 'static' as an identifier name (e.g., `var static;`) in contexts
             // where an IdentifierName is expected.
@@ -3090,6 +3118,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             // Now expect parameter list. Be forgiving if the '(' was consumed
             // earlier; accept either an explicit '(' or start directly at an
             // identifier (first parameter) or an immediate ')' for empty params.
+            // Allow line terminators between the name and the '(' as per ASI rules.
+            while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                *index += 1;
+            }
             if *index < tokens.len()
                 && (matches!(tokens[*index].token, Token::LParen) || matches!(tokens[*index].token, Token::Identifier(_)))
             {
@@ -3387,6 +3419,10 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             }
             Token::Dot => {
                 *index += 1; // consume '.'
+                // Allow line terminators between '.' and the property name
+                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator) {
+                    *index += 1;
+                }
                 if *index >= tokens.len() {
                     return Err(raise_parse_error_at!(tokens.get(*index)));
                 }

@@ -398,11 +398,14 @@ pub fn tokenize(expr: &str) -> Result<Vec<TokenData>, JSError> {
                     column += 2;
                 } else if i + 1 < chars.len() && chars[i + 1] == '/' {
                     // Single-line comment: //
-                    while i < chars.len() && chars[i] != '\n' {
+                    i += 2; // skip //
+                    column += 2;
+                    // Stop at any line terminator (LF, CR, LS (U+2028), PS (U+2029))
+                    while i < chars.len() && !matches!(chars[i], '\n' | '\r' | '\u{2028}' | '\u{2029}') {
                         i += 1;
                         column += 1;
                     }
-                    // Don't consume the newline, let the whitespace handler deal with it
+                    // Don't consume the line terminator here; let the whitespace/line handler process it
                 } else if i + 1 < chars.len() && chars[i + 1] == '*' {
                     // Multi-line comment: /*
                     i += 2; // skip /*

@@ -78,7 +78,7 @@ declare -A HARNESS_INDEX
 while IFS= read -r -d '' p; do
   base=$(basename "$p")
   HARNESS_INDEX["$base"]="$p"
-done < <(find "$REPO_DIR/harness" -type f -print0)
+done < <(find "$REPO_DIR/harness" -type f -print0 | sort -z)
 
 # Build the collection cap and support focused searches
 CAP=$((LIMIT * CAP_MULTIPLIER))
@@ -129,7 +129,7 @@ for dir in "${SEARCH_DIRS[@]}"; do
     if [[ $(( ${#basic[@]} + ${#other[@]} + ${#intl_tests[@]} )) -ge $CAP ]]; then
       break 2
     fi
-  done < <(find "$dir" -name '*.js' -print0)
+  done < <(find "$dir" -name '*.js' -print0 | sort -z)
 done
 
 echo "Collected: basic=${#basic[@]} other=${#other[@]} intl=${#intl_tests[@]} (total=$((${#basic[@]}+${#other[@]}+${#intl_tests[@]})))"

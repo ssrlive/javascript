@@ -35,6 +35,12 @@ pub enum JSErrorKind {
 
     #[error("std::io error: {0}")]
     IoError(#[from] std::io::Error),
+
+    #[error("std::num::ParseIntError: {0}")]
+    ParseIntError(#[from] std::num::ParseIntError),
+
+    #[error("std::num::ParseFloatError: {0}")]
+    ParseFloatError(#[from] std::num::ParseFloatError),
 }
 
 #[derive(Debug)]
@@ -120,6 +126,8 @@ impl JSError {
             JSErrorKind::RuntimeError { message } => format!("Error: {message}"),
             JSErrorKind::Throw(msg) => msg.clone(),
             JSErrorKind::IoError(e) => format!("IOError: {e}"),
+            JSErrorKind::ParseIntError(e) => format!("ParseIntError: {e}"),
+            JSErrorKind::ParseFloatError(e) => format!("ParseFloatError: {e}"),
         }
     }
 
@@ -175,6 +183,28 @@ impl std::error::Error for JSError {
 impl From<std::io::Error> for JSError {
     fn from(err: std::io::Error) -> Self {
         JSError::new(JSErrorKind::IoError(err), "<unknown>".to_string(), "<unknown>".to_string(), None)
+    }
+}
+
+impl From<std::num::ParseIntError> for JSError {
+    fn from(err: std::num::ParseIntError) -> Self {
+        JSError::new(
+            JSErrorKind::ParseIntError(err),
+            "<unknown>".to_string(),
+            "<unknown>".to_string(),
+            None,
+        )
+    }
+}
+
+impl From<std::num::ParseFloatError> for JSError {
+    fn from(err: std::num::ParseFloatError) -> Self {
+        JSError::new(
+            JSErrorKind::ParseFloatError(err),
+            "<unknown>".to_string(),
+            "<unknown>".to_string(),
+            None,
+        )
     }
 }
 

@@ -136,6 +136,8 @@ pub struct JSObjectData<'gc> {
     pub is_function_scope: bool,
     // Whether new own properties can be added to this object. Default true.
     pub extensible: bool,
+    // Optional internal class definition slot (not exposed as an own property)
+    pub class_def: Option<GcPtr<'gc, ClassDefinition>>,
 }
 
 unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
@@ -155,6 +157,9 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
         }
         if let Some(p) = &self.prototype {
             p.trace(cc);
+        }
+        if let Some(cd) = &self.class_def {
+            cd.trace(cc);
         }
     }
 }
@@ -264,10 +269,14 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_non_enumerable(&mut self, key: PropertyKey<'gc>) {
+        // Debug: log where non-enumerable markers are set
+        log::debug!("set_non_enumerable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_enumerable.insert(key);
     }
 
     pub fn set_enumerable(&mut self, key: PropertyKey<'gc>) {
+        // Debug: log where enumerable markers are cleared
+        log::debug!("set_enumerable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_enumerable.remove(&key);
     }
 
@@ -553,7 +562,13 @@ pub fn to_primitive<'gc>(
             let is_primitive = |v: &Value<'gc>| {
                 matches!(
                     v,
-                    Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Symbol(_)
+                    Value::Number(_)
+                        | Value::BigInt(_)
+                        | Value::String(_)
+                        | Value::Boolean(_)
+                        | Value::Symbol(_)
+                        | Value::Null
+                        | Value::Undefined
                 )
             };
 
@@ -565,6 +580,7 @@ pub fn to_primitive<'gc>(
                             if let Some(func_val_rc) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym)) {
                                 let func_val = func_val_rc.borrow().clone();
                                 if !matches!(func_val, Value::Undefined | Value::Null) {
+                                    log::debug!("DBG to_primitive: calling @@toPrimitive with hint={}", hint);
                                     // Call it with hint
                                     let arg = Value::String(crate::unicode::utf8_to_utf16(hint));
                                     // Support closures or function objects
@@ -594,6 +610,7 @@ pub fn to_primitive<'gc>(
                                         _ => return Err(crate::raise_type_error!("@@toPrimitive is not a function")),
                                     };
                                     let res = res_eval?;
+                                    log::debug!("DBG to_primitive: @@toPrimitive returned {:?}", res);
                                     if is_primitive(&res) {
                                         return Ok(res);
                                     } else {
@@ -608,22 +625,35 @@ pub fn to_primitive<'gc>(
 
             if hint == "string" {
                 // toString -> valueOf
+                log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
                 let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
-                if is_primitive(&to_s) {
+                log::debug!("DBG to_primitive: toString result = {:?}", to_s);
+                // Treat `Uninitialized` as a sentinel meaning "no callable toString" and
+                // therefore do not accept it as a primitive result. Only accept real
+                // primitive values here.
+                if !matches!(to_s, crate::core::Value::Uninitialized) && is_primitive(&to_s) {
                     return Ok(to_s);
                 }
+                log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
                 let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
+                log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
                 if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
             } else {
                 // number/default: valueOf -> toString
+                log::debug!("DBG to_primitive: trying valueOf for obj={:p}", Gc::as_ptr(*obj));
                 let val_of = crate::js_object::handle_value_of_method(mc, &Value::Object(*obj), &[], env)?;
+                log::debug!("DBG to_primitive: valueOf result = {:?}", val_of);
                 if is_primitive(&val_of) {
                     return Ok(val_of);
                 }
+                log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
                 let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
-                if is_primitive(&to_s) {
+                log::debug!("DBG to_primitive: toString result = {:?}", to_s);
+                // See comment above: do not treat `Uninitialized` as a primitive sentinel
+                // result from a non-callable `toString` property.
+                if !matches!(to_s, crate::core::Value::Uninitialized) && is_primitive(&to_s) {
                     return Ok(to_s);
                 }
             }
@@ -697,10 +727,16 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
     }
 }
 
-fn format_js_number(n: f64) -> String {
-    // Handle zero (including -0)
+pub fn format_js_number(n: f64) -> String {
+    log::debug!(
+        "DBG format_js_number: n={} is_zero={} sign_neg={}",
+        n,
+        n == 0.0,
+        n.is_sign_negative()
+    );
+    // Handle zero: ECMAScript ToString(-0) should produce "0"
     if n == 0.0 {
-        return if n.is_sign_negative() { "-0".to_string() } else { "0".to_string() };
+        return "0".to_string();
     }
     // Special-case the smallest positive subnormal number to match JS representation
     if n.to_bits() == 1 {
@@ -953,7 +989,7 @@ pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<
 pub fn has_own_property_value<'gc>(obj: &JSObjectDataPtr<'gc>, key_val: &Value<'gc>) -> bool {
     match key_val {
         Value::String(s) => get_own_property(obj, &utf16_to_utf8(s).into()).is_some(),
-        Value::Number(n) => get_own_property(obj, &n.to_string().into()).is_some(),
+        Value::Number(n) => get_own_property(obj, &value_to_string(&Value::Number(*n)).into()).is_some(),
         Value::Boolean(b) => get_own_property(obj, &b.to_string().into()).is_some(),
         Value::Undefined => get_own_property(obj, &"undefined".into()).is_some(),
         Value::Symbol(sd) => {

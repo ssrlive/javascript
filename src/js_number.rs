@@ -332,7 +332,8 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
     match method {
         "toString" => {
             if args.is_empty() {
-                Ok(Value::String(utf8_to_utf16(&n.to_string())))
+                // Use canonical JS string conversion for numbers
+                Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))))
             } else {
                 let msg = format!("toString method expects no arguments, got {}", args.len());
                 Err(raise_eval_error!(msg))
@@ -351,7 +352,7 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
         "toLocaleString" => {
             if args.is_empty() {
                 // For now, same as toString
-                Ok(Value::String(utf8_to_utf16(&n.to_string())))
+                Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n)))))
             } else {
                 let msg = format!("toLocaleString method expects no arguments, got {}", args.len());
                 Err(raise_eval_error!(msg))
@@ -428,7 +429,7 @@ pub fn handle_number_instance_method<'gc>(n: &f64, method: &str, args: &[Value<'
                         Ok(Value::String(utf8_to_utf16(&format!("{:.1$}", n, width))))
                     }
                 }
-                None => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                None => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
             }
         }
         _ => Err(raise_eval_error!(format!("Number.prototype.{method} is not implemented"))),

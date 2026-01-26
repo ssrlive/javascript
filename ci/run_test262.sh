@@ -297,6 +297,40 @@ JS
       continue
     fi
 
+
+    # If resolved_includes contains assert.js but not sta.js, ensure we insert sta.js before assert.js
+    if [[ ${#resolved_includes[@]} -gt 0 ]]; then
+      have_assert_include=false
+      have_sta_include=false
+      for p in "${resolved_includes[@]}"; do
+        base=$(basename "$p")
+        if [[ "$base" == "assert.js" ]]; then
+          have_assert_include=true
+        fi
+        if [[ "$base" == "sta.js" ]]; then
+          have_sta_include=true
+        fi
+      done
+
+      if $have_assert_include && ! $have_sta_include; then
+        sta_path="${HARNESS_INDEX['sta.js']:-}"
+        if [[ -n "$sta_path" ]]; then
+          # Insert sta.js before the first assert.js occurrence
+          new_resolved=()
+          inserted=false
+          for p in "${resolved_includes[@]}"; do
+            base=$(basename "$p")
+            if [[ "$base" == "assert.js" && "$inserted" == "false" ]]; then
+              new_resolved+=("$sta_path")
+              inserted=true
+            fi
+            new_resolved+=("$p")
+          done
+          resolved_includes=("${new_resolved[@]}")
+        fi
+      fi
+    fi
+
     tmp=$(mktemp /tmp/test262.XXXXXX.js)
     for p in "${resolved_includes[@]}"; do
       cat "$p" >> "$tmp"

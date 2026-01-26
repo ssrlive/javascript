@@ -332,6 +332,16 @@ pub fn handle_object_method<'gc>(
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::BigInt(b) => PropertyKey::String(b.to_string()),
                 Value::Symbol(sd) => PropertyKey::Symbol(sd),
+                Value::Object(_) => {
+                    // ToPropertyKey semantics: ToPrimitive with hint 'string'
+                    let prim = crate::core::to_primitive(mc, &prop_val, "string", env)?;
+                    match prim {
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        other => PropertyKey::String(value_to_string(&other)),
+                    }
+                }
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
@@ -581,6 +591,15 @@ pub fn handle_object_method<'gc>(
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
                 Value::BigInt(b) => PropertyKey::String(b.to_string()),
                 Value::Symbol(sd) => PropertyKey::Symbol(sd),
+                Value::Object(_) => {
+                    let prim = crate::core::to_primitive(mc, &prop_val, "string", env)?;
+                    match prim {
+                        Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        other => PropertyKey::String(value_to_string(&other)),
+                    }
+                }
                 val => PropertyKey::String(value_to_string(&val)),
             };
 
@@ -978,7 +997,7 @@ pub fn handle_object_method<'gc>(
             // Determine property key (support strings & numbers for now)
             let prop_key = match prop_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                 _ => return Err(raise_type_error!("Unsupported property key type in Object.defineProperty")),
             };
 
@@ -1074,26 +1093,36 @@ pub(crate) fn handle_to_string_method<'gc>(
     }
 
     if let Value::Object(object) = obj_val {
-        // Check if this object defines its own toString method
+        // Check if this object defines its own toString method (Get semantics)
         if let Some(method_rc) = object_get_key_value(object, "toString") {
             let method_val = method_rc.borrow().clone();
+            log::debug!("DBG handle_to_string_method: found toString property => {:?}", method_val);
             match method_val {
-                Value::Function(ref name) if name == "Object.prototype.toString" => {
-                    // This is the default prototype method, skip calling it to avoid recursion
-                    // and proceed to the default implementation below.
-                }
+                // If the property is a callable, call it and return the result
                 Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_) => {
                     // If it's an object, it might be a function object (with a __closure__ property)
+                    log::debug!("DBG handle_to_string_method: calling toString implementation");
                     let res = evaluate_call_dispatch(mc, env, method_val, Some(obj_val.clone()), Vec::new()).map_err(JSError::from)?;
+                    log::debug!("DBG handle_to_string_method: toString returned {:?}", res);
                     return Ok(res);
                 }
-                _ => {}
+                // If the property exists but is not callable (e.g. `toString: null`),
+                // per ECMAScript ToPrimitive semantics we must not call the prototype's
+                // `toString` - instead indicate there's no callable toString by
+                // returning `Uninitialized` so the caller can try `valueOf` next.
+                _ => {
+                    log::debug!("DBG handle_to_string_method: toString not callable -> returning Uninitialized sentinel");
+                    // Indicate "no callable toString" by returning `Uninitialized` as
+                    // a sentinel that is not a JS primitive and will cause the
+                    // caller to proceed to `valueOf`.
+                    return Ok(Value::Uninitialized);
+                }
             }
         }
     }
 
     match obj_val {
-        Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+        Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
         Value::BigInt(h) => Ok(Value::String(utf8_to_utf16(&h.to_string()))),
         Value::String(s) => Ok(Value::String(s.clone())),
         Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
@@ -1109,7 +1138,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             // Check if this is a wrapped primitive object
             if let Some(wrapped_val) = object_get_key_value(object, "__value__") {
                 match &*wrapped_val.borrow() {
-                    Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                    Value::Number(n) => return Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(*n))))),
                     Value::BigInt(h) => return Ok(Value::String(utf8_to_utf16(&h.to_string()))),
                     Value::Boolean(b) => return Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::String(s) => return Ok(Value::String(s.clone())),
@@ -1131,7 +1160,7 @@ pub(crate) fn handle_to_string_method<'gc>(
                         match &*val_rc.borrow() {
                             Value::Undefined | Value::Null => parts.push("".to_string()), // push empty string for null and undefined
                             Value::String(s) => parts.push(utf16_to_utf8(s)),
-                            Value::Number(n) => parts.push(n.to_string()),
+                            Value::Number(n) => parts.push(crate::core::value_to_string(&Value::Number(*n))),
                             Value::Boolean(b) => parts.push(b.to_string()),
                             Value::BigInt(b) => parts.push(format!("{}n", b)),
                             _ => parts.push("[object Object]".to_string()),

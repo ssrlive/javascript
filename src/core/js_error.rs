@@ -79,6 +79,10 @@ pub fn initialize_error_constructor<'gc>(mc: &MutationContext<'gc>, env: &JSObje
     object_set_key_value(mc, &error_proto, "constructor", Value::Object(error_ctor))?;
     object_set_key_value(mc, &error_proto, "name", Value::String(utf8_to_utf16("Error")))?;
     object_set_key_value(mc, &error_proto, "message", Value::String(utf8_to_utf16("")))?;
+    // Provide Error.prototype.toString implementation
+    let val = Value::Function("Error.prototype.toString".to_string());
+    object_set_key_value(mc, &error_proto, "toString", val)?;
+    error_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("toString"));
 
     env_set(mc, env, "Error", Value::Object(error_ctor))?;
 
@@ -144,6 +148,8 @@ pub fn create_error<'gc>(
     error_obj.borrow_mut(mc).prototype = prototype;
 
     object_set_key_value(mc, &error_obj, "message", message.clone())?;
+    // Make message non-enumerable by default
+    error_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("message"));
 
     let msg_str = if let Value::String(s) = &message {
         utf16_to_utf8(s)
@@ -152,9 +158,13 @@ pub fn create_error<'gc>(
     };
     let stack_str = format!("Error: {msg_str}");
     object_set_key_value(mc, &error_obj, "stack", Value::String(utf8_to_utf16(&stack_str)))?;
+    // Make stack non-enumerable by default
+    error_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("stack"));
 
     // Internal marker to identify Error objects
     object_set_key_value(mc, &error_obj, "__is_error", Value::Boolean(true))?;
+    // Make internal marker non-enumerable so it doesn't show up in enumerations
+    error_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__is_error"));
 
     Ok(Value::Object(error_obj))
 }

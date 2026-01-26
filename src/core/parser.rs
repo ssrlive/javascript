@@ -2226,8 +2226,11 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             // Check if it is used as keyword or name
             // get x() {} -> keyword
             // get() {} -> method name 'get'
+            // Also allow computed accessor: get [expr]() {}
             if let Some(next) = t.get(*index + 1)
-                && matches!(next.token, Token::Identifier(_) | Token::PrivateIdentifier(_))
+                && (matches!(next.token, Token::Identifier(_))
+                    || matches!(next.token, Token::PrivateIdentifier(_))
+                    || matches!(next.token, Token::LBracket))
             {
                 is_accessor = true;
                 is_getter = kw == "get";
@@ -2236,12 +2239,33 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
 
         if is_accessor {
             *index += 1; // consume get/set
-            let (prop_name, is_private) = match &t[*index].token {
-                Token::Identifier(name) => (name.clone(), false),
-                Token::PrivateIdentifier(name) => (name.clone(), true),
+
+            // Support computed accessor names: get [expr]() {} or get id() {}
+            let mut is_private = false;
+            let mut prop_expr_opt: Option<Expr> = None;
+            let mut prop_name_str: Option<String> = None;
+
+            match &t[*index].token {
+                Token::Identifier(name) => {
+                    prop_name_str = Some(name.clone());
+                    *index += 1;
+                }
+                Token::PrivateIdentifier(name) => {
+                    prop_name_str = Some(name.clone());
+                    is_private = true;
+                    *index += 1;
+                }
+                Token::LBracket => {
+                    *index += 1; // consume [
+                    let expr = parse_assignment(t, index)?;
+                    if *index >= t.len() || !matches!(t[*index].token, Token::RBracket) {
+                        return Err(raise_parse_error_at!(t.get(*index)));
+                    }
+                    *index += 1; // consume ]
+                    prop_expr_opt = Some(expr);
+                }
                 _ => return Err(raise_parse_error_at!(t.get(*index))),
-            };
-            *index += 1;
+            }
 
             if *index >= t.len() || !matches!(t[*index].token, Token::LParen) {
                 return Err(raise_parse_error_at!(t.get(*index)));
@@ -2255,51 +2279,103 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             let body = parse_statement_block(t, index)?;
 
             if is_getter {
-                if is_static {
-                    if is_private {
-                        members.push(ClassMember::PrivateStaticGetter(prop_name, body));
+                if let Some(prop_expr) = prop_expr_opt {
+                    // computed getter
+                    if is_static {
+                        members.push(ClassMember::StaticGetterComputed(prop_expr, body));
                     } else {
-                        members.push(ClassMember::StaticGetter(prop_name, body));
+                        members.push(ClassMember::GetterComputed(prop_expr, body));
                     }
-                } else if is_private {
-                    members.push(ClassMember::PrivateGetter(prop_name, body));
-                } else {
-                    members.push(ClassMember::Getter(prop_name, body));
+                } else if let Some(prop_name) = prop_name_str {
+                    if is_static {
+                        if is_private {
+                            members.push(ClassMember::PrivateStaticGetter(prop_name, body));
+                        } else {
+                            members.push(ClassMember::StaticGetter(prop_name, body));
+                        }
+                    } else if is_private {
+                        members.push(ClassMember::PrivateGetter(prop_name, body));
+                    } else {
+                        members.push(ClassMember::Getter(prop_name, body));
+                    }
                 }
-            } else if is_static {
-                if is_private {
-                    members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
-                } else {
-                    members.push(ClassMember::StaticSetter(prop_name, params, body));
-                }
-            } else if is_private {
-                members.push(ClassMember::PrivateSetter(prop_name, params, body));
             } else {
-                members.push(ClassMember::Setter(prop_name, params, body));
+                // setter
+                if let Some(prop_expr) = prop_expr_opt {
+                    if is_static {
+                        members.push(ClassMember::StaticSetterComputed(prop_expr, params, body));
+                    } else {
+                        members.push(ClassMember::SetterComputed(prop_expr, params, body));
+                    }
+                } else if let Some(prop_name) = prop_name_str {
+                    if is_static {
+                        if is_private {
+                            members.push(ClassMember::PrivateStaticSetter(prop_name, params, body));
+                        } else {
+                            members.push(ClassMember::StaticSetter(prop_name, params, body));
+                        }
+                    } else if is_private {
+                        members.push(ClassMember::PrivateSetter(prop_name, params, body));
+                    } else {
+                        members.push(ClassMember::Setter(prop_name, params, body));
+                    }
+                }
             }
             continue;
         }
 
-        // Method or Property
-        let (name, is_private) = match &t[*index].token {
-            Token::Identifier(name) => (name.clone(), false),
-            Token::PrivateIdentifier(name) => (name.clone(), true),
-            _ => return Err(raise_parse_error_at!(t.get(*index))),
-        };
-
-        // Check duplicate private
-        if is_private {
-            if declared_private_names.contains(&name) {
-                let msg = format!("Duplicate private name: #{}", name);
-                return Err(raise_parse_error_with_token!(&t[*index], msg));
-            }
-            declared_private_names.insert(name.clone());
-            current_private_names.borrow_mut().insert(name.clone());
+        // Method or Property (support computed names via [expr])
+        // Optional '*' indicates a generator method (can appear before an identifier or before a computed '[' key)
+        let mut _is_generator = false;
+        if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
+            _is_generator = true;
+            *index += 1; // consume '*'
         }
 
-        *index += 1; // consume name
+        let mut name_str_opt: Option<String> = None;
+        let mut is_private = false;
+        let mut computed_key_expr: Option<Expr> = None;
 
-        if !is_static && !is_private && name == "constructor" && matches!(t.get(*index).map(|d| &d.token), Some(Token::LParen)) {
+        match &t[*index].token {
+            Token::Identifier(name) => {
+                name_str_opt = Some(name.clone());
+            }
+            Token::PrivateIdentifier(name) => {
+                name_str_opt = Some(name.clone());
+                is_private = true;
+            }
+            Token::LBracket => {
+                *index += 1; // consume [
+                let expr = parse_assignment(t, index)?;
+                if *index >= t.len() || !matches!(t[*index].token, Token::RBracket) {
+                    return Err(raise_parse_error_at!(t.get(*index)));
+                }
+                *index += 1; // consume ]
+                computed_key_expr = Some(expr);
+            }
+            _ => return Err(raise_parse_error_at!(t.get(*index))),
+        }
+
+        // Check duplicate private
+        if let Some(ref name) = name_str_opt {
+            if is_private {
+                if declared_private_names.contains(name) {
+                    let msg = format!("Duplicate private name: #{}", name);
+                    return Err(raise_parse_error_with_token!(&t[*index], msg));
+                }
+                declared_private_names.insert(name.clone());
+                current_private_names.borrow_mut().insert(name.clone());
+            }
+            *index += 1; // consume name
+        }
+
+        // If this is an identifier constructor, handle specially (computed-constructor not special)
+        if computed_key_expr.is_none()
+            && !is_static
+            && !is_private
+            && name_str_opt.as_deref() == Some("constructor")
+            && matches!(t.get(*index).map(|d| &d.token), Some(Token::LParen))
+        {
             *index += 1; // (
             let params = parse_parameters(t, index)?;
             if *index >= t.len() || !matches!(t[*index].token, Token::LBrace) {
@@ -2311,6 +2387,13 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             continue;
         }
 
+        // Support optional '*' prefix for generators
+        let mut is_generator = false;
+        if *index < t.len() && matches!(t[*index].token, Token::Multiply) {
+            is_generator = true;
+            *index += 1; // consume '*'
+        }
+
         if *index < t.len() && matches!(t[*index].token, Token::LParen) {
             // Method
             *index += 1; // (
@@ -2320,16 +2403,40 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             }
             *index += 1; // {
             let body = parse_statement_block(t, index)?;
-            if is_static {
-                if is_private {
-                    members.push(ClassMember::PrivateStaticMethod(name, params, body));
-                } else {
-                    members.push(ClassMember::StaticMethod(name, params, body));
+            if is_generator {
+                if let Some(expr) = computed_key_expr {
+                    if is_static {
+                        members.push(ClassMember::StaticMethodComputedGenerator(expr, params, body));
+                    } else {
+                        members.push(ClassMember::MethodComputedGenerator(expr, params, body));
+                    }
+                } else if let Some(name) = name_str_opt {
+                    if is_static {
+                        members.push(ClassMember::StaticMethodGenerator(name, params, body));
+                    } else if is_private {
+                        members.push(ClassMember::PrivateMethod(name, params, body)); // private methods generators not implemented separately
+                    } else {
+                        members.push(ClassMember::MethodGenerator(name, params, body));
+                    }
                 }
-            } else if is_private {
-                members.push(ClassMember::PrivateMethod(name, params, body));
-            } else {
-                members.push(ClassMember::Method(name, params, body));
+            } else if let Some(expr) = computed_key_expr {
+                if is_static {
+                    members.push(ClassMember::StaticMethodComputed(expr, params, body));
+                } else {
+                    members.push(ClassMember::MethodComputed(expr, params, body));
+                }
+            } else if let Some(name) = name_str_opt {
+                if is_static {
+                    if is_private {
+                        members.push(ClassMember::PrivateStaticMethod(name, params, body));
+                    } else {
+                        members.push(ClassMember::StaticMethod(name, params, body));
+                    }
+                } else if is_private {
+                    members.push(ClassMember::PrivateMethod(name, params, body));
+                } else {
+                    members.push(ClassMember::Method(name, params, body));
+                }
             }
         } else if *index < t.len() && matches!(t[*index].token, Token::Assign) {
             // Property
@@ -2338,32 +2445,48 @@ pub fn parse_class_body(t: &[TokenData], index: &mut usize) -> Result<Vec<ClassM
             if *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
                 *index += 1;
             }
-            if is_static {
-                if is_private {
-                    members.push(ClassMember::PrivateStaticProperty(name, value));
+            if let Some(expr) = computed_key_expr {
+                if is_static {
+                    members.push(ClassMember::StaticPropertyComputed(expr, value));
                 } else {
-                    members.push(ClassMember::StaticProperty(name, value));
+                    members.push(ClassMember::PropertyComputed(expr, value));
                 }
-            } else if is_private {
-                members.push(ClassMember::PrivateProperty(name, value));
-            } else {
-                members.push(ClassMember::Property(name, value));
+            } else if let Some(name) = name_str_opt {
+                if is_static {
+                    if is_private {
+                        members.push(ClassMember::PrivateStaticProperty(name, value));
+                    } else {
+                        members.push(ClassMember::StaticProperty(name, value));
+                    }
+                } else if is_private {
+                    members.push(ClassMember::PrivateProperty(name, value));
+                } else {
+                    members.push(ClassMember::Property(name, value));
+                }
             }
         } else {
             // Property without initializer
             if *index < t.len() && matches!(t[*index].token, Token::Semicolon | Token::LineTerminator) {
                 *index += 1;
             }
-            if is_static {
-                if is_private {
-                    members.push(ClassMember::PrivateStaticProperty(name, Expr::Undefined));
+            if let Some(expr) = computed_key_expr {
+                if is_static {
+                    members.push(ClassMember::StaticPropertyComputed(expr, Expr::Undefined));
                 } else {
-                    members.push(ClassMember::StaticProperty(name, Expr::Undefined));
+                    members.push(ClassMember::PropertyComputed(expr, Expr::Undefined));
                 }
-            } else if is_private {
-                members.push(ClassMember::PrivateProperty(name, Expr::Undefined));
-            } else {
-                members.push(ClassMember::Property(name, Expr::Undefined));
+            } else if let Some(name) = name_str_opt {
+                if is_static {
+                    if is_private {
+                        members.push(ClassMember::PrivateStaticProperty(name, Expr::Undefined));
+                    } else {
+                        members.push(ClassMember::StaticProperty(name, Expr::Undefined));
+                    }
+                } else if is_private {
+                    members.push(ClassMember::PrivateProperty(name, Expr::Undefined));
+                } else {
+                    members.push(ClassMember::Property(name, Expr::Undefined));
+                }
             }
         }
     }
@@ -2828,6 +2951,12 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
 
                     // Parse key
                     let mut is_shorthand_candidate = false;
+                    // Optional '*' indicates generator concise method
+                    let mut is_generator = false;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                        is_generator = true;
+                        *index += 1; // consume '*'
+                    }
                     let key_expr = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
                         // Check for concise method: Identifier + (
                         if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
@@ -2844,11 +2973,19 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                                 return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                             *index += 1; // consume }
-                            properties.push((
-                                Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                Expr::Function(None, params, body),
-                                true,
-                            ));
+                            if is_generator {
+                                properties.push((
+                                    Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                    Expr::GeneratorFunction(None, params, body),
+                                    true,
+                                ));
+                            } else {
+                                properties.push((
+                                    Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                    Expr::Function(None, params, body),
+                                    true,
+                                ));
+                            }
 
                             // After adding method, skip any newline/semicolons and handle comma/end in outer loop
                             while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
@@ -2873,8 +3010,8 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                     } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
                         // Numeric property keys are allowed in object literals (they become strings)
                         *index += 1;
-                        // Format as integer if whole number, otherwise use default representation
-                        let s = if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() };
+                        // Use canonical JS string conversion to preserve formatting like '1e+55'
+                        let s = crate::core::value_to_string(&crate::core::Value::Number(n));
                         Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
                     } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
                         *index += 1;
@@ -2896,6 +3033,13 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                         return Err(raise_parse_error_at!(tokens.get(*index)));
                     };
 
+                    // Check for optional '*' prefix to denote generator method
+                    let mut is_generator = false;
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                        is_generator = true;
+                        *index += 1; // consume '*'
+                    }
+
                     // Check for method definition after computed key
                     if !is_getter && !is_setter && *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                         *index += 1; // consume (
@@ -2909,7 +3053,11 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             return Err(raise_parse_error_at!(tokens.get(*index)));
                         }
                         *index += 1; // consume }
-                        properties.push((key_expr, Expr::Function(None, params, body), true));
+                        if is_generator {
+                            properties.push((key_expr, Expr::GeneratorFunction(None, params, body), true));
+                        } else {
+                            properties.push((key_expr, Expr::Function(None, params, body), true));
+                        }
 
                         // After adding method, skip any newline/semicolons and handle comma/end in outer loop
                         while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {

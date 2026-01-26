@@ -13,7 +13,7 @@ keywords = ["javascript", "engine", "interpreter", "runtime"]
 categories = ["development-tools", "parsing"]
 
 [features]
-# default = ["os", "std"]
+default = ["os", "std"]
 os = ["libc", "windows-sys"]
 std = []
 

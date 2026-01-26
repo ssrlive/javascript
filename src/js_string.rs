@@ -126,7 +126,7 @@ pub(crate) fn string_constructor<'gc>(
     if args.len() == 1 {
         let arg_val = args[0].clone();
         match arg_val {
-            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+            Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
             Value::String(s) => Ok(Value::String(s.clone())),
             Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
             Value::Undefined => Ok(Value::String(utf8_to_utf16("undefined"))),
@@ -136,7 +136,7 @@ pub(crate) fn string_constructor<'gc>(
                 let prim = to_primitive(mc, &Value::Object(obj), "string", env).map_err(EvalError::from)?;
                 match prim {
                     Value::String(s) => Ok(Value::String(s)),
-                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&n.to_string()))),
+                    Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),
                     Value::Boolean(b) => Ok(Value::String(utf8_to_utf16(&b.to_string()))),
                     Value::Symbol(sd) => match sd.description {
                         Some(ref d) => Ok(Value::String(utf8_to_utf16(&format!("Symbol({})", d)))),

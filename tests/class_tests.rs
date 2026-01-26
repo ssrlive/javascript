@@ -257,9 +257,7 @@ mod class_tests {
                 static staticMethod() {
                     return "static method result";
                 }
-                constructor(name) {
-                    this.name = name;
-                }
+                constructor(name) { this.name = name; }
             }
 
             let staticProp = Test.staticProp;
@@ -275,6 +273,21 @@ mod class_tests {
             Err(e) => println!("Error: {:?}", e),
         }
         assert!(result.is_ok(), "Static property, method access and instance properties should work");
+    }
+
+    #[test]
+    fn test_class_constructor_name_non_enumerable() {
+        let script = r#"
+            class C { }
+            Object.getOwnPropertyDescriptor(C, 'name')
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>);
+        assert!(result.is_ok(), "Script should execute");
+        // Expect the descriptor to have enumerable=false per spec
+        assert_eq!(
+            result.unwrap(),
+            "{\"value\":\"C\",\"writable\":true,\"enumerable\":false,\"configurable\":true}"
+        );
     }
 
     #[test]

@@ -212,7 +212,7 @@ pub fn handle_reflect_method<'gc>(
                         if let Some(value_rc) = object_get_key_value(attr_obj, "value") {
                             let prop_key = match property_key {
                                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                                Value::Number(n) => PropertyKey::String(n.to_string()),
+                                Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                                 _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                             };
                             object_set_key_value(mc, &obj, &prop_key, value_rc.borrow().clone())?;
@@ -238,7 +238,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Object(obj) => {
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
                     // For now, always return true as we don't have configurable properties
@@ -260,7 +260,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Object(obj) => {
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
                     if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
@@ -285,7 +285,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Object(obj) => {
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
                     if let Some(value_rc) = object_get_key_value(&obj, &prop_key) {
@@ -331,7 +331,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Object(obj) => {
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
                     let has_prop = object_get_key_value(&obj, &prop_key).is_some();
@@ -405,7 +405,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Object(obj) => {
                     let prop_key = match property_key {
                         Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                        Value::Number(n) => PropertyKey::String(n.to_string()),
+                        Value::Number(n) => PropertyKey::String(crate::core::value_to_string(&Value::Number(n))),
                         _ => return Err(EvalError::Js(raise_type_error!("Invalid property key"))),
                     };
                     object_set_key_value(mc, &obj, &prop_key, value)?;

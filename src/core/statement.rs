@@ -230,24 +230,36 @@ pub enum ObjectDestructuringElement {
 #[derive(Debug, Clone, Collect)]
 #[collect(require_static)]
 pub enum ClassMember {
-    Constructor(Vec<DestructuringElement>, Vec<Statement>),           // parameters, body
-    Method(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameters, body
-    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameters, body
-    Property(String, Expr),                                           // name, value
-    StaticProperty(String, Expr),                                     // name, value
-    PrivateProperty(String, Expr),                                    // name, value
-    PrivateStaticProperty(String, Expr),                              // name, value
-    PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
+    Constructor(Vec<DestructuringElement>, Vec<Statement>),             // parameters, body
+    Method(String, Vec<DestructuringElement>, Vec<Statement>),          // name, parameters, body
+    MethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body (generator)
+    StaticMethod(String, Vec<DestructuringElement>, Vec<Statement>),    // name, parameters, body
+    StaticMethodGenerator(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body (generator)
+    MethodComputed(Expr, Vec<DestructuringElement>, Vec<Statement>),    // computed-key, parameters, body
+    MethodComputedGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, generator
+    StaticMethodComputed(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, parameters, body
+    StaticMethodComputedGenerator(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, generator
+    Property(String, Expr),                                             // name, value
+    StaticProperty(String, Expr),                                       // name, value
+    PropertyComputed(Expr, Expr),                                       // computed-key, value
+    StaticPropertyComputed(Expr, Expr),                                 // computed-key, value
+    PrivateProperty(String, Expr),                                      // name, value
+    PrivateStaticProperty(String, Expr),                                // name, value
+    PrivateMethod(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameters, body
     PrivateStaticMethod(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameters, body
-    PrivateGetter(String, Vec<Statement>),                            // name, body
-    PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
-    PrivateStaticGetter(String, Vec<Statement>),                      // name, body
+    PrivateGetter(String, Vec<Statement>),                              // name, body
+    PrivateSetter(String, Vec<DestructuringElement>, Vec<Statement>),   // name, parameter, body
+    PrivateStaticGetter(String, Vec<Statement>),                        // name, body
     PrivateStaticSetter(String, Vec<DestructuringElement>, Vec<Statement>), // name, parameter, body
-    StaticBlock(Vec<Statement>),                                      // body
-    Getter(String, Vec<Statement>),                                   // name, body
-    Setter(String, Vec<DestructuringElement>, Vec<Statement>),        // name, parameter, body
-    StaticGetter(String, Vec<Statement>),                             // name, body
-    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),  // name, parameter, body
+    StaticBlock(Vec<Statement>),                                        // body
+    Getter(String, Vec<Statement>),                                     // name, body
+    Setter(String, Vec<DestructuringElement>, Vec<Statement>),          // name, parameter, body
+    GetterComputed(Expr, Vec<Statement>),                               // computed-key, body
+    SetterComputed(Expr, Vec<DestructuringElement>, Vec<Statement>),    // computed-key, parameter, body
+    StaticGetter(String, Vec<Statement>),                               // name, body
+    StaticSetter(String, Vec<DestructuringElement>, Vec<Statement>),    // name, parameter, body
+    StaticGetterComputed(Expr, Vec<Statement>),                         // computed-key, body
+    StaticSetterComputed(Expr, Vec<DestructuringElement>, Vec<Statement>), // computed-key, parameter, body
 }
 
 #[derive(Debug, Clone, Collect)]

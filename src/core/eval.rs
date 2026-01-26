@@ -5386,9 +5386,11 @@ fn handle_eval_function<'gc>(
         let is_strict_eval = starts_with_use_strict || (caller_is_strict && !is_indirect_eval);
 
         // Prepare execution environment
-        // For direct evals, execute in the caller environment. For indirect strict evals,
-        // create a new declarative environment so top-level bindings do not affect caller.
-        let exec_env = if is_indirect_eval && is_strict_eval {
+        // For strict evals (direct or indirect), create a fresh declarative environment
+        // whose prototype points to the current env so top-level bindings do not affect the
+        // caller or the global variable environment. For non-strict evals, execute in the
+        // caller environment.
+        let exec_env = if is_strict_eval {
             let new_env = crate::core::new_js_object_data(mc);
             new_env.borrow_mut(mc).prototype = Some(*env);
             new_env.borrow_mut(mc).is_function_scope = true;
@@ -5401,26 +5403,12 @@ fn handle_eval_function<'gc>(
         // Execution closure
         let run_stmts = || check_top_level_return(&statements).and_then(|_| evaluate_statements(mc, &exec_env, &statements));
 
-        // If this is a direct strict eval executed in a non-strict caller, temporarily set
-        // the caller env as strict for the duration of the eval so semantics match strict eval
-        // without creating an isolated declarative env (which would hide existing bindings).
-        let mut original_strict_marker = false;
-        if !is_indirect_eval && is_strict_eval {
-            original_strict_marker = env_get_strictness(env);
-            env_set_strictness(mc, env, true)?;
-        }
-
         // Run with temporary global strictness clearing if needed (Global Scope + Non-Strict Eval)
         let res = if env.borrow().prototype.is_none() && !is_strict_eval {
             run_with_global_strictness_cleared(mc, env, run_stmts)
         } else {
             run_stmts()
         };
-
-        // Restore original strictness marker if we modified it
-        if !is_indirect_eval && is_strict_eval {
-            env_set_strictness(mc, env, original_strict_marker)?;
-        }
 
         if let Ok(v) = &res {
             log::trace!("handle_eval_function result={}", crate::core::value_to_string(v));
@@ -5508,6 +5496,10 @@ pub fn evaluate_call_dispatch<'gc>(
             } else if name == "Object.prototype.toString" {
                 let this_v = this_val.clone().unwrap_or(Value::Undefined);
                 Ok(handle_object_prototype_to_string(mc, &this_v, env))
+            } else if name == "Error.prototype.toString" {
+                let this_v = this_val.clone().unwrap_or(Value::Undefined);
+                // Delegate to Error.prototype.toString implementation
+                Ok(crate::js_object::handle_error_to_string_method(mc, &this_v, &eval_args)?)
             } else if let Some(method) = name.strip_prefix("BigInt.") {
                 Ok(crate::js_bigint::handle_bigint_static_method(mc, method, &eval_args, env)?)
             } else if let Some(method) = name.strip_prefix("Number.prototype.") {
@@ -5897,7 +5889,7 @@ pub fn evaluate_call_dispatch<'gc>(
                     },
                     _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
                 }
-            } else if (object_get_key_value(&obj, "__class_def__")).is_some() {
+            } else if obj.borrow().class_def.is_some() {
                 Err(EvalError::Js(crate::raise_type_error!(
                     "Class constructor cannot be invoked without 'new'"
                 )))
@@ -6642,7 +6634,7 @@ fn evaluate_expr_logical_assign<'gc>(
 
             let key = match key_val_res {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
                 _ => PropertyKey::from(value_to_string(&key_val_res)),
             };
@@ -6950,8 +6942,18 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
             let key = match key_val {
                 Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-                Value::Number(n) => PropertyKey::String(n.to_string()),
+                Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
                 Value::Symbol(s) => PropertyKey::Symbol(s),
+                Value::Object(_) => {
+                    // ToPropertyKey semantics: ToPrimitive with hint 'string'
+                    let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+                    match prim {
+                        Value::String(s) => PropertyKey::String(crate::unicode::utf16_to_utf8(&s)),
+                        Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
+                        Value::Symbol(s) => PropertyKey::Symbol(s),
+                        other => PropertyKey::String(value_to_string(&other)),
+                    }
+                }
                 _ => PropertyKey::String(value_to_string(&key_val)),
             };
 
@@ -6995,7 +6997,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                         // Objects are converted via ToPrimitive with hint 'string'.
                         match val {
                             Value::String(s) => result.extend(s),
-                            Value::Number(n) => result.extend(crate::unicode::utf8_to_utf16(&n.to_string())),
+                            Value::Number(n) => result.extend(crate::unicode::utf8_to_utf16(&value_to_string(&Value::Number(n)))),
                             Value::BigInt(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
                             Value::Boolean(b) => result.extend(crate::unicode::utf8_to_utf16(&b.to_string())),
                             Value::Undefined => result.extend(crate::unicode::utf8_to_utf16("undefined")),
@@ -7394,7 +7396,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 let key_val_res = evaluate_expr(mc, env, key_expr)?;
                 let key = match &key_val_res {
                     Value::String(s) => PropertyKey::String(utf16_to_utf8(s)),
-                    Value::Number(n) => PropertyKey::String(n.to_string()),
+                    Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(*n))),
                     Value::Symbol(s) => PropertyKey::Symbol(*s),
                     _ => PropertyKey::from(value_to_string(&key_val_res)),
                 };
@@ -7770,6 +7772,7 @@ fn set_property_with_accessors<'gc>(
     key: &PropertyKey<'gc>,
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
+    log::debug!("DBG set_property_with_accessors: obj={:p} key={:?}", Gc::as_ptr(*obj), key);
     // Special-case assignment to `__proto__` to update the internal prototype pointer
     if let PropertyKey::String(s) = key
         && s == "__proto__"
@@ -7843,9 +7846,25 @@ fn set_property_with_accessors<'gc>(
 
     if let Some(prop_ptr) = object_get_key_value(obj, key) {
         let prop = prop_ptr.borrow().clone();
+        log::debug!("DBG set_property: existing prop for key={:?} -> {:?}", key, prop);
         match prop {
             Value::Property { setter, getter, .. } => {
                 if let Some(s) = setter {
+                    // Diagnostic: log whether the stored setter has a home object
+                    if let Value::Setter(_, _, _, home_opt) = &*s {
+                        if let Some(hb) = home_opt
+                            && let Value::Object(home_ptr) = &**hb
+                        {
+                            log::debug!(
+                                "DBG set_property: stored Property descriptor has setter with home_obj={:p}",
+                                Gc::as_ptr(*home_ptr)
+                            );
+                        } else {
+                            log::debug!("DBG set_property: stored Property descriptor has setter with no home_obj");
+                        }
+                    } else {
+                        log::debug!("DBG set_property: stored Property descriptor setter is not a Setter variant");
+                    }
                     return call_setter(mc, obj, &s, val);
                 }
                 if getter.is_some() {
@@ -7860,7 +7879,19 @@ fn set_property_with_accessors<'gc>(
                 object_set_key_value(mc, obj, key, val)?;
                 Ok(())
             }
-            Value::Setter(params, body, captured_env, _) => call_setter_raw(mc, obj, &params, &body, &captured_env, val),
+            Value::Setter(params, body, captured_env, home_opt) => {
+                // Log whether the setter carries a home object for diagnostics
+                if let Some(hb) = &home_opt {
+                    if let Value::Object(home_ptr) = &**hb {
+                        log::debug!("DBG set_property: calling setter with home_obj={:p}", Gc::as_ptr(*home_ptr));
+                    } else {
+                        log::debug!("DBG set_property: calling setter but home_opt is not an Object");
+                    }
+                } else {
+                    log::debug!("DBG set_property: calling setter with no home_obj");
+                }
+                call_setter_raw(mc, obj, &params, &body, &captured_env, &home_opt, val)
+            }
             Value::Getter(..) => Err(EvalError::Js(crate::raise_type_error!(
                 "Cannot set property which has only a getter"
             ))),
@@ -8304,7 +8335,10 @@ fn call_setter<'gc>(
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
     match setter {
-        Value::Setter(params, body, captured_env, _) => call_setter_raw(mc, receiver, params, body, captured_env, val),
+        Value::Setter(params, body, captured_env, home_opt) => {
+            log::debug!("DBG call_setter: Setter with home_opt={:?}", home_opt);
+            call_setter_raw(mc, receiver, params, body, captured_env, home_opt, val)
+        }
         Value::Closure(cl) => {
             let cl_data = cl;
             let call_env = crate::core::new_js_object_data(mc);
@@ -8317,6 +8351,12 @@ fn call_setter<'gc>(
             {
                 crate::core::env_set(mc, &call_env, name, val)?;
             }
+
+            // If the closure has a stored home object, propagate it into the call environment
+            if let Some(home_obj) = *cl_data.home_object.borrow() {
+                object_set_key_value(mc, &call_env, "__home_object__", Value::Object(home_obj))?;
+            }
+
             let body_clone = cl_data.body.clone();
             evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
         }
@@ -8326,7 +8366,10 @@ fn call_setter<'gc>(
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
-                return call_setter(mc, receiver, &Value::Closure(*cl), val);
+                // If the function object wrapper holds a __home_object__, propagate it
+                let home_opt = object_get_key_value(obj, "__home_object__").map(|hv| Box::new(hv.borrow().clone()));
+                let env_ptr = cl.env.expect("Closure must have an env for setter call");
+                return call_setter_raw(mc, receiver, &cl.params, &cl.body, &env_ptr, &home_opt, val);
             }
             Err(EvalError::Js(crate::raise_type_error!("Setter is not a function")))
         }
@@ -8340,12 +8383,38 @@ fn call_setter_raw<'gc>(
     params: &[DestructuringElement],
     body: &[Statement],
     env: &JSObjectDataPtr<'gc>,
+    home_opt: &Option<Box<Value<'gc>>>,
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
+    log::debug!("DBG call_setter_raw: entry home_opt={:?}", home_opt);
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(*env);
     call_env.borrow_mut(mc).is_function_scope = true;
     object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
+
+    // If the setter carried a home object, propagate it into call env so `super` resolves
+    if let Some(home_box) = home_opt
+        && let Value::Object(home_obj) = &**home_box
+    {
+        log::debug!(
+            "DBG call_setter_raw: propagating home_obj={:p} into call_env",
+            Gc::as_ptr(*home_obj)
+        );
+        object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
+    } else {
+        log::debug!("DBG call_setter_raw: no home_obj provided");
+    }
+
+    // Debug: check whether call_env now has __home_object__ set
+    if let Some(home_val) = object_get_key_value(&call_env, "__home_object__") {
+        if let Value::Object(home_obj) = &*home_val.borrow() {
+            log::debug!("DBG call_setter_raw: call_env __home_object__ present: {:p}", Gc::as_ptr(*home_obj));
+        } else {
+            log::debug!("DBG call_setter_raw: call_env __home_object__ present but not an object");
+        }
+    } else {
+        log::debug!("DBG call_setter_raw: call_env __home_object__ absent");
+    }
 
     if let Some(param) = params.first()
         && let DestructuringElement::Variable(name, _) = param
@@ -8413,7 +8482,11 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
 
     if let Value::Object(obj) = &err_val {
         obj.borrow_mut(mc).set_property(mc, "name", name.into());
+        // Mark name non-enumerable (match built-in Error behavior)
+        obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("name"));
         obj.borrow_mut(mc).set_property(mc, "message", (&raw_msg).into());
+        // Mark message non-enumerable
+        obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("message"));
 
         let stack = js_err.stack();
         let stack_str = if stack.is_empty() {
@@ -8422,6 +8495,8 @@ fn js_error_to_value<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             format!("{name}: {raw_msg}\n    {}", stack.join("\n    "))
         };
         obj.borrow_mut(mc).set_property(mc, "stack", stack_str.into());
+        // Mark stack non-enumerable
+        obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("stack"));
     }
     err_val
 }
@@ -9122,7 +9197,7 @@ fn evaluate_expr_new<'gc>(
                     }
                     _ => Err(EvalError::Js(raise_eval_error!("Not a constructor"))),
                 }
-            } else if object_get_key_value(&obj, "__class_def__").is_some() {
+            } else if obj.borrow().class_def.is_some() {
                 // Delegate to js_class::evaluate_new
                 let val = crate::js_class::evaluate_new(mc, env, func_val.clone(), &eval_args)?;
                 Ok(val)
@@ -9280,11 +9355,20 @@ fn evaluate_expr_object<'gc>(
         // If this value is a Closure/AsyncClosure/GeneratorFunction that is a method
         // defined on an object literal, set its [[HomeObject]] so that `super` works.
         match &mut val {
-            Value::Closure(_c) => {
-                // set home object to this object
-                // Note: closure.home_object is not directly mutated here; instead we store
-                // the home object on the function object itself (see handling below for
-                // Value::Object representing functions with a __closure__ property).
+            Value::Closure(_cl) => {
+                // Wrap Closure in a function object and attach __closure__ so we can set __home_object__
+                // and have consistent runtime semantics with other function values.
+                let func_obj = crate::core::new_js_object_data(mc);
+                let closure_val = val.clone();
+                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                // Attach the home object so `super` resolves to the object's prototype
+                object_set_key_value(mc, &func_obj, "__home_object__", Value::Object(obj))?;
+                // Replace the original value with the function object wrapper
+                val = Value::Object(func_obj);
+                log::debug!(
+                    "DBG object literal: wrapped closure into func_obj={:p} and attached home",
+                    Gc::as_ptr(obj)
+                );
             }
             Value::AsyncClosure(_) => {
                 // handled via function object __home_object__ setting
@@ -9303,16 +9387,25 @@ fn evaluate_expr_object<'gc>(
             _ => {}
         }
 
-        let key_v = match key_val {
+        // Apply ToPropertyKey semantics: if the key is an object, perform ToPrimitive(hint='string')
+        log::debug!("DBG object literal: evaluated key expr -> {:?}", key_val);
+        let key_prim = if let Value::Object(_) = &key_val {
+            let prim = crate::core::to_primitive(mc, &key_val, "string", env)?;
+            log::debug!("DBG object literal: key ToPrimitive -> {:?}", prim);
+            prim
+        } else {
+            key_val.clone()
+        };
+
+        let key_v = match key_prim {
             Value::String(s) => PropertyKey::String(utf16_to_utf8(&s)),
-            Value::Number(n) => PropertyKey::String(n.to_string()),
+            Value::Number(n) => PropertyKey::String(value_to_string(&Value::Number(n))),
             Value::Boolean(b) => PropertyKey::String(b.to_string()),
             Value::BigInt(b) => PropertyKey::String(b.to_string()),
             Value::Undefined => PropertyKey::String("undefined".to_string()),
             Value::Null => PropertyKey::String("null".to_string()),
             Value::Symbol(s) => PropertyKey::Symbol(s),
-            Value::Object(_) => PropertyKey::String("[object Object]".to_string()),
-            _ => PropertyKey::String("object".to_string()),
+            other => PropertyKey::String(value_to_string(&other)),
         };
 
         // If the value is a function object (holds a __closure__), attach a __home_object__

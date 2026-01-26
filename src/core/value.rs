@@ -138,6 +138,7 @@ pub struct JSObjectData<'gc> {
     pub extensible: bool,
     // Optional internal class definition slot (not exposed as an own property)
     pub class_def: Option<GcPtr<'gc, ClassDefinition>>,
+    pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
 }
 
 unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
@@ -300,6 +301,14 @@ impl<'gc> JSObjectData<'gc> {
     pub fn is_enumerable(&self, key: &PropertyKey<'gc>) -> bool {
         !self.non_enumerable.contains(key)
     }
+
+    pub fn get_home_object(&self) -> Option<GcCell<JSObjectDataPtr<'gc>>> {
+        self.home_object.clone()
+    }
+
+    pub fn set_home_object(&mut self, home: Option<GcCell<JSObjectDataPtr<'gc>>>) {
+        self.home_object = home;
+    }
 }
 
 impl<'gc> ClosureData<'gc> {
@@ -313,7 +322,7 @@ impl<'gc> ClosureData<'gc> {
             params: params.to_vec(),
             body: body.to_vec(),
             env,
-            home_object: GcCell::new(home_object),
+            home_object: home_object.map(GcCell::new),
             enforce_strictness_inheritance: true,
             ..ClosureData::default()
         }
@@ -332,7 +341,7 @@ pub struct ClosureData<'gc> {
     pub params: Vec<DestructuringElement>,
     pub body: Vec<Statement>,
     pub env: Option<JSObjectDataPtr<'gc>>,
-    pub home_object: GcCell<Option<JSObjectDataPtr<'gc>>>,
+    pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
     pub captured_envs: Vec<JSObjectDataPtr<'gc>>,
     pub bound_this: Option<Value<'gc>>,
     pub is_arrow: bool,
@@ -410,12 +419,12 @@ pub enum Value<'gc> {
     GeneratorFunction(Option<String>, Gc<'gc, ClosureData<'gc>>),
     ClassDefinition(Gc<'gc, ClassDefinition>),
     // Getter/Setter legacy variants - keeping structures as implied by usage
-    Getter(Vec<Statement>, JSObjectDataPtr<'gc>, Option<Box<Value<'gc>>>),
+    Getter(Vec<Statement>, JSObjectDataPtr<'gc>, Option<GcCell<JSObjectDataPtr<'gc>>>), // body, env, home object
     Setter(
-        Vec<DestructuringElement>,
-        Vec<Statement>,
-        JSObjectDataPtr<'gc>,
-        Option<Box<Value<'gc>>>,
+        Vec<DestructuringElement>,            // params
+        Vec<Statement>,                       // body
+        JSObjectDataPtr<'gc>,                 // env
+        Option<GcCell<JSObjectDataPtr<'gc>>>, // home object
     ),
 
     Promise(GcPtr<'gc, JSPromise<'gc>>),
@@ -482,16 +491,16 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
             Value::AsyncClosure(cl) => cl.trace(cc),
             Value::GeneratorFunction(_, cl) => cl.trace(cc),
             Value::ClassDefinition(cl) => cl.trace(cc),
-            Value::Getter(body, env, v) => {
+            Value::Getter(body, env, home_object) => {
                 for s in body {
                     s.trace(cc);
                 }
                 env.trace(cc);
-                if let Some(val) = v {
-                    val.trace(cc);
+                if let Some(home_object) = home_object {
+                    home_object.trace(cc);
                 }
             }
-            Value::Setter(param, body, env, v) => {
+            Value::Setter(param, body, env, home_object) => {
                 for p in param {
                     p.trace(cc);
                 }
@@ -499,8 +508,8 @@ unsafe impl<'gc> Collect<'gc> for Value<'gc> {
                     s.trace(cc);
                 }
                 env.trace(cc);
-                if let Some(val) = v {
-                    val.trace(cc);
+                if let Some(home_obj) = home_object {
+                    home_obj.trace(cc);
                 }
             }
             Value::Promise(p) => p.trace(cc),

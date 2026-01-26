@@ -7852,12 +7852,10 @@ fn set_property_with_accessors<'gc>(
                 if let Some(s) = setter {
                     // Diagnostic: log whether the stored setter has a home object
                     if let Value::Setter(_, _, _, home_opt) = &*s {
-                        if let Some(hb) = home_opt
-                            && let Value::Object(home_ptr) = &**hb
-                        {
+                        if let Some(home_ptr) = home_opt {
                             log::debug!(
                                 "DBG set_property: stored Property descriptor has setter with home_obj={:p}",
-                                Gc::as_ptr(*home_ptr)
+                                Gc::as_ptr(*home_ptr.borrow())
                             );
                         } else {
                             log::debug!("DBG set_property: stored Property descriptor has setter with no home_obj");
@@ -7882,15 +7880,11 @@ fn set_property_with_accessors<'gc>(
             Value::Setter(params, body, captured_env, home_opt) => {
                 // Log whether the setter carries a home object for diagnostics
                 if let Some(hb) = &home_opt {
-                    if let Value::Object(home_ptr) = &**hb {
-                        log::debug!("DBG set_property: calling setter with home_obj={:p}", Gc::as_ptr(*home_ptr));
-                    } else {
-                        log::debug!("DBG set_property: calling setter but home_opt is not an Object");
-                    }
+                    log::debug!("DBG set_property: calling setter with home_obj={:p}", Gc::as_ptr(*hb.borrow()));
                 } else {
                     log::debug!("DBG set_property: calling setter with no home_obj");
                 }
-                call_setter_raw(mc, obj, &params, &body, &captured_env, &home_opt, val)
+                call_setter_raw(mc, obj, &params, &body, &captured_env, home_opt.clone(), val)
             }
             Value::Getter(..) => Err(EvalError::Js(crate::raise_type_error!(
                 "Cannot set property which has only a getter"
@@ -8280,11 +8274,7 @@ pub(crate) fn call_accessor<'gc>(
             call_env.borrow_mut(mc).is_function_scope = true;
             object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
             // If the getter carried a home object, propagate it into call env so `super` resolves
-            if let Some(home_box) = home_opt
-                && let Value::Object(home_obj) = &**home_box
-            {
-                object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
-            }
+            call_env.borrow_mut(mc).set_home_object(home_opt.clone());
             let body_clone = body.clone();
             evaluate_statements(mc, &call_env, &body_clone)
         }
@@ -8295,9 +8285,7 @@ pub(crate) fn call_accessor<'gc>(
             call_env.borrow_mut(mc).is_function_scope = true;
             object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
             // Propagate [[HomeObject]] if present on the closure
-            if let Some(home_obj) = *cl_data.home_object.borrow() {
-                object_set_key_value(mc, &call_env, "__home_object__", Value::Object(home_obj))?;
-            }
+            call_env.borrow_mut(mc).set_home_object(cl_data.home_object.clone());
             let body_clone = cl_data.body.clone();
             evaluate_statements(mc, &call_env, &body_clone)
         }
@@ -8307,16 +8295,14 @@ pub(crate) fn call_accessor<'gc>(
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
-                // If the function object has a stored __home_object__, propagate that into the call env
-                if let Some(home_val_rc) = object_get_key_value(obj, "__home_object__")
-                    && let Value::Object(home_obj) = &*home_val_rc.borrow()
-                {
+                // If the function object has a stored home object, propagate that into the call env
+                if let Some(home_obj) = obj.borrow().get_home_object() {
                     let cl_data = cl;
                     let call_env = crate::core::new_js_object_data(mc);
                     call_env.borrow_mut(mc).prototype = cl_data.env;
                     call_env.borrow_mut(mc).is_function_scope = true;
                     object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
-                    object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
+                    call_env.borrow_mut(mc).set_home_object(Some(home_obj));
                     let body_clone = cl_data.body.clone();
                     return evaluate_statements(mc, &call_env, &body_clone);
                 }
@@ -8336,8 +8322,12 @@ fn call_setter<'gc>(
 ) -> Result<(), EvalError<'gc>> {
     match setter {
         Value::Setter(params, body, captured_env, home_opt) => {
-            log::debug!("DBG call_setter: Setter with home_opt={:?}", home_opt);
-            call_setter_raw(mc, receiver, params, body, captured_env, home_opt, val)
+            if let Some(hb) = &home_opt {
+                log::trace!("DBG call_setter: stored Setter has home_obj={:p}", Gc::as_ptr(*hb.borrow()));
+            } else {
+                log::trace!("DBG call_setter: stored Setter has no home_obj");
+            }
+            call_setter_raw(mc, receiver, params, body, captured_env, home_opt.clone(), val)
         }
         Value::Closure(cl) => {
             let cl_data = cl;
@@ -8353,9 +8343,7 @@ fn call_setter<'gc>(
             }
 
             // If the closure has a stored home object, propagate it into the call environment
-            if let Some(home_obj) = *cl_data.home_object.borrow() {
-                object_set_key_value(mc, &call_env, "__home_object__", Value::Object(home_obj))?;
-            }
+            call_env.borrow_mut(mc).set_home_object(cl_data.home_object.clone());
 
             let body_clone = cl_data.body.clone();
             evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
@@ -8366,10 +8354,10 @@ fn call_setter<'gc>(
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
-                // If the function object wrapper holds a __home_object__, propagate it
-                let home_opt = object_get_key_value(obj, "__home_object__").map(|hv| Box::new(hv.borrow().clone()));
+                // If the function object wrapper holds a home object, propagate it
+                let home_opt = obj.borrow().get_home_object();
                 let env_ptr = cl.env.expect("Closure must have an env for setter call");
-                return call_setter_raw(mc, receiver, &cl.params, &cl.body, &env_ptr, &home_opt, val);
+                return call_setter_raw(mc, receiver, &cl.params, &cl.body, &env_ptr, home_opt, val);
             }
             Err(EvalError::Js(crate::raise_type_error!("Setter is not a function")))
         }
@@ -8383,38 +8371,24 @@ fn call_setter_raw<'gc>(
     params: &[DestructuringElement],
     body: &[Statement],
     env: &JSObjectDataPtr<'gc>,
-    home_opt: &Option<Box<Value<'gc>>>,
+    home_opt: Option<GcCell<JSObjectDataPtr<'gc>>>,
     val: Value<'gc>,
 ) -> Result<(), EvalError<'gc>> {
-    log::debug!("DBG call_setter_raw: entry home_opt={:?}", home_opt);
     let call_env = crate::core::new_js_object_data(mc);
     call_env.borrow_mut(mc).prototype = Some(*env);
     call_env.borrow_mut(mc).is_function_scope = true;
     object_set_key_value(mc, &call_env, "this", Value::Object(*receiver))?;
 
     // If the setter carried a home object, propagate it into call env so `super` resolves
-    if let Some(home_box) = home_opt
-        && let Value::Object(home_obj) = &**home_box
-    {
+    if let Some(home_obj) = &home_opt {
         log::debug!(
             "DBG call_setter_raw: propagating home_obj={:p} into call_env",
-            Gc::as_ptr(*home_obj)
+            Gc::as_ptr(*home_obj.borrow())
         );
-        object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
     } else {
         log::debug!("DBG call_setter_raw: no home_obj provided");
     }
-
-    // Debug: check whether call_env now has __home_object__ set
-    if let Some(home_val) = object_get_key_value(&call_env, "__home_object__") {
-        if let Value::Object(home_obj) = &*home_val.borrow() {
-            log::debug!("DBG call_setter_raw: call_env __home_object__ present: {:p}", Gc::as_ptr(*home_obj));
-        } else {
-            log::debug!("DBG call_setter_raw: call_env __home_object__ present but not an object");
-        }
-    } else {
-        log::debug!("DBG call_setter_raw: call_env __home_object__ absent");
-    }
+    call_env.borrow_mut(mc).set_home_object(home_opt);
 
     if let Some(param) = params.first()
         && let DestructuringElement::Variable(name, _) = param
@@ -8588,21 +8562,19 @@ pub fn call_closure<'gc>(
         object_set_key_value(mc, &call_env, "this", tv.clone())?;
     }
 
-    // If the function was stored as an object with a `__home_object__` property, propagate
+    // If the function was stored as an object with a home object, propagate
     // that into the call environment (this covers methods defined in object-literals).
     if let Some(fn_obj_ptr) = fn_obj
-        && let Some(home_val_rc) = object_get_key_value(&fn_obj_ptr, "__home_object__")
-        && let Value::Object(home_obj) = &*home_val_rc.borrow()
+        && let Some(home_obj) = fn_obj_ptr.borrow().get_home_object()
     {
-        object_set_key_value(mc, &call_env, "__home_object__", Value::Object(*home_obj))?;
+        call_env.borrow_mut(mc).set_home_object(Some(home_obj));
     }
 
     // FIX: propagate [[HomeObject]] into call_env so `super` resolves parent prototype and avoids recursive lookup
     // Propagate home object into the call environment so `super.*` can resolve
     // the proper parent prototype during method calls.
-    if let Some(home_obj) = *cl.home_object.borrow() {
-        // Debug: indicate that we are propagating the home object into the call environment
-        object_set_key_value(mc, &call_env, "__home_object__", Value::Object(home_obj))?;
+    if let Some(home_obj) = &cl.home_object {
+        call_env.borrow_mut(mc).set_home_object(Some(home_obj.clone()));
     }
 
     if !cl.is_arrow {
@@ -9356,13 +9328,13 @@ fn evaluate_expr_object<'gc>(
         // defined on an object literal, set its [[HomeObject]] so that `super` works.
         match &mut val {
             Value::Closure(_cl) => {
-                // Wrap Closure in a function object and attach __closure__ so we can set __home_object__
+                // Wrap Closure in a function object and attach __closure__ so we can set home object field
                 // and have consistent runtime semantics with other function values.
                 let func_obj = crate::core::new_js_object_data(mc);
                 let closure_val = val.clone();
                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
                 // Attach the home object so `super` resolves to the object's prototype
-                object_set_key_value(mc, &func_obj, "__home_object__", Value::Object(obj))?;
+                func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
                 // Replace the original value with the function object wrapper
                 val = Value::Object(func_obj);
                 log::debug!(
@@ -9371,18 +9343,18 @@ fn evaluate_expr_object<'gc>(
                 );
             }
             Value::AsyncClosure(_) => {
-                // handled via function object __home_object__ setting
+                // handled via function object home object setting
             }
             Value::GeneratorFunction(_, _) => {
-                // handled via function object __home_object__ setting
+                // handled via function object home object setting
             }
 
             // For getter/setter variants, wrap them with home object so super resolves
             Value::Getter(body, captured_env, _) => {
-                val = Value::Getter(body.clone(), *captured_env, Some(Box::new(Value::Object(obj))));
+                val = Value::Getter(body.clone(), *captured_env, Some(GcCell::new(obj)));
             }
             Value::Setter(params, body, captured_env, _) => {
-                val = Value::Setter(params.clone(), body.clone(), *captured_env, Some(Box::new(Value::Object(obj))));
+                val = Value::Setter(params.clone(), body.clone(), *captured_env, Some(GcCell::new(obj)));
             }
             _ => {}
         }
@@ -9408,12 +9380,12 @@ fn evaluate_expr_object<'gc>(
             other => PropertyKey::String(value_to_string(&other)),
         };
 
-        // If the value is a function object (holds a __closure__), attach a __home_object__
-        // own property on the function object so it can propagate [[HomeObject]] during calls
+        // If the value is a function object (holds a __closure__), set home object field
+        // on the function object so it can propagate [[HomeObject]] during calls
         if let Value::Object(func_obj) = &val
             && let Some(_) = object_get_key_value(func_obj, "__closure__")
         {
-            object_set_key_value(mc, func_obj, "__home_object__", Value::Object(obj))?;
+            func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
         }
 
         // Merge accessors if existing property is a getter or setter; otherwise set normally

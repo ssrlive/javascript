@@ -63,7 +63,8 @@ mod os_tests {
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
         let expected_cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-        assert_eq!(result, format!("\"{}\"", expected_cwd));
+        // Use JSON stringification for the expected value so platform-specific escaping (e.g. backslashes on Windows) matches
+        assert_eq!(result, serde_json::to_string(&expected_cwd).unwrap());
     }
 
     #[test]
@@ -85,8 +86,8 @@ mod os_tests {
             os.path.join("a", "b", "c");
         "#;
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
-        let expected = format!("\"a{}b{}c\"", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
-        assert_eq!(result, expected);
+        let expected = format!("a{}b{}c", std::path::MAIN_SEPARATOR, std::path::MAIN_SEPARATOR);
+        assert_eq!(result, serde_json::to_string(&expected).unwrap());
     }
 
     #[test]

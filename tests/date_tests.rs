@@ -7,174 +7,80 @@ fn __init_test_logger() {
 
 #[cfg(test)]
 mod date_tests {
-    use javascript::{JSError, evaluate_script as evaluate_script_raw, utf8_to_utf16, utf16_to_utf8};
-
-    #[derive(Debug, Clone)]
-    enum Value {
-        Number(f64),
-        String(Vec<u16>),
-        #[allow(unused)]
-        Boolean(bool),
-        Undefined,
-        Null,
-    }
-
-    fn evaluate_script(script: &str, _path: Option<&std::path::Path>) -> Result<Value, JSError> {
-        let s = evaluate_script_raw(script, None::<&std::path::Path>)?;
-        if s == "undefined" {
-            return Ok(Value::Undefined);
-        }
-        if s == "null" {
-            return Ok(Value::Null);
-        }
-        if s == "true" {
-            return Ok(Value::Boolean(true));
-        }
-        if s == "false" {
-            return Ok(Value::Boolean(false));
-        }
-        if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-            let inner = &s[1..s.len() - 1];
-            return Ok(Value::String(utf8_to_utf16(inner)));
-        }
-        if let Ok(n) = s.parse::<f64>() {
-            return Ok(Value::Number(n));
-        }
-        // Fallback: return the raw string as UTF-16
-        Ok(Value::String(utf8_to_utf16(&s)))
-    }
+    use javascript::evaluate_script;
 
     #[test]
     fn test_date_constructor_no_args() {
-        let result = evaluate_script("new Date().toString()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                println!("Date string: {}", str_val);
-                // Should be a properly formatted date string, not starting with "Date: "
-                assert!(!str_val.starts_with("Date: "));
-                assert!(str_val.contains("GMT") || str_val == "Invalid Date");
-            }
-            _ => panic!("Expected string result"),
-        }
+        let str_val = evaluate_script("new Date().toString()", None::<&std::path::Path>).unwrap();
+        println!("Date string: {}", str_val);
+        // Should be a properly formatted date string, not starting with "Date: "
+        assert!(!str_val.starts_with("\"Date: "));
+        assert!(str_val.contains("GMT") || str_val == "Invalid Date");
     }
 
     #[test]
     fn test_date_constructor_with_timestamp() {
-        let result = evaluate_script("new Date(1234567890000).getTime()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
+        let value = evaluate_script("new Date(1234567890000).getTime()", None::<&std::path::Path>).unwrap();
         println!("Timestamp: {:?}", value);
-        match value {
-            Value::Number(n) => assert_eq!(n, 1234567890000.0),
-            _ => panic!("Expected number result"),
-        }
+        assert_eq!(value, "1234567890000");
     }
 
     #[test]
     fn test_date_value_of() {
-        let result = evaluate_script("new Date(1234567890000).valueOf()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 1234567890000.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(1234567890000).valueOf()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "1234567890000");
     }
 
     #[test]
     fn test_date_to_string() {
-        let result = evaluate_script("new Date(1234567890000).toString()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::String(s) => {
-                let str_val = utf16_to_utf8(&s);
-                // Should be a properly formatted date string
-                assert!(str_val.contains("2009") || str_val.contains("Invalid Date"));
-            }
-            _ => panic!("Expected string result"),
-        }
+        let value = evaluate_script("new Date(1234567890000).toString()", None::<&std::path::Path>).unwrap();
+        // Should be a properly formatted date string
+        assert!(value.contains("2009") || value.contains("Invalid Date"));
     }
 
     #[test]
     fn test_date_constructor_with_iso_string() {
-        let result = evaluate_script("new Date('2023-12-25T10:30:00Z').getTime()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => {
-                // Should be a valid timestamp
-                assert!(n > 0.0);
-            }
-            _ => panic!("Expected number result"),
-        }
+        let result = evaluate_script("new Date('2023-12-25T10:30:00Z').getTime()", None::<&std::path::Path>).unwrap();
+        // Should be a valid timestamp
+        assert_eq!(result, "1703500200000");
     }
 
     #[test]
     fn test_date_constructor_with_components() {
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 2023.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 0, 0).getFullYear()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "2023");
     }
 
     #[test]
     fn test_date_get_methods() {
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 11.0), // December (0-based)
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMonth()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "11"); // December (0-based)
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 25.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getDate()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "25");
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getHours()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 10.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getHours()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "10");
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 30.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getMinutes()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "30");
 
-        let result = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()", None::<&std::path::Path>);
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 45.0),
-            _ => panic!("Expected number result"),
-        }
+        let value = evaluate_script("new Date(2023, 11, 25, 10, 30, 45, 123).getSeconds()", None::<&std::path::Path>).unwrap();
+        assert_eq!(value, "45");
 
-        let result = evaluate_script(
+        let value = evaluate_script(
             "new Date(2023, 11, 25, 10, 30, 45, 123).getMilliseconds()",
             None::<&std::path::Path>,
-        );
-        assert!(result.is_ok());
-        let value = result.unwrap();
-        match value {
-            Value::Number(n) => assert_eq!(n, 123.0),
-            _ => panic!("Expected number result"),
-        }
+        )
+        .unwrap();
+        assert_eq!(value, "123");
+    }
+
+    #[test]
+    fn test_date_to_primitive_string_hint_in_addition() {
+        // Ensure Date objects use ToPrimitive with hint "string" when used in addition
+        let left = evaluate_script("new Date(0) + new Date(0)", None::<&std::path::Path>).unwrap();
+        let right = evaluate_script("new Date(0).toString() + new Date(0).toString()", None::<&std::path::Path>).unwrap();
+        assert_eq!(left, right);
     }
 }

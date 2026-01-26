@@ -141,6 +141,12 @@ for f in "${ordered[@]}"; do
   # extract metadata inside /*--- ... ---*/
   meta=$(awk '/\/\*---/{flag=1; next} /---\*\//{flag=0} flag{print}' "$f" || true)
 
+  # Per-test state for deferred composition: list of files to prepend and flags
+  PREPEND_FILES=()
+  NEED_PREPEND=false
+  NEED_STRICT=false
+  tmp=""
+
   # Feature detection: skip tests requiring JS features our engine doesn't support
   # Cache results in associative array FEATURE_SUPPORTED so we probe each feature once.
   detect_feature() {
@@ -331,13 +337,9 @@ JS
       fi
     fi
 
-    tmp=$(mktemp /tmp/test262.XXXXXX.js)
-    for p in "${resolved_includes[@]}"; do
-      cat "$p" >> "$tmp"
-      echo -e "\n" >> "$tmp"
-    done
-    cat "$f" >> "$tmp"
-    cleanup_tmp=true
+    # Defer creation of a temporary test file; record includes to prepend later
+    PREPEND_FILES=("${resolved_includes[@]}")
+    NEED_PREPEND=true
   else
     cleanup_tmp=false
   fi
@@ -348,15 +350,14 @@ JS
       inc_path="${HARNESS_INDEX['assert.js']:-}"
       if [[ -n "$inc_path" ]]; then
         sta_path="${HARNESS_INDEX['sta.js']:-}"
-        tmp=$(mktemp /tmp/test262.XXXXXX.js)
+        # Defer injecting assert and optional sta.js until final composition
+        # Preserve existing PREPEND_FILES and append new entries
+        PREPEND_FILES=("${PREPEND_FILES[@]}")
         if [[ -n "$sta_path" ]]; then
-          cat "$sta_path" >> "$tmp"
-          echo -e "\n" >> "$tmp"
+          PREPEND_FILES+=("$sta_path")
         fi
-        cat "$inc_path" >> "$tmp"
-        echo -e "\n" >> "$tmp"
-        cat "$f" >> "$tmp"
-        cleanup_tmp=true
+        PREPEND_FILES+=("$inc_path")
+        NEED_PREPEND=true
       fi
     fi
   fi
@@ -392,29 +393,66 @@ JS
 
   # Ensure all non-module tests are executed under strict semantics by prepending 'use strict'
   # Create a temporary file that begins with a strict directive and then run that
-  strict_tmp=$(mktemp /tmp/test262.strict.XXXXXX.js)
-  echo '"use strict";' > "$strict_tmp"
-  cat "$test_to_run" >> "$strict_tmp"
-  test_to_run="$strict_tmp"
-  cleanup_tmp=true
+  # Defer strict wrapper to final composition; mark we need to insert 'use strict'
+  NEED_STRICT=true
 
-  # Final safety: if the test references Test262Error but we are about to run
-  # the original file (no tmp), create a tmp that prepends harness/sta.js so
-  # Test262Error is defined. This guarantees consistent behavior regardless of
-  # which earlier branch ran.
+  # Final safety: if the test references Test262Error, ensure `sta.js` is
+  # prepended into whatever file we are about to run (original or tmp). This
+  # guarantees Test262Error is defined regardless of previous tmp handling.
   if grep -q '\<Test262Error\>' "$f"; then
-    if [[ "$test_to_run" == "$f" ]]; then
-      sta_path="${HARNESS_INDEX['sta.js']:-}"
-      if [[ -n "$sta_path" ]]; then
-        tmp=$(mktemp /tmp/test262.XXXXXX.js)
-        cat "$sta_path" >> "$tmp"
-        echo -e "\n" >> "$tmp"
-        cat "$f" >> "$tmp"
-        test_to_run="$tmp"
-        cleanup_tmp=true
-        # echo "DEBUG: created tmp with sta.js prepended for $f (final safety prep)" >&2
+    sta_path="${HARNESS_INDEX['sta.js']:-}"
+    if [[ -n "$sta_path" ]]; then
+      # Add sta.js to PREPEND_FILES unless it's already present or some prepend file defines Test262Error
+      already=false
+      if [[ ${#PREPEND_FILES[@]} -gt 0 ]]; then
+        for p in "${PREPEND_FILES[@]}"; do
+          if [[ "$(basename "$p")" == "sta.js" ]]; then
+            already=true; break
+          fi
+          if grep -qE 'function[[:space:]]+Test262Error|class[[:space:]]+Test262Error|var[[:space:]]+Test262Error|Test262Error[[:space:]]*=' "$p"; then
+            already=true; break
+          fi
+        done
+      fi
+      if ! $already; then
+        # Also ensure the test itself doesn't already define Test262Error
+        if ! grep -qE 'function[[:space:]]+Test262Error|class[[:space:]]+Test262Error|var[[:space:]]+Test262Error|Test262Error[[:space:]]*=' "$f"; then
+          if [[ ${#PREPEND_FILES[@]} -gt 0 ]]; then
+            PREPEND_FILES=("$sta_path" "${PREPEND_FILES[@]}")
+          else
+            PREPEND_FILES=("$sta_path")
+          fi
+          NEED_PREPEND=true
+        fi
       fi
     fi
+  fi
+
+  # If we deferred any prepends or strict wrapping, compose a single temporary test file now
+  if [[ "${NEED_PREPEND:-false}" == "true" || "${NEED_STRICT:-false}" == "true" ]]; then
+    TMP_TEST_FILE=$(mktemp /tmp/test262.XXXXXX.js)
+    if [[ "${NEED_STRICT:-false}" == "true" ]]; then
+      echo '"use strict";' > "$TMP_TEST_FILE"
+      echo -e "\n" >> "$TMP_TEST_FILE"
+    else
+      : > "$TMP_TEST_FILE"
+    fi
+    declare -A _seen_prepend=()
+    if [[ ${#PREPEND_FILES[@]} -gt 0 ]]; then
+      for p in "${PREPEND_FILES[@]}"; do
+        b=$(basename "$p")
+        if [[ -n "${_seen_prepend[$b]:-}" ]]; then
+          continue
+        fi
+        _seen_prepend[$b]=1
+        cat "$p" >> "$TMP_TEST_FILE"
+        echo -e "\n" >> "$TMP_TEST_FILE"
+      done
+    fi
+    cat "$f" >> "$TMP_TEST_FILE"
+    test_to_run="$TMP_TEST_FILE"
+    tmp="$TMP_TEST_FILE"
+    cleanup_tmp=true
   fi
 
   echo "RUN $f"
@@ -431,10 +469,14 @@ JS
   fi
 
   # cleanup temporary test file if created
-  if [[ "$cleanup_tmp" == "true" && -n "$tmp" ]]; then
-    rm -f "$tmp"
-    # echo "$tmp"
+  if [[ "$cleanup_tmp" == "true" && -n "${tmp:-}" ]]; then
+    rm -f "$tmp" || true
   fi
+  # Reset per-test state
+  PREPEND_FILES=()
+  NEED_PREPEND=false
+  NEED_STRICT=false
+  tmp=""
 
 done
 

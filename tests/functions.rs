@@ -40,6 +40,30 @@ mod function_tests {
     }
 
     #[test]
+    fn test_named_evaluation_sets_name_flags() {
+        let script = r#"
+            var xFn;
+            xFn = function () {};
+            var d = Object.getOwnPropertyDescriptor(xFn, 'name');
+            [d.value === "xFn", d.writable, d.enumerable, d.configurable].toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"true,false,false,true\"");
+    }
+
+    #[test]
+    fn test_arrow_named_evaluation_sets_name_flags() {
+        let script = r#"
+            var arrow;
+            arrow = () => {};
+            var d = Object.getOwnPropertyDescriptor(arrow, 'name');
+            [d.value === "arrow", d.writable, d.enumerable, d.configurable].toString();
+        "#;
+        let result = evaluate_script(script, None::<&std::path::Path>).unwrap();
+        assert_eq!(result, "\"true,false,false,true\"");
+    }
+
+    #[test]
     fn test_nested_function_calls() {
         let script = "function double(x) { return x * 2; } function add(a, b) { return double(a) + double(b); } add(3, 4)";
         let result = evaluate_script(script, None::<&std::path::Path>).unwrap();

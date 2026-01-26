@@ -922,6 +922,36 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
                 object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(name)))?;
 
+                // Set 'length' property for generator function
+                let mut fn_length = 0_usize;
+                for p in params.iter() {
+                    match p {
+                        crate::core::DestructuringElement::Variable(_, default_opt) => {
+                            if default_opt.is_some() {
+                                break;
+                            }
+                            fn_length += 1;
+                        }
+                        crate::core::DestructuringElement::Rest(_) => break,
+                        crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                            fn_length += 1;
+                        }
+                        crate::core::DestructuringElement::Empty => {}
+                        _ => {}
+                    }
+                }
+                let desc_len = crate::core::new_js_object_data(mc);
+                object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+                object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+                crate::js_object::define_property_internal(
+                    mc,
+                    &func_obj,
+                    &crate::core::PropertyKey::String("length".to_string()),
+                    &desc_len,
+                )?;
+
                 // Create prototype object
                 let proto_obj = crate::core::new_js_object_data(mc);
                 if let Some(obj_val) = env_get(env, "Object")
@@ -960,6 +990,35 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
 
                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
                 object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(name)))?;
+                // Set 'length' property for async function declaration
+                let mut fn_length = 0_usize;
+                for p in params.iter() {
+                    match p {
+                        crate::core::DestructuringElement::Variable(_, default_opt) => {
+                            if default_opt.is_some() {
+                                break;
+                            }
+                            fn_length += 1;
+                        }
+                        crate::core::DestructuringElement::Rest(_) => break,
+                        crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                            fn_length += 1;
+                        }
+                        crate::core::DestructuringElement::Empty => {}
+                        _ => {}
+                    }
+                }
+                let desc_len = crate::core::new_js_object_data(mc);
+                object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+                object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+                crate::js_object::define_property_internal(
+                    mc,
+                    &func_obj,
+                    &crate::core::PropertyKey::String("length".to_string()),
+                    &desc_len,
+                )?;
                 env_set(mc, env, name, Value::Object(func_obj))?;
             } else {
                 let func = evaluate_function_expression(mc, env, None, params, &mut body_clone)?;
@@ -4228,6 +4287,123 @@ fn evaluate_expr_assign<'gc>(
     value_expr: &Expr,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     let val = evaluate_expr(mc, env, value_expr)?;
+
+    // NamedEvaluation: if RHS is an anonymous function definition, set the function's name appropriately
+    let mut maybe_name_to_set: Option<String> = None;
+    match value_expr {
+        crate::core::Expr::Function(name_opt, ..) if name_opt.is_none() => {
+            maybe_name_to_set = Some(match target {
+                crate::core::Expr::Var(n, _, _) => n.clone(),
+                _ => String::new(),
+            });
+        }
+        crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..) => {
+            maybe_name_to_set = Some(match target {
+                crate::core::Expr::Var(n, _, _) => n.clone(),
+                _ => String::new(),
+            });
+        }
+        crate::core::Expr::GeneratorFunction(name_opt, ..) if name_opt.is_none() => {
+            maybe_name_to_set = Some(match target {
+                crate::core::Expr::Var(n, _, _) => n.clone(),
+                _ => String::new(),
+            });
+        }
+        crate::core::Expr::AsyncFunction(name_opt, ..) if name_opt.is_none() => {
+            maybe_name_to_set = Some(match target {
+                crate::core::Expr::Var(n, _, _) => n.clone(),
+                _ => String::new(),
+            });
+        }
+        _ => {}
+    }
+    if let Some(nm) = maybe_name_to_set.clone() {
+        log::debug!(
+            "NamedEvaluation: maybe_name_to_set={:?} value_expr={:?} val={:?}",
+            maybe_name_to_set,
+            value_expr,
+            val
+        );
+        log::debug!("NamedEvaluation: candidate name='{}' val={:?}", nm, val);
+        if let Value::Object(obj) = &val {
+            log::debug!(
+                "NamedEvaluation: value is object, will check existing name property obj_ptr={:p} own_has_name={} keys={:?}",
+                obj.as_ptr(),
+                obj.borrow()
+                    .properties
+                    .contains_key(&crate::core::PropertyKey::String("name".to_string())),
+                obj.borrow().properties.keys().collect::<Vec<_>>()
+            );
+            // If the function is an arrow function, prefer to set the name (arrow functions are anonymous and
+            // should receive the assignment target name). For other anonymous functions, only set if the
+            // existing name is absent or empty.
+            let mut should_set = false;
+            let force_set_for_arrow = matches!(
+                value_expr,
+                crate::core::Expr::ArrowFunction(..) | crate::core::Expr::AsyncArrowFunction(..)
+            ) || format!("{:?}", value_expr).contains("ArrowFunction");
+            log::error!(
+                "NamedEvaluation: force_set_for_arrow = {} value_expr={:?}",
+                force_set_for_arrow,
+                value_expr
+            );
+            if force_set_for_arrow {
+                should_set = true;
+            } else if let Some(name_rc) = object_get_key_value(obj, "name") {
+                // Normalize the existing name property's stored value to a Value and convert to string
+                log::debug!("NamedEvaluation: existing name prop = {:?}", name_rc.borrow().clone());
+                let existing_val = match &*name_rc.borrow() {
+                    Value::Property { value: Some(v), .. } => v.borrow().clone(),
+                    other => other.clone(),
+                };
+                // convert to a JS string representation to check emptiness robustly
+                let name_str = crate::core::value_to_string(&existing_val);
+                log::debug!("NamedEvaluation: existing name resolved to string = '{}'", name_str);
+                if name_str.is_empty() {
+                    should_set = true;
+                }
+            } else {
+                should_set = true;
+            }
+            log::debug!("NamedEvaluation: should_set = {}", should_set);
+
+            if should_set {
+                let desc_obj = crate::core::new_js_object_data(mc);
+                object_set_key_value(mc, &desc_obj, "value", Value::String(crate::unicode::utf8_to_utf16(&nm)))?;
+                object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_obj, "enumerable", Value::Boolean(false))?;
+                object_set_key_value(mc, &desc_obj, "configurable", Value::Boolean(true))?;
+                // DEBUG: Show raw descriptor content before calling define_property_internal
+                log::debug!(
+                    "NamedEvaluation: desc writable raw = {:?}",
+                    object_get_key_value(&desc_obj, "writable").map(|rc| rc.borrow().clone())
+                );
+                crate::js_object::define_property_internal(mc, obj, &crate::core::PropertyKey::String("name".to_string()), &desc_obj)?;
+                // Defensive: ensure name property is marked non-writable and non-enumerable
+                obj.borrow_mut(mc)
+                    .set_non_writable(crate::core::PropertyKey::String("name".to_string()));
+                obj.borrow_mut(mc)
+                    .set_non_enumerable(crate::core::PropertyKey::String("name".to_string()));
+                // DEBUG: confirm flags on object after defensive setting
+                log::debug!(
+                    "NamedEvaluation: post-set flags for obj_ptr={:p} name_non_writable={} name_non_enumerable={} non_writable_list={:?} non_enumerable_list={:?}",
+                    obj.as_ptr(),
+                    obj.borrow()
+                        .non_writable
+                        .contains(&crate::core::PropertyKey::String("name".to_string())),
+                    obj.borrow()
+                        .non_enumerable
+                        .contains(&crate::core::PropertyKey::String("name".to_string())),
+                    obj.borrow().non_writable.iter().collect::<Vec<_>>(),
+                    obj.borrow().non_enumerable.iter().collect::<Vec<_>>()
+                );
+                log::debug!("NamedEvaluation: set name='{}' on object", nm);
+            } else {
+                log::debug!("NamedEvaluation: did not set name for object");
+            }
+        }
+    }
+
     match target {
         Expr::Var(name, _, _) => {
             // Disallow assignment to the special 'arguments' binding in strict-function scope
@@ -6799,8 +6975,9 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             };
             let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
-            if let Some(n) = name {
-                object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?;
+            match name {
+                Some(n) if !n.is_empty() => object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?,
+                _ => {}
             }
 
             // Create prototype object
@@ -6848,9 +7025,46 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
-            if let Some(n) = name {
-                object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?;
+            match name {
+                Some(n) if !n.is_empty() => object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?,
+                _ => {
+                    let desc_name = crate::core::new_js_object_data(mc);
+                    object_set_key_value(mc, &desc_name, "value", Value::String(crate::unicode::utf8_to_utf16("")))?;
+                    object_set_key_value(mc, &desc_name, "writable", Value::Boolean(false))?;
+                    object_set_key_value(mc, &desc_name, "enumerable", Value::Boolean(false))?;
+                    object_set_key_value(mc, &desc_name, "configurable", Value::Boolean(true))?;
+                    crate::js_object::define_property_internal(
+                        mc,
+                        &func_obj,
+                        &crate::core::PropertyKey::String("name".to_string()),
+                        &desc_name,
+                    )?;
+                }
             }
+            // Set 'length' property for async functions
+            let mut fn_length = 0_usize;
+            for p in params.iter() {
+                match p {
+                    crate::core::DestructuringElement::Variable(_, default_opt) => {
+                        if default_opt.is_some() {
+                            break;
+                        }
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Rest(_) => break,
+                    crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Empty => {}
+                    _ => {}
+                }
+            }
+            let desc_len = crate::core::new_js_object_data(mc);
+            object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+            object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
 
             Ok(Value::Object(func_obj))
         }
@@ -6889,20 +7103,40 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
             object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
 
-            // Create prototype object
-            let proto_obj = crate::core::new_js_object_data(mc);
-            // Set prototype of prototype object to Object.prototype
-            if let Some(obj_val) = env_get(env, "Object")
-                && let Value::Object(obj_ctor) = &*obj_val.borrow()
-                && let Some(obj_proto_val) = object_get_key_value(obj_ctor, "prototype")
-                && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
-            {
-                proto_obj.borrow_mut(mc).prototype = Some(*obj_proto);
+            // Set 'length' for arrow functions
+            let mut fn_length = 0_usize;
+            for p in params.iter() {
+                match p {
+                    crate::core::DestructuringElement::Variable(_, default_opt) => {
+                        if default_opt.is_some() {
+                            break;
+                        }
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Rest(_) => break,
+                    crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                        fn_length += 1;
+                    }
+                    crate::core::DestructuringElement::Empty => {}
+                    _ => {}
+                }
             }
+            let desc_len = crate::core::new_js_object_data(mc);
+            object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+            object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
 
-            // Set 'constructor' on prototype and 'prototype' on function
-            object_set_key_value(mc, &proto_obj, "constructor", Value::Object(func_obj))?;
-            object_set_key_value(mc, &func_obj, "prototype", Value::Object(proto_obj))?;
+            // By default, anonymous arrow functions expose an own `name` property with the empty string
+            let desc_name = crate::core::new_js_object_data(mc);
+            object_set_key_value(mc, &desc_name, "value", Value::String(crate::unicode::utf8_to_utf16("")))?;
+            object_set_key_value(mc, &desc_name, "writable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_name, "enumerable", Value::Boolean(false))?;
+            object_set_key_value(mc, &desc_name, "configurable", Value::Boolean(true))?;
+            crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("name".to_string()), &desc_name)?;
+
+            // Arrow functions do not have a 'prototype' property (not constructible)
 
             Ok(Value::Object(func_obj))
         }
@@ -7704,9 +7938,51 @@ fn evaluate_function_expression<'gc>(
     };
     let closure_val = Value::Closure(Gc::new(mc, closure_data));
     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
-    if let Some(n) = name {
-        object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(&n)))?;
+    match name {
+        Some(n) if !n.is_empty() => {
+            object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(&n)))?;
+        }
+        _ => {
+            // Anonymous function expressions expose an own 'name' property with the empty string
+            // Use direct insertion + flags to ensure non-writable / non-enumerable markers are set atomically
+            object_set_key_value(mc, &func_obj, "name", Value::String(crate::unicode::utf8_to_utf16("")))?;
+            func_obj
+                .borrow_mut(mc)
+                .set_non_writable(crate::core::PropertyKey::String("name".to_string()));
+            func_obj
+                .borrow_mut(mc)
+                .set_non_enumerable(crate::core::PropertyKey::String("name".to_string()));
+            // Mark configurable=true explicitly (default is configurable unless non-configurable marker present)
+            func_obj
+                .borrow_mut(mc)
+                .set_configurable(crate::core::PropertyKey::String("name".to_string()));
+        }
     }
+
+    // Set 'length' property for functions (number of positional params before first default/rest)
+    let mut fn_length = 0_usize;
+    for p in params.iter() {
+        match p {
+            crate::core::DestructuringElement::Variable(_, default_opt) => {
+                if default_opt.is_some() {
+                    break;
+                }
+                fn_length += 1;
+            }
+            crate::core::DestructuringElement::Rest(_) => break,
+            crate::core::DestructuringElement::NestedArray(_) | crate::core::DestructuringElement::NestedObject(_) => {
+                fn_length += 1;
+            }
+            crate::core::DestructuringElement::Empty => {}
+            _ => {}
+        }
+    }
+    let desc_len = crate::core::new_js_object_data(mc);
+    object_set_key_value(mc, &desc_len, "value", Value::Number(fn_length as f64))?;
+    object_set_key_value(mc, &desc_len, "writable", Value::Boolean(false))?;
+    object_set_key_value(mc, &desc_len, "enumerable", Value::Boolean(false))?;
+    object_set_key_value(mc, &desc_len, "configurable", Value::Boolean(true))?;
+    crate::js_object::define_property_internal(mc, &func_obj, &crate::core::PropertyKey::String("length".to_string()), &desc_len)?;
 
     // Create prototype object
     let proto_obj = crate::core::new_js_object_data(mc);
@@ -7925,6 +8201,11 @@ pub fn call_native_function<'gc>(
                 "ArrayIterator.prototype.next called on non-object"
             )));
         }
+    }
+
+    // Restricted accessor used to implement the throwing 'caller'/'arguments' accessors on Function.prototype
+    if name == "Function.prototype.restrictedThrow" {
+        return Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")));
     }
 
     if name == "call" || name == "Function.prototype.call" {
@@ -8259,13 +8540,21 @@ pub(crate) fn call_accessor<'gc>(
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match accessor {
         Value::Function(name) => {
+            // Special-case restricted accessor thrower
+            if name == "Function.prototype.restrictedThrow" {
+                return Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")));
+            }
             if let Some(res) = call_native_function(mc, name, Some(Value::Object(*receiver)), &[], env)? {
                 Ok(res)
             } else {
-                Err(EvalError::Js(crate::raise_type_error!(format!(
-                    "Accessor function {} not supported",
-                    name
-                ))))
+                // For certain well-known internal accessors, surface a TypeError (e.g., restricted 'caller'/'arguments')
+                if name.contains("restrictedThrow") {
+                    Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")))
+                } else {
+                    Err(EvalError::Js(crate::raise_type_error!(format!(
+                        "Accessor function {name} not supported"
+                    ))))
+                }
             }
         }
         Value::Getter(body, captured_env, home_opt) => {
@@ -9114,6 +9403,11 @@ fn evaluate_expr_new<'gc>(
             if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
+                        // Arrow functions are not constructors per ECMAScript; throw TypeError
+                        if cl.is_arrow {
+                            return Err(EvalError::Js(raise_type_error!("Not a constructor")));
+                        }
+
                         // 1. Create instance
                         let instance = crate::core::new_js_object_data(mc);
 

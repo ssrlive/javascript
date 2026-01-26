@@ -1,3 +1,11 @@
+"use strict";
+
+function assert(mustBeTrue, message) {
+  if (!mustBeTrue) {
+    throw new Error(message || "Assertion failed");
+  }
+}
+
 function MyError(message) {
   this.message = message || "";
 }
@@ -7,10 +15,10 @@ MyError.prototype.toString = function() { return "MyError: " + this.message; };
 try {
   throw new MyError('dbg-test');
 } catch(e) {
-  console.log('CAUGHT constructor==', e.constructor===MyError);
-  console.log('CAUGHT constructor.name =', e.constructor && e.constructor.name);
-  console.log('CAUGHT message =', e.message);
-  console.log('CAUGHT toString =', e.toString());
+  assert(e.constructor === MyError, `Expected thrown error's constructor to be MyError but got ${e.constructor}`);
+  assert(e.constructor && e.constructor.name === 'MyError', `Expected thrown error's constructor name to be 'MyError' but got '${e.constructor && e.constructor.name}'`);
+  assert(e.message === 'dbg-test', `Expected thrown error's message to be 'dbg-test' but got '${e.message}'`);
+  assert(e.toString() === 'MyError: dbg-test', `Expected thrown error's toString() to be 'MyError: dbg-test' but got '${e.toString()}'`);
 }
 
 (function(){
@@ -24,12 +32,33 @@ try {
 
   const p = new Person('A');
 
-  console.log(p.greet());                // 从 prototype 链上找到方法 -> "hi A"
-  console.log('greet' in p);             // true（会检查原型链）
+  assert(p.greet() === 'hi A', `Expected p.greet() to be 'hi A' but got '${p.greet()}'`);
+  assert('greet' in p, `Expected 'greet' in p to be true but got false`);
+  assert(p.hasOwnProperty('greet') === false, `Expected p.hasOwnProperty('greet') to be false but got true`);
+  assert(Object.prototype.hasOwnProperty.call(p, 'greet') === false, `Expected Object.prototype.hasOwnProperty.call(p, 'greet') to be false but got true`);
+  assert(p.hasOwnProperty('name') === true, `Expected p.hasOwnProperty('name') to be true but got false`);
+  assert(Object.prototype.hasOwnProperty.call(p, 'name') === true, `Expected Object.prototype.hasOwnProperty.call(p, 'name') to be true but got false`);
+}
 
-  console.log(p.hasOwnProperty('greet'));// false（不是自身属性）
-  console.log(Object.prototype.hasOwnProperty.call(p, 'greet'));// false（不是自身属性）
+{
+  var xFn;
+  xFn = function() {};
+  // console.log(xFn.name);
+  assert(xFn.name === 'xFn', `Expected function name to be 'xFn' but got '${xFn.name}'`);
 
-  console.log(p.hasOwnProperty('name'));// true（是自身属性）
-  console.log(Object.prototype.hasOwnProperty.call(p, 'name'));// true（是自身属性）
+  var d = Object.getOwnPropertyDescriptor(xFn, 'name');
+  assert(d.value === 'xFn', `Expected descriptor value to be 'xFn' but got '${d.value}'`);
+  assert(d.writable === false, `Expected descriptor writable to be false but got '${d.writable}'`);
+  assert(d.enumerable === false, `Expected descriptor enumerable to be false but got '${d.enumerable}'`);
+  assert(d.configurable === true, `Expected descriptor configurable to be true but got '${d.configurable}'`);
+}
+
+{
+  var arrow;
+  arrow = () => {};
+  var d = Object.getOwnPropertyDescriptor(arrow, 'name');
+  assert(d.value === 'arrow', `Expected descriptor value to be 'arrow' but got '${d.value}'`);
+  assert(d.writable === false, `Expected descriptor writable to be false but got '${d.writable}'`);
+  assert(d.enumerable === false, `Expected descriptor enumerable to be false but got '${d.enumerable}'`);
+  assert(d.configurable === true, `Expected descriptor configurable to be true but got '${d.configurable}'`);
 }

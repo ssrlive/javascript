@@ -4,7 +4,7 @@ use crate::core::{ClassDefinition, Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, 
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
-    core::{DestructuringElement, PropertyKey, Statement, is_error},
+    core::{DestructuringElement, EvalError, PropertyKey, Statement, is_error},
     raise_type_error,
 };
 use num_bigint::BigInt;
@@ -188,10 +188,14 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_non_writable(&mut self, key: PropertyKey<'gc>) {
+        // Debug: log where non-writable markers are set
+        log::debug!("set_non_writable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_writable.insert(key);
     }
 
     pub fn set_writable(&mut self, key: PropertyKey<'gc>) {
+        // Debug: log where non-writable markers are cleared
+        log::debug!("set_writable: obj_ptr={:p} key={:?}", self as *const _, key);
         self.non_writable.remove(&key);
     }
 
@@ -562,7 +566,7 @@ pub fn to_primitive<'gc>(
     val: &Value<'gc>,
     hint: &str,
     env: &JSObjectDataPtr<'gc>,
-) -> Result<Value<'gc>, JSError> {
+) -> Result<Value<'gc>, EvalError<'gc>> {
     match val {
         Value::Number(_) | Value::BigInt(_) | Value::String(_) | Value::Boolean(_) | Value::Undefined | Value::Null | Value::Symbol(_) => {
             Ok(val.clone())
@@ -610,20 +614,20 @@ pub fn to_primitive<'gc>(
                                                         Some(func_obj),
                                                     )
                                                 } else {
-                                                    return Err(crate::raise_type_error!("@@toPrimitive is not a function"));
+                                                    return Err(raise_type_error!("@@toPrimitive is not a function").into());
                                                 }
                                             } else {
-                                                return Err(crate::raise_type_error!("@@toPrimitive is not a function"));
+                                                return Err(raise_type_error!("@@toPrimitive is not a function").into());
                                             }
                                         }
-                                        _ => return Err(crate::raise_type_error!("@@toPrimitive is not a function")),
+                                        _ => return Err(raise_type_error!("@@toPrimitive is not a function").into()),
                                     };
                                     let res = res_eval?;
                                     log::debug!("DBG to_primitive: @@toPrimitive returned {:?}", res);
                                     if is_primitive(&res) {
                                         return Ok(res);
                                     } else {
-                                        return Err(crate::raise_type_error!("@@toPrimitive must return a primitive value"));
+                                        return Err(raise_type_error!("@@toPrimitive must return a primitive value").into());
                                     }
                                 }
                             }
@@ -632,7 +636,15 @@ pub fn to_primitive<'gc>(
                 }
             }
 
-            if hint == "string" {
+            // If hint is 'default' and this is a Date object, treat the default hint
+            // as if it were 'string' per ECMAScript semantics for Date objects.
+            let effective_hint = if hint == "default" && crate::js_date::is_date_object(obj) {
+                "string"
+            } else {
+                hint
+            };
+
+            if effective_hint == "string" {
                 // toString -> valueOf
                 log::debug!("DBG to_primitive: trying toString for obj={:p}", Gc::as_ptr(*obj));
                 let to_s = crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), &[], env)?;
@@ -667,7 +679,7 @@ pub fn to_primitive<'gc>(
                 }
             }
 
-            Err(raise_type_error!("Cannot convert object to primitive"))
+            Err(raise_type_error!("Cannot convert object to primitive").into())
         }
         _ => Ok(val.clone()),
     }
@@ -936,7 +948,15 @@ pub fn object_set_key_value<'gc>(
     }
 
     let val_ptr = Gc::new(mc, GcCell::new(val));
-    obj.borrow_mut(mc).insert(key, val_ptr);
+    obj.borrow_mut(mc).insert(key.clone(), val_ptr);
+    log::debug!(
+        "object_set_key_value: after insert obj={:p} key={:?} is_writable={} is_enumerable={} is_configurable={}",
+        &*obj.borrow(),
+        key,
+        obj.borrow().is_writable(&key),
+        obj.borrow().is_enumerable(&key),
+        obj.borrow().is_configurable(&key)
+    );
     Ok(())
 }
 

@@ -555,6 +555,9 @@ pub fn handle_global_function<'gc>(
                 return Err(EvalError::Js(raise_eval_error!("Function.prototype.apply called without this")));
             }
         }
+        "Function.prototype.restrictedThrow" => {
+            return Err(EvalError::Js(raise_type_error!("Access to 'caller' or 'arguments' is restricted")));
+        }
         _ => {}
     }
 
@@ -1718,6 +1721,15 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
 
     let func_proto = new_js_object_data(mc);
 
+    // Link Function.prototype to Object.prototype so function objects inherit object methods
+    if let Some(obj_val) = crate::core::env_get(env, "Object")
+        && let Value::Object(obj_ctor) = &*obj_val.borrow()
+        && let Some(obj_proto_val) = crate::core::object_get_key_value(obj_ctor, "prototype")
+        && let Value::Object(obj_proto) = &*obj_proto_val.borrow()
+    {
+        func_proto.borrow_mut(mc).prototype = Some(*obj_proto);
+    }
+
     object_set_key_value(mc, &func_ctor, "prototype", Value::Object(func_proto))?;
     object_set_key_value(mc, &func_proto, "constructor", Value::Object(func_ctor))?;
 
@@ -1738,6 +1750,28 @@ pub fn initialize_function<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr
     func_proto
         .borrow_mut(mc)
         .set_non_enumerable(crate::core::PropertyKey::from("constructor"));
+
+    // Define restricted 'caller' and 'arguments' accessors that throw a TypeError when accessed or assigned
+    let restricted_desc = crate::core::new_js_object_data(mc);
+    let val = Value::Function("Function.prototype.restrictedThrow".to_string());
+    object_set_key_value(mc, &restricted_desc, "get", val)?;
+
+    let val = Value::Function("Function.prototype.restrictedThrow".to_string());
+    object_set_key_value(mc, &restricted_desc, "set", val)?;
+
+    object_set_key_value(mc, &restricted_desc, "configurable", Value::Boolean(true))?;
+    crate::js_object::define_property_internal(
+        mc,
+        &func_proto,
+        &crate::core::PropertyKey::String("caller".to_string()),
+        &restricted_desc,
+    )?;
+    crate::js_object::define_property_internal(
+        mc,
+        &func_proto,
+        &crate::core::PropertyKey::String("arguments".to_string()),
+        &restricted_desc,
+    )?;
 
     crate::core::env_set(mc, env, "Function", Value::Object(func_ctor))?;
 
@@ -1769,36 +1803,11 @@ pub fn handle_function_prototype_method<'gc>(
             // function.bind(thisArg, ...args)
             if let Value::Closure(closure_gc) = this_value {
                 let original = closure_gc;
-                // Check if already bound?
-                // logic: if already bound, subsequent binds (of this) are ignored?
-                // MDN: "The bind() method creates a new function that, when called, has its this keyword set to the provided value."
-                // "The new function has the same body as the original function. The this value is bound to the first argument of bind()."
-
-                // If original func is already bound, calling bind on it creates a NEW bound function.
-                // The new bound function calls the OLD bound function.
-                // But with our ClosureData implementation, if we just clone data and set bound_this, we are modifying the 'effective' this for the code.
-                // If 'original' has 'bound_this' set, 'call_closure' uses that.
-                // If we overwrite 'bound_this' in the clone:
-                //   Value::Closure(new_data { bound_this: new_this })
-                //   call_closure(new_data) -> uses new_this.
-                // This is WRONG if the original was already bound. The original binding should take precedence.
-                // But wait, if original was bound, 'call_closure' on original uses original.bound_this.
-                // If we clone 'original.body' etc, we are essentially copying the code.
-                // Does 'bound_this' stick to the code?
-
-                // Correct implementation of Bound Function creates a wrapper that calls TargetFunction.
-                // Since this engine simplifies things by using ClosureData, we have limits.
-                // If 'bound_this' is already set, we should probably NOT overwrite it with new access?
-                // Or rather, we can't easily implement "bound function calling bound function" without wrapper.
-
                 let effective_bound_this = if original.bound_this.is_some() {
                     original.bound_this.clone()
                 } else {
                     Some(this_arg)
                 };
-
-                // NOTE: Arguments binding is skipped for now as ClosureData doesn't support it.
-
                 let new_closure_data = ClosureData {
                     params: original.params.clone(),
                     body: original.body.clone(),
@@ -1811,8 +1820,34 @@ pub fn handle_function_prototype_method<'gc>(
                     native_target: None,
                     enforce_strictness_inheritance: true,
                 };
-
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
+            } else if let Value::Object(obj) = this_value {
+                // Support calling bind on a function object wrapper (object with __closure__)
+                if let Some(cl_prop) = crate::core::object_get_key_value(obj, "__closure__")
+                    && let Value::Closure(original) = &*cl_prop.borrow()
+                {
+                    let effective_bound_this = if original.bound_this.is_some() {
+                        original.bound_this.clone()
+                    } else {
+                        Some(this_arg)
+                    };
+                    let new_closure_data = ClosureData {
+                        params: original.params.clone(),
+                        body: original.body.clone(),
+                        env: original.env,
+                        home_object: original.home_object.clone(),
+                        captured_envs: original.captured_envs.clone(),
+                        bound_this: effective_bound_this,
+                        is_arrow: original.is_arrow,
+                        is_strict: original.is_strict,
+                        native_target: None,
+                        enforce_strictness_inheritance: true,
+                    };
+                    return Ok(Value::Closure(Gc::new(mc, new_closure_data)));
+                }
+                Err(EvalError::Js(crate::raise_type_error!(
+                    "Function.prototype.bind called on non-function"
+                )))
             } else if let Value::Function(name) = this_value {
                 let effective_bound_this = Some(this_arg);
                 let new_closure_data = ClosureData {

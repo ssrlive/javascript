@@ -2834,134 +2834,213 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
             if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
                 // Empty object {}
                 *index += 1; // consume }
-                return Ok(Expr::Object(properties));
-            }
-            loop {
-                log::trace!(
-                    "parse_primary: object literal loop; next tokens (first 8): {:?}",
-                    tokens.iter().take(8).collect::<Vec<_>>()
-                );
-                // Skip blank lines that may appear between properties.
-                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
-                    *index += 1;
-                }
-
-                // If we hit the closing brace after skipping blank lines,
-                // consume it and finish the object literal. This handles
-                // trailing commas followed by whitespace/newlines before `}`.
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
-                    *index += 1; // consume }
-                    break;
-                }
-                if *index >= tokens.len() {
-                    return Err(raise_parse_error_at!(tokens.last()));
-                }
-                // Check for spread
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
+            } else {
+                loop {
                     log::trace!(
-                        "parse_primary: object property is spread; next tokens (first 8): {:?}",
+                        "parse_primary: object literal loop; next tokens (first 8): {:?}",
                         tokens.iter().take(8).collect::<Vec<_>>()
                     );
-                    *index += 1; // consume ...
-                    // Use parse_assignment here so a spread is a single expression
-                    // and doesn't accidentally capture following comma-separated
-                    // properties via the comma operator.
-                    let expr = parse_assignment(tokens, index)?;
-                    // Use empty string as key for spread
-                    properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false));
-                } else {
-                    // Check for getter/setter: only treat as getter/setter if the
-                    // identifier 'get'/'set' is followed by a property key and
-                    // an opening parenthesis (no colon). This avoids confusing a
-                    // regular property named 'get'/'set' (e.g. `set: function(...)`) with
-                    // the getter/setter syntax.
-                    // Recognize getter/setter signatures including computed keys
-                    let is_getter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get")
-                    {
-                        if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
-                            tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
-                        } else if matches!(tokens[*index + 1].token, Token::LBracket) {
-                            // find matching RBracket and ensure '(' follows
-                            let mut depth = 0i32;
-                            let mut idx_after = None;
-                            for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
-                                match &t.token {
-                                    Token::LBracket => depth += 1,
-                                    Token::RBracket => {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            idx_after = Some(i + 1);
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if let Some(next_i) = idx_after {
-                                next_i < tokens.len() && matches!(tokens[next_i].token, Token::LParen)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
+                    // Skip blank lines that may appear between properties.
+                    while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                        *index += 1;
+                    }
 
-                    let is_setter = if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set")
-                    {
-                        if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
-                            tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
-                        } else if matches!(tokens[*index + 1].token, Token::LBracket) {
-                            let mut depth = 0i32;
-                            let mut idx_after = None;
-                            for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
-                                match &t.token {
-                                    Token::LBracket => depth += 1,
-                                    Token::RBracket => {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            idx_after = Some(i + 1);
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            if let Some(next_i) = idx_after {
-                                next_i < tokens.len() && matches!(tokens[next_i].token, Token::LParen)
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    };
-
-                    if is_getter || is_setter {
+                    // If we hit the closing brace after skipping blank lines,
+                    // consume it and finish the object literal. This handles
+                    // trailing commas followed by whitespace/newlines before `}`.
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::RBrace) {
+                        *index += 1; // consume }
+                        break;
+                    }
+                    if *index >= tokens.len() {
+                        return Err(raise_parse_error_at!(tokens.last()));
+                    }
+                    // Check for spread
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Spread) {
                         log::trace!(
-                            "parse_primary: object property is getter/setter; next tokens (first 8): {:?}",
+                            "parse_primary: object property is spread; next tokens (first 8): {:?}",
                             tokens.iter().take(8).collect::<Vec<_>>()
                         );
-                        *index += 1; // consume get/set
-                    }
+                        *index += 1; // consume ...
+                        // Use parse_assignment here so a spread is a single expression
+                        // and doesn't accidentally capture following comma-separated
+                        // properties via the comma operator.
+                        let expr = parse_assignment(tokens, index)?;
+                        // Use empty string as key for spread
+                        properties.push((Expr::StringLit(Vec::new()), Expr::Spread(Box::new(expr)), false));
+                    } else {
+                        // Check for getter/setter: only treat as getter/setter if the
+                        // identifier 'get'/'set' is followed by a property key and
+                        // an opening parenthesis (no colon). This avoids confusing a
+                        // regular property named 'get'/'set' (e.g. `set: function(...)`) with
+                        // the getter/setter syntax.
+                        // Recognize getter/setter signatures including computed keys
+                        let is_getter =
+                            if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "get") {
+                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                                    tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
+                                } else if matches!(tokens[*index + 1].token, Token::LBracket) {
+                                    // find matching RBracket and ensure '(' follows
+                                    let mut depth = 0i32;
+                                    let mut idx_after = None;
+                                    for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
+                                        match &t.token {
+                                            Token::LBracket => depth += 1,
+                                            Token::RBracket => {
+                                                depth -= 1;
+                                                if depth == 0 {
+                                                    idx_after = Some(i + 1);
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if let Some(next_i) = idx_after {
+                                        next_i < tokens.len() && matches!(tokens[next_i].token, Token::LParen)
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
 
-                    // Parse key
-                    let mut is_shorthand_candidate = false;
-                    // Optional '*' indicates generator concise method
-                    let mut is_generator = false;
-                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
-                        is_generator = true;
-                        *index += 1; // consume '*'
-                    }
-                    let key_expr = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
-                        // Check for concise method: Identifier + (
-                        if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
-                            // Concise method
-                            *index += 1; // consume name
+                        let is_setter =
+                            if tokens.len() > *index + 1 && matches!(tokens[*index].token, Token::Identifier(ref id) if id == "set") {
+                                if matches!(tokens[*index + 1].token, Token::Identifier(_) | Token::StringLit(_)) {
+                                    tokens.len() > *index + 2 && matches!(tokens[*index + 2].token, Token::LParen)
+                                } else if matches!(tokens[*index + 1].token, Token::LBracket) {
+                                    let mut depth = 0i32;
+                                    let mut idx_after = None;
+                                    for (i, t) in tokens.iter().enumerate().skip(*index + 1) {
+                                        match &t.token {
+                                            Token::LBracket => depth += 1,
+                                            Token::RBracket => {
+                                                depth -= 1;
+                                                if depth == 0 {
+                                                    idx_after = Some(i + 1);
+                                                    break;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    if let Some(next_i) = idx_after {
+                                        next_i < tokens.len() && matches!(tokens[next_i].token, Token::LParen)
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+
+                        if is_getter || is_setter {
+                            log::trace!(
+                                "parse_primary: object property is getter/setter; next tokens (first 8): {:?}",
+                                tokens.iter().take(8).collect::<Vec<_>>()
+                            );
+                            *index += 1; // consume get/set
+                        }
+
+                        // Parse key
+                        let mut is_shorthand_candidate = false;
+                        // Optional '*' indicates generator concise method
+                        let mut is_generator = false;
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                            is_generator = true;
+                            *index += 1; // consume '*'
+                        }
+                        let key_expr = if let Some(Token::Identifier(name)) = tokens.get(*index).map(|t| t.token.clone()) {
+                            // Check for concise method: Identifier + (
+                            if !is_getter && !is_setter && tokens.len() > *index + 1 && matches!(tokens[*index + 1].token, Token::LParen) {
+                                // Concise method
+                                *index += 1; // consume name
+                                *index += 1; // consume (
+                                let params = parse_parameters(tokens, index)?;
+                                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                *index += 1; // consume {
+                                let body = parse_statements(tokens, index)?;
+                                if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                *index += 1; // consume }
+                                if is_generator {
+                                    properties.push((
+                                        Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                        Expr::GeneratorFunction(None, params, body),
+                                        true,
+                                    ));
+                                } else {
+                                    properties.push((
+                                        Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
+                                        Expr::Function(None, params, body),
+                                        true,
+                                    ));
+                                }
+
+                                // After adding method, skip any newline/semicolons and handle comma/end in outer loop
+                                while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
+                                    *index += 1;
+                                }
+                                if *index >= tokens.len() {
+                                    return Err(raise_parse_error_at!(tokens.get(*index)));
+                                }
+                                if matches!(tokens[*index].token, Token::RBrace) {
+                                    *index += 1;
+                                    break;
+                                }
+                                if matches!(tokens[*index].token, Token::Comma) {
+                                    *index += 1;
+                                    continue;
+                                }
+                                continue;
+                            }
+                            is_shorthand_candidate = true;
+                            *index += 1;
+                            Expr::StringLit(crate::unicode::utf8_to_utf16(&name))
+                        } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
+                            // Numeric property keys are allowed in object literals (they become strings)
+                            *index += 1;
+                            // Use canonical JS string conversion to preserve formatting like '1e+55'
+                            let s = crate::core::value_to_string(&crate::core::Value::Number(n));
+                            Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
+                        } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
+                            *index += 1;
+                            Expr::StringLit(s)
+                        } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
+                            // allow the reserved word `default` as an object property key
+                            *index += 1;
+                            Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
+                        } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
+                            // Computed key (e.g., get [Symbol.toPrimitive]())
+                            *index += 1; // consume [
+                            let expr = parse_assignment(tokens, index)?;
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume ]
+                            expr
+                        } else {
+                            return Err(raise_parse_error_at!(tokens.get(*index)));
+                        };
+
+                        // Check for optional '*' prefix to denote generator method
+                        let mut is_generator = false;
+                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
+                            is_generator = true;
+                            *index += 1; // consume '*'
+                        }
+
+                        // Check for method definition after computed key
+                        if !is_getter && !is_setter && *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
                             *index += 1; // consume (
                             let params = parse_parameters(tokens, index)?;
                             if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
@@ -2974,17 +3053,9 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             *index += 1; // consume }
                             if is_generator {
-                                properties.push((
-                                    Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                    Expr::GeneratorFunction(None, params, body),
-                                    true,
-                                ));
+                                properties.push((key_expr, Expr::GeneratorFunction(None, params, body), true));
                             } else {
-                                properties.push((
-                                    Expr::StringLit(crate::unicode::utf8_to_utf16(&name)),
-                                    Expr::Function(None, params, body),
-                                    true,
-                                ));
+                                properties.push((key_expr, Expr::Function(None, params, body), true));
                             }
 
                             // After adding method, skip any newline/semicolons and handle comma/end in outer loop
@@ -3004,142 +3075,71 @@ fn parse_primary(tokens: &[TokenData], index: &mut usize, allow_call: bool) -> R
                             }
                             continue;
                         }
-                        is_shorthand_candidate = true;
-                        *index += 1;
-                        Expr::StringLit(crate::unicode::utf8_to_utf16(&name))
-                    } else if let Some(Token::Number(n)) = tokens.get(*index).map(|t| t.token.clone()) {
-                        // Numeric property keys are allowed in object literals (they become strings)
-                        *index += 1;
-                        // Use canonical JS string conversion to preserve formatting like '1e+55'
-                        let s = crate::core::value_to_string(&crate::core::Value::Number(n));
-                        Expr::StringLit(crate::unicode::utf8_to_utf16(&s))
-                    } else if let Some(Token::StringLit(s)) = tokens.get(*index).map(|t| t.token.clone()) {
-                        *index += 1;
-                        Expr::StringLit(s)
-                    } else if let Some(Token::Default) = tokens.get(*index).map(|t| t.token.clone()) {
-                        // allow the reserved word `default` as an object property key
-                        *index += 1;
-                        Expr::StringLit(crate::unicode::utf8_to_utf16("default"))
-                    } else if *index < tokens.len() && matches!(tokens[*index].token, Token::LBracket) {
-                        // Computed key (e.g., get [Symbol.toPrimitive]())
-                        *index += 1; // consume [
-                        let expr = parse_assignment(tokens, index)?;
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBracket) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume ]
-                        expr
-                    } else {
-                        return Err(raise_parse_error_at!(tokens.get(*index)));
-                    };
 
-                    // Check for optional '*' prefix to denote generator method
-                    let mut is_generator = false;
-                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Multiply) {
-                        is_generator = true;
-                        *index += 1; // consume '*'
-                    }
-
-                    // Check for method definition after computed key
-                    if !is_getter && !is_setter && *index < tokens.len() && matches!(tokens[*index].token, Token::LParen) {
-                        *index += 1; // consume (
-                        let params = parse_parameters(tokens, index)?;
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume {
-                        let body = parse_statements(tokens, index)?;
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume }
-                        if is_generator {
-                            properties.push((key_expr, Expr::GeneratorFunction(None, params, body), true));
+                        if is_getter {
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume (
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume )
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume {
+                            let body = parse_statements(tokens, index)?;
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume }
+                            properties.push((key_expr, Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))), false));
+                        } else if is_setter {
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume (
+                            let params = parse_parameters(tokens, index)?;
+                            if params.len() != 1 {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume {
+                            let body = parse_statements(tokens, index)?;
+                            if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
+                                return Err(raise_parse_error_at!(tokens.get(*index)));
+                            }
+                            *index += 1; // consume }
+                            properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false));
                         } else {
-                            properties.push((key_expr, Expr::Function(None, params, body), true));
-                        }
-
-                        // After adding method, skip any newline/semicolons and handle comma/end in outer loop
-                        while *index < tokens.len() && matches!(tokens[*index].token, Token::LineTerminator | Token::Semicolon) {
-                            *index += 1;
-                        }
-                        if *index >= tokens.len() {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        if matches!(tokens[*index].token, Token::RBrace) {
-                            *index += 1;
-                            break;
-                        }
-                        if matches!(tokens[*index].token, Token::Comma) {
-                            *index += 1;
-                            continue;
-                        }
-                        continue;
-                    }
-
-                    if is_getter {
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume (
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RParen) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume )
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume {
-                        let body = parse_statements(tokens, index)?;
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume }
-                        properties.push((key_expr, Expr::Getter(Box::new(Expr::Function(None, Vec::new(), body))), false));
-                    } else if is_setter {
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LParen) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume (
-                        let params = parse_parameters(tokens, index)?;
-                        if params.len() != 1 {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::LBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume {
-                        let body = parse_statements(tokens, index)?;
-                        if *index >= tokens.len() || !matches!(tokens[*index].token, Token::RBrace) {
-                            return Err(raise_parse_error_at!(tokens.get(*index)));
-                        }
-                        *index += 1; // consume }
-                        properties.push((key_expr, Expr::Setter(Box::new(Expr::Function(None, params, body))), false));
-                    } else {
-                        // Regular property
-                        if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
-                            *index += 1; // consume :
-                            let value = parse_assignment(tokens, index)?;
-                            properties.push((key_expr, value, false));
-                        } else {
-                            // Shorthand property { x } -> { x: x }
-                            if is_shorthand_candidate {
-                                if let Expr::StringLit(s) = &key_expr {
-                                    let name = utf16_to_utf8(s);
-                                    properties.push((key_expr, Expr::Var(name, None, None), false));
+                            // Regular property
+                            if *index < tokens.len() && matches!(tokens[*index].token, Token::Colon) {
+                                *index += 1; // consume :
+                                let value = parse_assignment(tokens, index)?;
+                                properties.push((key_expr, value, false));
+                            } else {
+                                // Shorthand property { x } -> { x: x }
+                                if is_shorthand_candidate {
+                                    if let Expr::StringLit(s) = &key_expr {
+                                        let name = utf16_to_utf8(s);
+                                        properties.push((key_expr, Expr::Var(name, None, None), false));
+                                    } else {
+                                        return Err(raise_parse_error_at!(tokens.get(*index)));
+                                    }
                                 } else {
                                     return Err(raise_parse_error_at!(tokens.get(*index)));
                                 }
-                            } else {
-                                return Err(raise_parse_error_at!(tokens.get(*index)));
                             }
                         }
                     }
-                }
 
-                // Handle comma
-                if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
-                    *index += 1;
+                    // Handle comma
+                    if *index < tokens.len() && matches!(tokens[*index].token, Token::Comma) {
+                        *index += 1;
+                    }
                 }
             }
             Expr::Object(properties)

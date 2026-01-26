@@ -60,6 +60,9 @@ pub(crate) fn initialize_date<'gc>(mc: &MutationContext<'gc>, env: &JSObjectData
     for method in inst_methods {
         object_set_key_value(mc, &date_proto, method, Value::Function(format!("Date.prototype.{method}")))?;
         date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from(method));
+        if let Some(val_rc) = object_get_key_value(&date_proto, method) {
+            log::debug!("DBG initialize_date: method {} stored as {:?}", method, val_rc.borrow());
+        }
     }
     // Mark constructor non-enumerable
     date_proto.borrow_mut(mc).set_non_enumerable(PropertyKey::from("constructor"));

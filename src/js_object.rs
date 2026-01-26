@@ -180,7 +180,17 @@ pub(crate) fn define_property_internal<'gc>(
         setter: setter_opt,
     };
 
-    // If descriptor explicitly sets configurable flag, apply it (set or clear non-configurable)
+    // DEBUG: Log raw descriptor fields for troubleshooting
+    if let Some(wrc) = object_get_key_value(desc_obj, "writable") {
+        log::debug!("define_property_internal: descriptor writable raw = {:?}", wrc.borrow());
+    } else {
+        log::debug!("define_property_internal: descriptor writable raw = <absent>");
+    }
+    if let Some(enum_rc) = object_get_key_value(desc_obj, "enumerable") {
+        log::debug!("define_property_internal: descriptor enumerable raw = {:?}", enum_rc.borrow());
+    } else {
+        log::debug!("define_property_internal: descriptor enumerable raw = <absent>");
+    }
     if let Some(cfg_rc) = object_get_key_value(desc_obj, "configurable")
         && let Value::Boolean(is_cfg) = &*cfg_rc.borrow()
     {
@@ -195,19 +205,49 @@ pub(crate) fn define_property_internal<'gc>(
 
     // Only update writable/enumerable if property is configurable or does not exist
     let is_configurable = target_obj.borrow().is_configurable(prop_key);
+    log::debug!(
+        "define_property_internal: is_configurable={} for {:?} on obj_ptr={:p}",
+        is_configurable,
+        prop_key,
+        target_obj.as_ptr()
+    );
     if is_configurable {
         // If writable flag explicitly set to false, mark property as non-writable
         if let Some(wrc) = object_get_key_value(desc_obj, "writable")
             && let Value::Boolean(is_writable) = &*wrc.borrow()
             && !*is_writable
         {
+            log::trace!(
+                "define_property_internal: setting non-writable for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
+            log::debug!(
+                "define_property_internal: before set_non_writable contains={} list={:?} for obj_ptr={:p} key={:?}",
+                target_obj.borrow().non_writable.contains(prop_key),
+                target_obj.borrow().non_writable.iter().collect::<Vec<_>>(),
+                target_obj.as_ptr(),
+                prop_key
+            );
             target_obj.borrow_mut(mc).set_non_writable(prop_key.clone());
+            log::debug!(
+                "define_property_internal: after set_non_writable contains={} list={:?} for obj_ptr={:p} key={:?}",
+                target_obj.borrow().non_writable.contains(prop_key),
+                target_obj.borrow().non_writable.iter().collect::<Vec<_>>(),
+                target_obj.as_ptr(),
+                prop_key
+            );
         }
         // If writable flag explicitly set to true, clear non-writable
         if let Some(wrc) = object_get_key_value(desc_obj, "writable")
             && let Value::Boolean(is_writable) = &*wrc.borrow()
             && *is_writable
         {
+            log::trace!(
+                "define_property_internal: setting writable=true for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
             target_obj.borrow_mut(mc).set_writable(prop_key.clone());
         }
 
@@ -216,6 +256,11 @@ pub(crate) fn define_property_internal<'gc>(
             && let Value::Boolean(is_enum) = &*enum_rc.borrow()
             && !*is_enum
         {
+            log::trace!(
+                "define_property_internal: setting non-enumerable for {:?} on obj_ptr={:p}",
+                prop_key,
+                target_obj.as_ptr()
+            );
             target_obj.borrow_mut(mc).set_non_enumerable(prop_key.clone());
         }
         // If enumerable flag explicitly set to true, clear non-enumerable
@@ -226,6 +271,17 @@ pub(crate) fn define_property_internal<'gc>(
             target_obj.borrow_mut(mc).set_enumerable(prop_key.clone());
         }
     }
+
+    // DEBUG: print non_writable/non_enumerable state before final set
+    log::debug!(
+        "define_property_internal: post-flag state for obj_ptr={:p} key={:?} non_writable_contains={} non_writable_list={:?} non_enumerable_contains={} non_enumerable_list={:?}",
+        target_obj.as_ptr(),
+        prop_key,
+        target_obj.borrow().non_writable.contains(prop_key),
+        target_obj.borrow().non_writable.iter().collect::<Vec<_>>(),
+        target_obj.borrow().non_enumerable.contains(prop_key),
+        target_obj.borrow().non_enumerable.iter().collect::<Vec<_>>()
+    );
 
     // Always update value
     object_set_key_value(mc, target_obj, prop_key, prop_descriptor)?;
@@ -611,23 +667,38 @@ pub fn handle_object_method<'gc>(
                     Value::Property { value, getter, setter } => {
                         if let Some(v) = value {
                             object_set_key_value(mc, &desc_obj, "value", v.borrow().clone())?;
-                            object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
+                            // Use the object's actual writable flag rather than assuming true
+                            let writable = obj.borrow().is_writable(&key);
+                            let non_writable_contains = obj.borrow().non_writable.contains(&key);
+                            let non_writable_list: Vec<String> = obj
+                                .borrow()
+                                .non_writable
+                                .iter()
+                                .map(|k| match k {
+                                    PropertyKey::String(s) => s.clone(),
+                                    PropertyKey::Symbol(_) => "<symbol>".to_string(),
+                                })
+                                .collect();
+                            log::debug!(
+                                "getOwnPropertyDescriptor: obj_ptr={:p} key={:?} is_writable={} non_writable_contains={} non_writable_list={:?}",
+                                obj.as_ptr(),
+                                key,
+                                writable,
+                                non_writable_contains,
+                                non_writable_list
+                            );
+                            let writable_flag = Value::Boolean(writable);
+                            object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
                         }
                         if let Some(g) = getter {
                             match &*g.clone() {
                                 Value::Getter(body, captured_env, _home) => {
                                     let func_obj = crate::core::new_js_object_data(mc);
                                     let closure_data = crate::core::ClosureData {
-                                        params: Vec::new(),
                                         body: body.clone(),
                                         env: Some(*captured_env),
-                                        home_object: None,
-                                        captured_envs: Vec::new(),
-                                        bound_this: None,
-                                        is_arrow: false,
-                                        is_strict: false,
-                                        native_target: None,
                                         enforce_strictness_inheritance: true,
+                                        ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -642,17 +713,12 @@ pub fn handle_object_method<'gc>(
                             match &*s.clone() {
                                 Value::Setter(params, body, captured_env, _home) => {
                                     let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = crate::core::ClosureData {
+                                    let closure_data = ClosureData {
                                         params: params.clone(),
                                         body: body.clone(),
                                         env: Some(*captured_env),
-                                        home_object: None,
-                                        captured_envs: Vec::new(),
-                                        bound_this: None,
-                                        is_arrow: false,
-                                        is_strict: false,
-                                        native_target: None,
                                         enforce_strictness_inheritance: true,
+                                        ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -671,17 +737,11 @@ pub fn handle_object_method<'gc>(
                     }
                     Value::Getter(body, captured_env, _home_opt) => {
                         let func_obj = crate::core::new_js_object_data(mc);
-                        let closure_data = crate::core::ClosureData {
-                            params: Vec::new(),
+                        let closure_data = ClosureData {
                             body: body.clone(),
                             env: Some(*captured_env),
-                            home_object: None,
-                            captured_envs: Vec::new(),
-                            bound_this: None,
-                            is_arrow: false,
-                            is_strict: false,
-                            native_target: None,
                             enforce_strictness_inheritance: true,
+                            ..ClosureData::default()
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -694,17 +754,12 @@ pub fn handle_object_method<'gc>(
                     }
                     Value::Setter(params, body, captured_env, _home_opt) => {
                         let func_obj = crate::core::new_js_object_data(mc);
-                        let closure_data = crate::core::ClosureData {
+                        let closure_data = ClosureData {
                             params: params.clone(),
                             body: body.clone(),
                             env: Some(*captured_env),
-                            home_object: None,
-                            captured_envs: Vec::new(),
-                            bound_this: None,
-                            is_arrow: false,
-                            is_strict: false,
-                            native_target: None,
                             enforce_strictness_inheritance: true,
+                            ..ClosureData::default()
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                         object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -761,24 +816,19 @@ pub fn handle_object_method<'gc>(
                                         // But if it has 'value', it's data?
                                         // The Value::Property variant in core/value.rs has: value, getter, setter. Make sense.
 
-                                        object_set_key_value(mc, &desc_obj, "writable", Value::Boolean(true))?;
+                                        let writable_flag = Value::Boolean(obj.borrow().is_writable(key));
+                                        object_set_key_value(mc, &desc_obj, "writable", writable_flag)?;
                                     }
                                     // Accessor
                                     if let Some(g) = getter {
                                         match &*g.clone() {
                                             Value::Getter(body, captured_env, _home) => {
                                                 let func_obj = crate::core::new_js_object_data(mc);
-                                                let closure_data = crate::core::ClosureData {
-                                                    params: Vec::new(),
+                                                let closure_data = ClosureData {
                                                     body: body.clone(),
                                                     env: Some(*captured_env),
-                                                    home_object: None,
-                                                    captured_envs: Vec::new(),
-                                                    bound_this: None,
-                                                    is_arrow: false,
-                                                    is_strict: false,
-                                                    native_target: None,
                                                     enforce_strictness_inheritance: true,
+                                                    ..ClosureData::default()
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -793,19 +843,14 @@ pub fn handle_object_method<'gc>(
                                         match &*s.clone() {
                                             Value::Setter(params, body, captured_env, _home) => {
                                                 let func_obj = crate::core::new_js_object_data(mc);
-                                                let closure_data = crate::core::ClosureData {
+                                                let closure_data = ClosureData {
                                                     params: params.clone(),
                                                     body: body.clone(),
                                                     env: Some(*captured_env),
-                                                    home_object: None,
-                                                    captured_envs: Vec::new(),
-                                                    bound_this: None,
-                                                    is_arrow: false,
-                                                    is_strict: false,
-                                                    native_target: None,
                                                     enforce_strictness_inheritance: true,
+                                                    ..ClosureData::default()
                                                 };
-                                                let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
+                                                let closure_val = Value::Closure(crate::core::Gc::new(mc, closure_data));
                                                 object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
                                                 object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
                                             }
@@ -824,17 +869,11 @@ pub fn handle_object_method<'gc>(
                                 Value::Getter(body, captured_env, _home_opt) => {
                                     // Create a function object to expose as the 'get' value on the descriptor
                                     let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = crate::core::ClosureData {
-                                        params: Vec::new(),
+                                    let closure_data = ClosureData {
                                         body: body.clone(),
                                         env: Some(*captured_env),
-                                        home_object: None,
-                                        captured_envs: Vec::new(),
-                                        bound_this: None,
-                                        is_arrow: false,
-                                        is_strict: false,
-                                        native_target: None,
                                         enforce_strictness_inheritance: true,
+                                        ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -848,17 +887,12 @@ pub fn handle_object_method<'gc>(
                                 Value::Setter(params, body, captured_env, _home_opt) => {
                                     // Create a function object to expose as the 'set' value on the descriptor
                                     let func_obj = crate::core::new_js_object_data(mc);
-                                    let closure_data = crate::core::ClosureData {
+                                    let closure_data = ClosureData {
                                         params: params.clone(),
                                         body: body.clone(),
                                         env: Some(*captured_env),
-                                        home_object: None,
-                                        captured_envs: Vec::new(),
-                                        bound_this: None,
-                                        is_arrow: false,
-                                        is_strict: false,
-                                        native_target: None,
                                         enforce_strictness_inheritance: true,
+                                        ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
                                     object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
@@ -1330,6 +1364,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                         }
                     }
                     Value::Function(func_name) => {
+                        log::debug!("DBG handle_value_of_method: found function name='{}'", func_name);
                         // If the function is one of the Object.prototype builtins,
                         // handle it directly here to avoid recursion back into
                         // `handle_global_function` which would call us again.
@@ -1339,16 +1374,36 @@ pub(crate) fn handle_value_of_method<'gc>(
                         if func_name == "Object.prototype.toString" {
                             return crate::js_object::handle_to_string_method(mc, &Value::Object(*obj), args, env);
                         }
+                        // Handle Date prototype functions specially when invoking as a method
+                        if func_name.ends_with(".valueOf") && crate::js_date::is_date_object(obj) {
+                            return crate::js_date::handle_date_method(mc, &Value::Object(*obj), "valueOf", args, env);
+                        }
+                        if func_name.ends_with(".toString") && crate::js_date::is_date_object(obj) {
+                            return crate::js_date::handle_date_method(mc, &Value::Object(*obj), "toString", args, env);
+                        }
+                        if let Some(method) = func_name.strip_prefix("Date.prototype.") {
+                            return crate::js_date::handle_date_method(mc, &Value::Object(*obj), method, args, env);
+                        }
 
-                        // let func_env = prepare_function_call_env(mc, None, Some(Value::Object(obj)), None, &[], None, env)?;
-                        // let res = crate::js_function::handle_global_function(mc, &func_name, &[], &func_env)?;
-                        // if matches!(
-                        //     res,
-                        //     Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
-                        // ) {
-                        //     return Ok(res);
-                        // }
-                        todo!("Handle built-in function calls in valueOf");
+                        let func_env = prepare_function_call_env(mc, None, Some(Value::Object(*obj)), None, &[], None, Some(env))?;
+                        // Use the central `evaluate_call_dispatch` helper to perform the call so
+                        // builtins like `Date.prototype.*` are routed correctly when represented
+                        // as `Value::Function` names. This avoids falling back to `handle_global_function`
+                        // which does not perform the same prefix-based dispatching.
+                        let eval_args: Vec<Value<'gc>> = Vec::new();
+                        let res = crate::core::evaluate_call_dispatch(
+                            mc,
+                            &func_env,
+                            Value::Function(func_name.clone()),
+                            Some(Value::Object(*obj)),
+                            eval_args,
+                        )?;
+                        if matches!(
+                            res,
+                            Value::Number(_) | Value::String(_) | Value::Boolean(_) | Value::BigInt(_) | Value::Symbol(_)
+                        ) {
+                            return Ok(res);
+                        }
                     }
                     _ => {}
                 }

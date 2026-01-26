@@ -133,7 +133,7 @@ pub(crate) fn string_constructor<'gc>(
             Value::Null => Ok(Value::String(utf8_to_utf16("null"))),
             Value::Object(obj) => {
                 // Attempt ToPrimitive with 'string' hint first (honor [Symbol.toPrimitive] or fallback)
-                let prim = to_primitive(mc, &Value::Object(obj), "string", env).map_err(EvalError::from)?;
+                let prim = to_primitive(mc, &Value::Object(obj), "string", env)?;
                 match prim {
                     Value::String(s) => Ok(Value::String(s)),
                     Value::Number(n) => Ok(Value::String(utf8_to_utf16(&crate::core::value_to_string(&Value::Number(n))))),

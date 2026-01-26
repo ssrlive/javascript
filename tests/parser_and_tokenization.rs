@@ -125,3 +125,47 @@ fn parse_rejects_outside_private_access() {
     let res = parse_statements(&tokens.clone(), &mut index);
     assert!(res.is_err(), "Expected parse to fail for outside private access");
 }
+
+#[test]
+fn parse_addition_object_plus_function_expression() {
+    // Reproducer for c2.js CHECK#1: ensure parser accepts ({} + function(){...})
+    let script = r#"
+    if (({} + function(){return 1}) !== ({}.toString() + function(){return 1}.toString())) {
+      throw new Error('Parse or runtime mismatch');
+    }
+    "#;
+    let tokens = tokenize(script).expect("tokenize failed");
+    // Print tokens to help debug why the parser rejects this case
+    for (i, t) in tokens.iter().enumerate() {
+        eprintln!("{}: {:?} (line {}, col {})", i, t.token, t.line, t.column);
+    }
+    let mut index = 0usize;
+    let res = parse_statements(&tokens, &mut index);
+    if let Err(err) = &res {
+        eprintln!("parse error: {:?}", err);
+    }
+    assert!(
+        res.is_ok(),
+        "Expected parser to accept object + function expression: {:?}",
+        res.err()
+    );
+}
+
+#[test]
+fn parse_inner_object_plus_function_expr_alone() {
+    let script = "({}.toString() + function(){return 1}.toString());";
+    let tokens = tokenize(script).expect("tokenize failed");
+    for (i, t) in tokens.iter().enumerate() {
+        eprintln!("{}: {:?} (line {}, col {})", i, t.token, t.line, t.column);
+    }
+    let mut index = 0usize;
+    let res = parse_statements(&tokens, &mut index);
+    if let Err(err) = &res {
+        eprintln!("parse error stmt-only: {:?}", err);
+    }
+    assert!(
+        res.is_ok(),
+        "Expected parsing inner expression statement to succeed: {:?}",
+        res.err()
+    );
+}

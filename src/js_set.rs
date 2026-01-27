@@ -1,5 +1,5 @@
 use crate::core::JSSet;
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::{
     core::{
         EvalError, JSObjectDataPtr, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
@@ -88,7 +88,7 @@ pub(crate) fn handle_set_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let set = Gc::new(mc, GcCell::new(JSSet { values: Vec::new() }));
+    let set = new_gc_cell_ptr(mc, JSSet { values: Vec::new() });
 
     initialize_collection_from_iterable(mc, env, args, "Set", |value| {
         // Check if value already exists
@@ -102,10 +102,9 @@ pub(crate) fn handle_set_constructor<'gc>(
     // Create a wrapper object for the Set
     let set_obj = new_js_object_data(mc);
     // Store the actual set data
-    set_obj.borrow_mut(mc).insert(
-        PropertyKey::String("__set__".to_string()),
-        Gc::new(mc, GcCell::new(Value::Set(set))),
-    );
+    set_obj
+        .borrow_mut(mc)
+        .insert(PropertyKey::String("__set__".to_string()), new_gc_cell_ptr(mc, Value::Set(set)));
 
     // Set prototype to Set.prototype
     if let Some(set_ctor) = object_get_key_value(env, "Set")
@@ -219,7 +218,7 @@ pub(crate) fn handle_set_instance_method<'gc>(
 
             match callback {
                 Value::Object(obj) => {
-                    if let Some(cl_val) = object_get_key_value(&obj, "__closure__") {
+                    if let Some(cl_val) = obj.borrow().get_closure() {
                         match &*cl_val.borrow() {
                             Value::Closure(cl) => execute(cl)?,
                             _ => {

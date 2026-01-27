@@ -1,7 +1,7 @@
 use crate::{
     JSError, Value,
     core::{ClosureData, DestructuringElement, Expr, Statement, StatementKind, object_get_key_value, object_set_key_value},
-    core::{Gc, GcCell, MutationContext},
+    core::{Gc, MutationContext, new_gc_cell_ptr},
     new_js_object_data,
 };
 use std::path::Path;
@@ -141,18 +141,18 @@ fn execute_module<'gc>(mc: &MutationContext<'gc>, content: &str, module_path: &s
     // Add exports object to the environment
     env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        Gc::new(mc, GcCell::new(Value::Object(module_exports))),
+        new_gc_cell_ptr(mc, Value::Object(module_exports)),
     );
 
     // Add module object with exports
     let module_obj = new_js_object_data(mc);
     module_obj.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("exports".to_string()),
-        Gc::new(mc, GcCell::new(Value::Object(module_exports))),
+        new_gc_cell_ptr(mc, Value::Object(module_exports)),
     );
     env.borrow_mut(mc).insert(
         crate::core::PropertyKey::String("module".to_string()),
-        Gc::new(mc, GcCell::new(Value::Object(module_obj))),
+        new_gc_cell_ptr(mc, Value::Object(module_obj)),
     );
 
     // Initialize global constructors

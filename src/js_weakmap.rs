@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::core::{JSWeakMap, PropertyKey};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
@@ -12,7 +12,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let weakmap = Gc::new(mc, GcCell::new(JSWeakMap { entries: Vec::new() }));
+    let weakmap = new_gc_cell_ptr(mc, JSWeakMap { entries: Vec::new() });
 
     if !args.is_empty() {
         if args.len() == 1 {
@@ -28,7 +28,7 @@ pub(crate) fn handle_weakmap_constructor<'gc>(
     // Store the actual weakmap data
     weakmap_obj.borrow_mut(mc).insert(
         PropertyKey::String("__weakmap__".to_string()),
-        Gc::new(mc, GcCell::new(Value::WeakMap(weakmap))),
+        new_gc_cell_ptr(mc, Value::WeakMap(weakmap)),
     );
     // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
     weakmap_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakmap__"));

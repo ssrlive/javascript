@@ -1,9 +1,6 @@
 use crate::core::{Gc, GcCell, GeneratorState, MutationContext};
 use crate::{
-    core::{
-        Expr, JSObjectDataPtr, PropertyKey, Statement, StatementKind, Value, object_get_key_value, object_set_key_value,
-        prepare_function_call_env,
-    },
+    core::{Expr, JSObjectDataPtr, Statement, StatementKind, Value, object_get_key_value, object_set_key_value, prepare_function_call_env},
     error::JSError,
 };
 
@@ -669,17 +666,17 @@ pub fn generator_next<'gc>(
                         Ok(val) => {
                             // Cache the value so re-entry/resume paths can use it
                             gen_obj.cached_initial_yield = Some(val.clone());
-                            return Ok(create_iterator_result(mc, val, false));
+                            return create_iterator_result(mc, val, false);
                         }
                         Err(_) => {
                             gen_obj.cached_initial_yield = Some(Value::Undefined);
-                            return Ok(create_iterator_result(mc, Value::Undefined, false));
+                            return create_iterator_result(mc, Value::Undefined, false);
                         }
                     }
                 }
 
                 // No inner expression -> yield undefined
-                Ok(create_iterator_result(mc, Value::Undefined, false))
+                Ok(create_iterator_result(mc, Value::Undefined, false)?)
             } else {
                 // No yields found: execute the whole function body in a freshly
                 // prepared function activation environment using the captured
@@ -690,7 +687,7 @@ pub fn generator_next<'gc>(
                 let res = crate::core::evaluate_statements(mc, &func_env, &gen_obj.body);
                 gen_obj.state = GeneratorState::Completed;
                 match res {
-                    Ok(v) => Ok(create_iterator_result(mc, v, true)),
+                    Ok(v) => Ok(create_iterator_result(mc, v, true)?),
                     Err(e) => Err(e.into()),
                 }
             }
@@ -704,7 +701,7 @@ pub fn generator_next<'gc>(
             log::trace!("DEBUG: generator_next Suspended. pc={}, send_value={:?}", pc_val, _send_value);
             if pc_val >= gen_obj.body.len() {
                 gen_obj.state = GeneratorState::Completed;
-                return Ok(create_iterator_result(mc, Value::Undefined, true));
+                return create_iterator_result(mc, Value::Undefined, true);
             }
             // Clone the tail and replace first yield in the first statement
             let mut tail: Vec<Statement> = gen_obj.body[pc_val..].to_vec();
@@ -739,12 +736,12 @@ pub fn generator_next<'gc>(
             log::trace!("DEBUG: evaluate_statements result: {:?}", result);
             gen_obj.state = GeneratorState::Completed;
             match result {
-                Ok(val) => Ok(create_iterator_result(mc, val, true)),
-                Err(_) => Ok(create_iterator_result(mc, Value::Undefined, true)),
+                Ok(val) => Ok(create_iterator_result(mc, val, true)?),
+                Err(_) => Ok(create_iterator_result(mc, Value::Undefined, true)?),
             }
         }
         GeneratorState::Running { .. } => Err(raise_eval_error!("Generator is already running")),
-        GeneratorState::Completed => Ok(create_iterator_result(mc, Value::Undefined, true)),
+        GeneratorState::Completed => Ok(create_iterator_result(mc, Value::Undefined, true)?),
     }
 }
 
@@ -756,7 +753,7 @@ fn generator_return<'gc>(
 ) -> Result<Value<'gc>, JSError> {
     let mut gen_obj = generator.borrow_mut(mc);
     gen_obj.state = GeneratorState::Completed;
-    Ok(create_iterator_result(mc, return_value, true))
+    create_iterator_result(mc, return_value, true)
 }
 
 /// Execute generator.throw()
@@ -807,7 +804,7 @@ pub fn generator_throw<'gc>(
             gen_obj.state = GeneratorState::Completed;
 
             match result {
-                Ok(val) => Ok(create_iterator_result(mc, val, true)),
+                Ok(val) => Ok(create_iterator_result(mc, val, true)?),
                 Err(e) => Err(e.into()),
             }
         }
@@ -817,21 +814,17 @@ pub fn generator_throw<'gc>(
 }
 
 /// Create an iterator result object {value: value, done: done}
-fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Value<'gc> {
-    let obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::default()));
+fn create_iterator_result<'gc>(mc: &MutationContext<'gc>, value: Value<'gc>, done: bool) -> Result<Value<'gc>, JSError> {
+    // Iterator result objects should be extensible by default
+    let obj = crate::core::new_js_object_data(mc);
 
     // Set value property
-    obj.borrow_mut(mc)
-        .properties
-        .insert(PropertyKey::String("value".to_string()), Gc::new(mc, GcCell::new(value)));
+    object_set_key_value(mc, &obj, "value", value)?;
 
     // Set done property
-    obj.borrow_mut(mc).properties.insert(
-        PropertyKey::String("done".to_string()),
-        Gc::new(mc, GcCell::new(Value::Boolean(done))),
-    );
+    object_set_key_value(mc, &obj, "done", Value::Boolean(done))?;
 
-    Value::Object(obj)
+    Ok(Value::Object(obj))
 }
 
 /// Initialize Generator constructor/prototype and attach prototype methods

@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell};
+use crate::core::new_gc_cell_ptr;
 use crate::{
     JSError,
     core::{
@@ -33,7 +33,7 @@ impl Repl {
 
             JsRoot {
                 global_env,
-                well_known_symbols: Gc::new(mc, GcCell::new(HashMap::new())),
+                well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
             }
         });
 

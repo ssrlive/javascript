@@ -24,6 +24,11 @@ pub(crate) use gc_arena::{Collect, Gc};
 pub(crate) type GcPtr<'gc, T> = Gc<'gc, GcCell<T>>;
 use std::collections::HashMap;
 
+#[inline]
+pub fn new_gc_cell_ptr<'gc, T: 'gc + Collect<'gc>>(mc: &MutationContext<'gc>, value: T) -> GcPtr<'gc, T> {
+    Gc::new(mc, GcCell::new(value))
+}
+
 mod gc;
 
 mod value;
@@ -180,7 +185,7 @@ where
 
         JsRoot {
             global_env,
-            well_known_symbols: Gc::new(mc, GcCell::new(HashMap::new())),
+            well_known_symbols: new_gc_cell_ptr(mc, HashMap::new()),
         }
     });
 

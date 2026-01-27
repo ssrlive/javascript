@@ -1,5 +1,5 @@
 use crate::core::{ClosureData, Expr, JSProxy, Statement, StatementKind, prepare_closure_call_env};
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, MutationContext, new_gc_cell_ptr};
 use crate::env_set;
 use crate::{
     core::{
@@ -40,7 +40,7 @@ pub(crate) fn handle_proxy_constructor<'gc>(
     // Store the actual proxy data
     proxy_obj.borrow_mut(mc).insert(
         PropertyKey::String("__proxy__".to_string()),
-        Gc::new(mc, GcCell::new(Value::Proxy(proxy))),
+        new_gc_cell_ptr(mc, Value::Proxy(proxy)),
     );
 
     Ok(Value::Object(proxy_obj))
@@ -83,25 +83,25 @@ pub(crate) fn handle_proxy_revocable<'gc>(
     let revoke_env = new_js_object_data(mc);
     revoke_env
         .borrow_mut(mc)
-        .insert("__revoke_proxy".into(), Gc::new(mc, GcCell::new(Value::Proxy(proxy))));
+        .insert("__revoke_proxy".into(), new_gc_cell_ptr(mc, Value::Proxy(proxy)));
 
     // Create a wrapper object for the Proxy
     let proxy_wrapper = new_js_object_data(mc);
     // Store the actual proxy data
     proxy_wrapper.borrow_mut(mc).insert(
         PropertyKey::String("__proxy__".to_string()),
-        Gc::new(mc, GcCell::new(Value::Proxy(proxy))),
+        new_gc_cell_ptr(mc, Value::Proxy(proxy)),
     );
 
     // Also capture the wrapper object so the internal revoke helper can replace the stored proxy
     revoke_env
         .borrow_mut(mc)
-        .insert("__proxy_wrapper".into(), Gc::new(mc, GcCell::new(Value::Object(proxy_wrapper))));
+        .insert("__proxy_wrapper".into(), new_gc_cell_ptr(mc, Value::Object(proxy_wrapper)));
 
     // Provide a callable function in the revoke env that dispatches to the internal revoke helper
     revoke_env.borrow_mut(mc).insert(
         "__internal_revoke".into(),
-        Gc::new(mc, GcCell::new(Value::Function("Proxy.__internal_revoke".to_string()))),
+        new_gc_cell_ptr(mc, Value::Function("Proxy.__internal_revoke".to_string())),
     );
 
     let revoke_func = Value::Closure(Gc::new(mc, ClosureData::new(&[], &revoke_body, Some(revoke_env), None)));
@@ -132,7 +132,7 @@ pub(crate) fn apply_proxy_trap<'gc>(
     {
         let trap = trap_val.borrow().clone();
         // Accept either a direct `Value::Closure` or a function-object that
-        // stores the executable closure under the internal `__closure__` key.
+        // stores the executable closure in the internal closure slot.
         if let Some((params, body, captured_env)) = extract_closure_from_value(&trap) {
             // Create execution environment for the trap and bind parameters
             let trap_env = prepare_closure_call_env(mc, Some(&captured_env), Some(&params), &args, None)?;

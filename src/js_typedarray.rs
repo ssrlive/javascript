@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, MutationContext, new_gc_cell_ptr};
 use crate::core::{JSObjectDataPtr, Value, new_js_object_data, object_get_key_value, object_set_key_value};
 use crate::unicode::utf8_to_utf16;
 use crate::{JSArrayBuffer, JSDataView, JSTypedArray, TypedArrayKind};
@@ -704,13 +704,13 @@ pub fn handle_arraybuffer_constructor<'gc>(
     };
 
     // Create ArrayBuffer instance
-    let buffer = Gc::new(
+    let buffer = new_gc_cell_ptr(
         mc,
-        GcCell::new(JSArrayBuffer {
+        JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
             detached: false,
             shared: false,
-        }),
+        },
     );
 
     // Create the ArrayBuffer object
@@ -742,13 +742,13 @@ pub fn handle_sharedarraybuffer_constructor<'gc>(
     };
 
     // Create SharedArrayBuffer instance (mark shared: true)
-    let buffer = Gc::new(
+    let buffer = new_gc_cell_ptr(
         mc,
-        GcCell::new(JSArrayBuffer {
+        JSArrayBuffer {
             data: Arc::new(Mutex::new(vec![0; length])),
             detached: false,
             shared: true,
-        }),
+        },
     );
 
     // Create the SharedArrayBuffer object wrapper
@@ -890,13 +890,13 @@ pub fn handle_typedarray_constructor<'gc>(
 
     let (buffer, byte_offset, length) = if args.is_empty() {
         // new TypedArray() - create empty array
-        let buffer = Gc::new(
+        let buffer = new_gc_cell_ptr(
             mc,
-            GcCell::new(JSArrayBuffer {
+            JSArrayBuffer {
                 data: Arc::new(Mutex::new(vec![])),
                 detached: false,
                 shared: false,
-            }),
+            },
         );
         (buffer, 0, 0)
     } else if args.len() == 1 {
@@ -905,13 +905,13 @@ pub fn handle_typedarray_constructor<'gc>(
             Value::Number(n) if n >= 0.0 && n <= u32::MAX as f64 && n.fract() == 0.0 => {
                 // new TypedArray(length)
                 let length = n as usize;
-                let buffer = Gc::new(
+                let buffer = new_gc_cell_ptr(
                     mc,
-                    GcCell::new(JSArrayBuffer {
+                    JSArrayBuffer {
                         data: Arc::new(Mutex::new(vec![0; length * element_size])),
                         detached: false,
                         shared: false,
-                    }),
+                    },
                 );
                 (buffer, 0, length)
             }
@@ -921,13 +921,13 @@ pub fn handle_typedarray_constructor<'gc>(
                     if let Value::TypedArray(ta) = &*ta_val.borrow() {
                         // new TypedArray(typedArray) - copy constructor
                         let src_length = ta.length;
-                        let buffer = Gc::new(
+                        let buffer = new_gc_cell_ptr(
                             mc,
-                            GcCell::new(JSArrayBuffer {
+                            JSArrayBuffer {
                                 data: Arc::new(Mutex::new(vec![0; src_length * element_size])),
                                 detached: false,
                                 shared: false,
-                            }),
+                            },
                         );
                         // TODO: Copy data from source TypedArray
                         (buffer, 0, src_length)

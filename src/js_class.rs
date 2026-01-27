@@ -4,7 +4,7 @@ use crate::core::{ClassDefinition, ClassMember};
 use crate::core::{
     ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, Value, evaluate_expr, evaluate_statements, new_js_object_data,
 };
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::core::{PropertyKey, object_get_key_value, object_set_key_value, value_to_string};
 use crate::js_typedarray::handle_typedarray_constructor;
 use crate::unicode::utf16_to_utf8;
@@ -240,7 +240,7 @@ pub(crate) fn evaluate_new<'gc>(
             // constructor. This allows script-defined functions stored
             // as objects to be used with `new` while still exposing
             // assignable `prototype` properties."}
-            if let Some(cl_val_rc) = object_get_key_value(&class_obj, "__closure__") {
+            if let Some(cl_val_rc) = class_obj.borrow().get_closure() {
                 let closure_data = match &*cl_val_rc.borrow() {
                     Value::Closure(data) | Value::AsyncClosure(data) => Some(*data),
                     _ => None,
@@ -793,7 +793,7 @@ pub(crate) fn create_class_object<'gc>(
     };
 
     // Store it in an internal slot so it does not appear in Object.getOwnPropertyNames
-    let class_def_ptr = Gc::new(mc, GcCell::new(class_def));
+    let class_def_ptr = new_gc_cell_ptr(mc, class_def);
     class_obj.borrow_mut(mc).class_def = Some(class_def_ptr);
 
     // Store the definition environment for constructor execution
@@ -874,7 +874,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: setter.clone(),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &getter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, getter_name, new_prop)?;
                             prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(getter_name));
                         }
                         Value::Setter(params, body_set, set_env, home) => {
@@ -884,7 +884,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: Some(Box::new(Value::Setter(params.clone(), body_set.clone(), *set_env, home.clone()))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &getter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, getter_name, new_prop)?;
                         }
                         // If there's an existing raw value or getter, overwrite with a Property descriptor bearing the getter
                         _ => {
@@ -893,7 +893,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: None,
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &getter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, getter_name, new_prop)?;
                             prototype_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from(getter_name));
                         }
                     }
@@ -927,7 +927,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: setter.clone(),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                         Value::Setter(params, body_set, set_env, home) => {
                             let new_prop = Value::Property {
@@ -935,7 +935,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: Some(Box::new(Value::Setter(params.clone(), body_set.clone(), *set_env, home.clone()))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -943,7 +943,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: None,
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                     }
                 } else {
@@ -974,7 +974,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &setter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, setter_name, new_prop)?;
                         }
                         Value::Getter(get_body, get_env, home) => {
                             // Convert to property descriptor with both getter and setter
@@ -988,7 +988,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &setter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, setter_name, new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1001,7 +1001,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &setter_name.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, setter_name, new_prop)?;
                         }
                     }
                 } else {
@@ -1044,7 +1044,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                         Value::Getter(get_body, get_env, home) => {
                             let new_prop = Value::Property {
@@ -1057,7 +1057,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1070,7 +1070,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &pk, Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, pk.clone(), new_prop)?;
                         }
                     }
                 } else {
@@ -1249,7 +1249,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: setter.clone(),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &key.clone().into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1257,7 +1257,7 @@ pub(crate) fn create_class_object<'gc>(
                                 getter: Some(Box::new(Value::Getter(body.clone(), *env, Some(GcCell::new(prototype_obj))))),
                                 setter: None,
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &key.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
                         }
                     }
                 } else {
@@ -1288,7 +1288,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &key.clone().into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
                         }
                         _ => {
                             let new_prop = Value::Property {
@@ -1301,7 +1301,7 @@ pub(crate) fn create_class_object<'gc>(
                                     Some(GcCell::new(prototype_obj)),
                                 ))),
                             };
-                            crate::core::obj_set_rc(mc, &prototype_obj, &key.into(), Gc::new(mc, GcCell::new(new_prop)))?;
+                            object_set_key_value(mc, &prototype_obj, &key, new_prop)?;
                         }
                     }
                 } else {
@@ -1687,7 +1687,7 @@ pub(crate) fn evaluate_super_property<'gc>(
                                         });
                                     }
                                     Value::Object(obj) => {
-                                        if let Some(cl_rc) = object_get_key_value(obj, "__closure__") {
+                                        if let Some(cl_rc) = obj.borrow().get_closure() {
                                             if let Value::Closure(cl) = &*cl_rc.borrow() {
                                                 let cl_data = cl;
                                                 let call_env = crate::core::new_js_object_data(mc);
@@ -1907,7 +1907,7 @@ pub(crate) fn evaluate_super_method<'gc>(
                             return Err(raise_eval_error!(format!("Method '{}' not found in parent class", method)));
                         }
                         Value::Object(func_obj) => {
-                            if let Some(cl_rc) = object_get_key_value(func_obj, "__closure__") {
+                            if let Some(cl_rc) = func_obj.borrow().get_closure() {
                                 match &*cl_rc.borrow() {
                                     Value::Closure(data) | Value::AsyncClosure(data) => {
                                         let params = &data.params;

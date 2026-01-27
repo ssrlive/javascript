@@ -26,11 +26,11 @@
 //! Future refactoring will introduce dedicated Rust structures for better type safety.
 
 use crate::core::{
-    ClosureData, DestructuringElement, EvalError, Expr, JSObjectDataPtr, JSPromise, PromiseState, PropertyKey, Statement, StatementKind,
-    Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, generate_unique_id, object_get_key_value,
-    object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
+    ClosureData, DestructuringElement, EvalError, Expr, JSObjectData, JSObjectDataPtr, JSPromise, PromiseState, PropertyKey, Statement,
+    StatementKind, Value, env_set, evaluate_expr, evaluate_statements, extract_closure_from_value, generate_unique_id,
+    object_get_key_value, object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
-use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext};
+use crate::core::{Collect, Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
 use crate::js_array::set_array_length;
 use crate::unicode::utf8_to_utf16;
@@ -116,7 +116,7 @@ pub fn create_promise_capability<'gc>(
     mc: &MutationContext<'gc>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<(GcPtr<'gc, JSPromise<'gc>>, Value<'gc>, Value<'gc>), JSError> {
-    let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let promise = new_gc_cell_ptr(mc, JSPromise::new());
 
     // Create resolve/reject functions
     let resolve = create_resolve_function_direct(mc, promise, env);
@@ -132,7 +132,7 @@ pub fn call_function<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match func {
-        Value::Closure(cl) => crate::core::call_closure(mc, cl, None, args, env, None),
+        Value::Closure(cl) => crate::core::call_closure(mc, &*cl, None, args, env, None),
         Value::Function(name) => {
             if let Some(res) = crate::core::call_native_function(mc, name, None, args, env)? {
                 Ok(res)
@@ -141,9 +141,9 @@ pub fn call_function<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = object_get_key_value(obj, "__closure__") {
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
                 if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                    return crate::core::call_closure(mc, cl, None, args, env, None);
+                    return crate::core::call_closure(mc, &*cl, None, args, env, None);
                 }
             }
             Err(EvalError::Js(crate::raise_type_error!("Not a function")))
@@ -160,7 +160,7 @@ pub fn call_function_with_this<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     match func {
-        Value::Closure(cl) => crate::core::call_closure(mc, cl, this_val, args, env, None),
+        Value::Closure(cl) => crate::core::call_closure(mc, &*cl, this_val, args, env, None),
         Value::Function(name) => {
             if let Some(res) = crate::core::call_native_function(mc, name, this_val.clone(), args, env)? {
                 Ok(res)
@@ -178,7 +178,7 @@ pub fn call_function_with_this<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = object_get_key_value(obj, "__closure__") {
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
                 if let Value::Closure(cl) = &*cl_ptr.borrow() {
                     return crate::core::call_closure(mc, cl, this_val, args, env, None);
                 }
@@ -647,7 +647,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     let should_forward = match &callback {
                         Value::Undefined => true,
                         Value::Function(_) => false,
-                        Value::Object(obj) => object_get_key_value(obj, "__closure__").is_none(),
+                        Value::Object(obj) => obj.borrow().get_closure().is_none(),
                         _ => true,
                     };
 
@@ -730,7 +730,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     let should_forward = match &callback {
                         Value::Undefined => true,
                         Value::Function(_) => false,
-                        Value::Object(obj) => object_get_key_value(obj, "__closure__").is_none(),
+                        Value::Object(obj) => obj.borrow().get_closure().is_none(),
                         _ => true,
                     };
 
@@ -781,7 +781,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     Value::Closure(cl) => is_arrow = cl.is_arrow,
                     Value::AsyncClosure(cl) => is_arrow = cl.is_arrow,
                     Value::Object(obj) => {
-                        if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
+                        if let Some(closure_prop) = obj.borrow().get_closure() {
                             match &*closure_prop.borrow() {
                                 Value::Closure(c) => is_arrow = c.is_arrow,
                                 Value::AsyncClosure(c) => is_arrow = c.is_arrow,
@@ -843,7 +843,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
                     Value::Closure(cl) => is_arrow = cl.is_arrow,
                     Value::AsyncClosure(cl) => is_arrow = cl.is_arrow,
                     Value::Object(obj) => {
-                        if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
+                        if let Some(closure_prop) = obj.borrow().get_closure() {
                             match &*closure_prop.borrow() {
                                 Value::Closure(c) => is_arrow = c.is_arrow,
                                 Value::AsyncClosure(c) => is_arrow = c.is_arrow,
@@ -945,7 +945,7 @@ fn process_task<'gc>(mc: &MutationContext<'gc>, task: Task<'gc>) -> Result<(), J
             log::trace!("AttachHandlers task executed for promise={:p}", Gc::as_ptr(promise.clone()));
             // Safe to borrow mutably here because we are running in the event loop
             let mut state = promise.borrow_mut(mc);
-            let rp = result_promise.unwrap_or_else(|| Gc::new(mc, GcCell::new(JSPromise::new())));
+            let rp = result_promise.unwrap_or_else(|| new_gc_cell_ptr(mc, JSPromise::new()));
             match state.state {
                 PromiseState::Pending => {
                     let before_len = state.on_rejected.len();
@@ -1367,7 +1367,7 @@ impl<'gc> AllSettledState<'gc> {
 
             for (i, result) in self.results.iter().enumerate() {
                 if let Some(settled_result) = result {
-                    let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
 
                     match settled_result {
                         SettledResult::Fulfilled(value) => {
@@ -1511,7 +1511,7 @@ pub fn handle_promise_constructor_direct<'gc>(
     };
 
     // Create the promise directly
-    let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let promise = new_gc_cell_ptr(mc, JSPromise::new());
     let _promise_obj = make_promise_js_object(mc, promise, Some(*env)).map_err(EvalError::Js)?;
 
     // Create resolve and reject functions directly
@@ -1537,7 +1537,7 @@ pub fn handle_promise_constructor_direct<'gc>(
             let _ = crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None)?;
         }
         Value::Object(ref obj) => {
-            if let Some(cl_rc) = object_get_key_value(obj, "__closure__") {
+            if let Some(cl_rc) = obj.borrow().get_closure() {
                 if let Value::Closure(data) = &*cl_rc.borrow() {
                     let _ = crate::core::call_closure(mc, data, None, &[resolve_func.clone(), reject_func.clone()], &executor_env, None)?;
                 } else {
@@ -1574,7 +1574,7 @@ fn perform_promise_then<'gc>(
     // Try to acquire a mutable borrow; if another borrow is active, defer attachment
     match promise.try_borrow_mut(mc) {
         Ok(mut promise_state) => {
-            let rp = result_promise.clone().unwrap_or_else(|| Gc::new(mc, GcCell::new(JSPromise::new())));
+            let rp = result_promise.clone().unwrap_or_else(|| new_gc_cell_ptr(mc, JSPromise::new()));
 
             match promise_state.state {
                 PromiseState::Pending => {
@@ -1647,7 +1647,7 @@ pub fn handle_promise_then_direct<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a new promise for chaining
-    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 
     // Get the onFulfilled callback
@@ -1818,7 +1818,7 @@ pub fn handle_promise_catch_direct<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a new promise for chaining
-    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 
     // Get the onRejected callback
@@ -1970,7 +1970,7 @@ pub fn handle_promise_finally_direct<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, EvalError<'gc>> {
     // Create a new promise for chaining
-    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 
     // Get the onFinally callback
@@ -2327,7 +2327,7 @@ pub fn handle_promise_static_method<'gc>(
             };
 
             // Create a new promise that resolves when all promises resolve
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             let num_promises = promises.len();
@@ -2536,7 +2536,7 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             let num_promises = promises.len();
@@ -2576,7 +2576,7 @@ pub fn handle_promise_static_method<'gc>(
                             match promise_state {
                                 PromiseState::Fulfilled(val) => {
                                     // Promise already fulfilled, record synchronously into results array
-                                    let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                                     object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                                     object_set_key_value(mc, &result_obj, "value", val.clone())?;
                                     object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -2597,7 +2597,7 @@ pub fn handle_promise_static_method<'gc>(
                                     }
                                 }
                                 PromiseState::Rejected(reason) => {
-                                    let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                                     object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("rejected")))?;
                                     object_set_key_value(mc, &result_obj, "reason", reason.clone())?;
                                     object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -2627,7 +2627,7 @@ pub fn handle_promise_static_method<'gc>(
                             }
                         } else {
                             // Not a promise, treat as resolved value
-                            let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                            let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                             object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                             object_set_key_value(mc, &result_obj, "value", Value::Object(obj.clone()))?;
                             object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -2640,7 +2640,7 @@ pub fn handle_promise_static_method<'gc>(
                     }
                     val => {
                         // Non-object, treat as resolved value
-                        let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                        let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                         object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                         object_set_key_value(mc, &result_obj, "value", val.clone())?;
                         object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -2691,13 +2691,13 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             let num_promises = promises.len();
             if num_promises == 0 {
                 // Empty array, reject with AggregateError
-                let aggregate_error = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                let aggregate_error = new_gc_cell_ptr(mc, JSObjectData::new());
                 object_set_key_value(mc, &aggregate_error, "name", Value::String(utf8_to_utf16("AggregateError")))?;
                 object_set_key_value(
                     mc,
@@ -2709,8 +2709,8 @@ pub fn handle_promise_static_method<'gc>(
                 return Ok(Value::Object(result_promise_obj));
             }
 
-            let rejections = Gc::new(mc, GcCell::new(vec![None::<Value<'gc>>; num_promises]));
-            let rejected_count = Gc::new(mc, GcCell::new(0));
+            let rejections = new_gc_cell_ptr(mc, vec![None::<Value<'gc>>; num_promises]);
+            let rejected_count = new_gc_cell_ptr(mc, 0);
 
             for (idx, promise_val) in promises.into_iter().enumerate() {
                 let _rejections_clone = rejections.clone();
@@ -2820,7 +2820,7 @@ pub fn handle_promise_static_method<'gc>(
                 }
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             for promise_val in promises {
@@ -2929,7 +2929,7 @@ pub fn handle_promise_static_method<'gc>(
             }
 
             // Otherwise create a new resolved promise holding the value
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             {
                 let mut p = result_promise.borrow_mut(mc);
                 p.state = PromiseState::Fulfilled(value.clone());
@@ -2946,7 +2946,7 @@ pub fn handle_promise_static_method<'gc>(
                 evaluate_expr(mc, env, &args[0])?
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             {
                 let mut p = result_promise.borrow_mut(mc);
                 p.state = PromiseState::Rejected(reason.clone());
@@ -3019,7 +3019,7 @@ pub fn __internal_promise_allsettled_resolve<'gc>(
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             // Create settled result
-            let settled = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+            let settled = new_gc_cell_ptr(mc, JSObjectData::new());
             object_set_key_value(mc, &settled, "status", Value::String(utf8_to_utf16("fulfilled")))?;
             object_set_key_value(mc, &settled, "value", value)?;
             // Add to results array at idx
@@ -3080,7 +3080,7 @@ pub fn __internal_promise_allsettled_reject<'gc>(
             && let Value::Object(results_obj) = &*results_val_rc.borrow()
         {
             // Create settled result
-            let settled = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+            let settled = new_gc_cell_ptr(mc, JSObjectData::new());
             object_set_key_value(mc, &settled, "status", Value::String(utf8_to_utf16("rejected")))?;
             object_set_key_value(mc, &settled, "reason", reason)?;
 
@@ -3164,7 +3164,7 @@ pub fn __internal_promise_any_reject<'gc>(
 
     if *rejected_count.borrow() == total {
         // All promises rejected, create AggregateError
-        let aggregate_error = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+        let aggregate_error = new_gc_cell_ptr(mc, JSObjectData::new());
         object_set_key_value(mc, &aggregate_error, "name", Value::String(utf8_to_utf16("AggregateError"))).unwrap();
         object_set_key_value(
             mc,
@@ -3173,7 +3173,7 @@ pub fn __internal_promise_any_reject<'gc>(
             Value::String(utf8_to_utf16("All promises were rejected")),
         )?;
 
-        let errors_array = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+        let errors_array = new_gc_cell_ptr(mc, JSObjectData::new());
         let rejections_vec = rejections.borrow();
         for (i, rejection) in rejections_vec.iter().enumerate() {
             if let Some(err) = rejection {
@@ -3243,7 +3243,7 @@ pub fn __internal_allsettled_state_record_fulfilled_env<'gc>(
         if let Some(results_rc) = object_get_key_value(state_obj, "__results") {
             if let Value::Object(results_arr) = &*results_rc.borrow() {
                 // create result object
-                let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                 object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                 object_set_key_value(mc, &result_obj, "value", value.clone())?;
                 object_set_key_value(mc, results_arr, index, Value::Object(result_obj))?;
@@ -3298,7 +3298,7 @@ pub fn __internal_allsettled_state_record_rejected_env<'gc>(
         if let Some(results_rc) = object_get_key_value(state_obj, "__results") {
             if let Value::Object(results_arr) = &*results_rc.borrow() {
                 // create result object
-                let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                 object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("rejected")))?;
                 object_set_key_value(mc, &result_obj, "reason", reason.clone())?;
                 object_set_key_value(mc, results_arr, index, Value::Object(result_obj))?;
@@ -3945,14 +3945,14 @@ pub fn handle_promise_static_method_val<'gc>(
             // We can't easily call `make_promise_js_object` from here if it relies on "Promise" in env.
             // `make_promise_js_object` uses object_get_key_value(env, "Promise") to get prototype.
             // If Promise is not yet initialized in env fully this might be tricky, but handle_promise_static_method_val runs dynamically.
-            let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let promise = new_gc_cell_ptr(mc, JSPromise::new());
             let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
             resolve_promise(mc, &promise, val, env);
             Ok(Value::Object(promise_obj))
         }
         "reject" => {
             let val = if args.is_empty() { Value::Undefined } else { args[0].clone() };
-            let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let promise = new_gc_cell_ptr(mc, JSPromise::new());
             let promise_obj = make_promise_js_object(mc, promise, Some(*env))?;
             reject_promise(mc, &promise, val, env);
             Ok(Value::Object(promise_obj))
@@ -3982,7 +3982,7 @@ pub fn handle_promise_static_method_val<'gc>(
                 _ => return Err(crate::raise_eval_error!("Promise.allSettled argument must be iterable")),
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             let num_promises = promises.len();
@@ -4006,7 +4006,7 @@ pub fn handle_promise_static_method_val<'gc>(
                             let promise_state = &promise_ref.borrow().state;
                             match promise_state {
                                 PromiseState::Fulfilled(val) => {
-                                    let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                                     object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                                     object_set_key_value(mc, &result_obj, "value", val.clone())?;
                                     object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -4025,7 +4025,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                     }
                                 }
                                 PromiseState::Rejected(reason) => {
-                                    let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                                    let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                                     object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("rejected")))?;
                                     object_set_key_value(mc, &result_obj, "reason", reason.clone())?;
                                     object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -4049,7 +4049,7 @@ pub fn handle_promise_static_method_val<'gc>(
                                 }
                             }
                         } else {
-                            let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                            let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                             object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                             object_set_key_value(mc, &result_obj, "value", Value::Object(obj.clone()))?;
                             object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -4061,7 +4061,7 @@ pub fn handle_promise_static_method_val<'gc>(
                         }
                     }
                     val => {
-                        let result_obj = Gc::new(mc, GcCell::new(crate::core::JSObjectData::new()));
+                        let result_obj = new_gc_cell_ptr(mc, JSObjectData::new());
                         object_set_key_value(mc, &result_obj, "status", Value::String(utf8_to_utf16("fulfilled")))?;
                         object_set_key_value(mc, &result_obj, "value", val.clone())?;
                         object_set_key_value(mc, &results_array, idx, Value::Object(result_obj))?;
@@ -4108,7 +4108,7 @@ pub fn handle_promise_static_method_val<'gc>(
                 _ => return Err(crate::raise_eval_error!("Promise.all argument must be iterable")),
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             let num_promises = promises.len();
@@ -4285,7 +4285,7 @@ pub fn handle_promise_static_method_val<'gc>(
                 _ => return Err(crate::raise_eval_error!("Promise.race argument must be iterable")),
             };
 
-            let result_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+            let result_promise = new_gc_cell_ptr(mc, JSPromise::new());
             let result_promise_obj = make_promise_js_object(mc, result_promise, Some(*env))?;
 
             for promise_val in promises {
@@ -4419,7 +4419,7 @@ pub fn handle_promise_constructor_val<'gc>(
     }
     let executor = &args[0];
 
-    let promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let promise = new_gc_cell_ptr(mc, JSPromise::new());
     let promise_obj = make_promise_js_object(mc, promise, Some(*env)).map_err(EvalError::Js)?;
     // Also store the internal id on the object for correlation
     object_set_key_value(mc, &promise_obj, "__promise_internal_id", Value::Number(promise.borrow().id as f64)).map_err(EvalError::Js)?;
@@ -4449,7 +4449,7 @@ pub fn handle_promise_then_val<'gc>(
     on_rejected: Option<Value<'gc>>,
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 
     perform_promise_then(mc, promise, on_fulfilled, on_rejected, Some(new_promise), env)?;
@@ -4547,7 +4547,7 @@ pub fn __internal_promise_finally_resolve<'gc>(
         }
         Value::Object(ref obj) => {
             // Support function objects that wrap a closure (from evaluate_expr Function -> Object)
-            if let Some(cl_rc) = object_get_key_value(obj, "__closure__") {
+            if let Some(cl_rc) = obj.borrow().get_closure() {
                 if let Value::Closure(cl) = &*cl_rc.borrow() {
                     match crate::core::call_closure(mc, cl, None, &[], env, None) {
                         Ok(ret) => {
@@ -4850,7 +4850,7 @@ pub fn handle_promise_finally_val<'gc>(
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
     // Create a new promise for chaining
-    let new_promise = Gc::new(mc, GcCell::new(JSPromise::new()));
+    let new_promise = new_gc_cell_ptr(mc, JSPromise::new());
     let new_promise_obj = make_promise_js_object(mc, new_promise, Some(*env))?;
 
     // Prepare closure wrappers that will invoke the internal helpers

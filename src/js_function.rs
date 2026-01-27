@@ -368,7 +368,7 @@ pub fn handle_global_function<'gc>(
                     }
                     Value::Object(object) => {
                         log::trace!("Function.prototype.call on Value::Object");
-                        if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
+                        if let Some(cl_rc) = object.borrow().get_closure()
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
@@ -483,7 +483,7 @@ pub fn handle_global_function<'gc>(
                         return crate::core::evaluate_statements(mc, &func_env, body);
                     }
                     Value::Object(object) => {
-                        if let Some(cl_rc) = object_get_key_value(&object, "__closure__")
+                        if let Some(cl_rc) = object.borrow().get_closure()
                             && let Value::Closure(data) = &*cl_rc.borrow()
                         {
                             if args.is_empty() {
@@ -1782,8 +1782,8 @@ pub fn handle_function_prototype_method<'gc>(
                 };
                 Ok(Value::Closure(Gc::new(mc, new_closure_data)))
             } else if let Value::Object(obj) = this_value {
-                // Support calling bind on a function object wrapper (object with __closure__)
-                if let Some(cl_prop) = crate::core::object_get_key_value(obj, "__closure__")
+                // Support calling bind on a function object wrapper (object with internal closure)
+                if let Some(cl_prop) = obj.borrow().get_closure()
                     && let Value::Closure(original) = &*cl_prop.borrow()
                 {
                     let effective_bound_this = if original.bound_this.is_some() {

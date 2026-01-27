@@ -183,7 +183,7 @@ fn format_value_pretty<'gc>(
                 let mut first = true;
                 for (key, val_rc) in obj.borrow().properties.iter() {
                     let key_str = key.as_ref();
-                    if key_str == "__proto__" || key_str == "constructor" || key_str == "__class_def__" || key_str == "__closure__" {
+                    if key_str == "__proto__" || key_str == "constructor" || key_str == "__class_def__" {
                         continue;
                     }
 

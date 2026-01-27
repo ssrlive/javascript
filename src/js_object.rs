@@ -2,7 +2,7 @@ use crate::core::{
     ClosureData, EvalError, JSObjectDataPtr, PropertyKey, Value, evaluate_call_dispatch, new_js_object_data, object_get_key_value,
     object_set_key_value, prepare_closure_call_env, prepare_function_call_env, value_to_string,
 };
-use crate::core::{Gc, GcCell, GcPtr, MutationContext};
+use crate::core::{Gc, GcCell, GcPtr, MutationContext, new_gc_cell_ptr};
 use crate::error::JSError;
 use crate::js_array::{get_array_length, is_array, set_array_length};
 use crate::js_date::is_date_object;
@@ -701,7 +701,7 @@ pub fn handle_object_method<'gc>(
                                         ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                     object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
                                 }
                                 other => {
@@ -721,7 +721,7 @@ pub fn handle_object_method<'gc>(
                                         ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                     object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
                                 }
                                 other => {
@@ -744,7 +744,7 @@ pub fn handle_object_method<'gc>(
                             ..ClosureData::default()
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                        object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                        func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                         object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
 
                         let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
@@ -762,7 +762,7 @@ pub fn handle_object_method<'gc>(
                             ..ClosureData::default()
                         };
                         let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                        object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                        func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                         object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
 
                         let enum_flag = Value::Boolean(obj.borrow().is_enumerable(&key));
@@ -831,7 +831,7 @@ pub fn handle_object_method<'gc>(
                                                     ..ClosureData::default()
                                                 };
                                                 let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                                 object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
                                             }
                                             other => {
@@ -851,7 +851,7 @@ pub fn handle_object_method<'gc>(
                                                     ..ClosureData::default()
                                                 };
                                                 let closure_val = Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                                 object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
                                             }
                                             other => {
@@ -876,7 +876,7 @@ pub fn handle_object_method<'gc>(
                                         ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                     object_set_key_value(mc, &desc_obj, "get", Value::Object(func_obj))?;
 
                                     let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
@@ -895,7 +895,7 @@ pub fn handle_object_method<'gc>(
                                         ..ClosureData::default()
                                     };
                                     let closure_val = crate::core::Value::Closure(crate::core::Gc::new(mc, closure_data));
-                                    object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                                    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                                     object_set_key_value(mc, &desc_obj, "set", Value::Object(func_obj))?;
 
                                     let enum_flag = Value::Boolean(obj.borrow().is_enumerable(key));
@@ -1134,7 +1134,7 @@ pub(crate) fn handle_to_string_method<'gc>(
             match method_val {
                 // If the property is a callable, call it and return the result
                 Value::Closure(_) | Value::AsyncClosure(_) | Value::Function(_) | Value::Object(_) => {
-                    // If it's an object, it might be a function object (with a __closure__ property)
+                    // If it's an object, it might be a function object (with an internal closure slot)
                     log::debug!("DBG handle_to_string_method: calling toString implementation");
                     let res = evaluate_call_dispatch(mc, env, method_val, Some(obj_val.clone()), Vec::new()).map_err(JSError::from)?;
                     log::debug!("DBG handle_to_string_method: toString returned {:?}", res);
@@ -1409,7 +1409,7 @@ pub(crate) fn handle_value_of_method<'gc>(
                 }
                 // Support method stored as a function-object (object wrapping a closure)
                 if let Value::Object(func_obj_map) = &*method_rc.borrow()
-                    && let Some(cl_rc) = object_get_key_value(func_obj_map, "__closure__")
+                    && let Some(cl_rc) = func_obj_map.borrow().get_closure()
                 {
                     match &*cl_rc.borrow() {
                         Value::Closure(data) | Value::AsyncClosure(data) => {

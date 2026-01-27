@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::js_array::{create_array, handle_array_static_method, is_array, set_array_length};
 use crate::js_bigint::bigint_constructor;
 use crate::js_class::prepare_call_env_with_this;
@@ -920,7 +920,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                     ..ClosureData::default()
                 };
                 let closure_val = Value::GeneratorFunction(Some(name.clone()), Gc::new(mc, closure_data));
-                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(name)))?;
 
                 // Set 'length' property for generator function
@@ -989,7 +989,7 @@ fn hoist_declarations<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>
                 };
                 let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
 
-                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(name)))?;
                 // Set 'length' property for async function declaration
                 let mut fn_length = 0_usize;
@@ -6012,7 +6012,7 @@ pub fn evaluate_call_dispatch<'gc>(
                                 }
                             }
                             Value::Object(obj) => {
-                                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+                                if let Some(cl_ptr) = obj.borrow().get_closure() {
                                     if let Value::Closure(cl) = &*cl_ptr.borrow() {
                                         call_closure(mc, cl, Some(this_arg), call_args, env, None)
                                     } else {
@@ -6037,7 +6037,7 @@ pub fn evaluate_call_dispatch<'gc>(
             }
         }
         Value::Object(obj) => {
-            if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
                         let res = call_closure(mc, cl, this_val.clone(), &eval_args, env, Some(obj));
@@ -6141,7 +6141,7 @@ fn evaluate_expr_call<'gc>(
             let f_val = if let Value::Object(obj) = &obj_val {
                 if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some() {
+                } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                     Value::Function(key.to_string())
                 } else {
                     Value::Undefined
@@ -6192,7 +6192,7 @@ fn evaluate_expr_call<'gc>(
             let f_val = if let Value::Object(obj) = &obj_val {
                 if let Some(val) = object_get_key_value(obj, key) {
                     val.borrow().clone()
-                } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some() {
+                } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                     Value::Function(key.to_string())
                 } else {
                     Value::Undefined
@@ -6247,10 +6247,10 @@ fn evaluate_expr_call<'gc>(
             let val = evaluate_expr(mc, env, target)?;
             if let Value::Object(obj) = val {
                 if is_array(mc, &obj) {
-                    let len_val = object_get_key_value(&obj, "length").unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                    let len_val = object_get_key_value(&obj, "length").unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
                     let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
                     for k in 0..len {
-                        let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                        let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
                         eval_args.push(item.borrow().clone());
                     }
                 } else {
@@ -6979,7 +6979,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 ..ClosureData::default()
             };
             let closure_val = Value::GeneratorFunction(name.clone(), Gc::new(mc, closure_data));
-            object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
             match name {
                 Some(n) if !n.is_empty() => object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?,
                 _ => {}
@@ -7005,7 +7005,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
         }
         Expr::AsyncFunction(name, params, body) => {
             // Async functions are represented as objects with an AsyncClosure stored
-            // under the hidden '__closure__' property. They inherit from Function.prototype.
+            // in an internal closure slot. They inherit from Function.prototype.
             let func_obj = new_js_object_data(mc);
 
             // Set __proto__ to Function.prototype
@@ -7029,7 +7029,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 ..ClosureData::default()
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
-            object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
             match name {
                 Some(n) if !n.is_empty() => object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(n)))?,
                 _ => {
@@ -7107,7 +7107,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 ..ClosureData::default()
             };
             let closure_val = Value::Closure(Gc::new(mc, closure_data));
-            object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
 
             // Set 'length' for arrow functions
             let mut fn_length = 0_usize;
@@ -7362,7 +7362,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 | Value::Getter(..)
                 | Value::Setter(..) => "function",
                 Value::Object(obj) => {
-                    if object_get_key_value(&obj, "__closure__").is_some() {
+                    if obj.borrow().get_closure().is_some() {
                         "function"
                     } else if let Some(is_ctor) = object_get_key_value(&obj, "__is_constructor") {
                         if matches!(*is_ctor.borrow(), Value::Boolean(true)) {
@@ -7495,8 +7495,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                     let f_val = if let Value::Object(obj) = &obj_val {
                         if let Some(val) = object_get_key_value(obj, key) {
                             val.borrow().clone()
-                        } else if (key.as_str() == "call" || key.as_str() == "apply") && object_get_key_value(obj, "__closure__").is_some()
-                        {
+                        } else if (key.as_str() == "call" || key.as_str() == "apply") && obj.borrow().get_closure().is_some() {
                             Value::Function(key.to_string())
                         } else {
                             Value::Undefined
@@ -7699,16 +7698,16 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let val = evaluate_expr(mc, env, func_expr)?;
             let closure = match &val {
                 Value::Object(obj) => {
-                    let c_val = object_get_key_value(obj, "__closure__");
+                    let c_val = obj.borrow().get_closure();
                     if let Some(c_ptr) = c_val {
                         let c_ref = c_ptr.borrow();
                         if let Value::Closure(c) = &*c_ref {
                             *c
                         } else {
-                            panic!("Getter function missing __closure__ (not a closure)");
+                            panic!("Getter function missing internal closure (not a closure)");
                         }
                     } else {
-                        panic!("Getter function missing __closure__");
+                        panic!("Getter function missing internal closure");
                     }
                 }
                 Value::Closure(c) => *c,
@@ -7724,16 +7723,16 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
             let val = evaluate_expr(mc, env, func_expr)?;
             let closure = match &val {
                 Value::Object(obj) => {
-                    let c_val = object_get_key_value(obj, "__closure__");
+                    let c_val = obj.borrow().get_closure();
                     if let Some(c_ptr) = c_val {
                         let c_ref = c_ptr.borrow();
                         if let Value::Closure(c) = &*c_ref {
                             *c
                         } else {
-                            panic!("Setter function missing __closure__ (not a closure)");
+                            panic!("Setter function missing internal closure (not a closure)");
                         }
                     } else {
-                        panic!("Setter function missing __closure__");
+                        panic!("Setter function missing internal closure");
                     }
                 }
                 Value::Closure(c) => *c,
@@ -7875,7 +7874,7 @@ pub fn evaluate_expr<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>,
                 ..ClosureData::default()
             };
             let closure_val = Value::AsyncClosure(Gc::new(mc, closure_data));
-            object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+            func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
 
             Ok(Value::Object(func_obj))
         }
@@ -7978,7 +7977,7 @@ fn evaluate_function_expression<'gc>(
         ..ClosureData::default()
     };
     let closure_val = Value::Closure(Gc::new(mc, closure_data));
-    object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+    func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
     match name {
         Some(n) if !n.is_empty() => {
             object_set_key_value(mc, &func_obj, "name", Value::String(utf8_to_utf16(&n)))?;
@@ -8283,7 +8282,7 @@ pub fn call_native_function<'gc>(
                 }
             }
             Value::Object(obj) => {
-                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+                if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), rest_args, env, Some(obj))?)),
 
@@ -8307,10 +8306,10 @@ pub fn call_native_function<'gc>(
         if let Value::Object(obj) = arg_array
             && is_array(mc, &obj)
         {
-            let len_val = object_get_key_value(&obj, "length").unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+            let len_val = object_get_key_value(&obj, "length").unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
             let len = if let Value::Number(n) = *len_val.borrow() { n as usize } else { 0 };
             for k in 0..len {
-                let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
                 rest_args.push(item.borrow().clone());
             }
         }
@@ -8344,7 +8343,7 @@ pub fn call_native_function<'gc>(
                 }
             }
             Value::Object(obj) => {
-                if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+                if let Some(cl_ptr) = obj.borrow().get_closure() {
                     match &*cl_ptr.borrow() {
                         Value::Closure(cl) => Ok(Some(call_closure(mc, cl, Some(new_this), &rest_args, env, Some(obj))?)),
                         _ => Err(EvalError::Js(raise_eval_error!("Not a function"))),
@@ -8620,8 +8619,8 @@ pub(crate) fn call_accessor<'gc>(
             evaluate_statements(mc, &call_env, &body_clone)
         }
         Value::Object(obj) => {
-            // Check for __closure__
-            let cl_val_opt = object_get_key_value(obj, "__closure__");
+            // Check for internal closure
+            let cl_val_opt = obj.borrow().get_closure();
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
@@ -8679,8 +8678,8 @@ fn call_setter<'gc>(
             evaluate_statements(mc, &call_env, &body_clone).map(|_| ())
         }
         Value::Object(obj) => {
-            // Check for __closure__
-            let cl_val_opt = object_get_key_value(obj, "__closure__");
+            // Check for internal closure
+            let cl_val_opt = obj.borrow().get_closure();
             if let Some(cl_val) = cl_val_opt
                 && let Value::Closure(cl) = &*cl_val.borrow()
             {
@@ -9132,7 +9131,7 @@ pub fn extract_closure_from_value<'gc>(val: &Value<'gc>) -> Option<(Vec<Destruct
             Some((data.params.clone(), data.body.clone(), data.env?))
         }
         Value::Object(obj) => {
-            if let Some(closure_prop) = object_get_key_value(obj, "__closure__") {
+            if let Some(closure_prop) = obj.borrow().get_closure() {
                 let closure_val = closure_prop.borrow();
                 match &*closure_val {
                     Value::Closure(cl) => {
@@ -9332,7 +9331,7 @@ fn evaluate_expr_new<'gc>(
                 if is_array(mc, &obj) {
                     let len = object_get_length(&obj).unwrap_or(0);
                     for k in 0..len {
-                        let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                        let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
                         eval_args.push(item.borrow().clone());
                     }
                 } else {
@@ -9465,7 +9464,7 @@ fn evaluate_expr_new<'gc>(
 
     match func_val {
         Value::Object(obj) => {
-            if let Some(cl_ptr) = object_get_key_value(&obj, "__closure__") {
+            if let Some(cl_ptr) = obj.borrow().get_closure() {
                 match &*cl_ptr.borrow() {
                     Value::Closure(cl) => {
                         // Arrow functions are not constructors per ECMAScript; throw TypeError
@@ -9638,7 +9637,7 @@ fn evaluate_expr_new<'gc>(
                     }
                 }
                 // If we've reached here, the target object is not a recognized constructor
-                // (no __closure__, no __class_def__, and no native constructor handled above).
+                // (no internal closure, no __class_def__, and no native constructor handled above).
                 // Per ECMAScript, attempting `new` with a non-constructor should throw a TypeError.
                 Err(EvalError::Js(raise_type_error!("Not a constructor")))
             }
@@ -9687,11 +9686,11 @@ fn evaluate_expr_object<'gc>(
         // defined on an object literal, set its [[HomeObject]] so that `super` works.
         match &mut val {
             Value::Closure(_cl) => {
-                // Wrap Closure in a function object and attach __closure__ so we can set home object field
+                // Wrap Closure in a function object and attach internal closure so we can set home object field
                 // and have consistent runtime semantics with other function values.
                 let func_obj = crate::core::new_js_object_data(mc);
                 let closure_val = val.clone();
-                object_set_key_value(mc, &func_obj, "__closure__", closure_val)?;
+                func_obj.borrow_mut(mc).set_closure(Some(new_gc_cell_ptr(mc, closure_val)));
                 // Attach the home object so `super` resolves to the object's prototype
                 func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
                 // Replace the original value with the function object wrapper
@@ -9739,12 +9738,13 @@ fn evaluate_expr_object<'gc>(
             other => PropertyKey::String(value_to_string(&other)),
         };
 
-        // If the value is a function object (holds a __closure__), set home object field
+        // If the value is a function object (holds a internal closure), set home object field
         // on the function object so it can propagate [[HomeObject]] during calls
-        if let Value::Object(func_obj) = &val
-            && let Some(_) = object_get_key_value(func_obj, "__closure__")
-        {
-            func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
+        if let Value::Object(func_obj) = &val {
+            let exists_closure = func_obj.borrow().get_closure().is_some();
+            if exists_closure {
+                func_obj.borrow_mut(mc).set_home_object(Some(GcCell::new(obj)));
+            }
         }
 
         // Merge accessors if existing property is a getter or setter; otherwise set normally
@@ -9767,7 +9767,7 @@ fn evaluate_expr_object<'gc>(
                         Value::Setter(_, _, _, _) => setter_opt = Some(Box::new(new_val)),
                         other => {
                             // Replace data value
-                            let new_ptr = Gc::new(mc, GcCell::new(other));
+                            let new_ptr = new_gc_cell_ptr(mc, other);
                             value_opt = Some(new_ptr);
                         }
                     }
@@ -9832,7 +9832,7 @@ fn evaluate_expr_array<'gc>(
                     if is_array(mc, &obj) {
                         let len = object_get_length(&obj).unwrap_or(0);
                         for k in 0..len {
-                            let item = object_get_key_value(&obj, k).unwrap_or(Gc::new(mc, GcCell::new(Value::Undefined)));
+                            let item = object_get_key_value(&obj, k).unwrap_or(new_gc_cell_ptr(mc, Value::Undefined));
                             object_set_key_value(mc, &arr_obj, index, item.borrow().clone())?;
                             index += 1;
                         }

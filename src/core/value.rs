@@ -1,10 +1,8 @@
-#![allow(clippy::collapsible_if, clippy::collapsible_match, dead_code)]
-
-use crate::core::{ClassDefinition, Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext};
+use crate::core::{Collect, Gc, GcCell, GcPtr, GcTrace, GcWeak, MutationContext, new_gc_cell_ptr};
 use crate::unicode::utf16_to_utf8;
 use crate::{
     JSError,
-    core::{DestructuringElement, EvalError, PropertyKey, Statement, is_error},
+    core::{ClassDefinition, DestructuringElement, EvalError, PropertyKey, Statement, is_error},
     raise_type_error,
 };
 use num_bigint::BigInt;
@@ -118,11 +116,11 @@ pub enum GeneratorState<'gc> {
 }
 
 pub type JSObjectDataPtr<'gc> = GcPtr<'gc, JSObjectData<'gc>>;
-pub type JSObjectDataWeakPtr<'gc> = Gc<'gc, GcCell<JSObjectData<'gc>>>;
+// pub type JSObjectDataWeakPtr<'gc> = Gc<'gc, GcCell<JSObjectData<'gc>>>;
 
 #[inline]
 pub fn new_js_object_data<'gc>(mc: &MutationContext<'gc>) -> JSObjectDataPtr<'gc> {
-    Gc::new(mc, GcCell::new(JSObjectData::new()))
+    new_gc_cell_ptr(mc, JSObjectData::new())
 }
 
 #[derive(Clone, Default)]
@@ -139,6 +137,8 @@ pub struct JSObjectData<'gc> {
     // Optional internal class definition slot (not exposed as an own property)
     pub class_def: Option<GcPtr<'gc, ClassDefinition>>,
     pub home_object: Option<GcCell<JSObjectDataPtr<'gc>>>,
+    /// Internal executable closure for function objects (previously stored as an internal property)
+    closure: Option<GcPtr<'gc, Value<'gc>>>,
 }
 
 unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
@@ -161,6 +161,9 @@ unsafe impl<'gc> Collect<'gc> for JSObjectData<'gc> {
         }
         if let Some(cd) = &self.class_def {
             cd.trace(cc);
+        }
+        if let Some(cl) = &self.closure {
+            cl.trace(cc);
         }
     }
 }
@@ -204,7 +207,7 @@ impl<'gc> JSObjectData<'gc> {
     }
 
     pub fn set_property(&mut self, mc: &MutationContext<'gc>, key: impl Into<PropertyKey<'gc>>, val: Value<'gc>) {
-        let val_ptr = Gc::new(mc, GcCell::new(val));
+        let val_ptr = new_gc_cell_ptr(mc, val);
         self.insert(key.into(), val_ptr);
     }
 
@@ -216,12 +219,11 @@ impl<'gc> JSObjectData<'gc> {
             }
             return None;
         }
-        if let Some(proto) = &self.prototype {
-            if let Some(val_ptr) = object_get_key_value(proto, key) {
-                if let Value::String(s) = &*val_ptr.borrow() {
-                    return Some(utf16_to_utf8(s));
-                }
-            }
+        if let Some(proto) = &self.prototype
+            && let Some(val_ptr) = object_get_key_value(proto, key)
+            && let Value::String(s) = &*val_ptr.borrow()
+        {
+            return Some(utf16_to_utf8(s));
         }
         None
     }
@@ -239,7 +241,7 @@ impl<'gc> JSObjectData<'gc> {
         let key = PropertyKey::String("__line__".to_string());
         if !self.properties.contains_key(&key) {
             let val = Value::Number(line as f64);
-            let val_ptr = Gc::new(mc, GcCell::new(val));
+            let val_ptr = new_gc_cell_ptr(mc, val);
             self.insert(key, val_ptr);
         }
         Ok(())
@@ -258,7 +260,7 @@ impl<'gc> JSObjectData<'gc> {
         let key = PropertyKey::String("__column__".to_string());
         if !self.properties.contains_key(&key) {
             let val = Value::Number(column as f64);
-            let val_ptr = Gc::new(mc, GcCell::new(val));
+            let val_ptr = new_gc_cell_ptr(mc, val);
             self.insert(key, val_ptr);
         }
         Ok(())
@@ -312,6 +314,14 @@ impl<'gc> JSObjectData<'gc> {
 
     pub fn set_home_object(&mut self, home: Option<GcCell<JSObjectDataPtr<'gc>>>) {
         self.home_object = home;
+    }
+
+    pub fn get_closure(&self) -> Option<GcPtr<'gc, Value<'gc>>> {
+        self.closure
+    }
+
+    pub fn set_closure(&mut self, closure: Option<GcPtr<'gc, Value<'gc>>>) {
+        self.closure = closure;
     }
 }
 
@@ -586,52 +596,40 @@ pub fn to_primitive<'gc>(
             };
 
             // If object has Symbol.toPrimitive, call it first
-            if let Some(sym_ctor) = crate::core::env_get(env, "Symbol") {
-                if let Value::Object(sym_obj) = &*sym_ctor.borrow() {
-                    if let Some(tp_sym_val) = object_get_key_value(sym_obj, "toPrimitive") {
-                        if let Value::Symbol(tp_sym) = &*tp_sym_val.borrow() {
-                            if let Some(func_val_rc) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym)) {
-                                let func_val = func_val_rc.borrow().clone();
-                                if !matches!(func_val, Value::Undefined | Value::Null) {
-                                    log::debug!("DBG to_primitive: calling @@toPrimitive with hint={}", hint);
-                                    // Call it with hint
-                                    let arg = Value::String(crate::unicode::utf8_to_utf16(hint));
-                                    // Support closures or function objects
-                                    use std::slice::from_ref;
-                                    let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
-                                        Value::Closure(cl) => {
-                                            crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None)
-                                        }
-                                        Value::Object(func_obj) => {
-                                            if let Some(cl_ptr) = object_get_key_value(&func_obj, "__closure__") {
-                                                if let Value::Closure(cl) = &*cl_ptr.borrow() {
-                                                    crate::core::call_closure(
-                                                        mc,
-                                                        cl,
-                                                        Some(Value::Object(*obj)),
-                                                        from_ref(&arg),
-                                                        env,
-                                                        Some(func_obj),
-                                                    )
-                                                } else {
-                                                    return Err(raise_type_error!("@@toPrimitive is not a function").into());
-                                                }
-                                            } else {
-                                                return Err(raise_type_error!("@@toPrimitive is not a function").into());
-                                            }
-                                        }
-                                        _ => return Err(raise_type_error!("@@toPrimitive is not a function").into()),
-                                    };
-                                    let res = res_eval?;
-                                    log::debug!("DBG to_primitive: @@toPrimitive returned {:?}", res);
-                                    if is_primitive(&res) {
-                                        return Ok(res);
-                                    } else {
-                                        return Err(raise_type_error!("@@toPrimitive must return a primitive value").into());
-                                    }
+            if let Some(sym_ctor) = crate::core::env_get(env, "Symbol")
+                && let Value::Object(sym_obj) = &*sym_ctor.borrow()
+                && let Some(tp_sym_val) = object_get_key_value(sym_obj, "toPrimitive")
+                && let Value::Symbol(tp_sym) = &*tp_sym_val.borrow()
+                && let Some(func_val_rc) = object_get_key_value(obj, crate::core::PropertyKey::Symbol(*tp_sym))
+            {
+                let func_val = func_val_rc.borrow().clone();
+                if !matches!(func_val, Value::Undefined | Value::Null) {
+                    log::debug!("DBG to_primitive: calling @@toPrimitive with hint={}", hint);
+                    // Call it with hint
+                    let arg = Value::String(crate::unicode::utf8_to_utf16(hint));
+                    // Support closures or function objects
+                    use std::slice::from_ref;
+                    let res_eval: Result<Value<'gc>, crate::core::js_error::EvalError> = match func_val {
+                        Value::Closure(cl) => crate::core::call_closure(mc, &cl, Some(Value::Object(*obj)), from_ref(&arg), env, None),
+                        Value::Object(func_obj) => {
+                            if let Some(cl_ptr) = func_obj.borrow().get_closure() {
+                                if let Value::Closure(cl) = &*cl_ptr.borrow() {
+                                    crate::core::call_closure(mc, cl, Some(Value::Object(*obj)), from_ref(&arg), env, Some(func_obj))
+                                } else {
+                                    return Err(raise_type_error!("@@toPrimitive is not a function").into());
                                 }
+                            } else {
+                                return Err(raise_type_error!("@@toPrimitive is not a function").into());
                             }
                         }
+                        _ => return Err(raise_type_error!("@@toPrimitive is not a function").into()),
+                    };
+                    let res = res_eval?;
+                    log::debug!("DBG to_primitive: @@toPrimitive returned {:?}", res);
+                    if is_primitive(&res) {
+                        return Ok(res);
+                    } else {
+                        return Err(raise_type_error!("@@toPrimitive must return a primitive value").into());
                     }
                 }
             }
@@ -712,10 +710,10 @@ pub fn value_to_string<'gc>(val: &Value<'gc>) -> String {
             }
             // Prefer an explicit `message` property on user-defined error-like objects
             // so thrown harness-liked errors show useful messages
-            if let Ok(borrowed) = obj.try_borrow() {
-                if let Some(msg) = borrowed.get_message() {
-                    return msg;
-                }
+            if let Ok(borrowed) = obj.try_borrow()
+                && let Some(msg) = borrowed.get_message()
+            {
+                return msg;
             }
             "[object Object]".to_string()
         }
@@ -860,14 +858,14 @@ pub fn ordinary_own_property_keys<'gc>(obj: &JSObjectDataPtr<'gc>) -> Vec<Proper
     // properties (0..length-1) which should appear in ordinary own property keys
     // even if we don't materialize them in the object's properties map.
     let mut typed_indices: std::collections::HashSet<String> = std::collections::HashSet::new();
-    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string())) {
-        if let Value::TypedArray(ta) = &*ta_cell.borrow() {
-            for i in 0..ta.length {
-                let s = i.to_string();
-                // push as numeric index entry (keeps numeric ordering)
-                indices.push((i as u64, PropertyKey::String(s.clone())));
-                typed_indices.insert(s);
-            }
+    if let Some(ta_cell) = obj.borrow().properties.get(&PropertyKey::String("__typedarray".to_string()))
+        && let Value::TypedArray(ta) = &*ta_cell.borrow()
+    {
+        for i in 0..ta.length {
+            let s = i.to_string();
+            // push as numeric index entry (keeps numeric ordering)
+            indices.push((i as u64, PropertyKey::String(s.clone())));
+            typed_indices.insert(s);
         }
     }
 
@@ -935,19 +933,18 @@ pub fn object_set_key_value<'gc>(
     }
 
     // If obj is an array and we're setting a numeric index, update length accordingly
-    if let PropertyKey::String(s) = &key {
-        if let Ok(idx) = s.parse::<usize>() {
-            if crate::js_array::is_array(mc, obj) {
-                let current_len = object_get_length(obj).unwrap_or(0);
-                if idx >= current_len {
-                    // Set internal length to idx + 1
-                    object_set_length(mc, obj, idx + 1)?;
-                }
-            }
+    if let PropertyKey::String(s) = &key
+        && let Ok(idx) = s.parse::<usize>()
+        && crate::js_array::is_array(mc, obj)
+    {
+        let current_len = object_get_length(obj).unwrap_or(0);
+        if idx >= current_len {
+            // Set internal length to idx + 1
+            object_set_length(mc, obj, idx + 1)?;
         }
     }
 
-    let val_ptr = Gc::new(mc, GcCell::new(val));
+    let val_ptr = new_gc_cell_ptr(mc, val);
     obj.borrow_mut(mc).insert(key.clone(), val_ptr);
     log::debug!(
         "object_set_key_value: after insert obj={:p} key={:?} is_writable={} is_enumerable={} is_configurable={}",
@@ -957,16 +954,6 @@ pub fn object_set_key_value<'gc>(
         obj.borrow().is_enumerable(&key),
         obj.borrow().is_configurable(&key)
     );
-    Ok(())
-}
-
-pub fn obj_set_rc<'gc>(
-    mc: &MutationContext<'gc>,
-    obj: &JSObjectDataPtr<'gc>,
-    key: &PropertyKey<'gc>,
-    val: GcPtr<'gc, Value<'gc>>,
-) -> Result<(), JSError> {
-    obj.borrow_mut(mc).insert(key.clone(), val);
     Ok(())
 }
 
@@ -989,23 +976,23 @@ pub fn env_set<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, key: 
     if (*env.borrow()).is_const(key) {
         return Err(raise_type_error!(format!("Assignment to constant variable '{key}'")));
     }
-    let val_ptr = Gc::new(mc, GcCell::new(val));
+    let val_ptr = new_gc_cell_ptr(mc, val);
     env.borrow_mut(mc).insert(PropertyKey::String(key.to_string()), val_ptr);
     Ok(())
 }
 
 pub fn env_get_strictness<'gc>(env: &JSObjectDataPtr<'gc>) -> bool {
-    if let Some(is_strict_cell) = get_own_property(env, &PropertyKey::String("__is_strict".to_string())) {
-        if let crate::core::Value::Boolean(is_strict) = *is_strict_cell.borrow() {
-            return is_strict;
-        }
+    if let Some(is_strict_cell) = get_own_property(env, &PropertyKey::String("__is_strict".to_string()))
+        && let crate::core::Value::Boolean(is_strict) = *is_strict_cell.borrow()
+    {
+        return is_strict;
     }
     false
 }
 
 pub fn env_set_strictness<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>, is_strict: bool) -> Result<(), JSError> {
     let val = Value::Boolean(is_strict);
-    let val_ptr = Gc::new(mc, GcCell::new(val));
+    let val_ptr = new_gc_cell_ptr(mc, val);
     env.borrow_mut(mc).insert(PropertyKey::String("__is_strict".to_string()), val_ptr);
     Ok(())
 }
@@ -1054,23 +1041,23 @@ pub fn env_set_recursive<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'
 }
 
 pub fn object_get_length<'gc>(obj: &JSObjectDataPtr<'gc>) -> Option<usize> {
-    if let Some(len_ptr) = object_get_key_value(obj, "length") {
-        if let Value::Number(n) = &*len_ptr.borrow() {
-            return Some(*n as usize);
-        }
+    if let Some(len_ptr) = object_get_key_value(obj, "length")
+        && let Value::Number(n) = &*len_ptr.borrow()
+    {
+        return Some(*n as usize);
     }
     None
 }
 
 pub fn object_set_length<'gc>(mc: &MutationContext<'gc>, obj: &JSObjectDataPtr<'gc>, length: usize) -> Result<(), JSError> {
     // When reducing array length, delete indexed properties >= new length
-    if let Some(cur_len) = object_get_length(obj) {
-        if length < cur_len {
-            for i in length..cur_len {
-                let key = PropertyKey::from(i.to_string());
-                // Use shift_remove to preserve insertion order (avoid deprecated remove)
-                let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
-            }
+    if let Some(cur_len) = object_get_length(obj)
+        && length < cur_len
+    {
+        for i in length..cur_len {
+            let key = PropertyKey::from(i.to_string());
+            // Use shift_remove to preserve insertion order (avoid deprecated remove)
+            let _ = obj.borrow_mut(mc).properties.shift_remove(&key);
         }
     }
     object_set_key_value(mc, obj, "length", Value::Number(length as f64))?;

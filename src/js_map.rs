@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, GcPtr};
+use crate::core::{GcPtr, new_gc_cell_ptr};
 use crate::core::{
     JSMap, JSObjectDataPtr, MutationContext, PropertyKey, Value, env_set, initialize_collection_from_iterable, new_js_object_data,
     object_get_key_value, object_set_key_value, values_equal,
@@ -81,7 +81,7 @@ pub(crate) fn handle_map_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let map = Gc::new(mc, GcCell::new(JSMap { entries: Vec::new() }));
+    let map = new_gc_cell_ptr(mc, JSMap { entries: Vec::new() });
 
     initialize_collection_from_iterable(mc, env, args, "Map", |entry| {
         if let Value::Object(entry_obj) = entry {
@@ -100,10 +100,7 @@ pub(crate) fn handle_map_constructor<'gc>(
     // Create a wrapper object for the Map
     let map_obj = new_js_object_data(mc);
     // Store the actual map data
-    map_obj.borrow_mut(mc).insert(
-        PropertyKey::String("__map__".to_string()),
-        Gc::new(mc, GcCell::new(Value::Map(map))),
-    );
+    object_set_key_value(mc, &map_obj, "__map__", Value::Map(map))?;
 
     // Set prototype to Map.prototype
     if let Some(map_ctor) = object_get_key_value(env, "Map")

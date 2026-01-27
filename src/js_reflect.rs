@@ -121,7 +121,7 @@ pub fn handle_reflect_method<'gc>(
                 // Detect async closure (unused here; dispatcher handles it internally)
                 let _is_async = matches!(target, Value::AsyncClosure(_))
                     || (if let Value::Object(obj) = &target {
-                        if let Some(cl_ptr) = object_get_key_value(obj, "__closure__") {
+                        if let Some(cl_ptr) = obj.borrow().get_closure() {
                             matches!(&*cl_ptr.borrow(), Value::AsyncClosure(_))
                         } else {
                             false
@@ -138,7 +138,7 @@ pub fn handle_reflect_method<'gc>(
                 Value::Function(func_name) => Ok(crate::js_function::handle_global_function(mc, &func_name, &arg_values, env)?),
                 Value::Object(object) => {
                     // If this object wraps an internal closure (function-object), invoke it
-                    if let Some(cl_rc) = object_get_key_value(&object, "__closure__") {
+                    if let Some(cl_rc) = object.borrow().get_closure() {
                         let cl_val = cl_rc.borrow().clone();
                         if let Some((params, body, captured_env)) = crate::core::extract_closure_from_value(&cl_val) {
                             let func_env = prepare_function_call_env(

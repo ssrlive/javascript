@@ -1,4 +1,4 @@
-use crate::core::{Gc, GcCell, MutationContext};
+use crate::core::{Gc, GcCell, MutationContext, new_gc_cell_ptr};
 use crate::core::{JSWeakSet, PropertyKey};
 use crate::{
     core::{JSObjectDataPtr, Value, env_set, new_js_object_data, object_get_key_value, object_set_key_value},
@@ -12,7 +12,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     args: &[Value<'gc>],
     env: &JSObjectDataPtr<'gc>,
 ) -> Result<Value<'gc>, JSError> {
-    let weakset = Gc::new(mc, GcCell::new(JSWeakSet { values: Vec::new() }));
+    let weakset = new_gc_cell_ptr(mc, JSWeakSet { values: Vec::new() });
 
     if !args.is_empty() {
         if args.len() == 1 {
@@ -28,7 +28,7 @@ pub(crate) fn handle_weakset_constructor<'gc>(
     // Store the actual weakset data
     weakset_obj.borrow_mut(mc).insert(
         PropertyKey::String("__weakset__".to_string()),
-        Gc::new(mc, GcCell::new(Value::WeakSet(weakset))),
+        new_gc_cell_ptr(mc, Value::WeakSet(weakset)),
     );
     // Internal slot should be non-enumerable so it doesn't show up in `evaluate_script` output
     weakset_obj.borrow_mut(mc).set_non_enumerable(PropertyKey::from("__weakset__"));

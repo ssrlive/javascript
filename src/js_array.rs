@@ -9,8 +9,8 @@ use crate::{
 };
 
 use crate::core::{
-    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, obj_set_rc, object_get_key_value, object_set_key_value,
-    value_to_sort_string, values_equal,
+    Expr, Value, evaluate_expr, evaluate_statements, get_own_property, object_get_key_value, object_set_key_value, value_to_sort_string,
+    values_equal,
 };
 
 pub fn initialize_array<'gc>(mc: &MutationContext<'gc>, env: &JSObjectDataPtr<'gc>) -> Result<(), JSError> {
@@ -325,7 +325,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                                                             if let Some(ref fn_val) = map_fn {
                                                                 // Support closures or function names for map function
                                                                 let actual_fn = if let Value::Object(obj) = fn_val {
-                                                                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                                                                    if let Some(prop) = obj.borrow().get_closure() {
                                                                         prop.borrow().clone()
                                                                     } else {
                                                                         fn_val.clone()
@@ -387,7 +387,7 @@ pub(crate) fn handle_array_static_method<'gc>(
                             if let Some(ref fn_val) = map_fn {
                                 // Support closures or function names for map function
                                 let actual_fn = if let Value::Object(obj) = fn_val {
-                                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                                    if let Some(prop) = obj.borrow().get_closure() {
                                         prop.borrow().clone()
                                     } else {
                                         fn_val.clone()
@@ -656,7 +656,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
 
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -695,14 +695,14 @@ pub(crate) fn handle_array_instance_method<'gc>(
                     if let Some(val_rc) = object_get_key_value(object, i) {
                         let val = val_rc.borrow().clone();
                         let call_args = vec![val, Value::Number(i as f64), Value::Object(object.clone())];
-                        // Support inline closures wrapped as objects with __closure__ like forEach does.
+                        // Support inline closures wrapped as objects with internal closure like forEach does.
                         // Also, constructors are represented as objects; if a constructor object
                         // is passed (has a __native_ctor string), treat it as a global function
                         // with that name so it can be called.
                         let mut actual_callback_val = callback_val.clone();
                         if let Value::Object(obj) = &callback_val {
                             // Closure wrapper
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 actual_callback_val = prop.borrow().clone();
                             } else if let Some(nc) = object_get_key_value(obj, "__native_ctor") {
                                 if let Value::String(name_vec) = &*nc.borrow() {
@@ -735,9 +735,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let mut idx = 0;
                 for i in 0..current_len {
                     if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with __closure__ like forEach does.
+                        // Support inline closures wrapped as objects with internal closure like forEach does.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -807,9 +807,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let start_idx = if initial_value.is_some() { 0 } else { 1 };
                 for i in start_idx..current_len {
                     if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -897,9 +897,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in (0..start_loop).rev() {
                     if let Some(val) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback_val {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback_val.clone()
@@ -936,9 +936,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
 
                 for i in 0..current_len {
                     if let Some(value) = object_get_key_value(object, i) {
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1001,9 +1001,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if is_truthy {
                         //         return Ok(Value::Number(i as f64));
                         //     }
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1066,9 +1066,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if is_truthy {
                         //         return Ok(Value::Boolean(true));
                         //     }
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1131,9 +1131,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         //     if !is_truthy {
                         //         return Ok(Value::Boolean(false));
                         //     }
-                        // Support inline closures wrapped as objects with __closure__.
+                        // Support inline closures wrapped as objects with internal closure.
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1192,7 +1192,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                         let arg_len = get_array_length(mc, &arg_obj).unwrap_or(0);
                         for i in 0..arg_len {
                             if let Some(val) = object_get_key_value(&arg_obj, i) {
-                                obj_set_rc(mc, &result, &new_index.to_string().into(), val.clone())?;
+                                object_set_key_value(mc, &result, new_index, val.borrow().clone())?;
                                 new_index += 1;
                             }
                         }
@@ -1302,7 +1302,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let compare_fn = args[0].clone();
                 // Support closures wrapped in objects or bare closures/functions
                 let actual_fn = if let Value::Object(obj) = &compare_fn {
-                    if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                    if let Some(prop) = obj.borrow().get_closure() {
                         prop.borrow().clone()
                     } else {
                         compare_fn.clone()
@@ -1476,7 +1476,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 for i in 1..current_len {
                     let val_rc_opt = object_get_key_value(object, i);
                     if let Some(val_rc) = val_rc_opt {
-                        obj_set_rc(mc, object, &(i - 1).to_string().into(), val_rc);
+                        object_set_key_value(mc, object, i - 1, val_rc.borrow().clone())?;
                     } else {
                         object
                             .borrow_mut(mc)
@@ -1505,7 +1505,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 let dest = (i + args.len()).to_string();
                 let val_rc_opt = object_get_key_value(object, i);
                 if let Some(val_rc) = val_rc_opt {
-                    obj_set_rc(mc, object, &dest.into(), val_rc);
+                    object_set_key_value(mc, object, dest, val_rc.borrow().clone())?;
                 } else {
                     object.borrow_mut(mc).properties.shift_remove(&PropertyKey::from(dest));
                 }
@@ -1650,9 +1650,9 @@ pub(crate) fn handle_array_instance_method<'gc>(
             let mut result = Vec::new();
             for i in 0..current_len {
                 if let Some(val) = object_get_key_value(object, i) {
-                    // Support inline closures wrapped as objects with __closure__.
+                    // Support inline closures wrapped as objects with internal closure.
                     let actual_func = if let Value::Object(obj) = &callback_val {
-                        if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                        if let Some(prop) = obj.borrow().get_closure() {
                             prop.borrow().clone()
                         } else {
                             callback_val.clone()
@@ -1775,7 +1775,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 for i in (0..current_len).rev() {
                     if let Some(value) = object_get_key_value(object, i) {
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
@@ -1820,7 +1820,7 @@ pub(crate) fn handle_array_instance_method<'gc>(
                 for i in (0..current_len).rev() {
                     if let Some(value) = object_get_key_value(object, i) {
                         let actual_func = if let Value::Object(obj) = &callback {
-                            if let Some(prop) = object_get_key_value(obj, "__closure__") {
+                            if let Some(prop) = obj.borrow().get_closure() {
                                 prop.borrow().clone()
                             } else {
                                 callback.clone()
